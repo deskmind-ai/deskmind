@@ -39,7 +39,7 @@ flowchart LR
 
 ## Where we are (September 2026)
 
-On the real macOS desktop (bench v23, 13 tasks × 3 runs, strict pass):
+On the real macOS desktop (bench v23, 13 tasks × 3 runs, strict pass; 38 runs scored, one environment failure per system):
 
 | | pass | false "done" | time per step (p50) |
 |---|---|---|---|
