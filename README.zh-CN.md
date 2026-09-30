@@ -1,82 +1,107 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="brand/social/README-bilingual-dark.svg">
-    <img src="brand/social/README-bilingual-light.svg" alt="得心 DeskMind — 得心，应手。" width="760">
+    <img src="brand/social/README-bilingual-light.svg" alt="得心 DeskMind · 得心，应手。" width="760">
   </picture>
 </p>
 
-<p align="center">
-  <b>得心 · DeskMind</b><br>
-  一个安静、可靠的桌面伙伴：一组开源模型和工具，让 agent 在你自己的电脑上看懂屏幕、想好下一步、稳稳做到。<br>
-  <a href="README.md">English</a> · <a href="BRAND.zh-CN.md">品牌规范</a>
-</p>
+# 得心 · DeskMind
 
----
+**得心，应手。 · See. Think. Act.**
 
-**得心，应手。** 「得心」取自「得心应手」：心里想到，手上就做到。DeskMind 把电脑操作 agent 拆成三个角色，外加一套评测，每一部分都可以单独使用：
+**知道自己有几分把握的小模型。** 每一步先由 0.8B 模型决定，没把握时交给 4B。每个决定都是带类型的，每个选项都有概率。目标可能有不止一种意思时，得心会先问你，再动手写。在我们的真实桌面评测上（v25，router-g14-q8，13 个任务各跑 3 次），39 次运行通过 36 次，没有一次把没做完的任务报告为完成（false DONE 0 次）。
 
-| | 项目 | 做什么 | 状态 |
-|---|---|---|---|
-| <picture><source media="(prefers-color-scheme: dark)" srcset="brand/family/eyes-lockup-dark.svg"><img src="brand/family/eyes-lockup-light.svg" height="28" alt="DeskMind Eyes"></picture> | [**eyes**](https://github.com/deskmind-ai/eyes) | 在截图里找到要操作的目标（视觉定位） | 代码和成绩已公开，权重即将发布 |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="brand/family/brain-lockup-dark.svg"><img src="brand/family/brain-lockup-light.svg" height="28" alt="DeskMind Brain"></picture> | [**brain**](https://github.com/deskmind-ai/brain) | 决定下一步，并给出把握有多大（带类型的决策，MLX 本地运行） | 模型见 [🤗 deskmind](https://huggingface.co/deskmind) |
-| <picture><source media="(prefers-color-scheme: dark)" srcset="brand/family/hands-lockup-dark.svg"><img src="brand/family/hands-lockup-light.svg" height="28" alt="DeskMind Hands"></picture> | [**hands**](https://github.com/deskmind-ai/hands) | 驱动真实的 macOS 桌面，采集并标注操作轨迹 | 可用 |
-| 📐 | [**bench**](https://github.com/deskmind-ai/bench) | 沙箱桌面任务和评分器，附参考成绩 | 测试集 v23 |
+面向 Apple Silicon 的本地优先 computer-use 全栈：用小模型做决策和屏幕定位，用 macOS 执行循环完成操作，以可复现评测检验结果，再通过原生 Mac app 交付完整体验。
 
-```mermaid
-flowchart LR
-  S[屏幕] --> E[Eyes<br/>在哪里？] --> B[Brain<br/>下一步做什么、有几成把握？] --> H[Hands<br/>去做] --> S
-  B -. 没把握或风险高 .-> B2[Brain 4B<br/>或远程模型]
-```
+[English](README.md) · [路线图](ROADMAP.md) · [参与贡献](https://github.com/deskmind-ai/.github/blob/main/CONTRIBUTING.md) · [品牌规范](BRAND.zh-CN.md)
 
-## 原则
+得心正在构建完整的桌面 agent 系统。Brain、Eyes、Hands、Bench 和 App 各自保留清晰接口，既能连成闭环，也能单独研究、替换或接入。我们希望端到端体验真正有用，每个组件的能力也能独立衡量。
 
-- **本地优先。** 模型用 MLX 在你的 Mac 上运行，屏幕内容默认留在本机。
-- **给把握，不给废话。** 每一步都是一个带类型的问题，用概率来回答。没把握的时候就去问用户、交给更强的模型或者等一等，不瞎猜。
-- **在真实桌面上说话。** 每个结论都附带可复现的测试结果，输给别人的地方也照实写。
+**开发状态 · 2026 年 9 月 30 日。** 源码仓库目前为私有；项目文档也注明发布模型仓库仍为私有。下方链接需要相应访问权限，不能视为已经可公开安装。公开产物与干净环境安装流程验证完成后，再更新可用状态。
 
-## 现在的水平（2026 年 9 月）
+## 五个组件，一条任务链
 
-真实 macOS 桌面（bench v23，13 个任务 × 3 轮，按严格标准判定通过；两边各有 1 轮环境故障不计分，共 38 轮计分）：
+| 组件 | 负责什么 | 当前范围 |
+|---|---|---|
+| [Brain](https://github.com/deskmind-ai/brain) | 决定下一步 | 0.8B / 4B 带类型决策模型、MLX 本地服务、可选双层路由 |
+| [Eyes](https://github.com/deskmind-ai/eyes) | 找到屏幕上的目标 | 4B 视觉定位模型、训练与评测工具、实验性本地服务 |
+| [Hands](https://github.com/deskmind-ai/hands) | 观察并操作 macOS | 桌面循环、辅助功能观察、视觉后备路径、执行预算与取消 |
+| [Bench](https://github.com/deskmind-ai/bench) | 检查是否真的完成 | 沙箱任务、测试素材、严格评分器、分版本参考结果 |
+| [App](https://github.com/deskmind-ai/app) | 交付完整 Mac 体验 | 原生应用与承载系统权限的 helper，已有打包开发版本 |
 
-| | 通过率 | 没做完就说完成 | 每步耗时（中位数） |
-|---|---|---|---|
-| Jev（云端参照） | 87% | 2 | 0.36 秒 |
-| **得心**（0.8B → 4B 路由，8 位，M4 Pro） | **92%** | **0** | **0.59 秒** |
+任务从 App 或开发者客户端进入。Hands 观察桌面，Brain 选择带类型的动作，Hands 执行后再次观察；需要定位目标时可以调用 Eyes。Bench 在受控任务中检查最终状态。
 
-在 JevBench v1.4.2 的 231 道公开题上（榜单的 `public_accuracy`），DeskMind Brain 4B 得 0.866，与 Jev 1.13 相同；密封题成绩待出。详细数据和已知不足见
-[brain/docs/results.zh-CN.md](https://github.com/deskmind-ai/brain/blob/main/docs/results.zh-CN.md)。
+并非每个任务都调用 Eyes。Finder 和 TextEdit 可以使用合成的辅助功能投影，因此这类任务的成功本身不能证明纯截图操作能力，也不能单独证明 Eyes 的贡献。
 
-## 试一试
+## 从哪里开始
 
-在 Apple 芯片的 Mac 上：
+- **体验 Mac 应用：**先看 [App 的要求和设置说明](https://github.com/deskmind-ai/app/blob/main/README.md)。文档要求 Apple Silicon、macOS 15 或以上；当前版本仍需私有模型访问权限。已有打包版本，公开且经独立验证的全新安装路径仍待建立。
+- **接入一个组件：**从 [Brain 的结构化决策 API](https://github.com/deskmind-ai/brain/blob/main/README.md)、[Eyes 定位接口](https://github.com/deskmind-ai/eyes/blob/main/README.md) 或 [Hands](https://github.com/deskmind-ai/hands) 开始。Brain 可以先用随仓库提供的请求样例验证接口，再接桌面操作。
+- **复现或质疑成绩：**从 [Bench](https://github.com/deskmind-ai/bench) 和准确的[参考配置](https://github.com/deskmind-ai/bench/blob/main/results/reference.md) 开始。本仓库采纳模板后，可以用评测复现表单提交结果。
 
-```bash
-git clone https://github.com/deskmind-ai/brain && cd brain
-uv sync --extra mlx
-uv run hf download deskmind/brain-4b --local-dir models/brain-4b
-uv run hf download deskmind/brain-0.8b --local-dir models/brain-0.8b
-uv run deskmind-brain-serve --predictor mlx:models/brain-0.8b --escalate-to mlx:models/brain-4b --two-stage --port 8793
-```
+实验请使用可丢弃的测试文件夹和明确选定的应用。运行前先检查组件要求的权限与数据流向。
 
-然后让 [hands](https://github.com/deskmind-ai/hands) 连到 `http://127.0.0.1:8793` 去操作桌面，再用 [bench](https://github.com/deskmind-ai/bench) 测成绩。
+## 现在展示到哪一步
+
+仓库报告覆盖了范围明确的 Finder 任务，例如新建文件夹和移动文件，以及 TextEdit 精确编辑、歧义处理和中途取消。这些可以作为可复现演示的候选；目前这里还没有经过审阅的公开录像与可下载演示包。
+
+除了 Finder 和 TextEdit（辅助功能投影），Hands 还有视觉模式，用于没有可用辅助功能结构的应用：用 OCR 和 Eyes 读屏幕，再由 Brain 决策。开发中的运行包括在这种模式下，在一个桌面音乐应用里搜索并播放某首歌的指定版本。这些运行还没有纳入已发布的 Bench 套件。
+
+下一份演示应展示目标、允许操作的应用和文件夹、观察结果、选定动作、最终文件状态与人工介入，并说明哪些步骤用了投影或视觉，也保留失败。拟议的跨应用展示仍是开发目标，需要以具体录像和验证结果确认。
+
+**已知边界：**诊断集中的网页提取任务仍未解决；已报告的真实桌面评测只覆盖一台 Mac 和一种界面语言；其他应用与环境的泛化能力需要继续测试。
+
+## 成绩与适用范围
+
+下列数字来自项目自己的运行报告，尚不代表独立复现。
+
+### 完整桌面任务
+
+最新 Bench 参考结果为 **v25、router-g14-q8：36/39 严格通过（92%）**，环境错误 0 次，false DONE 0 次。配置为 0.8B → 4B、8 位、Apple M4 Pro 48 GB；13 个任务各重复 3 次，开启投影层。
+
+规划决策耗时为 **p50 0.57 秒 / p95 5.25 秒**，不是整项任务完成时间。同一任务的重复运行具有相关性，这个小型诊断集还不能证明广泛的桌面可靠性。
+
+较早的同一 **v23** harness 对照为得心 **35/38**、Jev **33/38**，两者各排除 1 次环境故障。已查阅的参考表没有同版本 v25 Jev 对照，不应把不同 harness 版本混合排名。
+
+[参考结果与定义](https://github.com/deskmind-ai/bench/blob/main/results/reference.md)
+
+### Brain 决策质量
+
+在 **JevBench v1.4.2 的 231 道公开题**上，Brain 4B 报告准确率 **0.866**，Brain 0.8B 为 **0.706**。这只是公开题成绩，尚未建立官方密封题或综合分结果。输出带类型的概率是接口特性，留出集上的概率校准需要单独评估。
+
+[Brain 方法、结果与限制](https://github.com/deskmind-ai/brain/blob/main/docs/results.md)
+
+### Eyes 视觉定位
+
+在 **1,581 道 ScreenSpot-Pro** 上，Eyes 报告 **单次、无缩放 67.7%**；同一推理栈下的 GUI-Owl 基座为 **64.8%**，所测 KV-Ground 对照为 **66.1%**。**两次推理、缩放版本 77.5%** 属于另一种计算预算。
+
+以上设置为单 GPU、vLLM 0.19、bf16、贪心解码、原始分辨率、Qwen3-VL computer-use tool prompt。本地服务则使用 **4 位 MLX、≤2 MP 图像和 point_2d 提示格式；这个部署设置目前没有实测基准分数**。
+
+[Eyes 完整结果与失败分析](https://github.com/deskmind-ai/eyes/blob/main/docs/results.md)
+
+### 下一步想达到什么
+
+我们希望在明确的模型规模、开放程度与计算预算条件下，让小模型决策和视觉定位达到领先水平，同时完成可靠的端到端任务。**SOTA 是研究目标，当前不宣称已经达到。** 做出领先声明前，需要更新候选模型范围、固定协议、公开证据、审查权利与许可，并获得独立复现。[拟议优先事项](ROADMAP.md)
+
+## 本地优先意味着什么
+
+默认本地模型服务路径旨在让推理留在 Mac 上。模型下载需要联网；网络应用中的操作也可能发送数据。开发者配置可以启用远程升级层，它会收到发送给该层的请求。
+
+请以实际配置和组件文档为准。本地推理本身不能证明系统安全，也不代表每个动作都离线。提交报告时，只分享已经脱敏的日志和截图。
+
+## 参与贡献
+
+跨组件问题、复现报告和项目方向，统一从本仓库进入。如果已确定 bug 属于 Brain、Eyes、Hands、Bench 或 App，请在有权限访问的对应子仓库提交，并关联已有的主仓库问题；无法确定归属时，直接在这里报告。
+
+报告内容与分流规则见 [CONTRIBUTING.md](https://github.com/deskmind-ai/.github/blob/main/CONTRIBUTING.md)。将来若启用 GitHub Discussions，一般问答和设计讨论可在那里开展；本文不假设它目前已开放。
 
 ## 认识小方
 
-<p>
-  <img src="brand/xiaofang/idle.svg" height="84" alt="静候">
-  <img src="brand/xiaofang/notice.svg" height="84" alt="留意">
-  <img src="brand/xiaofang/think.svg" height="84" alt="思考">
-  <img src="brand/xiaofang/working.svg" height="84" alt="执行">
-  <img src="brand/xiaofang/done.svg" height="84" alt="完成">
-  <img src="brand/xiaofang/unsure.svg" height="84" alt="拿不准">
-  <img src="brand/xiaofang/waiting.svg" height="84" alt="等待">
-  <img src="brand/xiaofang/rest.svg" height="84" alt="休息">
-</p>
-
-小方是我们 logo 里的那个方框活了过来。贴纸和素材在 [`brand/`](brand)，使用规范见 [BRAND.zh-CN.md](BRAND.zh-CN.md)。
+小方是 logo 里的方框活了过来。现有素材在 [brand/](brand/)，使用规则见 [BRAND.zh-CN.md](BRAND.zh-CN.md)。
 
 ## 许可
 
-- 代码在各项目自己的仓库里，采用 Apache-2.0。
-- 本仓库的文字采用 CC BY 4.0。
-- 「DeskMind」「得心」这两个名称，以及 logo 和小方，按 [BRAND.zh-CN.md](BRAND.zh-CN.md) 使用。
+- 本仓库文字与文档采用 [CC BY 4.0](LICENSE)
+- 代码许可以各组件仓库的 LICENSE、NOTICE 为准
+- 模型权重、基座和数据集各有适用条款；代码许可不能单独证明所有产物都可以再分发
+- DeskMind、得心、logo 和小方的使用另见[品牌规范](BRAND.zh-CN.md)
