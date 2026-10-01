@@ -1,24 +1,33 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="brand/social/README-bilingual-dark.svg">
-    <img src="brand/social/README-bilingual-light.svg" alt="得心 DeskMind · 得心，应手。" width="760">
+    <img src="brand/social/README-bilingual-light.svg" alt="DeskMind 得心 · 得心，应手。" width="760">
   </picture>
 </p>
 
-# 得心 · DeskMind
+# DeskMind · 得心
 
-**在你的 Mac 上本地操作电脑、每个决定都给出概率的小模型。**
+**小到能在你的 Mac 上跑，聪明到知道该问你。**
 
-每一步先由 0.8B 模型决定，没把握的交给 4B。每个决定都带概率。目标有歧义时，它先问你，再动手写。在我们的真实桌面评测上（v25，G18b 路由，13 个任务 × 3 次），它从没把没做完的任务说成完成：39 次里误报完成 0 次。
+DeskMind 得心是全栈开源的电脑操作 AI。DeskMind 会看屏幕、想下一步、动手操作，靠的全是跑在你 Mac 上的小模型。任务有两种理解时，它先问你一句，不瞎猜。
 
-[English](README.md) · [官网](https://deskmind.dev) · [模型](https://huggingface.co/deskmind) · [讨论区](https://github.com/orgs/deskmind-ai/discussions) · [路线图](ROADMAP.md) · [参与贡献](https://github.com/deskmind-ai/.github/blob/main/CONTRIBUTING.md)
+[English](README.md) · [官网](https://deskmind.dev/zh/) · [文档](https://deskmind.dev/zh/docs/) · [下载 Mac App](https://github.com/deskmind-ai/app/releases/latest) · [模型](https://huggingface.co/deskmind) · [讨论区](https://github.com/deskmind-ai/deskmind/discussions) · [路线图](ROADMAP.md)
 
-<!-- TODO(launch): 换成通过验收的发布模型的真实、未剪辑录屏，保留倍速标注。 -->
-<p align="center"><img src="assets/demo.gif" alt="得心在 Mac 上执行真实任务：抄表、遇到歧义先问、播放歌曲的现场版" width="760"></p>
+**[在 deskmind.dev 观看 56 秒演示](https://deskmind.dev/zh/)**：发布版模型的真实录屏。两笔订单都叫 Lisa Wong，所以它先问用哪一笔，再写入。
 
-## 三步试用
+## 和别的电脑操作 AI 有什么不同
 
-下面在 Apple Silicon Mac 上**单独运行 4B**（发布版 G18b）。它回答桌面任务中的一步，本身不会去操作桌面。
+**小模型，就在你的 Mac 上。** 每一步先由 0.8B 判断，难的再交给 4B 复核。两个模型都在本机运行，不走云端，也不按次付费。0.8B 判断约 0.5 秒，4B 复核约 3.6 秒（决策时间中位数）。
+
+**System One：选择，不是猜。** 每一步是一道选择题。模型给每个选项打分而不是写文字，所以每个选项都有概率。没把握就交给 4B 或先问你，任何 agent 都能通过 `POST /v1/systemone` 接入。在 39 次真机运行中，它一次也没有在任务没做完时说「完成」。
+
+**从眼到手，全部开源。** Eyes、Brain、Hands 和 Mac App 全部开源，连同给它们打分的 Bench。下面每个成绩都附样本量，可以自己复现。
+
+## 开始使用
+
+**用 Mac App。** [下载 DeskMind for Mac](https://github.com/deskmind-ai/app/releases/latest)（macOS 15 及以上，Apple Silicon，已签名并公证）。v0.3.0 内置 G18b 发布模型；之前的 v0.2.0 用的是 G14。首次运行会下载模型（约 5.3 GB），并一步步引导你授予权限：[安装 App](https://deskmind.dev/zh/docs/start/install-the-app/)。
+
+**或者自己跑模型。** 下面单独运行 4B（发布版 G18b）。它回答桌面任务中的一步，本身不会去操作桌面。
 
 ```bash
 # 终端 1：获取 Brain 和模型，然后启动服务
@@ -27,7 +36,8 @@ uv run hf download deskmind/brain-4b --revision g18b-q8 --local-dir models/brain
 uv run deskmind-brain-serve --predictor mlx:models/brain-4b --port 8793 --two-stage
 ```
 
-模型下载约 4.2 GB。如果报 `CAS Client Error`，在下载命令前加 `HF_HUB_DISABLE_XET=1` 重试。
+4B 下载约 4.5 GB。如果报 `CAS Client Error`，在下载命令前加 `HF_HUB_DISABLE_XET=1` 重试。在中国大陆可以从 ModelScope 下载同样的文件：
+`uvx modelscope download --model gxcsoccer/brain-4b --revision g18b-q8 --local-dir models/brain-4b`。
 
 ```bash
 # 终端 2（同一个 brain 目录）：让它给出一个真实桌面任务的下一步
@@ -38,41 +48,68 @@ curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @exam
 `{"answers": {"operation": {"choice": "CLICK", "probabilities": {"CLICK": 0.96, "OPEN": 0.005, …}}, "click_target": {…}}}`。
 概率是模型对各选项的权衡，不保证这一步一定正确。
 
-**发布形态的路由（0.8B → 4B）：** 另外把 `deskmind/brain-0.8b --revision g18b-q8` 下载到 `models/brain-0.8b`，然后启动
+**发布形态的路由（0.8B → 4B）：** 另外把 `deskmind/brain-0.8b --revision g18b-q8` 下载到 `models/brain-0.8b`（0.8 GB），然后启动
 `uv run deskmind-brain-serve --predictor mlx:models/brain-0.8b --escalate-to mlx:models/brain-4b --two-stage --port 8796`。
 门槛（0.96）随权重一起发布；每次返回会多一条 `routing` 记录，例如 `{"by": "strong", "reason": "low_conf", "fast_conf": 0.956}`。
 
-要让它真正操作桌面，加上 [Hands](https://github.com/deskmind-ai/hands)。Mac 应用暂未公开。
+逐步说明和返回内容的解读见[快速上手](https://deskmind.dev/zh/docs/start/quickstart/)。要让它真正操作桌面，加上 [Hands](https://github.com/deskmind-ai/hands)。
 
-## 包含什么
+## 组成
 
 | | 负责 | |
 |---|---|---|
-| [Brain](https://github.com/deskmind-ai/brain) | 决定下一步 | 0.8B 和 4B，MLX，可选 0.8B → 4B 路由 |
-| [Eyes](https://github.com/deskmind-ai/eyes) | 在屏幕上找到目标 | 4B 视觉定位模型 |
+| [Eyes](https://github.com/deskmind-ai/eyes) | 在屏幕上找到目标 | 4B 视觉定位模型，用于没有辅助功能信息的应用 |
+| [Brain](https://github.com/deskmind-ai/brain) | 决定下一步 | 0.8B 和 4B，MLX，0.8B → 4B 路由，`/v1/systemone` |
 | [Hands](https://github.com/deskmind-ai/hands) | 观察并操作 macOS | 辅助功能与视觉两种模式、执行预算、取消 |
-| [Bench](https://github.com/deskmind-ai/bench) | 检查是否真的完成 | 沙箱任务和严格的最终状态评分 |
-| App | 带到你的 Mac 上 | 原生应用，暂未公开 |
+| [App](https://github.com/deskmind-ai/app) | 带到你的 Mac 上 | 原生应用加后台助手；[下载](https://github.com/deskmind-ai/app/releases/latest) |
+| [Bench](https://github.com/deskmind-ai/bench) | 检查是否真的完成 | 沙箱桌面任务，严格检查最终状态的评分程序 |
 
-## 成绩
+模型：[huggingface.co/deskmind](https://huggingface.co/deskmind)（`brain-0.8b`、`brain-4b`、`eyes-4b`）。官网：[deskmind.dev](https://deskmind.dev/zh/)。文档：[deskmind.dev/zh/docs](https://deskmind.dev/zh/docs/)。
+
+## 成绩，附样本量
 
 | 项目 | 条件 | 结果 |
 |---|---|---|
-| 真实桌面任务 | Bench v25，G18b 路由（0.8B → 4B，8 位，门槛 0.96），通过 app 运行，M4 Pro，13 个任务各跑 3 次 | **39/39**，false DONE 0 次；决策中位数：0.8B 直接回答 0.48 秒，交给 4B 复核 3.6 秒（约 70% 的步骤）；不是整项任务时间 |
-| 同一 harness 对比 | Bench v23（上一版 G14），两者各排除 1 次环境故障 | 得心 **35/38** · Jev 33/38 |
-| 决策质量 | JevBench v1.4.2，231 道公开题 | Brain 4B **0.835** · Brain 0.8B **0.723**（G18b；G14 4B 为 0.866） |
-| 视觉定位 | ScreenSpot-Pro，1,581 题，GPU，单次推理 | Eyes **67.7%**（基座 64.8%） |
+| 真实桌面任务 | Bench v25，13 个任务 × 3 次，严格评分；G18b 路由（0.8B → 4B，8 位，门槛 0.96），通过 App 运行，一台 M4 Pro（48 GB） | **39/39** 通过；没做完却说完成 **0** 次 |
+| 决策时间 | 同样 39 次运行，208 次决策 | 0.8B 直接回答时中位数 **0.48 秒**（约 30% 的步骤），交给 4B 复核时 **3.6 秒**（约 70%）；整体 2.85 秒，最慢 5% 为 9.82 秒。指单次决策，不是整项任务 |
+| 决策质量 | JevBench v1.4.2，231 道公开题 | Brain 4B **0.835** · Brain 0.8B 0.723 · 路由 0.797；密封题成绩待出 |
+| 视觉定位 | ScreenSpot-Pro，1,581 题，GPU，单次推理 | Eyes 4B **67.7%**（基座模型 64.8%） |
 
-以上都是我们自己的运行结果；方法和完整表格见 [Bench 参考结果](https://github.com/deskmind-ai/bench/blob/main/results/reference.md) · [Brain](https://github.com/deskmind-ai/brain/blob/main/docs/results.zh-CN.md) · [Eyes](https://github.com/deskmind-ai/eyes/blob/main/docs/results.md)。
+- **样本不大。** 13 个任务，一台 Mac，中文系统语言。同一任务的结果高度一致（几乎每个任务都是 3/3 或 0/3），所以有效样本更接近 13 个任务，而不是 39 次运行。
+- **有一个任务不算干净。** 中文精确文本任务的 3 次运行里，文件都写对了，但模型一直没说「完成」，用满了步数预算。评分只看最终状态，所以算通过。
+- **G18b 用一部分通用判断换来了桌面上的可靠。** 4B 的 JevBench 公开题成绩从 0.866（G14）降到 0.835，主要降在 hard 档。上一版 G14 在同一评测上是 36/39。
+- **Eyes 的 GPU 成绩不等于 App 里的配置。** App 用的是 4 位 MLX 版本、最高 2 MP 输入，这个配置还没有基准分数。
 
-## 局限
+以上都是我们自己的运行结果。方法和完整表格见 [Brain 成绩](https://github.com/deskmind-ai/brain/blob/main/docs/results.zh-CN.md) · [Bench 参考结果](https://github.com/deskmind-ai/bench/blob/main/results/reference.md) · [Eyes 成绩](https://github.com/deskmind-ai/eyes/blob/main/docs/results.zh-CN.md) · [成绩与局限](https://deskmind.dev/zh/docs/explanation/results-and-limits/)。
 
-评测集小，只在一台 Mac、一种界面语言上测过；目前大部分步骤交给 4B，一次决策通常约 3 秒；发布版在 JevBench hard 档上牺牲了一些通用判断；本地 4 位 Eyes 还没有基准分数；公开题成绩不等于 JevBench 密封题成绩。推理默认留在本机，但下载模型和联网应用本身会用网络。正在做的事见[路线图](ROADMAP.md)。
+## 还做不好的
+
+- 抄写长表格（超过约四行），或只抄符合条件的行。
+- 根据拍照的收据填写表单。
+- 需要 4B 复核的步骤要几秒钟，而目前大部分步骤都会交给 4B。
+
+接下来要做的事见[路线图](ROADMAP.md)。
+
+## 思考在你的 Mac 上完成
+
+默认在本机推理。模型只下载一次，来源是 Hugging Face 或 ModelScope；之后每一步决策都不需要联网。云端模型需要你自己接：App 不会调用云端模型，但如果你自己把路由的升级层指向云端模型，交给它的步骤会发送到那个服务。DeskMind 操作的网页或音乐应用，仍会和各自的服务器通信。
+
+## 参与贡献
+
+- 提问和设计讨论：[讨论区](https://github.com/deskmind-ai/deskmind/discussions)。
+- 跨组件的问题、复现报告和项目方向：[在这里提 issue](https://github.com/deskmind-ai/deskmind/issues)。只涉及某个组件的 bug，提到对应仓库。
+- 可以从哪里帮忙、好的报告包含什么：[参与贡献](https://deskmind.dev/zh/docs/project/contributing/)。和我们数字不一致的复现结果同样欢迎。
+- 安全问题请不要公开提交，见 [SECURITY.md](https://github.com/deskmind-ai/.github/blob/main/SECURITY.md)。
 
 ## 认识小方
+
+<img src="brand/xiaofang/done.png" alt="小方：任务完成" width="120" align="right">
 
 小方是 logo 里的方框活了过来。素材在 [brand/](brand/)，规则见 [BRAND.zh-CN.md](BRAND.zh-CN.md)。
 
 ## 许可
 
-本仓库文档：[CC BY 4.0](LICENSE)。代码：以各组件的 LICENSE、NOTICE 为准。模型权重和数据集各有条款。品牌：[BRAND.zh-CN.md](BRAND.zh-CN.md)。
+- 本仓库的文字和文档：[CC BY 4.0](LICENSE)。
+- **不在该许可范围内：** DeskMind 和「得心」这两个名称、DeskMind logo、小方这个角色，以及 [brand/](brand/) 下的其他文件。它们的使用规则见 [BRAND.zh-CN.md](BRAND.zh-CN.md)。
+- 代码在各组件仓库中，采用 Apache-2.0；以各仓库的 LICENSE 和 NOTICE 为准。
+- 模型权重、基座模型和数据集遵循各自的条款。

@@ -1,89 +1,40 @@
 # DeskMind roadmap
 
-[Project overview](README.md) · [中文概览](README.zh-CN.md) · [Contributing](https://github.com/deskmind-ai/.github/blob/main/CONTRIBUTING.md)
+[Project overview](README.md) · [中文概览](README.zh-CN.md) · [Contributing](https://deskmind.dev/docs/project/contributing/)
 
-**Proposal for maintainer review · September 30, 2026.** These are candidate priorities and acceptance criteria, not committed release dates or promises of support.
+**Updated October 2, 2026.** What we are working on, roughly in order. There are no dates, and plans change when the measurements say so.
 
-The direction is a complete, local-first computer-use system for Apple Silicon. Component quality and end-to-end usefulness are evaluated separately, then connected through reproducible experiments.
+## Where we are
 
-## 1. Make the first result reproducible
+The current release is the Brain **G18b** router (0.8B → 4B, 8-bit, threshold 0.96), shipped in the Mac app v0.3.0. On Bench v25 (13 tasks × 3 runs, one Mac) it passed 39/39 with 0 false "done". Its known weak spots: most steps (about 70%) still go to the 4B, long or filtered table copies and receipt-to-form tasks are not reliable, and the 4B lost some general judgement on JevBench's hard tier. Numbers and sample sizes: [README](README.md#results-with-the-sample-size).
 
-Proposed work:
-- Publish an explicit availability matrix for code, model weights, evaluation artifacts and App builds.
-- Pin a compatible Brain/Hands/Bench configuration and document the first typed request, then one disposable-folder task.
-- Verify clean-machine setup, model access, required permissions and interruption/retry behavior.
-- Provide one reviewed demo with the exact environment, every attempt and a sanitized result bundle.
+## Next: G19
 
-Acceptance evidence:
-- A contributor with the documented access reproduces the first request and task without maintainer intervention.
-- The report names source revisions, weight hashes, harness/suite version, hardware, OS and locale.
-- Public installation is claimed only when anonymous artifact access and the published flow are verified.
+The next Brain round targets the failures we see today:
 
-## 2. Measure Brain under defined constraints
+- **Long and filtered table copies:** 4 to 14 rows, 3 to 5 columns, Chinese and English, only the rows that match a condition, and no stopping early. The offline gate uses a held-out set whose templates the training data never saw.
+- **Forms from a photographed receipt,** including values that text recognition misread.
+- **Finishing cleanly:** save, then say "done"; append when asked to append instead of replacing the document; open a file from a folder, edit, save and close it.
+- **Media states:** do not pause a track that is already playing, and recognise when playback means the task is done.
+- **Speed:** widen the 0.8B's fast path (distil the 4B into the 0.8B, recalibrate, retune the threshold) so fewer steps wait for the 4B.
+- **General judgement:** JevBench public items stay a monitored check, so desktop gains do not cost the hard tier again.
 
-Proposed work:
-- Compare standalone 0.8B, standalone 4B and the router as separate systems.
-- Freeze the eligible model cohort and exact parameter-count definition before comparison.
-- Add held-out calibration and risk/coverage measurements; report false DONE and missed approval separately.
-- Pursue official or independently administered evaluation alongside public-set results.
+G19 replaces G18b only if it does better on the same bench. We publish the comparison either way.
 
-Acceptance evidence:
-- A dated eligibility manifest, pinned inference settings, item-level results where permitted, uncertainty estimates and failure analysis.
-- Validation-only threshold fitting; no sealed-test tuning.
-- Any leadership statement identifies metric, cohort, protocol and date. Incomplete coverage is described as “among the models evaluated.”
+## Measurement
 
-## 3. Measure Eyes where it is deployed
+- **A bigger bench:** an English system language, more apps (Mail, Calendar, Notes, web forms) and held-out task families, not just 13 tasks on one Mac. Report confidence intervals, and full-task time and interventions next to decision time.
+- **Eyes where it runs:** benchmark the setting the app ships (4-bit MLX, up to 2 MP) on Apple Silicon, kept separate from GPU numbers.
+- **A sealed score:** a JevBench sealed-set result for the G18b 4B, next to the public-item numbers.
 
-Proposed work:
-- Benchmark the shipped local setting separately from GPU research runs: 4-bit MLX, ≤2 MP and point_2d.
-- Keep one-pass and two-pass results separate.
-- Evaluate small targets, creative-app icons, absent targets and parse failures.
-- Audit dataset provenance and redistribution permissions for intended artifacts.
+## Later
 
-Acceptance evidence:
-- Paired comparisons with fixed checkpoint hashes, preprocessing, coordinate mapping, decoding and scoring.
-- Quality, latency and memory measured on named Apple Silicon hardware.
-- No transfer of GPU scores into local-Mac claims without a matching measurement.
+- **Pluggable escalation:** an optional third tier behind the 4B (a larger local model or a cloud model). Off by default; a cloud tier sends the steps routed to it off your Mac, so it is opt-in.
+- **Per-app lesson notes:** short, human-reviewed notes about an app, looked up at run time and removable without retraining.
+- **More apps and platforms** through Hands. Contributions are welcome.
 
-## 4. Strengthen the complete task loop
+## What counts as progress
 
-Proposed work:
-- Expand task and app coverage with held-out families and more than one device/locale.
-- Test cancellation, stale targets, denied permissions, approval boundaries and recovery using disposable fixtures.
-- Compare component swaps under one frozen harness and record whether Eyes was invoked.
-- Report full task duration, interventions, side effects and strict success alongside planner latency.
+Independent reproductions (including ones that disagree with ours), working integrations through `/v1/systemone` and more reliable complete tasks matter more to us than stars or downloads. An honest negative result is worth publishing too.
 
-Acceptance evidence:
-- Every attempted run is accounted for; environment errors and exclusions are visible.
-- A final-state grader checks outcomes independently of the agent's “done” response.
-- A known failure is preserved as a regression test before claiming it is resolved.
-- Unsupported cases and manual interventions remain explicit in demos.
-
-## 5. Make contribution useful
-
-Proposed work:
-- Keep project-level questions and reproduction reports in this front-door repository.
-- Route isolated component bugs to the corresponding repository and cross-link rather than duplicate.
-- Add reviewed starter tasks with bounded fixtures, a clear output and acceptance criteria.
-- Maintain English/Chinese front-door parity and a verified path from each component back here.
-
-Acceptance evidence:
-- A first-time contributor can identify a suitable task, reproduce its scope and submit a reviewable change.
-- Reproduction reports can disagree with project results and still be recorded in full.
-- A private vulnerability-reporting route is selected and documented before broad public onboarding.
-
-## What would count as progress
-
-Independent reproductions, working integrations, repeated external contributions, clean-install success, and more reliable complete tasks matter most. Stars and downloads are useful discovery signals, but do not establish adoption or correctness.
-
-SOTA remains an aspiration under defined constraints. A useful, reproducible system and an honest negative result are both worth publishing.
-
-## Owner decisions still needed
-
-- Which repositories and artifacts may become public, and with which verified access paths?
-- Which initial supported tasks, devices and locales should be documented?
-- Which model-size/openness cohorts should bound Brain and Eyes comparisons?
-- Which proposed work has an owner and should become an issue?
-- Which private security contact and general discussion channel should contributors use?
-
-No dates, issue assignments or public release commitments are set by this proposal.
+Questions and ideas: [Discussions](https://github.com/deskmind-ai/deskmind/discussions).

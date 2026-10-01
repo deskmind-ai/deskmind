@@ -25,11 +25,11 @@ Supporting lines: 看得清，想明白，稳稳做。/ See. Think. Act. / 让�
 | Folder | Contents |
 |---|---|
 | `brand/logo/` | horizontal (light, dark, mono), stacked, mark only, wordmark; Chinese wordmark 得心 (light, dark, mono); bilingual lockups (horizontal and stacked, light and dark) |
-| `brand/family/` | Eyes, Brain and Hands lockups (use at 32 px and above) |
+| `brand/family/` | Eyes, Brain and Hands lockups (use at 32 px and above); App and Bench symbols (light, dark, mono), lockups (light, dark) and dedicated 16 px and 24 px marks |
 | `brand/icons/` | dedicated 16 px and 24 px marks, favicon, avatar |
 | `brand/xiaofang/` | 8 poses (SVG and transparent PNG), plus an animated acknowledgement |
 | `brand/DeskMind-VI-Manual.pdf` | the full visual identity manual (15 pages) |
-| `brand/social/` | bilingual README banners (light and dark), 16:9 bilingual covers, social cover, sticker sheet, merch transfer |
+| `brand/social/` | bilingual README banners (light and dark), 16:9 bilingual covers, social cover, GitHub repository cards, sticker sheet, merch transfer |
 
 ## Using the brand
 
@@ -45,4 +45,4 @@ Supporting lines: 看得清，想明白，稳稳做。/ See. Think. Act. / 让�
 - use Xiaofang in place of the logo or scale him below 64 px;
 - set the Chinese wordmark 得心 smaller than 24 px tall (below that, use the mark alone).
 
-These assets are **not** covered by the Apache-2.0 licence of our code. Ask us about anything outside these rules.
+These assets are **not** covered by the Apache-2.0 licence of our code, nor by the CC BY 4.0 licence of the documentation in this repository: the DeskMind and 得心 names, the DeskMind logo, the Xiaofang (小方) character and the other files under `brand/` are governed by this page. Ask us about anything outside these rules.
