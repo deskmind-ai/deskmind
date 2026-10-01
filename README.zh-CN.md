@@ -7,30 +7,40 @@
 
 # 得心 · DeskMind
 
-**在你的 Mac 上本地操作电脑、并且知道自己有几分把握的小模型。**
+**在你的 Mac 上本地操作电脑、每个决定都给出概率的小模型。**
 
-每一步先由 0.8B 模型决定，没把握的交给 4B。每个决定都带概率。目标有歧义时，它先问你，再动手写。在我们的真实桌面评测上，它从没把没做完的任务说成完成。
+每一步先由 0.8B 模型决定，没把握的交给 4B。每个决定都带概率。目标有歧义时，它先问你，再动手写。在我们的真实桌面评测上（v25，G18b 路由，13 个任务 × 3 次），它从没把没做完的任务说成完成：39 次里误报完成 0 次。
 
 [English](README.md) · [官网](https://deskmind.dev) · [模型](https://huggingface.co/deskmind) · [讨论区](https://github.com/orgs/deskmind-ai/discussions) · [路线图](ROADMAP.md) · [参与贡献](https://github.com/deskmind-ai/.github/blob/main/CONTRIBUTING.md)
 
-<!-- TODO(launch): 换成真实、未剪辑的演示录屏（G18b 素材），保留倍速标注。 -->
+<!-- TODO(launch): 换成通过验收的发布模型的真实、未剪辑录屏，保留倍速标注。 -->
 <p align="center"><img src="assets/demo.gif" alt="得心在 Mac 上执行真实任务：抄表、遇到歧义先问、播放歌曲的现场版" width="760"></p>
 
 ## 三步试用
 
+下面在 Apple Silicon Mac 上**单独运行 4B**（发布版 G18b）。它回答桌面任务中的一步，本身不会去操作桌面。
+
 ```bash
-# 1. 获取 Brain 和模型   （发布版 G18b；HF main 指向 g18b-q8 后可去掉 --revision）
+# 终端 1：获取 Brain 和模型，然后启动服务
 git clone https://github.com/deskmind-ai/brain && cd brain && uv sync --extra mlx
 uv run hf download deskmind/brain-4b --revision g18b-q8 --local-dir models/brain-4b
-
-# 2. 在 Mac 上启动服务
 uv run deskmind-brain-serve --predictor mlx:models/brain-4b --port 8793 --two-stage
+```
 
-# 3. 让它给出一个真实桌面任务的下一步
+```bash
+# 终端 2（同一个 brain 目录）：让它给出一个真实桌面任务的下一步
 curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @examples/request.json
 ```
 
-返回的是带类型的决定（操作和目标），每个选项都有概率。要让它真正操作桌面，加上 [Hands](https://github.com/deskmind-ai/hands)；完整体验见 [Mac 应用](https://github.com/deskmind-ai/app)。<!-- TODO(launch): 确认 App 可用性表述 -->
+成功时返回带类型的决定，每个选项都有概率，例如
+`{"answers": {"operation": {"choice": "CLICK", "probabilities": {"CLICK": 0.96, "OPEN": 0.005, …}}, "click_target": {…}}}`。
+概率是模型对各选项的权衡，不保证这一步一定正确。
+
+**发布形态的路由（0.8B → 4B）：** 另外把 `deskmind/brain-0.8b --revision g18b-q8` 下载到 `models/brain-0.8b`，然后启动
+`uv run deskmind-brain-serve --predictor mlx:models/brain-0.8b --escalate-to mlx:models/brain-4b --two-stage --port 8796`。
+门槛（0.96）随权重一起发布；每次返回会多一条 `routing` 记录，例如 `{"by": "strong", "reason": "low_conf", "fast_conf": 0.956}`。
+
+要让它真正操作桌面，加上 [Hands](https://github.com/deskmind-ai/hands)。Mac 应用暂未公开。
 
 ## 包含什么
 
@@ -40,7 +50,7 @@ curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @exam
 | [Eyes](https://github.com/deskmind-ai/eyes) | 在屏幕上找到目标 | 4B 视觉定位模型 |
 | [Hands](https://github.com/deskmind-ai/hands) | 观察并操作 macOS | 辅助功能与视觉两种模式、执行预算、取消 |
 | [Bench](https://github.com/deskmind-ai/bench) | 检查是否真的完成 | 沙箱任务和严格的最终状态评分 |
-| [App](https://github.com/deskmind-ai/app) | 带到你的 Mac 上 | 原生应用 |
+| App | 带到你的 Mac 上 | 原生应用，暂未公开 |
 
 ## 成绩
 

@@ -7,30 +7,40 @@
 
 # DeskMind · 得心
 
-**Small models that operate your Mac, locally, and know how sure they are.**
+**Small models that operate your Mac, locally, with a probability for every decision.**
 
-A 0.8B model decides each step and hands the unsure ones to a 4B. Every decision comes with probabilities. When a goal is ambiguous, it asks before it writes. On our real-desktop bench it never reported a task as done when it wasn't.
+A 0.8B model decides each step and hands the unsure ones to a 4B. Every decision comes with probabilities. When a goal is ambiguous, it asks before it writes. On our real-desktop bench (v25, router G18b, 13 tasks × 3 runs) it never reported a task as done when it wasn't: 0 false DONE in 39 runs.
 
 [中文](README.zh-CN.md) · [Website](https://deskmind.dev) · [Models](https://huggingface.co/deskmind) · [Discussions](https://github.com/orgs/deskmind-ai/discussions) · [Roadmap](ROADMAP.md) · [Contributing](https://github.com/deskmind-ai/.github/blob/main/CONTRIBUTING.md)
 
-<!-- TODO(launch): replace with the real, unedited demo recording (G18b takes); keep the speed labels visible. -->
+<!-- TODO(launch): replace with footage of the released model that passed acceptance (real, unedited takes); keep the speed labels visible. -->
 <p align="center"><img src="assets/demo.gif" alt="DeskMind running real tasks on a Mac: copying a table, asking before writing an ambiguous record, playing the live version of a song" width="760"></p>
 
 ## Try it in three steps
 
+This runs the **4B alone** (release G18b) on an Apple Silicon Mac. It answers one step of a desktop task; it does not drive the desktop by itself.
+
 ```bash
-# 1. Get Brain and a model   (release G18b; drop --revision once HF main points to g18b-q8)
+# Terminal 1: get Brain and the model, then serve it
 git clone https://github.com/deskmind-ai/brain && cd brain && uv sync --extra mlx
 uv run hf download deskmind/brain-4b --revision g18b-q8 --local-dir models/brain-4b
-
-# 2. Serve it on your Mac
 uv run deskmind-brain-serve --predictor mlx:models/brain-4b --port 8793 --two-stage
+```
 
-# 3. Ask it for the next step of a real desktop task
+```bash
+# Terminal 2 (in the same brain folder): ask for the next step of a real desktop task
 curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @examples/request.json
 ```
 
-The reply is a typed decision (operation and target) with a probability for every option. To drive the desktop, add [Hands](https://github.com/deskmind-ai/hands); for the full experience, the [Mac app](https://github.com/deskmind-ai/app). <!-- TODO(launch): confirm App availability wording -->
+Success looks like a typed decision with a probability for every option, e.g.
+`{"answers": {"operation": {"choice": "CLICK", "probabilities": {"CLICK": 0.96, "OPEN": 0.005, …}}, "click_target": {…}}}`.
+A probability is the model's weighting of the options, not a guarantee that the step is right.
+
+**The router (0.8B → 4B), as released:** also download `deskmind/brain-0.8b --revision g18b-q8` into `models/brain-0.8b`, then serve
+`uv run deskmind-brain-serve --predictor mlx:models/brain-0.8b --escalate-to mlx:models/brain-4b --two-stage --port 8796`.
+The threshold (0.96) ships with the weights; each reply adds a `routing` record such as `{"by": "strong", "reason": "low_conf", "fast_conf": 0.956}`.
+
+To drive the desktop, add [Hands](https://github.com/deskmind-ai/hands). The Mac app is not public yet.
 
 ## What's inside
 
@@ -40,7 +50,7 @@ The reply is a typed decision (operation and target) with a probability for ever
 | [Eyes](https://github.com/deskmind-ai/eyes) | finds the target on screen | 4B visual grounder |
 | [Hands](https://github.com/deskmind-ai/hands) | observes and acts on macOS | accessibility and vision modes, budgets, cancellation |
 | [Bench](https://github.com/deskmind-ai/bench) | checks what really happened | sandbox tasks with strict final-state graders |
-| [App](https://github.com/deskmind-ai/app) | brings it to your Mac | native app |
+| App | brings it to your Mac | native app; not public yet |
 
 ## Results
 
