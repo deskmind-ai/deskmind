@@ -27,6 +27,8 @@ uv run hf download deskmind/brain-4b --revision g18b-q8 --local-dir models/brain
 uv run deskmind-brain-serve --predictor mlx:models/brain-4b --port 8793 --two-stage
 ```
 
+The model is a 4.2 GB download. If it fails with a `CAS Client Error`, rerun the download with `HF_HUB_DISABLE_XET=1`.
+
 ```bash
 # Terminal 2 (in the same brain folder): ask for the next step of a real desktop task
 curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @examples/request.json
