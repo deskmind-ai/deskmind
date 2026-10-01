@@ -19,9 +19,9 @@ A 0.8B model decides each step and hands the unsure ones to a 4B. Every decision
 ## Try it in three steps
 
 ```bash
-# 1. Get Brain and a model   (TODO(launch): confirm the public repo URL and model name)
+# 1. Get Brain and a model   (release G18b; drop --revision once HF main points to g18b-q8)
 git clone https://github.com/deskmind-ai/brain && cd brain && uv sync --extra mlx
-uv run hf download deskmind/brain-4b --local-dir models/brain-4b
+uv run hf download deskmind/brain-4b --revision g18b-q8 --local-dir models/brain-4b
 
 # 2. Serve it on your Mac
 uv run deskmind-brain-serve --predictor mlx:models/brain-4b --port 8793 --two-stage
@@ -46,16 +46,16 @@ The reply is a typed decision (operation and target) with a probability for ever
 
 | What | Setting | Result |
 |---|---|---|
-| Real-desktop tasks | Bench v25, router-g14-q8 (0.8B → 4B, 8-bit), M4 Pro, 13 tasks × 3 runs | **36/39 (92%)**, 0 false DONE; decision p50 0.57 s (not full-task time) |
-| Same-harness comparison | Bench v23, one environment-error run excluded per system | DeskMind **35/38** · Jev 33/38 |
-| Decision quality | JevBench v1.4.2, 231 public items | Brain 4B **0.866** · Brain 0.8B **0.706** |
+| Real-desktop tasks | Bench v25, router G18b (0.8B → 4B, 8-bit, threshold 0.96), through the app, M4 Pro, 13 tasks × 3 runs | **39/39**, 0 false DONE; decision p50 0.48 s when the 0.8B answers, 3.6 s when the 4B checks (~70% of steps); not full-task time |
+| Same-harness comparison | Bench v23 (earlier release G14), one environment-error run excluded per system | DeskMind **35/38** · Jev 33/38 |
+| Decision quality | JevBench v1.4.2, 231 public items | Brain 4B **0.835** · Brain 0.8B **0.723** (G18b; G14 4B was 0.866) |
 | Visual grounding | ScreenSpot-Pro, 1,581 items, GPU, one pass | Eyes **67.7%** (base 64.8%) |
 
 Our own runs; methods and full tables: [Bench reference](https://github.com/deskmind-ai/bench/blob/main/results/reference.md) · [Brain](https://github.com/deskmind-ai/brain/blob/main/docs/results.md) · [Eyes](https://github.com/deskmind-ai/eyes/blob/main/docs/results.md).
 
 ## Limits
 
-A small diagnostic suite on one Mac and one locale; a web-extraction task is still unsolved; the local 4-bit Eyes setting has no benchmark score yet; public-set scores are not a sealed JevBench result. Inference stays on your Mac by default, but model downloads and networked apps use the network. What we are working on: [ROADMAP](ROADMAP.md).
+A small diagnostic suite on one Mac and one locale; most steps currently go to the 4B, so a typical decision takes about 3 s; the release gave up some general judgement on JevBench's hard tier; the local 4-bit Eyes setting has no benchmark score yet; public-set scores are not a sealed JevBench result. Inference stays on your Mac by default, but model downloads and networked apps use the network. What we are working on: [ROADMAP](ROADMAP.md).
 
 ## Meet Xiaofang · 小方
 

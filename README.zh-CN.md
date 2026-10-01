@@ -19,9 +19,9 @@
 ## 三步试用
 
 ```bash
-# 1. 获取 Brain 和模型   （TODO(launch)：确认公开仓库地址和模型名）
+# 1. 获取 Brain 和模型   （发布版 G18b；HF main 指向 g18b-q8 后可去掉 --revision）
 git clone https://github.com/deskmind-ai/brain && cd brain && uv sync --extra mlx
-uv run hf download deskmind/brain-4b --local-dir models/brain-4b
+uv run hf download deskmind/brain-4b --revision g18b-q8 --local-dir models/brain-4b
 
 # 2. 在 Mac 上启动服务
 uv run deskmind-brain-serve --predictor mlx:models/brain-4b --port 8793 --two-stage
@@ -46,16 +46,16 @@ curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @exam
 
 | 项目 | 条件 | 结果 |
 |---|---|---|
-| 真实桌面任务 | Bench v25，router-g14-q8（0.8B → 4B，8 位），M4 Pro，13 个任务各跑 3 次 | **36/39（92%）**，false DONE 0 次；决策中位数 0.57 秒（不是整项任务时间） |
-| 同一 harness 对比 | Bench v23，两者各排除 1 次环境故障 | 得心 **35/38** · Jev 33/38 |
-| 决策质量 | JevBench v1.4.2，231 道公开题 | Brain 4B **0.866** · Brain 0.8B **0.706** |
+| 真实桌面任务 | Bench v25，G18b 路由（0.8B → 4B，8 位，门槛 0.96），通过 app 运行，M4 Pro，13 个任务各跑 3 次 | **39/39**，false DONE 0 次；决策中位数：0.8B 直接回答 0.48 秒，交给 4B 复核 3.6 秒（约 70% 的步骤）；不是整项任务时间 |
+| 同一 harness 对比 | Bench v23（上一版 G14），两者各排除 1 次环境故障 | 得心 **35/38** · Jev 33/38 |
+| 决策质量 | JevBench v1.4.2，231 道公开题 | Brain 4B **0.835** · Brain 0.8B **0.723**（G18b；G14 4B 为 0.866） |
 | 视觉定位 | ScreenSpot-Pro，1,581 题，GPU，单次推理 | Eyes **67.7%**（基座 64.8%） |
 
 以上都是我们自己的运行结果；方法和完整表格见 [Bench 参考结果](https://github.com/deskmind-ai/bench/blob/main/results/reference.md) · [Brain](https://github.com/deskmind-ai/brain/blob/main/docs/results.zh-CN.md) · [Eyes](https://github.com/deskmind-ai/eyes/blob/main/docs/results.md)。
 
 ## 局限
 
-评测集小，只在一台 Mac、一种界面语言上测过；一项网页提取任务仍未解决；本地 4 位 Eyes 还没有基准分数；公开题成绩不等于 JevBench 密封题成绩。推理默认留在本机，但下载模型和联网应用本身会用网络。正在做的事见[路线图](ROADMAP.md)。
+评测集小，只在一台 Mac、一种界面语言上测过；目前大部分步骤交给 4B，一次决策通常约 3 秒；发布版在 JevBench hard 档上牺牲了一些通用判断；本地 4 位 Eyes 还没有基准分数；公开题成绩不等于 JevBench 密封题成绩。推理默认留在本机，但下载模型和联网应用本身会用网络。正在做的事见[路线图](ROADMAP.md)。
 
 ## 认识小方
 
