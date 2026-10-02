@@ -73,7 +73,7 @@ Models: [huggingface.co/deskmind](https://huggingface.co/deskmind) (`brain-0.8b`
 | Real-desktop tasks | Bench v25, 13 tasks × 3 runs, strict graders; router G18b (0.8B → 4B, 8-bit, threshold 0.96), through the app, one M4 Pro (48 GB) | **39/39** passed; **0** false "done" |
 | Decision time | the same 39 runs, 208 decisions | median **0.48 s** when the 0.8B answers (about 30% of steps), **3.6 s** when the 4B checks (about 70%); 2.85 s overall, slowest 5% 9.82 s. Per decision, not per task |
 | Decision quality | JevBench v1.4.2, 231 public items | Brain 4B **0.835** · Brain 0.8B 0.723 · router 0.797; no sealed score yet |
-| Visual grounding | ScreenSpot-Pro, 1,581 items, GPU, one pass | Eyes 4B **67.7%** (base model 64.8%) |
+| Visual grounding | ScreenSpot-Pro, 1,581 items, one pass | Eyes 4B **67.7%** on a GPU (bf16, native resolution; base model 64.8%); **50.9%** as the Mac app runs it (4-bit MLX, ≤ 2 MP) |
 
 - **Small sample.** 13 tasks on one Mac with a Chinese system language. Runs cluster by task (almost every task passes 3/3 or 0/3), so the effective sample is closer to 13 tasks than to 39 runs.
 - **One task was not clean.** In all 3 runs of the Chinese exact-text task the file was right, but the model never said "done" and used its full step budget. The grader checks the final state, so these count as passes.
