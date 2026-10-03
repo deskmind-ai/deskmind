@@ -1,0 +1,179 @@
+name: app
+
+# Every push and pull request: build DeskMind.app (signed ad hoc) with its Python runtime, and test what can run
+# without a desktop or a model -- the runtime's imports and hands' mock-desktop smoke set through the bundled
+# interpreter. A tag v<major>.<minor>.<patch>: the same, then a release build signed with the Developer ID,
+# notarized, stapled, and uploaded with its SHA-256 to a draft GitHub Release (an existing release of that tag gets
+# the files replaced). A person reads the draft and publishes it. Releases come from here, not from a laptop.
+#
+# The sibling sources (hands, bench, brain, eyes) are checked out at the commits in app/deps.lock, so a
+# release's runtime can be rebuilt from public commits.
+#
+# Secrets:
+#   DEVELOPER_ID_P12, DEVELOPER_ID_P12_PASSWORD            the Developer ID Application certificate (base64 .p12)
+#   NOTARY_KEY_P8, NOTARY_KEY_ID, NOTARY_ISSUER            an App Store Connect API key for notarytool
+# Variables (optional):
+#   MAC_RUNNER   runner label; a self-hosted Mac avoids the 10x minutes of GitHub's macOS runners
+#
+# The Peekaboo CLI is not built here: app/vendor.env names the release asset of this repo that holds the
+# binary and its licence files (published by app/tools/vendor_peekaboo.sh).
+
+on:
+  # Only changes to the app (or this workflow) build it; README, brand and docs edits do not. Tags always build.
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+    paths: ["app/**", ".github/workflows/app.yml"]
+  pull_request:
+    paths: ["app/**", ".github/workflows/app.yml"]
+  workflow_dispatch:
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: write   # the release step; everything else only reads
+
+jobs:
+  build:
+    # The runner may be a self-hosted Mac: never run a fork's pull request on it (untrusted code on that machine).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.MAC_RUNNER || 'macos-15' }}
+    timeout-minutes: 75
+    env:
+      RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      HANDS_REPO: ${{ github.workspace }}/_deps/hands
+      BENCH_REPO: ${{ github.workspace }}/_deps/bench
+      BRAIN_REPO: ${{ github.workspace }}/_deps/brain
+      EYES_REPO: ${{ github.workspace }}/_deps/eyes
+      PEEKABOO_BIN: ${{ github.workspace }}/_deps/peekaboo/peekaboo
+      PEEKABOO_SRC: ${{ github.workspace }}/_deps/peekaboo/src
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # A release that is already published (for example one moved here with its files from another repository)
+      # is never rebuilt: the tag then gets a development build only.
+      - name: Published release check
+        if: env.RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" = "false" ]; then
+            echo "RELEASE=false" >> "$GITHUB_ENV"
+            echo "$GITHUB_REF_NAME is already published; building ad hoc only"
+          fi
+
+      - name: Pinned sources (app/deps.lock)
+        id: deps
+        run: grep -E '^[A-Z]+=[0-9a-f]{40}$' app/deps.lock | tr 'A-Z' 'a-z' >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with: { repository: deskmind-ai/hands, path: _deps/hands, ref: "${{ steps.deps.outputs.hands }}" }
+      - uses: actions/checkout@v7
+        with: { repository: deskmind-ai/bench, path: _deps/bench, ref: "${{ steps.deps.outputs.bench }}" }
+      - uses: actions/checkout@v7
+        with: { repository: deskmind-ai/brain, path: _deps/brain, ref: "${{ steps.deps.outputs.brain }}" }
+      - uses: actions/checkout@v7
+        with: { repository: deskmind-ai/eyes, path: _deps/eyes, ref: "${{ steps.deps.outputs.eyes }}" }
+
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Python (the python-build-standalone build runtime.sh expects)
+        run: uv python install 3.12.11
+
+      - name: Peekaboo (vendored release asset)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source app/vendor.env
+          mkdir -p _deps/peekaboo/src
+          gh release download "$PEEKABOO_RELEASE" -R "$GITHUB_REPOSITORY" -D _deps/peekaboo
+          (cd _deps/peekaboo && shasum -a 256 -c SHA256SUMS)
+          chmod +x _deps/peekaboo/peekaboo
+          tar -xzf _deps/peekaboo/peekaboo-licenses.tar.gz -C _deps/peekaboo/src
+
+      - name: Signing certificate (release)
+        if: env.RELEASE == 'true'
+        env:
+          P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KC="$RUNNER_TEMP/signing.keychain-db"; KC_PW="$(uuidgen)"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KC_PW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PW" "$KC"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PW" "$KC" >/dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KC"
+
+      - name: Notary key (release)
+        if: env.RELEASE == 'true'
+        env:
+          P8: ${{ secrets.NOTARY_KEY_P8 }}
+        run: |
+          printf '%s' "$P8" > "$RUNNER_TEMP/notary.p8"
+          echo "NOTARY_KEY=$RUNNER_TEMP/notary.p8" >> "$GITHUB_ENV"
+
+      - name: Build (development, ad hoc)
+        if: env.RELEASE != 'true'
+        run: SIGN_ID=- BUILD_NUMBER=${{ github.run_number }} ./app/build.sh
+
+      - name: Build, notarize, staple (release)
+        if: env.RELEASE == 'true'
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.NOTARY_ISSUER }}
+        run: |
+          # Pasted secrets can carry a newline or spaces; the issuer must be a bare UUID.
+          export NOTARY_KEY_ID="$(printf '%s' "$NOTARY_KEY_ID" | tr -d '[:space:]')"
+          export NOTARY_ISSUER="$(printf '%s' "$NOTARY_ISSUER" | tr -d '[:space:]')"
+          if ! [[ "$NOTARY_ISSUER" =~ ^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$ ]]; then
+            echo "NOTARY_ISSUER is not a UUID (${#NOTARY_ISSUER} characters): set it to the Issuer ID shown above the keys in App Store Connect" >&2
+            exit 1
+          fi
+          DIST=1 VERSION="${GITHUB_REF_NAME#v}" BUILD_NUMBER=${{ github.run_number }} ./app/build.sh
+
+      - name: Test the bundled runtime
+        run: |
+          RT="$GITHUB_WORKSPACE/build/cache/runtime"; PY="$RT/python/bin/python3.12"
+          WORK="$RUNNER_TEMP/work"; rm -rf "$WORK"; cp -R "$RT/hands" "$WORK"
+          export PYTHONNOUSERSITE=1
+          # The helper's own import check, then hands' mock-desktop smoke set with the oracle.
+          PYTHONPATH="$WORK:$RT/site" "$PY" -c \
+            "import deskmind_hands.cli, deskmind_hands.drivers.peekaboo, deskmind_hands.adapters.systemone"
+          (cd "$WORK" && PYTHONPATH="$WORK:$RT/site" "$PY" -m deskmind_hands.cli run --set smoke --adapter oracle \
+            --repeats 1 --gate 100 --no-screenshots)
+          # The brain server's code imports (the models are downloaded by the app, not tested here).
+          PYTHONPATH="$RT/site-brain" "$PY" -c "import deskmind_brain.serve"
+          # The grounding server's own code and mlx-vlm are there (importing the server loads MLX, which wants a
+          # GPU; finding the modules is what this checks), and the OCR helper was built for vision mode.
+          PYTHONPATH="$RT/site-eyes" "$PY" -c \
+            "import importlib.util as u, deskmind_eyes.common; assert u.find_spec('deskmind_eyes.ground_server') and u.find_spec('mlx_vlm')"
+          file "$RT/hands/tools/native/ocr" | grep -q "Mach-O 64-bit executable arm64"
+          "$RT/bin/peekaboo" --version
+
+      - name: GitHub Release
+        if: env.RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DMG="build/release/DeskMind-${GITHUB_REF_NAME#v}.dmg"
+          (cd "$(dirname "$DMG")" && shasum -a 256 "$(basename "$DMG")") | tee "$DMG.sha256"   # checkable where it is downloaded
+          NOTES="app/release-notes/${GITHUB_REF_NAME}.md"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --clobber
+          elif [ -f "$NOTES" ]; then
+            gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --draft --title "DeskMind ${GITHUB_REF_NAME#v}" --notes-file "$NOTES"
+          else
+            gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --draft --title "DeskMind ${GITHUB_REF_NAME#v}" --generate-notes
+          fi
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/cert.p12"
