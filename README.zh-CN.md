@@ -9,15 +9,19 @@
 
 **小到能在你的 Mac 上跑，聪明到知道该问你。**
 
-DeskMind 得心是全栈开源的电脑操作 AI。DeskMind 会看屏幕、想下一步、动手操作，靠的全是跑在你 Mac 上的小模型。任务有两种理解时，它先问你一句，不瞎猜。
+DeskMind 得心是全栈开源的 Computer Use Agent。DeskMind 会看屏幕、想下一步、动手操作，靠的全是跑在你 Mac 上的小模型。任务有两种理解时，它先问你一句，不瞎猜。
 
 [English](README.md) · [官网](https://deskmind.dev/zh/) · [文档](https://deskmind.dev/zh/docs/) · [下载 Mac App](https://github.com/deskmind-ai/app/releases/latest) · [模型](https://huggingface.co/deskmind) · [讨论区](https://github.com/deskmind-ai/deskmind/discussions) · [路线图](ROADMAP.md)
 
 **[在 deskmind.dev 观看 56 秒演示](https://deskmind.dev/zh/)**：发布版模型的真实录屏。两笔订单都叫 Lisa Wong，所以它先问用哪一笔，再写入。
 
-## 和别的电脑操作 AI 有什么不同
+<p align="center"><a href="https://deskmind.dev/zh/"><img src="docs/ask-card.png" alt="DeskMind 的提问框：“Lisa Wong” 出现在两行里，问用哪一笔，回答框里填着 09-27。" width="720"></a></p>
 
-**小模型，就在你的 Mac 上。** 每一步先由 0.8B 判断，难的再交给 4B 复核。两个模型都在本机运行，不走云端，也不按次付费。0.8B 判断约 0.5 秒，4B 复核约 3.6 秒（决策时间中位数）。
+它是怎么做出来的、路上踩了哪些坑：[三周、二十轮训练、600 美元](https://deskmind.dev/zh/blog/launch/?ref=gh)。如果你觉得 DeskMind 有用或有意思，给这个仓库点个 star，能让更多人看到它。
+
+## 和别的 Computer Use Agent 有什么不同
+
+**小模型，就在你的 Mac 上。** 每一步先由 0.8B 判断，没把握的交给 4B 重新判断。两个模型都在本机运行，不走云端，也不按次付费。0.8B 判断约 0.5 秒，4B 约 3.6 秒（决策时间中位数）。
 
 **System One：选择，不是猜。** 每一步是一道选择题。模型给每个选项打分而不是写文字，所以每个选项都有概率。没把握就交给 4B 或先问你，任何 agent 都能通过 `POST /v1/systemone` 接入。在 39 次真机运行中，它一次也没有在任务没做完时说「完成」。
 
@@ -71,7 +75,7 @@ curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @exam
 | 项目 | 条件 | 结果 |
 |---|---|---|
 | 真实桌面任务 | Bench v25，13 个任务 × 3 次，严格评分；G18b 路由（0.8B → 4B，8 位，门槛 0.96），通过 App 运行，一台 M4 Pro（48 GB） | **39/39** 通过；没做完却说完成 **0** 次 |
-| 决策时间 | 同样 39 次运行，208 次决策 | 0.8B 直接回答时中位数 **0.48 秒**（约 30% 的步骤），交给 4B 复核时 **3.6 秒**（约 70%）；整体 2.85 秒，最慢 5% 为 9.82 秒。指单次决策，不是整项任务 |
+| 决策时间 | 同样 39 次运行，208 次决策 | 0.8B 直接回答时中位数 **0.48 秒**（约 30% 的步骤），交给 4B 时 **3.6 秒**（约 70%）；整体 2.85 秒，最慢 5% 为 9.82 秒。指单次决策，不是整项任务 |
 | 决策质量 | JevBench v1.4.2，231 道公开题 | Brain 4B **0.835** · Brain 0.8B 0.723 · 路由 0.797；密封题成绩待出 |
 | 视觉定位 | ScreenSpot-Pro，1,581 题，单次推理 | Eyes 4B 在 GPU 上 **67.7%**（bf16，原始分辨率；基座模型 64.8%）；Mac App 实际设置下 **50.9%**（4 位 MLX，≤ 200 万像素） |
 
@@ -86,7 +90,7 @@ curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @exam
 
 - 抄写长表格（超过约四行），或只抄符合条件的行。
 - 根据拍照的收据填写表单。
-- 需要 4B 复核的步骤要几秒钟，而目前大部分步骤都会交给 4B。
+- 交给 4B 的步骤要几秒钟，而目前大部分步骤都会交给 4B。
 
 接下来要做的事见[路线图](ROADMAP.md)。
 

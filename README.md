@@ -15,9 +15,13 @@ Open-source computer use for your Mac. DeskMind reads the screen, works out the 
 
 **[Watch the 56-second demo on deskmind.dev](https://deskmind.dev)**: a real recording with the released model. Two orders match "Lisa Wong", so it asks which one before writing.
 
+<p align="center"><a href="https://deskmind.dev"><img src="docs/ask-card.png" alt="DeskMind asks: &quot;Lisa Wong&quot; is on more than one line, which one should I use? The answer field says 09-27." width="720"></a></p>
+
+How it was built, and what went wrong on the way: [3 weeks, 20 training rounds, $600](https://deskmind.dev/blog/launch/?ref=gh). If DeskMind is useful or interesting to you, a star on this repo helps other people find it.
+
 ## What makes it different
 
-**A small model, on your Mac.** A 0.8B model decides each step and a 4B checks the hard ones. Both run on your Mac: no cloud round-trip, no per-step bill. The 0.8B decides in about 0.5 s; the 4B checks in about 3.6 s (median decision times).
+**A small model, on your Mac.** A 0.8B model decides each step and hands the unsure ones to a 4B. Both run on your Mac: no cloud round-trip, no per-step bill. The 0.8B decides in about 0.5 s; the 4B answers in about 3.6 s (median decision times).
 
 **System One: choices, not guesses.** Each step is a multiple-choice question. The model scores every option instead of writing text, so every option gets a probability. Unsure steps go to the 4B or to you, and any agent can call it through `POST /v1/systemone`. In 39 real-desktop runs it never said "done" when the task was not done.
 
@@ -71,7 +75,7 @@ Models: [huggingface.co/deskmind](https://huggingface.co/deskmind) (`brain-0.8b`
 | What | Setting | Result |
 |---|---|---|
 | Real-desktop tasks | Bench v25, 13 tasks × 3 runs, strict graders; router G18b (0.8B → 4B, 8-bit, threshold 0.96), through the app, one M4 Pro (48 GB) | **39/39** passed; **0** false "done" |
-| Decision time | the same 39 runs, 208 decisions | median **0.48 s** when the 0.8B answers (about 30% of steps), **3.6 s** when the 4B checks (about 70%); 2.85 s overall, slowest 5% 9.82 s. Per decision, not per task |
+| Decision time | the same 39 runs, 208 decisions | median **0.48 s** when the 0.8B answers (about 30% of steps), **3.6 s** when the 4B answers (about 70%); 2.85 s overall, slowest 5% 9.82 s. Per decision, not per task |
 | Decision quality | JevBench v1.4.2, 231 public items | Brain 4B **0.835** · Brain 0.8B 0.723 · router 0.797; no sealed score yet |
 | Visual grounding | ScreenSpot-Pro, 1,581 items, one pass | Eyes 4B **67.7%** on a GPU (bf16, native resolution; base model 64.8%); **50.9%** as the Mac app runs it (4-bit MLX, ≤ 2 MP) |
 
