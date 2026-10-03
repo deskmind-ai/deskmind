@@ -12,7 +12,7 @@ DeskMind 是一个运行在本地的 macOS 电脑操作智能体。输入一个�
 
 **[下载 DeskMind Mac 版](https://github.com/deskmind-ai/deskmind/releases/latest)** · macOS 15+ · Apple 芯片 · 已签名并经 Apple 公证
 
-<img src="../docs/images/asks-first.png" width="720" alt="DeskMind 找到两笔 Lisa Wong 的订单，先问你用哪一笔">
+<img src="../docs/images/asks-first.gif" width="720" alt="DeskMind 找到两笔 Lisa Wong 的订单，先问你用哪一笔">
 
 *真实运行：有两行都符合目标，DeskMind 先问你用哪一笔，而不是自己猜。*
 

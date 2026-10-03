@@ -14,7 +14,7 @@ The planner and vision models run on your Mac with MLX. Nothing you see on scree
 **[Download DeskMind for Mac](https://github.com/deskmind-ai/deskmind/releases/latest)** · macOS 15+ · Apple Silicon ·
 signed and notarized
 
-<img src="../docs/images/asks-first.png" width="720" alt="DeskMind finds two orders for Lisa Wong and asks which one to use">
+<img src="../docs/images/asks-first.gif" width="720" alt="DeskMind finds two orders for Lisa Wong and asks which one to use">
 
 *A real run: two rows match the goal, so DeskMind asks which one to use instead of guessing.*
 
