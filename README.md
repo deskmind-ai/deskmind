@@ -11,11 +11,11 @@
 
 Open-source computer use for your Mac. DeskMind reads the screen, works out the next step and acts, all with small models running on your Mac. When a task could mean two things, it asks you instead of guessing.
 
-[中文](README.zh-CN.md) · [Website](https://deskmind.dev) · [Docs](https://deskmind.dev/docs/) · [Download for Mac](https://github.com/deskmind-ai/app/releases/latest) · [Models](https://huggingface.co/deskmind) · [Discussions](https://github.com/deskmind-ai/deskmind/discussions) · [Roadmap](ROADMAP.md)
+[中文](README.zh-CN.md) · [Website](https://deskmind.dev) · [Docs](https://deskmind.dev/docs/) · [Download for Mac](https://github.com/deskmind-ai/deskmind/releases/latest) · [Models](https://huggingface.co/deskmind) · [Discussions](https://github.com/deskmind-ai/deskmind/discussions) · [Roadmap](ROADMAP.md)
 
 **[Watch the 56-second demo on deskmind.dev](https://deskmind.dev)**: a real recording with the released model. Two orders match "Lisa Wong", so it asks which one before writing.
 
-<p align="center"><a href="https://deskmind.dev"><img src="docs/ask-card.png" alt="DeskMind asks: &quot;Lisa Wong&quot; is on more than one line, which one should I use? The answer field says 09-27." width="720"></a></p>
+<p align="center"><a href="https://deskmind.dev"><img src="docs/images/ask-card.png" alt="DeskMind asks: &quot;Lisa Wong&quot; is on more than one line, which one should I use? The answer field says 09-27." width="720"></a></p>
 
 How it was built, and what went wrong on the way: [3 weeks, 20 training rounds, $600](https://deskmind.dev/blog/launch/?ref=gh). If DeskMind is useful or interesting to you, a star on this repo helps other people find it.
 
@@ -29,7 +29,7 @@ How it was built, and what went wrong on the way: [3 weeks, 20 training rounds, 
 
 ## Get started
 
-**Use the Mac app.** [Download DeskMind for Mac](https://github.com/deskmind-ai/app/releases/latest) (macOS 15+, Apple Silicon, signed and notarized). It ships the G18b release models. On first run it downloads the models (about 5.3 GB) and walks you through the permissions: [Install the app](https://deskmind.dev/docs/start/install-the-app/).
+**Use the Mac app.** [Download DeskMind for Mac](https://github.com/deskmind-ai/deskmind/releases/latest) (macOS 15+, Apple Silicon, signed and notarized). It ships the G18b release models. On first run it downloads the models (about 5.3 GB) and walks you through the permissions: [Install the app](https://deskmind.dev/docs/start/install-the-app/).
 
 **Or run the model yourself.** This runs the 4B alone (release G18b). It answers one step of a desktop task; it does not drive the desktop by itself.
 
@@ -65,10 +65,22 @@ Step by step, with the full reply explained: [Quickstart](https://deskmind.dev/d
 | [Eyes](https://github.com/deskmind-ai/eyes) | finds the target on screen | 4B visual grounder, for apps without an accessibility tree |
 | [Brain](https://github.com/deskmind-ai/brain) | decides the next step | 0.8B and 4B, MLX, 0.8B → 4B routing, `/v1/systemone` |
 | [Hands](https://github.com/deskmind-ai/hands) | observes and acts on macOS | accessibility and vision modes, budgets, cancellation |
-| [App](https://github.com/deskmind-ai/app) | brings it to your Mac | native app with a background helper; [download](https://github.com/deskmind-ai/app/releases/latest) |
+| [App](app/) (this repository) | brings it to your Mac | native app with a background helper; [download](https://github.com/deskmind-ai/deskmind/releases/latest) |
 | [Bench](https://github.com/deskmind-ai/bench) | checks what really happened | sandbox desktop tasks with strict final-state graders |
 
 Models: [huggingface.co/deskmind](https://huggingface.co/deskmind) (`brain-0.8b`, `brain-4b`, `eyes-4b`). Website: [deskmind.dev](https://deskmind.dev). Docs: [deskmind.dev/docs](https://deskmind.dev/docs/).
+
+## In this repository
+
+| Path | What |
+|---|---|
+| [`app/`](app/) | The Mac app's source (Swift) and its build; [build it yourself](app/README.md#building) |
+| [`docs/`](docs/) | [How the app, its helper and the local model servers fit together](docs/architecture.md) |
+| [`brand/`](brand/) | Logo, Xiaofang and social images; rules in [BRAND.md](BRAND.md) |
+| [`.github/workflows/app.yml`](.github/workflows/app.yml) | CI: every app change is built and tested; a version tag is signed, notarized and drafted as a release |
+| [`ROADMAP.md`](ROADMAP.md) | What we are working on next |
+
+Mac app releases are published here: [Releases](https://github.com/deskmind-ai/deskmind/releases).
 
 ## Results, with the sample size
 
@@ -90,7 +102,7 @@ Our own runs. Methods and full tables: [Brain results](https://github.com/deskmi
 
 - Copying long tables (more than about four rows) or only the rows that match a condition.
 - Filling a form from a photographed receipt.
-- Steps the 4B has to check take a few seconds, and most steps go to the 4B today.
+- Steps handed to the 4B take a few seconds, and most steps go to the 4B today.
 
 What we are working on next: [ROADMAP](ROADMAP.md).
 
@@ -101,7 +113,7 @@ Inference runs locally by default. The models download once, from Hugging Face o
 ## Contribute
 
 - Questions and design discussion: [Discussions](https://github.com/deskmind-ai/deskmind/discussions).
-- Cross-component problems, reproduction reports and project direction: [issues here](https://github.com/deskmind-ai/deskmind/issues). A bug isolated to one component goes to that repository.
+- Cross-component problems, reproduction reports and project direction: [issues here](https://github.com/deskmind-ai/deskmind/issues). App bugs go here too; a bug isolated to Eyes, Brain, Hands or Bench goes to that repository.
 - How to help, and what a good report contains: [Contributing](https://deskmind.dev/docs/project/contributing/). A reproduction that disagrees with our numbers is welcome.
 - Security problems: not in public; see [SECURITY.md](https://github.com/deskmind-ai/.github/blob/main/SECURITY.md).
 
@@ -113,7 +125,8 @@ The frame from our logo, come to life. Artwork in [brand/](brand/), rules in [BR
 
 ## License
 
-- Text and documentation in this repository: [CC BY 4.0](LICENSE).
-- **Not covered by that licence:** the DeskMind and 得心 names, the DeskMind logo, the Xiaofang (小方) character and the other files under [brand/](brand/). Their use is governed by [BRAND.md](BRAND.md).
-- Code lives in the component repositories and is licensed Apache-2.0; see each repository's LICENSE and NOTICE.
+- Code in this repository (the Mac app under `app/` and the CI): [Apache-2.0](LICENSE); see [NOTICE](NOTICE).
+- Text and documentation in this repository: [CC BY 4.0](LICENSE-docs).
+- **Not covered by either licence:** the DeskMind and 得心 names, the DeskMind logo, the Xiaofang (小方) character and the other files under [brand/](brand/). Their use is governed by [BRAND.md](BRAND.md).
+- Eyes, Brain, Hands and Bench are Apache-2.0 in their own repositories; see each one's LICENSE and NOTICE.
 - Model weights, base models and datasets follow their own terms.

@@ -1,0 +1,212 @@
+// Unit tests for what needs no screen: the decision panel's reading of a step event, and a recording's file name.
+// Built and run by build.sh (a failure stops the build):
+//
+//   swiftc -parse-as-library Shared/L10n.swift Shared/Decision.swift tests/DecisionTests.swift -o /tmp/t && /tmp/t
+
+import Foundation
+
+@main
+enum DecisionTests {
+    static var failures = 0
+
+    static func check(_ ok: Bool, _ what: String, file: StaticString = #file, line: UInt = #line) {
+        if !ok { failures += 1; print("FAIL \(line): \(what)") }
+    }
+
+    static func main() {
+        let decision = #"{"top": [["OPEN", 0.82], ["CLICK", 0.12], ["DONE", 0.03]], "operation": "OPEN", "#
+            + #""confidence": 0.82, "routing": {"by": "strong", "reason": "low_conf", "fast_conf": 0.61}}"#
+        let step: [String: Any] = ["n": 4, "describe": "double_click #ocr:31", "target": "贝加尔湖畔（Live） · 李健\n原唱",
+                                   "latency": 0.654, "detail": "clicked", "decision": decision]
+
+        // A step in Chinese: headline, bars, tier, time.
+        let zh = DecisionStep.parse(step, lang: .zhHans)
+        check(zh.n == 4, "n")
+        check(zh.headline == "打开 · 贝加尔湖畔（Live） · 李健 原唱", "zh headline: \(zh.headline)")
+        check(zh.top == [.init(name: "打开", p: 0.82), .init(name: "点击", p: 0.12), .init(name: "完成", p: 0.03)],
+              "zh top: \(zh.top)")
+        check(zh.tier == "4B · 0.8B 不确定", "zh tier: \(zh.tier)")
+        check(zh.ms == 654, "ms: \(zh.ms)")
+        check(zh.question.isEmpty && zh.answer.isEmpty, "no question on an ordinary step")
+
+        // The same step in English.
+        let en = DecisionStep.parse(step, lang: .en)
+        check(en.headline.hasPrefix("Open · "), "en headline: \(en.headline)")
+        check(en.tier == "4B · 0.8B unsure", "en tier: \(en.tier)")
+
+        // The fast model; a DONE check.
+        let fast = DecisionStep.parse(["n": 5, "decision": #"{"operation": "DONE", "routing": {"by": "fast"}}"#],
+                                      lang: .en)
+        check(fast.tier == "0.8B" && fast.headline == "Done", "fast: \(fast)")
+        let risky = DecisionStep.parse(["decision": #"{"routing": {"by": "strong", "reason": "risky_DONE"}}"#],
+                                       lang: .zhHans, previous: 6)
+        check(risky.tier == "4B · 完成前复核" && risky.n == 7, "risky: \(risky)")
+
+        // A question and its answer; the dialogue step has no decision record.
+        let ask = DecisionStep.parse(["n": 2, "describe": "ask_user",
+                                      "detail": "「李娜的那笔订单」在屏幕上不止一处：…。应该用哪一个？ → 用 R-3307 那笔。"],
+                                     lang: .zhHans)
+        check(ask.headline == "提问", "ask headline: \(ask.headline)")
+        check(ask.question.hasSuffix("应该用哪一个？") && ask.answer == "用 R-3307 那笔。", "ask: \(ask)")
+        // An arrow in an ordinary step's detail is not a question.
+        let arrow = DecisionStep.parse(["describe": "click #x", "detail": "moved a → b"], lang: .en)
+        check(arrow.question.isEmpty, "arrow is not a question")
+
+        // Missing or broken records: no crash, empty fields.
+        let bare = DecisionStep.parse(["describe": "scroll #icon:scroll_down", "decision": "{not json"], lang: .en)
+        check(bare.headline == "Scroll" && bare.top.isEmpty && bare.tier.isEmpty && bare.ms == 0, "bare: \(bare)")
+        check(DecisionStep.opName("WHATEVER", .zhHans) == "Whatever", "unknown op")
+
+        // A recording's name: the time, then the instruction's start, nothing a path could trip on.
+        var c = DateComponents(); c.year = 2030; c.month = 1; c.day = 2; c.hour = 3; c.minute = 4; c.second = 5
+        let date = Calendar(identifier: .gregorian).date(from: c)!
+        check(MovieName.file(goal: "打开备忘录，新建一条购物清单", date: date)
+              == "2030-01-02 03.04.05 打开备忘录，新建一条购物清单.mov", "movie name")
+        let odd = MovieName.file(goal: "a/b:c\nd " + String(repeating: "x", count: 50), date: date)
+        check(!odd.contains("/") && !odd.contains(":") && !odd.contains("\n"), "no path characters: \(odd)")
+        check(odd.count == "2030-01-02 03.04.05 ".count + 30 + ".mov".count, "30 characters of the goal: \(odd)")
+        check(MovieName.file(goal: "  ", date: date) == "2030-01-02 03.04.05.mov", "empty goal")
+        check(MovieName.folder(goal: "打开备忘录，新建一条购物清单", date: date) == "2030-01-02 03.04.05 打开备忘录，新建一条购物清单",
+              "recording folder")
+
+        // steps.json from a trace: times in ms from the first frame, the target on the screen, the planner's weights.
+        let trace = [
+            #"{"t": "obs", "ts": 1000.500}"#,
+            #"{"t": "step", "n": 1, "action": {"kind": "double_click"}, "target_label": "纸船\n林夏", "#
+                + #""target_rect": [110.0, 220.0, 30.0, 40.0], "t_obs_start": 1000.000, "t_decide_start": 1000.600, "#
+                + #""t_decide_end": 1001.250, "t_act_start": 1001.300, "t_act_end": 1002.000, "ok": true, "#
+                + #""decision": "{\"top\": [[\"OPEN\", 0.9]], \"operation\": \"OPEN\", \"routing\": {\"by\": \"strong\", \"reason\": \"low_conf\"}}"}"#,
+            #"{"t": "step", "n": 2, "kind": "done", "t_obs_start": 1003.0, "t_decide_start": 1003.5, "t_decide_end": 1003.8}"#,
+            #"{"t": "step", "n": 3, "kind": "ask_user", "question": "Which one?", "reply": "R-3307", "t_obs_start": 1004.0, "#
+                + #""t_decide_start": 1004.2, "t_decide_end": 1005.0, "t_reply": 1009.5, "#
+                + #""decision": "{\"top\": [[\"ASK\", 0.8]], \"operation\": \"ASK\", \"routing\": {\"by\": \"fast\"}}"}"#,
+            "not json",
+            #"{"t": "summary", "state": "completed"}"#,
+        ].joined(separator: "\n")
+        let (rs, state) = RecordingSteps.from(trace: trace, t0: 999.0)
+        check(state == "completed" && rs.count == 3, "steps and state: \(rs.count) \(state)")
+        let s1 = rs[0]
+        check(s1["operation"] as? String == "OPEN" && s1["target"] as? String == "纸船 林夏", "op, target: \(s1)")
+        check(s1["t_obs_ms"] as? Int == 1000 && s1["t_seen_ms"] as? Int == 1500 && s1["t_act_end_ms"] as? Int == 3000,
+              "times: \(s1)")
+        check(s1["wall_ms"] as? Int == 2000 && s1["tier"] as? String == "4B" && s1["reason"] as? String == "low_conf",
+              "wall, tier: \(s1)")
+        check((s1["target_rect"] as? [Double]) == [110, 220, 30, 40], "rect: \(s1)")
+        check(rs[1]["operation"] as? String == "DONE" && rs[1]["wall_ms"] as? Int == 800 && rs[1]["t_act_start_ms"] is NSNull,
+              "done step: \(rs[1])")
+        // The question: the planner's own decision (0.8B asked), the question and reply, and when the reply came.
+        check(rs[2]["question"] as? String == "Which one?" && rs[2]["reply"] as? String == "R-3307"
+              && rs[2]["t_reply_ms"] as? Int == 10500 && rs[2]["tier"] as? String == "0.8B", "ask step: \(rs[2])")
+
+        // A recording's size: a Retina screen kept to 1920 on its longer side, or full; small content untouched.
+        let retina = RecordingSize.pixels(width: 1728, height: 1117, scale: 2, maxLong: 1920)
+        check(retina == (1920, 1240), "retina capped: \(retina)")
+        check(RecordingSize.pixels(width: 1728, height: 1117, scale: 2, maxLong: nil) == (3456, 2234), "full")
+        let tall = RecordingSize.pixels(width: 800, height: 1600, scale: 2, maxLong: 1920)
+        check(tall == (960, 1920), "portrait capped on its height: \(tall)")
+        check(RecordingSize.pixels(width: 801, height: 601, scale: 1, maxLong: 1920) == (800, 600), "small: even, not scaled up")
+
+        // The notch: the gap between the menu bar's two areas, as tall as the safe-area inset (a 16" MacBook Pro).
+        let screen = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+        let notch = Island.notch(screen: screen, safeTop: 32, left: CGRect(x: 0, y: 1085, width: 764, height: 32),
+                                 right: CGRect(x: 964, y: 1085, width: 764, height: 32))
+        check(notch == CGRect(x: 764, y: 1085, width: 200, height: 32), "notch: \(String(describing: notch))")
+        check(Island.notch(screen: screen, safeTop: 0, left: nil, right: nil) == nil, "no notch on an external screen")
+        check(Island.notch(screen: screen, safeTop: 32, left: CGRect(x: 0, y: 0, width: 900, height: 32),
+                           right: CGRect(x: 800, y: 0, width: 900, height: 32)) == nil, "overlapping areas: no notch")
+        if let n = notch {
+            let c = Island.collapsedFrame(notch: n)
+            check(c.midX == n.midX && c.width == n.width + 2 * Island.wing && c.maxY == screen.maxY, "collapsed: \(c)")
+            let e = Island.expandedFrame(notch: n, screen: screen)
+            check(e.midX == n.midX && e.maxY == screen.maxY && e.width >= c.width && e.height > c.height, "expanded: \(e)")
+        }
+        let pill = Island.pillFrame(visible: CGRect(x: 0, y: 0, width: 1920, height: 1050), size: CGSize(width: 560, height: 64))
+        check(pill == CGRect(x: 680, y: 976, width: 560, height: 64), "pill: \(pill)")
+
+        // A starting run's stage: the seconds once counting, the usual time when known and not long past.
+        check(RunStage.eyes.line(seconds: 0, lang: .en) == "Loading the vision model…", "stage, no seconds")
+        check(RunStage.eyes.line(seconds: 12, typical: 20, lang: .en) == "Loading the vision model… 12 s (usually about 20 s)",
+              "stage with typical: \(RunStage.eyes.line(seconds: 12, typical: 20, lang: .en))")
+        check(RunStage.eyes.line(seconds: 70, typical: 20, lang: .en) == "Loading the vision model… 70 s", "long past the usual")
+        check(RunStage.brain.line(seconds: 5, typical: 2, lang: .en) == "Loading the local model… 5 s", "too short to quote")
+        // The collapsed wing: the stage in a word and its seconds.
+        check(RunStage.eyes.wing(seconds: 12, lang: .en) == "Vision 12s", "wing: \(RunStage.eyes.wing(seconds: 12, lang: .en))")
+        check(RunStage.looking.wing(seconds: 0, lang: .zhHans) == "观察屏幕", "wing zh, no seconds")
+        check(RunStage.eyes.wing(seconds: 8, lang: .zhHans) == "加载视觉 8 秒", "wing zh: \(RunStage.eyes.wing(seconds: 8, lang: .zhHans))")
+        let zhLine = RunStage.brain.line(seconds: 5, typical: 30, lang: .zhHans)
+        check(zhLine.hasPrefix("正在载入本地模型") && zhLine.contains("5 秒") && zhLine.contains("30"), "zh stage: \(zhLine)")
+        check(RunStage.allCases.allSatisfy { L($0.key, lang: .zhHans) != $0.key }, "every stage has its zh")
+
+        // How a run ended, in the collapsed island: a word for each ending, each with a zh translation.
+        let endings: [Island.Ending] = [.done, .failed, .stopped]
+        check(Set(endings.map(Island.endWord)).count == 3, "three distinct ending words")
+        for e in endings {
+            check(L(Island.endWord(e), lang: .zhHans) != Island.endWord(e), "zh for \(Island.endWord(e))")
+        }
+        check(Island.resultOpenSeconds < Island.resultLingerSeconds, "open, then collapsed, then gone")
+
+        // Which display a recording shows: asked for; else where the task's windows are (a virtual display); else main.
+        check(RecordingDisplay.pick(displays: [1, 4], taskArea: [4: 5000], requested: nil, main: 1, wholeScreen: false) == 4,
+              "task on the virtual display")
+        check(RecordingDisplay.pick(displays: [1, 4], taskArea: [1: 10, 4: 5000], requested: nil, main: 1, wholeScreen: false) == 4,
+              "most of the task's windows")
+        check(RecordingDisplay.pick(displays: [1, 4], taskArea: [:], requested: nil, main: 1, wholeScreen: false) == 1,
+              "no task window yet: main")
+        check(RecordingDisplay.pick(displays: [1, 4], taskArea: [4: 5000], requested: 1, main: 1, wholeScreen: false) == 1,
+              "requested wins")
+        check(RecordingDisplay.pick(displays: [1, 4], taskArea: [4: 5000], requested: 9, main: 1, wholeScreen: false) == 4,
+              "a requested display that is gone is ignored")
+        check(RecordingDisplay.pick(displays: [1, 4], taskArea: [4: 5000], requested: nil, main: 1, wholeScreen: true) == 1,
+              "whole screen: main")
+        check(RecordingDisplay.pick(displays: [4], taskArea: [:], requested: nil, main: 1, wholeScreen: false) == 4,
+              "main gone: the one there is")
+        // Moving the recording: only when the task opened elsewhere and none of it is left where it was.
+        check(RecordingDisplay.shouldMove(current: 1, candidate: 4, taskArea: [4: 5000]), "task opened on the virtual display")
+        check(!RecordingDisplay.shouldMove(current: 1, candidate: 4, taskArea: [1: 100, 4: 5000]), "part still here: stay")
+        check(!RecordingDisplay.shouldMove(current: 4, candidate: 4, taskArea: [4: 5000]), "same display")
+        check(!RecordingDisplay.shouldMove(current: 1, candidate: 4, taskArea: [:]), "no task window anywhere")
+
+        // Naming an app (AppScope, via AppMention): the English goals that ran in Finder on 09-30, and what is not one.
+        func names(_ goal: String, _ app: String = "textedit") -> Bool {
+            AppMention.range(of: app, isAlias: false, in: goal.lowercased(), original: goal) != nil
+        }
+        check(names("Find Lisa Wong's order in records.txt and add it to ledger.csv, then save ledger.csv. Both files "
+                    + "are in the attached folder; open them in TextEdit."), "a sentence-final full stop")
+        check(names("TextEdit has records.txt and ledger.csv open. Add Lisa Wong's order to ledger.csv."), "X has …")
+        check(names("Safari shows a parts table. Copy it into parts.csv.", "safari"), "X shows …")
+        check(names("In TextEdit, records.txt and ledger.csv are open."), "in X (as before)")
+        check(names("TextEdit 里打开着 records.txt", "textedit"), "X 里 (as before)")
+        check(!names("rename notes.txt to done.txt", "notes"), "a file name is not the app")
+        check(!names("the file notes has 3 lines, copy them", "notes"), "a lowercase word before has is not the app")
+        check(!names("open textedit.app.bak in Finder", "textedit"), "an extension after the name")
+        check(names("Open NetEase Cloud Music and play it.", "netease cloud music"), "open X")
+
+        // The routing threshold: the override, then the manifest, then 0.94; nonsense ignored.
+        check(RoutingThreshold.pick(override: "0.96", manifest: 0.95) == 0.96, "override wins")
+        check(RoutingThreshold.pick(override: nil, manifest: 0.96) == 0.96, "manifest")
+        check(RoutingThreshold.pick(override: nil, manifest: nil) == 0.94, "default")
+        check(RoutingThreshold.pick(override: "high", manifest: 1.5) == 0.94, "nonsense ignored")
+        check(RoutingThreshold.pick(override: nil, model: 0.96, manifest: 0.95) == 0.96, "the model's own over the manifest")
+        check(RoutingThreshold.pick(override: "0.97", model: 0.96, manifest: nil) == 0.97, "override over the model's")
+        check(RoutingThreshold.fromModelConfig(Data(#"{"format":"x","router_threshold":0.96}"#.utf8)) == 0.96, "read from deskmind.json")
+        check(RoutingThreshold.fromModelConfig(Data(#"{"format":"x"}"#.utf8)) == nil, "absent in deskmind.json")
+        check(FileMention.named(in: "Find Lisa Wong's order in records.txt and add it to ledger.csv, then save ledger.csv.")
+              == ["records.txt", "ledger.csv"], "files named")
+        check(FileMention.named(in: "把 报销单.xlsx 里的金额改成 3.5") == ["报销单.xlsx"], "a Chinese file name")
+        check(FileMention.named(in: "Open https://example.com, read v0.1 notes in 3.5 s; open TextEdit.app").isEmpty,
+              "addresses, versions, numbers and apps are not files")
+        check(DownloadSource.url(primary: "hf", mirror: "ms", usingMirror: false) == "hf", "Hugging Face first")
+        check(DownloadSource.url(primary: "hf", mirror: "ms", usingMirror: true) == "ms", "the mirror once switched")
+        check(DownloadSource.url(primary: "hf", mirror: nil, usingMirror: true) == "hf", "no mirror: Hugging Face")
+        check(DownloadSource.shouldSwitch(hasMirror: true, usingMirror: false), "a failure on Hugging Face switches")
+        check(!DownloadSource.shouldSwitch(hasMirror: true, usingMirror: true), "a failure on the mirror is a failure")
+        check(!DownloadSource.shouldSwitch(hasMirror: false, usingMirror: false), "no mirror, no switch")
+        check(DownloadSource.stalled(elapsed: 30, bytes: 1_000_000, fileSize: 5_000_000_000), "a trickle is a stall")
+        check(!DownloadSource.stalled(elapsed: 30, bytes: 20_000_000, fileSize: 5_000_000_000), "6 MB in 30 s is not")
+        check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
+        check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
+
+        print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
+        exit(failures == 0 ? 0 : 1)
+    }
+}

@@ -1,0 +1,228 @@
+{
+  "name": "deskmind-brain g18b-q8",
+  "version": "80b4b2935fee-8897a9518ec0-de8e13bc1e9b",
+  "models": [
+    {
+      "role": "fast",
+      "name": "deskmind/brain-0.8b@80b4b2935fee",
+      "files": [
+        {
+          "path": "chat_template.jinja",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/chat_template.jinja",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/chat_template.jinja",
+          "size": 7755,
+          "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+        },
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/config.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/config.json",
+          "size": 2653,
+          "sha256": "cf398ec99f2cc563d4eb5f4b4b34a3aa6e58aae9c0962d03c893f02ba5ebeffe"
+        },
+        {
+          "path": "deskmind.json",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/deskmind.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/deskmind.json",
+          "size": 89,
+          "sha256": "68f9b14361e85444f96a50c26a0f92b8b277a34aa18a4e0b0296b9fdedea4e61"
+        },
+        {
+          "path": "generation_config.json",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/generation_config.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/generation_config.json",
+          "size": 116,
+          "sha256": "62153eb6c69f2e1f426beaa8002b7186437e949c7588167085df14e10e9c0a73"
+        },
+        {
+          "path": "model.safetensors",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/model.safetensors",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/model.safetensors",
+          "size": 799973748,
+          "sha256": "e5a1fbc39bb8f6c92b2566ef53f9b96ba012bc49dd3e45790f52b686a0cb519e"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/model.safetensors.index.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/model.safetensors.index.json",
+          "size": 60784,
+          "sha256": "6d0e74ad17103021d9748ca2279ff13a5cae9a3b3e1f9e6422d18cb39dac3150"
+        },
+        {
+          "path": "tokenizer.json",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/tokenizer.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/tokenizer.json",
+          "size": 19989325,
+          "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "url": "https://huggingface.co/deskmind/brain-0.8b/resolve/80b4b2935feeb7663e7127d68aa1b3cdf5efd64f/tokenizer_config.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-0.8b/resolve/g18b-q8/tokenizer_config.json",
+          "size": 1161,
+          "sha256": "95c557768e6b88a7128befc7bfd3c7de50e5d51af9b8b33a9f4dee0e04f99679"
+        }
+      ]
+    },
+    {
+      "role": "strong",
+      "name": "deskmind/brain-4b@8897a9518ec0",
+      "files": [
+        {
+          "path": "chat_template.jinja",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/chat_template.jinja",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/chat_template.jinja",
+          "size": 7756,
+          "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+        },
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/config.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/config.json",
+          "size": 2906,
+          "sha256": "5f39de80f2602c474d9c201c33f01b43a31734fe2f2c2474fe5b8373687a1d60"
+        },
+        {
+          "path": "deskmind.json",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/deskmind.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/deskmind.json",
+          "size": 64,
+          "sha256": "6b2b333d346f4123673d08674e0aaa9676a37937be8d4d914933fe113387bbfd"
+        },
+        {
+          "path": "generation_config.json",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/generation_config.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/generation_config.json",
+          "size": 116,
+          "sha256": "62153eb6c69f2e1f426beaa8002b7186437e949c7588167085df14e10e9c0a73"
+        },
+        {
+          "path": "model.safetensors",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/model.safetensors",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/model.safetensors",
+          "size": 4469632533,
+          "sha256": "3b1524ca3be1cf60d8a90a4a219544cba5651fcbdd884c5391e86146aa1bdfd1"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/model.safetensors.index.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/model.safetensors.index.json",
+          "size": 81008,
+          "sha256": "b29176b4a66faeca18c57eb2ddca251134073ac3af87b69e84512a81971a18b3"
+        },
+        {
+          "path": "tokenizer.json",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/tokenizer.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/tokenizer.json",
+          "size": 19989325,
+          "sha256": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "url": "https://huggingface.co/deskmind/brain-4b/resolve/8897a9518ec05aeee9cae2b998e89aafeefedfe9/tokenizer_config.json",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/brain-4b/resolve/g18b-q8/tokenizer_config.json",
+          "size": 1161,
+          "sha256": "95c557768e6b88a7128befc7bfd3c7de50e5d51af9b8b33a9f4dee0e04f99679"
+        }
+      ]
+    },
+    {
+      "role": "eyes",
+      "name": "deskmind/eyes-4b@de8e13bc1e9b",
+      "files": [
+        {
+          "path": "chat_template.jinja",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/chat_template.jinja",
+          "size": 5292,
+          "sha256": "3636d0f0bd6bef02654cdffdc447b79cb2cef8ab02cc75267345946291a489e4",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/chat_template.jinja"
+        },
+        {
+          "path": "chat_template.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/chat_template.json",
+          "size": 5499,
+          "sha256": "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/chat_template.json"
+        },
+        {
+          "path": "config.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/config.json",
+          "size": 2406,
+          "sha256": "69c47a94f37fcd910e17a96b8b211899f9b85d0b846e4a72f11b4ea7cbd5663d",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/config.json"
+        },
+        {
+          "path": "configuration.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/configuration.json",
+          "size": 64,
+          "sha256": "625c81a3527ce4f7a739854b431f380a987dc4af5e07e099b568e50e2e3b248c",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/configuration.json"
+        },
+        {
+          "path": "generation_config.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/generation_config.json",
+          "size": 214,
+          "sha256": "29d2f9cebb08e5a8d0312d42f20018c4cda80dc3f53feb0989f6fabe0319eed9",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/generation_config.json"
+        },
+        {
+          "path": "model.safetensors",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/model.safetensors",
+          "size": 3312555465,
+          "sha256": "4865f2006f3f23c6f50ad09a8bac5a7abe9f1ef4ef1ef52eb887dba108c7ab5f",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/model.safetensors"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/model.safetensors.index.json",
+          "size": 100158,
+          "sha256": "15c4d287d7f2b8045923ff8184e1d00278f063789f28fcc311ce28ddeaca98b9",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/model.safetensors.index.json"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/preprocessor_config.json",
+          "size": 390,
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/preprocessor_config.json"
+        },
+        {
+          "path": "processor_config.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/processor_config.json",
+          "size": 992,
+          "sha256": "ef21863acbfc0fc650bc40f0de7043f744cab66fd3024d6db3fad88bb3e311a9",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/processor_config.json"
+        },
+        {
+          "path": "tokenizer.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/tokenizer.json",
+          "size": 11422650,
+          "sha256": "be75606093db2094d7cd20f3c2f385c212750648bd6ea4fb2bf507a6a4c55506",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/tokenizer.json"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/tokenizer_config.json",
+          "size": 734,
+          "sha256": "7ce86d685d3fb775073b9b1c0f576dd89b7943194c771dd2573cc10e5cae4a48",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/tokenizer_config.json"
+        },
+        {
+          "path": "video_preprocessor_config.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/video_preprocessor_config.json",
+          "size": 386,
+          "sha256": "f38c890c32e0c037969b33be7693b2a51464695378b223418db5262a6da43fa0",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/video_preprocessor_config.json"
+        },
+        {
+          "path": "vocab.json",
+          "url": "https://huggingface.co/deskmind/eyes-4b/resolve/de8e13bc1e9bbb15eb04eac7a16e3eb1757f1338/vocab.json",
+          "size": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+          "mirror": "https://www.modelscope.cn/models/gxcsoccer/eyes-4b/resolve/mlx-4bit-de8e13b/vocab.json"
+        }
+      ]
+    }
+  ],
+  "threshold": 0.96
+}
