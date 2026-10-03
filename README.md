@@ -25,7 +25,7 @@ Open-source computer use for your Mac. DeskMind reads the screen, works out the 
 
 ## Get started
 
-**Use the Mac app.** [Download DeskMind for Mac](https://github.com/deskmind-ai/app/releases/latest) (macOS 15+, Apple Silicon, signed and notarized). v0.3.0 ships the G18b release models; the earlier v0.2.0 shipped G14. On first run it downloads the models (about 5.3 GB) and walks you through the permissions: [Install the app](https://deskmind.dev/docs/start/install-the-app/).
+**Use the Mac app.** [Download DeskMind for Mac](https://github.com/deskmind-ai/app/releases/latest) (macOS 15+, Apple Silicon, signed and notarized). It ships the G18b release models. On first run it downloads the models (about 5.3 GB) and walks you through the permissions: [Install the app](https://deskmind.dev/docs/start/install-the-app/).
 
 **Or run the model yourself.** This runs the 4B alone (release G18b). It answers one step of a desktop task; it does not drive the desktop by itself.
 

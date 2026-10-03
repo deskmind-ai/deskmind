@@ -25,7 +25,7 @@ DeskMind 得心是全栈开源的电脑操作 AI。DeskMind 会看屏幕、想�
 
 ## 开始使用
 
-**用 Mac App。** [下载 DeskMind for Mac](https://github.com/deskmind-ai/app/releases/latest)（macOS 15 及以上，Apple Silicon，已签名并公证）。v0.3.0 内置 G18b 发布模型；之前的 v0.2.0 用的是 G14。首次运行会下载模型（约 5.3 GB），并一步步引导你授予权限：[安装 App](https://deskmind.dev/zh/docs/start/install-the-app/)。
+**用 Mac App。** [下载 DeskMind for Mac](https://github.com/deskmind-ai/app/releases/latest)（macOS 15 及以上，Apple Silicon，已签名并公证）。App 内置 G18b 发布模型。首次运行会下载模型（约 5.3 GB），并一步步引导你授予权限：[安装 App](https://deskmind.dev/zh/docs/start/install-the-app/)。
 
 **或者自己跑模型。** 下面单独运行 4B（发布版 G18b）。它回答桌面任务中的一步，本身不会去操作桌面。
 
