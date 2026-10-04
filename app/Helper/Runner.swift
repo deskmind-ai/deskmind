@@ -446,7 +446,11 @@ enum Runner {
             // The user's own instruction. File work only inside the attached folder, if any (hands also refuses a
             // home or system root); apps only the ones the instruction named and the user confirmed.
             args = ["-m", "deskmind_hands.cli", "do", goal]
-            if let folder = spec.folder { args += ["--in", folder] }
+            if let folder = spec.folder {
+                args += ["--in", folder]
+                // A person's own folder: a rename waits for their approval, like a deletion (FolderPolicy).
+                if FolderPolicy.confirmRenames(folder: folder, sample: playground.path) { args += ["--confirm-renames"] }
+            }
             args += ["--app", spec.apps.first?.bundle ?? "com.apple.finder"]
             if !spec.apps.isEmpty { args += ["--apps", spec.apps.map { "\($0.name)=\($0.bundle)" }.joined(separator: ",")] }
             if spec.foregroundOK { args += ["--foreground-ok"] }

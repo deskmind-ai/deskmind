@@ -125,6 +125,14 @@ enum L10n {
         "6 smoke tests": "6 个冒烟任务",
         "Mock desktop": "模拟桌面",
         "Make a new folder": "新建一个文件夹",
+        "%@ isn't installed on this Mac. Install it, or name an app you have.": "这台 Mac 上没有安装%@。请先安装，或换成已有的应用。",
+        // The mock desktop's six smoke tasks (Shared/SelfTest.swift).
+        "Rename a file and keep its contents": "重命名文件并保留内容",
+        "Open a document, add a line and save": "打开文档、追加一行并保存",
+        "Type Chinese text exactly": "中文普通文本逐字写入",
+        "Finish without wiping the clipboard": "完成任务且不破坏用户剪贴板",
+        "Start no new write after a cancel": "取消后不得启动新的写操作",
+        "Find the window again after it moves": "窗口移动后重新定位再动手",
         "Move a file into a folder": "把文件移进已有文件夹",
         "Sort files by type": "按类型归档文件",
         "Type exact Chinese text and save": "中文精确写入并保存",
@@ -157,6 +165,10 @@ enum L10n {
             "助手的权限好像失效了：回到首页检查「辅助功能」「屏幕录制」，然后再跑一次。",
         "Couldn't see the window this time (it happens when the Mac is busy). Wait a moment and run it again.":
             "这次没能读到窗口的画面（机器太忙时会这样）。稍等一下再跑一次。",
+        "The local model couldn't handle this step. Please report it on GitHub so it can be fixed.":
+            "本地模型处理不了这一步。请到 GitHub 报告，方便我们修复。",
+        "The local model couldn't handle this step (%@). Please report it on GitHub so it can be fixed.":
+            "本地模型处理不了这一步（%@）。请到 GitHub 报告，方便我们修复。",
         "The local model didn't answer in time. Check that “Local model” is ready on the home screen, then run it again.":
             "本地模型没有及时回应。确认首页的「本地模型」已就绪，再跑一次。",
         "The last task is still running. Wait for it to finish, or click “Stop” first.":

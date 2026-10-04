@@ -208,6 +208,11 @@ enum DecisionTests {
 
         liveViewTests()
         issueReportTests()
+        runErrorTests()
+        fileExampleTests()
+        selfTestTests()
+        notInstalledTests()
+        folderPolicyTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -364,6 +369,95 @@ enum DecisionTests {
 
 
     /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
+    /// A failed run in one sentence (Shared/RunErrorText.swift), against real messages.
+    static func runErrorTests() {
+        let refused = "errored  0 actions  6s  $0.00\nprovider_unavailable: system one endpoint http://127.0.0.1:18850 failed: HTTP Error 400: Bad Request -- choice criteria must be a map with 1..255 options\ntrace runs/do-20261005-022054"
+        let en = RunErrorText.friendly(refused, lang: .en)
+        check(en.hasPrefix("The local model couldn't handle this step (choice criteria must be a map with 1..255 options)"),
+              "a 400 says the model refused the step, and why: \(en)")
+        check(!en.contains("in time"), "a refusal is not called a timeout")
+        let old = "provider_unavailable: system one endpoint http://127.0.0.1:18850 failed: HTTP Error 400: Bad Request"
+        check(RunErrorText.friendly(old, lang: .en) == L("The local model couldn't handle this step. Please report it on GitHub so it can be fixed.", lang: .en),
+              "a 400 with no message (an older hands)")
+        let timeout = "provider_unavailable: system one endpoint http://127.0.0.1:18850 failed: <urlopen error timed out>"
+        check(RunErrorText.friendly(timeout, lang: .en).contains("didn't answer in time"), "a timeout is still a timeout")
+        check(RunErrorText.friendly("provider_unavailable: ... failed: <urlopen error [Errno 61] Connection refused>", lang: .en)
+                .contains("didn't answer in time"), "connection refused: not ready")
+        check(RunErrorText.friendly(refused, lang: .zhHans).hasPrefix("本地模型处理不了这一步（choice criteria"), "zh")
+        check(RunErrorText.friendly("see failed: capture failed", lang: .en).hasPrefix("Couldn't see the window"), "capture")
+        check(RunErrorText.friendly("something else", lang: .en).hasPrefix("This run hit an error"), "anything else")
+    }
+
+    /// The file example names a file the folder really holds (Shared/FileExample.swift).
+    static func fileExampleTests() {
+        typealias F = FileExample
+        check(F.file(in: ["待办.txt", "报销单.csv", "草稿.txt"]) == "报销单.csv", "the sample folder, Chinese")
+        check(F.file(in: ["todo.txt", "expenses.csv"]) == "expenses.csv", "the sample folder, English")
+        check(F.file(in: ["todo.txt", "draft.txt"]) == "draft.txt", "no expenses file: a document it really holds")
+        check(F.file(in: ["IMG_0042.jpg", "setup.dmg", "Q3 report.pdf", "data.csv"]) == "data.csv", "documents first (csv, then pdf…)")
+        check(F.file(in: ["IMG_0042.jpg", "setup.dmg"]) == "IMG_0042.jpg", "no document: any visible file, in name order")
+        check(F.file(in: [".DS_Store", ".hidden.csv", "~$draft.docx", "Makefile"]) == nil, "nothing to name: the example is not offered")
+        check(F.file(in: []) == nil, "an empty folder")
+        // files(at:) lists files only, no folders, nothing hidden.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fileexample-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent("Receipts"), withIntermediateDirectories: true)
+        for n in ["a.pdf", ".DS_Store"] { FileManager.default.createFile(atPath: dir.appendingPathComponent(n).path, contents: Data()) }
+        check(F.files(at: dir.path) == ["a.pdf"], "files only: \(F.files(at: dir.path))")
+        try? FileManager.default.removeItem(at: dir)
+        check(L("Make a folder called Receipts and move %@ into it", "a.pdf", lang: .zhHans) != "Make a folder called Receipts and move a.pdf into it", "zh")
+    }
+
+    /// The Self-test screen's titles and Start button (Shared/SelfTest.swift).
+    static func selfTestTests() {
+        for (id, key) in SelfTest.titles {
+            check(SelfTest.title(id: id, fallback: "任务文件标题", lang: .en) == key, "en title for \(id)")
+            let zh = SelfTest.title(id: id, fallback: "任务文件标题", lang: .zhHans)
+            check(zh != key && zh.unicodeScalars.contains { $0.value >= 0x4E00 && $0.value <= 0x9FFF }, "zh title for \(id): \(zh)")
+        }
+        check(SelfTest.title(id: "Z99-unknown", fallback: "From the task file", lang: .en) == "From the task file", "an unknown task: its file's title")
+        check(SelfTest.startLabel(selected: "G07-finder-newfolder", lastRun: nil) == "Start", "nothing run yet: Start")
+        check(SelfTest.startLabel(selected: "G07-finder-newfolder", lastRun: "G07-finder-newfolder") == "Run again", "the one just run: Run again")
+        check(SelfTest.startLabel(selected: "G08-finder-move-one", lastRun: "G07-finder-newfolder") == "Start", "another one picked after a run: Start")
+        // Every task the screen offers has a title of ours.
+        for id in ["G07-finder-newfolder", "G08-finder-move-one", "G01-finder-sort", "G04-chinese-exact",
+                   "S01-rename", "S02-edit-save", "S03-zh-text", "S04-clipboard-protect", "S05-cancel", "S06-stale-binding"] {
+            check(SelfTest.titles[id] != nil, "a title for \(id)")
+        }
+    }
+
+    /// Apps an instruction names that the Mac does not have (Shared/AppMention.notInstalled).
+    static func notInstalledTests() {
+        let known: [String: (shown: String, names: [String])] = [
+            "com.netease.163music": ("NetEase Cloud Music", ["NetEase Cloud Music", "网易云音乐", "网易云"]),
+            "com.tencent.xinWeChat": ("WeChat", ["WeChat", "微信"]),
+        ]
+        let none: Set<String> = []
+        check(AppMention.notInstalled(in: "Open NetEase Cloud Music, search 张悬 宝贝 and play it", known: known, installed: none)
+              == ["NetEase Cloud Music"], "not installed: said")
+        check(AppMention.notInstalled(in: "打开网易云音乐，搜索最好的时光并播放", known: known, installed: none) == ["NetEase Cloud Music"], "zh name")
+        check(AppMention.notInstalled(in: "Open NetEase Cloud Music and play it", known: known, installed: ["com.netease.163music"]).isEmpty,
+              "installed: nothing to say")
+        check(AppMention.notInstalled(in: "用微信把网易云里的歌发给我", known: known, installed: none) == ["WeChat", "NetEase Cloud Music"],
+              "two, in the order named")
+        check(AppMention.notInstalled(in: "Make a folder called Receipts and move expenses.csv into it", known: known, installed: none).isEmpty,
+              "a file task names no app")
+        check(AppMention.notInstalled(in: "Rename wechat-export.txt to notes.txt", known: known, installed: none).isEmpty,
+              "a file named like an app is not the app")
+        check(L("%@ isn't installed on this Mac. Install it, or name an app you have.", "WeChat", lang: .zhHans).contains("微信") == false
+              && L("%@ isn't installed on this Mac. Install it, or name an app you have.", "微信", lang: .zhHans).contains("没有安装"), "zh text")
+    }
+
+    /// Renames wait for approval in a person's own folder, not the sample one (Shared/FolderPolicy.swift).
+    static func folderPolicyTests() {
+        let sample = "/Users/someone/DeskMind Playground"
+        check(!FolderPolicy.confirmRenames(folder: sample, sample: sample), "the sample folder: renames unasked")
+        check(!FolderPolicy.confirmRenames(folder: sample + "/", sample: sample), "with a trailing slash")
+        check(!FolderPolicy.confirmRenames(folder: sample + "/Receipts", sample: sample), "a folder inside it")
+        check(FolderPolicy.confirmRenames(folder: "/Users/someone/Downloads", sample: sample), "Downloads: asked")
+        check(FolderPolicy.confirmRenames(folder: "/Users/someone/DeskMind Playground 2", sample: sample), "a look-alike name: asked")
+        check(FolderPolicy.confirmRenames(folder: "/Users/someone/DeskMind Playground/../Documents", sample: sample), "a path that leaves it: asked")
+    }
+
     static func issueReportTests() {
         let u = IssueReport.url(kind: .guessed, goal: "Add Lisa Wong's order to ledger.csv\nthen save", outcome: "It said it finished.",
                                 steps: ["double_click", "type_text", "type_text", "save"], appVersion: "0.4.0", macOS: "Version 27.2")

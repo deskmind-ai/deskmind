@@ -75,31 +75,7 @@ final class RunModel: ObservableObject {
 
     /// A failed run in one sentence the user can act on; the raw text stays available under "Details".
     /// (The helper's "local model not ready" error is already such a sentence: apply() shows it as it is.)
-    static func friendly(_ raw: String) -> String {
-        let r = raw.lowercased()
-        let lang = ResolvedLang.current
-        if r.contains("screen recording") || r.contains("tcc") || r.contains("accessibility") && r.contains("not") {
-            return L("The helper seems to have lost its permissions. Check “Accessibility” and “Screen Recording” on the home screen, then run it again.",
-                     lang: lang)
-        }
-        if r.contains("quarantined") || r.contains("capture failed") || r.contains("see failed") {
-            return L("Couldn't see the window this time (it happens when the Mac is busy). Wait a moment and run it again.",
-                     lang: lang)
-        }
-        if r.contains("provider_unavailable") || r.contains("timed out") || r.contains("connection refused")
-            || r.contains("18850") {
-            return L("The local model didn't answer in time. Check that “Local model” is ready on the home screen, then run it again.",
-                     lang: lang)
-        }
-        if r.contains("no folder is attached") {
-            return L("The instruction names files, but no folder is attached and none of them is open. Attach the folder they're in, or open them, then run it again.",
-                     lang: lang)
-        }
-        if r.contains("a run is already in progress") {
-            return L("The last task is still running. Wait for it to finish, or click “Stop” first.", lang: lang)
-        }
-        return L("This run hit an error. Run it again; if it keeps happening, report it on GitHub.", lang: lang)
-    }
+    static func friendly(_ raw: String) -> String { RunErrorText.friendly(raw, lang: ResolvedLang.current) }
 
     func start(_ choice: PlayChoice) {
         let req: [String: Any] = choice.real
@@ -330,7 +306,9 @@ final class RunModel: ObservableObject {
             if tasks.isEmpty && stage != nil { setStage(.looking) }
             if !tasks.contains(where: { $0.id == id }) {
                 withAnimation(.easeOut(duration: 0.2)) {
-                    tasks.append(RunTask(id: id, title: e["title"] as? String ?? id))
+                    // Self-test tasks by their names in the app's language (their task files' titles are Chinese).
+                    let title = e["title"] as? String ?? id
+                    tasks.append(RunTask(id: id, title: free ? title : SelfTest.title(id: id, fallback: title, lang: ResolvedLang.current)))
                 }
             }
         case "preparing":
@@ -430,6 +408,9 @@ final class RunModel: ObservableObject {
                     MainWindow.comeBack(activate: false)
                 }
             } else if real {
+                // A Self-test run: the window comes back (not as the active window), on the screen where the next task
+                // is picked -- it stayed aside, and the way back to the list was not obvious.
+                if MainWindow.isAside { MainWindow.comeBack(activate: false) }
                 let passed = exit == 0 && (e["passed"] as? Int ?? 0) == (e["total"] as? Int ?? -1)
                 RunOverlay.shared.finish(passed: passed,
                                          summary: passed ? L("Task done, and the result checks out", lang: lang) : summary)
@@ -453,6 +434,8 @@ struct RunView: View {
     @StateObject private var run = RunModel()
     @EnvironmentObject var helper: HelperModel
     @State private var choice: PlayChoice = .mock
+    /// The task run last on this screen: "Run again" for it, "Start" for any other.
+    @State private var lastRun: String?
     @Environment(\.lang) private var lang
     let onBack: () -> Void
 
@@ -529,7 +512,7 @@ struct RunView: View {
                     Button(L("Stop", lang: lang)) { run.stop() }.buttonStyle(InkButtonStyle(prominent: false))
                         .keyboardShortcut(".", modifiers: .command)
                 } else {
-                    Button(L(run.phase == .idle ? "Start" : "Run again", lang: lang)) { run.start(choice) }
+                    Button(L(SelfTest.startLabel(selected: choice.id, lastRun: lastRun), lang: lang)) { lastRun = choice.id; run.start(choice) }
                         .buttonStyle(InkButtonStyle())
                         .keyboardShortcut(.defaultAction)
                 }
