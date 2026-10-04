@@ -57,6 +57,8 @@ struct HomeView: View {
     @State private var samplePath = ""
     /// What the sample folder holds (the helper lists it): which expenses file the file example names.
     @State private var sampleFiles: [String] = []
+    /// The files directly in the attached folder: the file example names one of them, or is not offered.
+    @State private var folderFiles: [String] = []
     @State private var confirmClear = false
     @State private var hovered: UUID?
     @FocusState private var promptFocused: Bool
@@ -139,7 +141,9 @@ struct HomeView: View {
             // Folded away once everything is ready; open while something still needs the user.
             showSetup = !model.requiredDone
             loadSample()
+            folderFiles = folder.map(FileExample.files(at:)) ?? []
         }
+        .onChange(of: folder) { _, f in folderFiles = f.map(FileExample.files(at:)) ?? [] }
         // Status arrives a second after launch: fold the card when everything turns out ready, open it again if
         // something stops being so (a permission revoked, the model server failed).
         .onChange(of: model.requiredDone) { _, done in withAnimation { showSetup = !done } }
@@ -272,35 +276,39 @@ struct HomeView: View {
     /// third off screen, and a mouse wheel does not scroll sideways.
     @ViewBuilder var examples: some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(GoalExample.all) { e in
+            ForEach(GoalExample.all.filter { $0.kind != .files || label(e: $0) != nil }) { e in
                 Button { use(e) } label: {
                     HStack(spacing: 5) {
                         Image(systemName: e.symbol).font(.system(size: 10)).foregroundStyle(Brand.sage)
-                        Text(label(e)).font(.system(size: 11)).foregroundStyle(Brand.ink).lineLimit(1).truncationMode(.tail)
+                        Text(label(e: e) ?? "").font(.system(size: 11)).foregroundStyle(Brand.ink).lineLimit(1).truncationMode(.tail)
                     }
                     .padding(.horizontal, 9).padding(.vertical, 4)
                     .background(Capsule().fill(Brand.card))
                     .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .help(label(e))
+                .help(label(e: e) ?? "")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 28)
     }
 
-    /// An example's words. The file example names the expenses file the sample folder actually holds: it is seeded
-    /// once, in the language of the moment, and the language may have changed since (the Chinese example named
-    /// 报销单.csv in a folder seeded with expenses.csv).
-    private func label(_ e: GoalExample) -> String {
+    /// An example's words. The file example names a file the folder it works in really holds (FileExample): the
+    /// attached folder's, or with none attached the sample folder's (seeded once, in the language of the moment --
+    /// the language may have changed since). nil: the attached folder has no file to name, and the example is not
+    /// offered.
+    private func label(e: GoalExample) -> String? {
         guard e.kind == .files else { return L(e.text, lang: lang) }
-        // The file itself, else the language the folder was seeded in (its other sample files), else the app's.
-        let seededEnglish = sampleFiles.contains { ["todo.txt", "draft.txt", "Meeting notes 0925.txt"].contains($0) }
-        let seededChinese = sampleFiles.contains { ["待办.txt", "草稿.txt", "会议纪要-0925.txt"].contains($0) }
-        let file = sampleFiles.first { $0 == "报销单.csv" || $0 == "expenses.csv" }
-            ?? (seededEnglish ? "expenses.csv" : seededChinese ? "报销单.csv" : lang == .zhHans ? "报销单.csv" : "expenses.csv")
-        return L("Make a folder called Receipts and move %@ into it", file, lang: lang)
+        let file: String?
+        if let folder, folder != samplePath {
+            file = FileExample.file(in: folderFiles)
+        } else {
+            // The sample folder's listing comes from the helper a moment after launch; until then, the language's.
+            file = FileExample.file(in: folder == nil ? sampleFiles : folderFiles)
+                ?? (sampleFiles.isEmpty ? (lang == .zhHans ? "报销单.csv" : "expenses.csv") : nil)
+        }
+        return file.map { L("Make a folder called Receipts and move %@ into it", $0, lang: lang) }
     }
 
     @ViewBuilder var recent: some View {
@@ -373,13 +381,20 @@ struct HomeView: View {
     }
 
     private func use(_ e: GoalExample) {
-        goal = label(e)
         switch e.kind {
-        // The file example is about the sample files: attach the sample folder unless a folder is attached.
-        case .files: if folder == nil { useSample() }
+        // The file example is about the sample files: attach the sample folder unless a folder is attached, and word
+        // it from what that folder holds once it is attached (its listing comes with it).
+        case .files:
+            if folder == nil {
+                loadSample { path in folder = path; folderNote = ""; folderFiles = FileExample.files(at: path); goal = label(e: e) ?? "" }
+            } else {
+                goal = label(e: e) ?? ""
+            }
+            return
         // An app example changes no files: the sample folder, if it was attached for the file example, goes.
         case .app, .question: if isSample { folder = nil }
         }
+        goal = label(e: e) ?? ""
     }
 
     private func pickFolder() {

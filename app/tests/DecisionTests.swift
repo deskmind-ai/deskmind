@@ -209,6 +209,7 @@ enum DecisionTests {
         liveViewTests()
         issueReportTests()
         runErrorTests()
+        fileExampleTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -382,6 +383,25 @@ enum DecisionTests {
         check(RunErrorText.friendly(refused, lang: .zhHans).hasPrefix("本地模型处理不了这一步（choice criteria"), "zh")
         check(RunErrorText.friendly("see failed: capture failed", lang: .en).hasPrefix("Couldn't see the window"), "capture")
         check(RunErrorText.friendly("something else", lang: .en).hasPrefix("This run hit an error"), "anything else")
+    }
+
+    /// The file example names a file the folder really holds (Shared/FileExample.swift).
+    static func fileExampleTests() {
+        typealias F = FileExample
+        check(F.file(in: ["待办.txt", "报销单.csv", "草稿.txt"]) == "报销单.csv", "the sample folder, Chinese")
+        check(F.file(in: ["todo.txt", "expenses.csv"]) == "expenses.csv", "the sample folder, English")
+        check(F.file(in: ["todo.txt", "draft.txt"]) == "draft.txt", "no expenses file: a document it really holds")
+        check(F.file(in: ["IMG_0042.jpg", "setup.dmg", "Q3 report.pdf", "data.csv"]) == "data.csv", "documents first (csv, then pdf…)")
+        check(F.file(in: ["IMG_0042.jpg", "setup.dmg"]) == "IMG_0042.jpg", "no document: any visible file, in name order")
+        check(F.file(in: [".DS_Store", ".hidden.csv", "~$draft.docx", "Makefile"]) == nil, "nothing to name: the example is not offered")
+        check(F.file(in: []) == nil, "an empty folder")
+        // files(at:) lists files only, no folders, nothing hidden.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fileexample-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent("Receipts"), withIntermediateDirectories: true)
+        for n in ["a.pdf", ".DS_Store"] { FileManager.default.createFile(atPath: dir.appendingPathComponent(n).path, contents: Data()) }
+        check(F.files(at: dir.path) == ["a.pdf"], "files only: \(F.files(at: dir.path))")
+        try? FileManager.default.removeItem(at: dir)
+        check(L("Make a folder called Receipts and move %@ into it", "a.pdf", lang: .zhHans) != "Make a folder called Receipts and move a.pdf into it", "zh")
     }
 
     static func issueReportTests() {
