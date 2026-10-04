@@ -206,41 +206,117 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
-        // The live view: which window, the card's size and place, the capture's size and crop.
-        check(LiveView.activeWindowID([["id": "812", "title": "a"], ["id": "77", "active": true]]) == 77, "the active window, as a string id")
-        check(LiveView.activeWindowID([["id": 9, "active": true]]) == 9, "an int id")
-        check(LiveView.activeWindowID([["id": "x", "active": true], ["id": "3"]]) == nil, "no usable active id")
-        let wins = [
-            LiveView.Candidate(id: 1, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 0, onScreen: true,
-                               frame: CGRect(x: 0, y: 0, width: 400, height: 300)),
-            LiveView.Candidate(id: 2, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 0, onScreen: true,
-                               frame: CGRect(x: 0, y: 0, width: 800, height: 600)),
-            LiveView.Candidate(id: 3, appName: "Safari", bundle: "com.apple.Safari", layer: 0, onScreen: true,
-                               frame: CGRect(x: 0, y: 0, width: 1200, height: 800)),
-            LiveView.Candidate(id: 4, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 0, onScreen: false,
-                               frame: CGRect(x: 0, y: 0, width: 900, height: 900)),
-            LiveView.Candidate(id: 5, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 3, onScreen: true,
-                               frame: CGRect(x: 0, y: 0, width: 990, height: 990)),
-        ]
-        check(LiveView.pick(wins, active: 1, app: "TextEdit", bundles: []) == 1, "the observed window first")
-        check(LiveView.pick(wins, active: 4, app: "TextEdit", bundles: []) == 2, "off screen: the app's largest ordinary window")
-        check(LiveView.pick(wins, active: nil, app: "TextEdit (no window open)", bundles: []) == 2, "the app's name before the note")
-        check(LiveView.pick(wins, active: nil, app: "", bundles: ["com.apple.safari"]) == 3, "no observation yet: the task's apps")
-        check(LiveView.pick(wins, active: nil, app: "Music", bundles: []) == nil, "nothing to show")
-        check(LiveView.pick(wins, active: nil, app: "文本编辑", bundles: ["com.apple.TextEdit"]) == 2, "another language's name: by bundle")
-        check(LiveView.pictureSize(window: CGSize(width: 1200, height: 800)) == CGSize(width: 360, height: 240), "wide fits the width")
-        check(LiveView.pictureSize(window: CGSize(width: 600, height: 1200)) == CGSize(width: 120, height: 240), "tall fits the height")
-        check(LiveView.pictureSize(window: CGSize(width: 200, height: 100)) == CGSize(width: 200, height: 100), "never enlarged")
-        let card = LiveView.cardFrame(picture: CGSize(width: 360, height: 240), visible: CGRect(x: 0, y: 80, width: 1512, height: 870))
-        check(card == CGRect(x: 1512 - 16 - 360, y: 96, width: 360, height: 240 + LiveView.lineHeight), "bottom-right: \(card)")
-        check(LiveView.capturePixels(picture: CGSize(width: 360, height: 240), window: CGSize(width: 1200, height: 800), scale: 2) == (720, 480), "twice the card")
-        check(LiveView.capturePixels(picture: CGSize(width: 201, height: 101), window: CGSize(width: 201, height: 101), scale: 1) == (200, 100), "the window's own pixels, even")
-        check(LiveView.sourceRect(window: CGRect(x: 1600, y: 100, width: 400, height: 300), display: CGRect(x: 1512, y: 0, width: 1920, height: 1080))
-              == CGRect(x: 88, y: 100, width: 400, height: 300), "in the display's coordinates")
-        check(LiveView.sourceRect(window: CGRect(x: -100, y: 0, width: 400, height: 300), display: CGRect(x: 0, y: 0, width: 1512, height: 982))
-              == CGRect(x: 0, y: 0, width: 300, height: 300), "clipped to the display")
+        liveViewTests()
 
         print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
+
+    /// The live view (Shared/LiveView.swift): which window, the card's size and corner, the cursor, the capture.
+    static func liveViewTests() {
+        typealias LV = LiveView
+        // The window hands observes.
+        check(LV.activeWindowID([["id": "812", "title": "a"], ["id": "77", "active": true]]) == 77, "the active window, a string id")
+        check(LV.activeWindowID([["id": 9, "active": true]]) == 9, "an int id")
+        check(LV.activeWindowID([["id": "x", "active": true], ["id": "3"]]) == nil, "no usable active id")
+        check(LV.activeWindowID([["id": "3", "active": false]]) == nil, "none active")
+        check(LV.activeWindowID([]) == nil, "no windows")
+
+        // Which window to show.
+        func w(_ id: Int, _ app: String, _ bundle: String, layer: Int = 0, on: Bool = true, _ wd: CGFloat, _ ht: CGFloat) -> LV.Candidate {
+            LV.Candidate(id: id, appName: app, bundle: bundle, layer: layer, onScreen: on, frame: CGRect(x: 0, y: 0, width: wd, height: ht))
+        }
+        let te = "com.apple.TextEdit"
+        let wins = [w(1, "TextEdit", te, 400, 300), w(2, "TextEdit", te, 800, 600), w(3, "Safari", "com.apple.Safari", 1200, 800),
+                    w(4, "TextEdit", te, on: false, 900, 900), w(5, "TextEdit", te, layer: 3, 990, 990),
+                    w(6, "TextEdit", te, 60, 40)]
+        check(LV.pick(wins, active: 1, app: "TextEdit", bundles: []) == 1, "the observed window first")
+        check(LV.pick(wins, active: 3, app: "TextEdit", bundles: []) == 3, "the observed window even in another app")
+        check(LV.pick(wins, active: 4, app: "TextEdit", bundles: [te]) == nil,
+              "observed but off screen (minimized, another Space): none, never another window of the app")
+        check(LV.pick(wins, active: 99, app: "TextEdit", bundles: [te]) == nil, "observed but gone (closed): none")
+        check(LV.pick(wins, active: nil, app: "TextEdit (no window open)", bundles: []) == 2, "the app's name before the note")
+        check(LV.pick(wins, active: nil, app: "textedit", bundles: []) == 2, "names compared without case")
+        check(LV.pick(wins, active: nil, app: "", bundles: ["com.apple.safari"]) == 3, "no observation yet: the task's apps")
+        check(LV.pick(wins, active: nil, app: "", bundles: [te, "com.apple.Safari"]) == 3, "the largest of the task's apps")
+        check(LV.pick(wins, active: nil, app: "Music", bundles: []) == nil, "nothing to show")
+        check(LV.pick(wins, active: nil, app: "文本编辑", bundles: [te]) == 2, "another language's name: by bundle")
+        check(LV.pick([w(6, "TextEdit", te, 60, 40)], active: nil, app: "TextEdit", bundles: []) == nil, "a sliver is not a window to show")
+        check(LV.pick([w(5, "TextEdit", te, layer: 3, 990, 990)], active: nil, app: "TextEdit", bundles: [te]) == nil,
+              "a floating panel or menu is not the window")
+        check(LV.pick([], active: 1, app: "TextEdit", bundles: [te]) == nil, "no windows at all")
+        check(LV.pick([], active: nil, app: "", bundles: []) == nil, "nothing known")
+
+        // The picture and the card.
+        check(LV.pictureSize(window: CGSize(width: 1200, height: 800)) == CGSize(width: 360, height: 240), "wide fits the width")
+        check(LV.pictureSize(window: CGSize(width: 1200, height: 800), box: LV.maxPictureLarge) == CGSize(width: 720, height: 480), "larger")
+        check(LV.pictureSize(window: CGSize(width: 600, height: 1200)) == CGSize(width: 220, height: 240),
+              "tall fits the height, the card not narrower than its header")
+        check(LV.pictureSize(window: CGSize(width: 300, height: 100)) == CGSize(width: 300, height: 100), "never enlarged")
+        check(LV.pictureSize(window: .zero) == CGSize(width: 360, height: 225), "no window yet: a placeholder shape")
+        check(LV.cardSize(picture: CGSize(width: 360, height: 240)) == CGSize(width: 360, height: 240 + LV.headerHeight + LV.lineHeight),
+              "header + picture + line")
+
+        // Corners.
+        let vis = CGRect(x: 0, y: 80, width: 1512, height: 870)   // above a Dock, below the menu bar
+        let size = CGSize(width: 360, height: 302)
+        check(LV.frame(size: size, corner: .bottomRight, visible: vis) == CGRect(x: 1512 - 16 - 360, y: 96, width: 360, height: 302), "bottom-right")
+        check(LV.frame(size: size, corner: .topLeft, visible: vis) == CGRect(x: 16, y: 80 + 870 - 16 - 302, width: 360, height: 302), "top-left")
+        check(LV.nearestCorner(center: CGPoint(x: 1400, y: 900), visible: vis) == .topRight, "dropped top-right")
+        check(LV.nearestCorner(center: CGPoint(x: 100, y: 100), visible: vis) == .bottomLeft, "dropped bottom-left")
+        check(LV.nearestCorner(center: CGPoint(x: 756, y: 515), visible: vis) == .topRight, "the exact middle goes up and right")
+        check(Set([LV.Corner.bottomRight] + LV.neighbours(.bottomRight)) == Set(LV.Corner.allCases), "every corner is tried")
+        for c in LV.Corner.allCases { check(!LV.neighbours(c).contains(c) && LV.neighbours(c).count == 3, "neighbours of \(c)") }
+
+        // Out of the window's way.
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: nil) == (.bottomRight, false), "nothing to avoid")
+        let leftHalf = CGRect(x: 0, y: 80, width: 700, height: 870)
+        check(LV.place(size: size, preferred: .bottomLeft, visible: vis, avoid: leftHalf) == (.bottomRight, false),
+              "a window on the left: across the bottom edge")
+        let bottomHalf = CGRect(x: 0, y: 80, width: 1512, height: 400)
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: bottomHalf) == (.topRight, false),
+              "a window along the bottom: up the same side")
+        let full = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        check(LV.place(size: size, preferred: .topLeft, visible: vis, avoid: full) == (.topLeft, true),
+              "a window filling the screen: the user's corner, letting clicks through")
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: .zero) == (.bottomRight, false), "an empty rect is nothing")
+
+        // Coordinates: top-left global (ScreenCaptureKit, hands) to AppKit.
+        check(LV.toAppKit(CGRect(x: 10, y: 20, width: 100, height: 50), mainHeight: 982) == CGRect(x: 10, y: 912, width: 100, height: 50), "flipped")
+        check(LV.toAppKit(CGRect(x: 1600, y: -100, width: 100, height: 50), mainHeight: 982) == CGRect(x: 1600, y: 1032, width: 100, height: 50),
+              "a display above the main one")
+
+        // The agent's cursor in the picture.
+        let win = CGRect(x: 100, y: 200, width: 800, height: 600)
+        check(LV.cursor(at: CGPoint(x: 500, y: 500), window: win, picture: CGSize(width: 400, height: 300)) == CGPoint(x: 200, y: 150), "the middle")
+        check(LV.cursor(at: CGPoint(x: 100, y: 200), window: win, picture: CGSize(width: 400, height: 300)) == CGPoint(x: 0, y: 300),
+              "the window's top-left is the picture's top-left (a layer counts y up)")
+        check(LV.cursor(at: CGPoint(x: 50, y: 500), window: win, picture: CGSize(width: 400, height: 300)) == nil, "outside the window: no cursor")
+        check(LV.cursor(at: CGPoint(x: 1, y: 1), window: .zero, picture: CGSize(width: 400, height: 300)) == nil, "no window")
+        check(LV.targetCenter([100, 200, 40, 20]) == CGPoint(x: 120, y: 210), "a target_rect's centre")
+        check(LV.targetCenter([100.5, 200, 41, 20.0] as [Any]) == CGPoint(x: 121, y: 210), "floats")
+        check(LV.targetCenter(nil) == nil && LV.targetCenter([1, 2, 3]) == nil && LV.targetCenter("x") == nil, "no target")
+        check(LV.targetCenter([1, 2, -3, 4]) == nil, "a negative size is nonsense")
+
+        // The capture.
+        check(LV.capturePixels(picture: CGSize(width: 360, height: 240), window: CGSize(width: 1200, height: 800), scale: 2) == (720, 480), "twice the card")
+        check(LV.capturePixels(picture: CGSize(width: 201, height: 101), window: CGSize(width: 201, height: 101), scale: 1) == (200, 100),
+              "the window's own pixels, even")
+        check(LV.capturePixels(picture: CGSize(width: 1, height: 1), window: CGSize(width: 1, height: 1), scale: 1) == (2, 2), "never empty")
+        check(LV.sourceRect(window: CGRect(x: 1600, y: 100, width: 400, height: 300), display: CGRect(x: 1512, y: 0, width: 1920, height: 1080))
+              == CGRect(x: 88, y: 100, width: 400, height: 300), "in the display's coordinates")
+        check(LV.sourceRect(window: CGRect(x: -100, y: 0, width: 400, height: 300), display: CGRect(x: 0, y: 0, width: 1512, height: 982))
+              == CGRect(x: 0, y: 0, width: 300, height: 300), "clipped to the display")
+        check(LV.sourceRect(window: CGRect(x: 5000, y: 0, width: 10, height: 10), display: CGRect(x: 0, y: 0, width: 1512, height: 982)) == .zero,
+              "off the display")
+
+        // Statuses.
+        check([LV.Status.done, .failed, .stopped].allSatisfy(\.isEnding), "endings")
+        check(![LV.Status.starting, .working, .waitingForUser, .paused, .hidden].contains(where: \.isEnding), "not endings")
+        let allStatuses: [LV.Status] = [.starting, .working, .waitingForUser, .paused, .hidden, .done, .failed, .stopped]
+        for st in allStatuses {
+            check(L(LV.word(st), lang: .zhHans) != LV.word(st), "a Chinese word for \(LV.word(st))")
+        }
+    }
+
 }

@@ -159,10 +159,9 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         let ok = Runner.answer(reply: req["reply"] as? String ?? "", approve: req["approve"] as? Bool ?? false)
         return ["ok": ok] as [String: Any]
     case "stop":
-        if Runner.busy { Runner.cancelled = true }
-        Runner.stopRequested = true
-        Runner.current?.terminate()
-        return ["ok": true, "stopped": Runner.current != nil]
+        let running = Runner.current != nil
+        Runner.requestStop()
+        return ["ok": true, "stopped": running]
     case "restart":
         // launchd's KeepAlive starts us again; the main app just reconnects.
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { exit(0) }

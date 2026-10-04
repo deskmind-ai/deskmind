@@ -333,6 +333,13 @@ enum Runner {
         var mayNeedVision: Bool { goal != nil && apps.contains { !Self.accessibleApps.contains($0.bundle) } }
     }
 
+    /// Stop the run: the main app's Stop, or the live view's.
+    static func requestStop() {
+        if busy { cancelled = true }
+        stopRequested = true
+        current?.terminate()
+    }
+
     /// Hand the user's answer to the question the running `hands do` asked. One JSON line on its stdin, which is
     /// what it blocks on: {"reply": "...", "approve": true}.
     static func answer(reply: String, approve: Bool) -> Bool {
@@ -473,9 +480,10 @@ enum Runner {
         _ = emit(["event": "start", "set": set, "real": spec.real, "pid": Int(p.processIdentifier)])
         // The live view, for the user's own instructions: until the run ends, however it ends.
         if spec.liveView && spec.goal != nil {
-            LiveCard.start(bundles: spec.apps.isEmpty ? ["com.apple.finder"] : spec.apps.map(\.bundle))
+            LiveCard.start(bundles: spec.apps.isEmpty ? ["com.apple.finder"] : spec.apps.map(\.bundle),
+                           goal: spec.goal ?? "", onStop: Runner.requestStop)
         }
-        defer { LiveCard.stop() }
+        defer { LiveCard.finish(nil) }
 
         let reader = DispatchGroup()
         reader.enter()
@@ -496,17 +504,17 @@ enum Runner {
                         let info = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(11).utf8))) as? [String: Any]
                         _ = emit(["event": "waiting", "what": info?["what"] as? String ?? "",
                                   "app": info?["app"] as? String ?? ""])
-                        LiveCard.say(L("Paused while you use your Mac", lang: ResolvedLang.current))
+                        LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
                         continue
                     }
-                    if line.hasPrefix("HANDS_RESUME") { _ = emit(["event": "resumed"]); continue }
+                    if line.hasPrefix("HANDS_RESUME") { _ = emit(["event": "resumed"]); LiveCard.status(.working); continue }
                     guard line.hasPrefix("HANDS_ASK "),
                           let q = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(10).utf8))) as? [String: Any]
                     else { continue }
                     answerLock.lock(); asking = true; answerLock.unlock()
-                    LiveCard.say(q["approval"] as? Bool == true
-                                 ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
-                                 : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
+                    LiveCard.status(.waitingForUser, words: q["approval"] as? Bool == true
+                                    ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
+                                    : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
                     // "options": the alternatives the question lists (hands' ambiguity), answers the user can click.
                     _ = emit(["event": "ask", "question": q["question"] as? String ?? "",
                               "approval": q["approval"] as? Bool ?? false, "options": q["options"] as? [String] ?? []])
@@ -572,7 +580,9 @@ enum Runner {
                             ? [e["question"] as? String, (e["reply"] as? String).map { "→ \($0)" }].compactMap { $0 }
                                 .joined(separator: " ")
                             : nil
-                        LiveCard.say(humanize(e))
+                        let acted = (e["action"] as? [String: Any])?["kind"] as? String ?? kind
+                        LiveCard.stepped(n: e["n"] as? Int ?? 0, words: humanize(e), target: e["target_rect"],
+                                         click: ["click", "double_click", "select"].contains(acted))
                         listening = listening && emit([
                             "event": "step", "task": taskID, "n": e["n"] ?? 0,
                             "describe": e["describe"] ?? (kind.isEmpty ? "step" : kind),
@@ -623,7 +633,8 @@ enum Runner {
         answerLock.lock(); answers = nil; asking = false; answerLock.unlock()
         try? inPipe.fileHandleForWriting.close()
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
-        LiveCard.stop()   // before the clean-up closes the run's windows
+        // Before the clean-up closes the run's windows: how it ended, for a moment, on its last picture.
+        LiveCard.finish(Runner.stopRequested ? .stopped : freeState == "completed" ? .done : .failed)
         cleanUp(quitTextEdit: !textEditWasRunning)
         pruneRuns(keep: 10)
         current = nil

@@ -1,7 +1,12 @@
 // What needs no screen for the live view, the small card in a corner that shows the window a run works in while
 // it works there (often behind other windows, or on a display nobody looks at): which window to show, the card's
-// size and place, and how large a picture to ask for. Foundation and CoreGraphics only, so tests/DecisionTests.swift
-// checks it without a screen. The card itself is Helper/LiveCard.swift.
+// size and place (a corner, out of the window's way), where the agent's cursor goes in the picture, and how large a
+// picture to ask for. Foundation and CoreGraphics only, so tests/DecisionTests.swift checks it without a screen. The
+// card itself is Helper/LiveCard.swift.
+//
+// Two coordinate systems meet here. ScreenCaptureKit and hands give window frames and action targets in global
+// points with the origin at the top-left of the main display; AppKit places windows with the origin at its
+// bottom-left. `toAppKit` converts.
 
 import CoreGraphics
 import Foundation
@@ -10,10 +15,15 @@ enum LiveView {
     /// The setting (View menu), on by default: the run request carries it as "live_view".
     static let enabledKey = "liveView.enabled"
 
-    /// The card's picture fits in this box, in points; the action line goes under it.
+    /// The picture fits in this box, in points: the usual card, and the larger one (expand, or a double click).
     static let maxPicture = CGSize(width: 360, height: 240)
-    static let lineHeight: CGFloat = 34
+    static let maxPictureLarge = CGSize(width: 720, height: 480)
+    /// The header (status, app, step, the buttons) and the action line under the picture.
+    static let headerHeight: CGFloat = 30
+    static let lineHeight: CGFloat = 32
     static let margin: CGFloat = 16
+    /// Collapsed: a capsule with the status and the step.
+    static let pill = CGSize(width: 260, height: 36)
 
     /// A window on screen, as the card chooses among them.
     struct Candidate: Equatable {
@@ -35,11 +45,14 @@ enum LiveView {
         return nil
     }
 
-    /// The window to show: the one hands observes, while it is on screen; else the largest ordinary window of the app
-    /// it works in, by the name the observation gives it ("TextEdit"); else of the task's apps, by bundle id -- the
-    /// system names apps in its own language ("文本编辑"), which need not be the one hands read; else none.
+    /// The window to show. Once hands has said which window it works in, that one and no other: while it is
+    /// minimized, closed or on another Space there is none (the card says so) -- another window of the same app may
+    /// be the user's own document, and the card must not show it. Before hands has said (the run is starting, or the
+    /// app is read from its pixels with no window list), the largest ordinary window of the app it works in, by the
+    /// name the observation gives it ("TextEdit"); else of the task's apps, by bundle id -- the system names apps in
+    /// its own language ("文本编辑"), which need not be the one hands read; else none.
     static func pick(_ windows: [Candidate], active: Int?, app: String, bundles: [String]) -> Int? {
-        if let active, windows.contains(where: { $0.id == active && $0.onScreen }) { return active }
+        if let active { return windows.contains(where: { $0.id == active && $0.onScreen }) ? active : nil }
         // "TextEdit (no window open)": the app's name is what comes before the note.
         let name = app.components(separatedBy: " (").first?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
         let wanted = Set(bundles.map { $0.lowercased() })
@@ -49,18 +62,76 @@ enum LiveView {
         return theirs.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }?.id
     }
 
-    /// The picture's size in the card: the window's shape, fitted into maxPicture, never larger than the window.
-    static func pictureSize(window: CGSize) -> CGSize {
-        guard window.width > 0, window.height > 0 else { return maxPicture }
-        let k = min(maxPicture.width / window.width, maxPicture.height / window.height, 1)
-        return CGSize(width: (window.width * k).rounded(), height: (window.height * k).rounded())
+    /// The picture's size in the card: the window's shape, fitted into `box`, never larger than the window.
+    static func pictureSize(window: CGSize, box: CGSize = maxPicture) -> CGSize {
+        guard window.width > 0, window.height > 0 else { return CGSize(width: box.width, height: (box.width * 0.625).rounded()) }
+        let k = min(box.width / window.width, box.height / window.height, 1)
+        // Not narrower than the header needs for its buttons.
+        let w = max((window.width * k).rounded(), 220)
+        return CGSize(width: w, height: (window.height * k).rounded())
     }
 
-    /// The whole card (picture and action line), in the bottom-right corner of `visible` (screen coordinates, origin
-    /// bottom-left: a screen's visibleFrame, which leaves out the menu bar and the Dock).
-    static func cardFrame(picture: CGSize, visible: CGRect) -> CGRect {
-        let size = CGSize(width: picture.width, height: picture.height + lineHeight)
-        return CGRect(x: visible.maxX - margin - size.width, y: visible.minY + margin, width: size.width, height: size.height)
+    /// The whole card for a picture: header, picture, action line.
+    static func cardSize(picture: CGSize) -> CGSize {
+        CGSize(width: picture.width, height: headerHeight + picture.height + lineHeight)
+    }
+
+    enum Corner: String, CaseIterable { case bottomRight, bottomLeft, topRight, topLeft }
+
+    /// The card in `corner` of `visible` (a screen's visibleFrame, AppKit coordinates: it leaves out the menu bar and
+    /// the Dock).
+    static func frame(size: CGSize, corner: Corner, visible: CGRect) -> CGRect {
+        let x = corner == .bottomRight || corner == .topRight ? visible.maxX - margin - size.width : visible.minX + margin
+        let y = corner == .bottomRight || corner == .bottomLeft ? visible.minY + margin : visible.maxY - margin - size.height
+        return CGRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
+    /// Where a card let go at `center` goes: the nearest corner.
+    static func nearestCorner(center: CGPoint, visible: CGRect) -> Corner {
+        let right = center.x >= visible.midX, top = center.y >= visible.midY
+        return top ? (right ? .topRight : .topLeft) : (right ? .bottomRight : .bottomLeft)
+    }
+
+    /// The corner for the card: the user's, unless the card there would cover the window being worked in; then the
+    /// first corner that does not, in the order nearest the user's first. `covers`: no corner is clear (a window
+    /// filling the screen) -- the card then lets clicks through, so a click the run makes there reaches the app.
+    static func place(size: CGSize, preferred: Corner, visible: CGRect, avoid window: CGRect?) -> (corner: Corner, covers: Bool) {
+        guard let window, !window.isEmpty else { return (preferred, false) }
+        let order = [preferred] + neighbours(preferred)
+        for c in order where !frame(size: size, corner: c, visible: visible).intersects(window) { return (c, false) }
+        return (preferred, true)
+    }
+
+    /// The other corners, nearest first: across the same edge, up or down the same side, then opposite.
+    static func neighbours(_ c: Corner) -> [Corner] {
+        switch c {
+        case .bottomRight: [.bottomLeft, .topRight, .topLeft]
+        case .bottomLeft: [.bottomRight, .topLeft, .topRight]
+        case .topRight: [.topLeft, .bottomRight, .bottomLeft]
+        case .topLeft: [.topRight, .bottomLeft, .bottomRight]
+        }
+    }
+
+    /// A rect in global top-left coordinates (ScreenCaptureKit, hands) in AppKit's, given the main display's height.
+    static func toAppKit(_ r: CGRect, mainHeight: CGFloat) -> CGRect {
+        CGRect(x: r.minX, y: mainHeight - r.maxY, width: r.width, height: r.height)
+    }
+
+    /// Where a point on the screen (top-left coordinates) is in the picture of `window` drawn in `picture` (the
+    /// picture's own coordinates, origin bottom-left as a layer's), or nil when it is outside the window.
+    static func cursor(at p: CGPoint, window: CGRect, picture: CGSize) -> CGPoint? {
+        guard window.width > 0, window.height > 0, window.contains(p) else { return nil }
+        let x = (p.x - window.minX) / window.width * picture.width
+        let y = (1 - (p.y - window.minY) / window.height) * picture.height
+        return CGPoint(x: x, y: y)
+    }
+
+    /// The centre of a hands target_rect ([x, y, w, h], screen points, top-left), when it has one.
+    static func targetCenter(_ v: Any?) -> CGPoint? {
+        guard let a = v as? [Any], a.count == 4 else { return nil }
+        let n = a.compactMap { ($0 as? NSNumber)?.doubleValue }
+        guard n.count == 4, n[2] >= 0, n[3] >= 0 else { return nil }
+        return CGPoint(x: n[0] + n[2] / 2, y: n[1] + n[3] / 2)
     }
 
     /// The pixels to capture for a picture of `picture` points: twice that (a Retina card), never more than the
@@ -76,5 +147,26 @@ enum LiveView {
         let r = window.intersection(display)
         guard !r.isNull else { return .zero }
         return r.offsetBy(dx: -display.minX, dy: -display.minY)
+    }
+
+    /// What the card says it is doing, beside its status dot.
+    enum Status: Equatable {
+        case starting, working, waitingForUser, paused, hidden, done, failed, stopped
+        /// The run is over: the card says how it ended for a moment, then goes.
+        var isEnding: Bool { self == .done || self == .failed || self == .stopped }
+    }
+
+    /// The header's word for a status: the key, for L().
+    static func word(_ s: Status) -> String {
+        switch s {
+        case .starting: "Starting"
+        case .working: "Working"
+        case .waitingForUser: "Needs you"
+        case .paused: "Paused"
+        case .hidden: "Window not visible"
+        case .done: "Done"
+        case .failed: "Didn't finish"
+        case .stopped: "Stopped"
+        }
     }
 }
