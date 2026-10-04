@@ -21,8 +21,10 @@
 // approval) the card says so, and a click on it opens DeskMind. When the run ends it says how, then fades.
 //
 // It keeps out of the way of the window being worked in: a corner where the card would cover that window is
-// skipped. When every corner would (a window filling the screen), the card lets clicks through, so a click the run
-// makes in the foreground lands on the app. It never becomes the active window.
+// skipped. When every corner would (a window filling the screen, as most people keep their apps), the card stays
+// over the window in the corner farthest from where the run has acted, and lets clicks through -- a click the run
+// makes in the foreground lands on the app -- until the user rests the pointer on it for half a second (a run's click
+// is instant); then its buttons work. It never becomes the active window.
 //
 // It is an ordinary shareable window: the user's own screenshots and screen sharing show it. hands' screenshots are
 // window captures (deskmind_hands/drivers/capture.py), so it is never in what the models see; a task recording
@@ -55,10 +57,8 @@ final class LiveCard: NSObject {
     private var target: (filter: SCContentFilter, config: SCStreamConfiguration)?
     private var shown: (window: Int, frame: CGRect, display: CGDirectDisplayID, drop: Set<Int>, pixels: CGSize)?
     private var watching = true
-    /// Collapsed to the capsule: no capture. `autoCollapsed`: by the card itself, because the card would cover the
-    /// window being worked in from every corner (a window filling the screen); it opens again when that is over.
+    /// Collapsed to the capsule (by the user): no capture.
     private var collapsed = false
-    private var autoCollapsed = false
     private var large = UserDefaults.standard.bool(forKey: largeKey)
     /// The run's own status (working, needs the user, paused, ended); `hidden` is the window's, layered on top.
     private var runStatus: LiveView.Status = .starting
@@ -78,6 +78,10 @@ final class LiveCard: NSObject {
     private var corner = LiveView.Corner(rawValue: UserDefaults.standard.string(forKey: cornerKey) ?? "") ?? .bottomRight
     private var lastWindow: CGRect?          // top-left global, the window's frame as last seen
     private var lastTarget: CGPoint?         // top-left global, where the last step acted
+    private var recentTargets: [CGPoint] = []   // the last few, for keeping the card away from them
+    private var covers = false               // the card is over the window being worked in
+    private var pointerSince: Date?          // the pointer has been on the card since
+    private var hoverTimer: Timer?
 
     /// What Stop on the card does (Runner.requestStop in the helper; a test's own in tests/e2e).
     private let onStop: () -> Void
@@ -138,7 +142,10 @@ final class LiveCard: NSObject {
         let p = LiveView.targetCenter(target)
         DispatchQueue.main.async {
             card.view?.line.stringValue = words
-            if let p { card.lastTarget = p; card.placeCursor(ripple: click) }
+            if let p {
+                card.lastTarget = p; card.recentTargets = Array((card.recentTargets + [p]).suffix(6))
+                card.placeCursor(ripple: click)
+            }
             card.refresh()
         }
     }
@@ -184,6 +191,17 @@ final class LiveCard: NSObject {
         p.setAccessibilityLabel(L("DeskMind live view", lang: ResolvedLang.current))
         panel = p; view = v
         refresh()
+        // Over the window being worked in the card lets clicks through, so it cannot see the pointer itself: where the
+        // pointer is gets checked here (its position only, no events), and resting on the card makes it clickable.
+        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.trackPointer() }
+    }
+
+    private func trackPointer() {
+        guard let p = panel else { return }
+        let on = p.frame.contains(NSEvent.mouseLocation)
+        if on { if pointerSince == nil { pointerSince = Date() } } else { pointerSince = nil }
+        let take = LiveView.interactive(covers: covers, pointerOnCardFor: pointerSince.map { Date().timeIntervalSince($0) })
+        if p.ignoresMouseEvents == take { p.ignoresMouseEvents = !take; view?.hoverChanged(on && take) }
     }
 
     /// Size, place, show what the state says. Main thread.
@@ -207,21 +225,16 @@ final class LiveCard: NSObject {
         let avoid = lastWindow.map { LiveView.toAppKit($0, mainHeight: mainHeight) }.flatMap { $0.intersects(screen.frame) ? $0 : nil }
         let pic = LiveView.pictureSize(window: lastWindow?.size ?? .zero, box: large ? LiveView.maxPictureLarge : LiveView.maxPicture)
         let cardSize = LiveView.cardSize(picture: pic)
-        // A card that would cover the window being worked in from every corner becomes the capsule, which covers
-        // little; the card comes back when the window leaves room for it.
-        let cardPlaced = LiveView.place(size: cardSize, preferred: corner, visible: visible, avoid: avoid)
-        let auto = !userCollapsed && cardPlaced.covers
-        if auto != read({ $0.autoCollapsed }) {
-            state.lock(); autoCollapsed = auto; state.unlock()
-            if auto { DispatchQueue.global().async { self.stopCapture() } }   // the capsule shows no picture
-        }
-        let collapsed = userCollapsed || auto
+        // A window filling the screen (most people keep their apps that way) leaves no clear corner: the card stays,
+        // over the window, in the corner farthest from where the run has acted, letting clicks through until the
+        // user rests the pointer on it. (It used to become the capsule, and a maximized app never had a picture.)
+        let collapsed = userCollapsed
         let size = collapsed ? LiveView.pill : cardSize
-        let placed = collapsed ? LiveView.place(size: size, preferred: corner, visible: visible, avoid: avoid) : cardPlaced
+        let recent = recentTargets.map { LiveView.toAppKit(CGRect(origin: $0, size: .zero), mainHeight: mainHeight).origin }
+        let placed = LiveView.place(size: size, preferred: corner, visible: visible, avoid: avoid, recent: recent)
         let frame = LiveView.frame(size: size, corner: placed.corner, visible: visible)
-        // Even the capsule would cover the window: it lets clicks through, so a click the run makes there reaches the
-        // app (its Stop is then out of reach; the island's is not).
-        p.ignoresMouseEvents = placed.covers
+        covers = placed.covers
+        p.ignoresMouseEvents = !LiveView.interactive(covers: covers, pointerOnCardFor: pointerSince.map { Date().timeIntervalSince($0) })
         v.layoutCard(collapsed: collapsed, large: large, size: size, dimmed: status == .hidden, note: status == .hidden || !hadPicture
                      ? L(LiveView.word(status == .hidden ? .hidden : .starting), lang: lang) : nil)
         if p.frame != frame {
@@ -249,6 +262,7 @@ final class LiveCard: NSObject {
     }
 
     private func close() {
+        hoverTimer?.invalidate(); hoverTimer = nil
         guard let p = panel else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             p.orderOut(nil)
@@ -314,7 +328,7 @@ final class LiveCard: NSObject {
         }
         state.lock()
         guard watching, !runStatus.isEnding else { state.unlock(); return }
-        let (active, app, isCollapsed, isLarge, observed) = (activeWindow, appName, collapsed || autoCollapsed, large, observedOnce)
+        let (active, app, isCollapsed, isLarge, observed) = (activeWindow, appName, collapsed, large, observedOnce)
         state.unlock()
         guard let id = LiveView.pick(candidates, active: active, app: app, bundles: bundles, observed: observed),
               let window = content.windows.first(where: { Int($0.windowID) == id }),
@@ -345,7 +359,7 @@ final class LiveCard: NSObject {
                                         perPoint: CGFloat(pixelScale))
         let pixels = CGSize(width: px.0, height: px.1)
         state.lock(); defer { state.unlock() }
-        guard watching, !collapsed, !autoCollapsed else { return }
+        guard watching, !collapsed else { return }
         if let s = shown, s.window == id, s.frame == frame, s.display == display.displayID, s.drop == dropIDs,
            s.pixels == pixels, target != nil { return }
         let cfg = SCStreamConfiguration()
@@ -412,11 +426,11 @@ extension LiveCard {
     /// What the card shows and does now, for an end-to-end test to check.
     static func snapshot() -> [String: Any] {
         guard let card = current else { return ["card": false] }
-        let (status, collapsed, large, streaming, watching, hidden, auto) = card.read {
-            ($0.runStatus, $0.collapsed, $0.large, $0.target != nil, $0.watching, $0.windowHidden, $0.autoCollapsed)
+        let (status, collapsed, large, streaming, watching, hidden) = card.read {
+            ($0.runStatus, $0.collapsed, $0.large, $0.target != nil, $0.watching, $0.windowHidden)
         }
         var out: [String: Any] = ["card": true, "status": LiveView.word(status), "collapsed": collapsed, "large": large,
-                                  "auto_collapsed": auto,
+                                  "covers": card.covers,
                                   "streaming": streaming, "watching": watching, "window_hidden": hidden,
                                   "corner": card.corner.rawValue]
         if let p = card.panel {
@@ -658,6 +672,9 @@ private final class CardView: NSView {
         let t = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
         addTrackingArea(t); tracking = t
     }
+    /// Made clickable while the pointer rests on it (over the window being worked in): the buttons show then, as
+    /// tracking areas see no entry in a window that was letting clicks through.
+    func hoverChanged(_ on: Bool) { if on != hovering { hover(on) } }
     override func mouseEntered(with event: NSEvent) { hover(true) }
     override func mouseExited(with event: NSEvent) { hover(false) }
     private func hover(_ on: Bool) {

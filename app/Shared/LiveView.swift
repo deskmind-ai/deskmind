@@ -98,12 +98,29 @@ enum LiveView {
 
     /// The corner for the card: the user's, unless the card there would cover the window being worked in; then the
     /// first corner that does not, in the order nearest the user's first. `covers`: no corner is clear (a window
-    /// filling the screen) -- the card then lets clicks through, so a click the run makes there reaches the app.
-    static func place(size: CGSize, preferred: Corner, visible: CGRect, avoid window: CGRect?) -> (corner: Corner, covers: Bool) {
+    /// filling the screen, as most people keep their apps) -- the card stays, over the window, in the corner farthest
+    /// from where the run has been acting (`recent`, AppKit coordinates; the user's corner when there is none), and
+    /// lets clicks through until the user rests the pointer on it (see interactive).
+    static func place(size: CGSize, preferred: Corner, visible: CGRect, avoid window: CGRect?,
+                      recent: [CGPoint] = []) -> (corner: Corner, covers: Bool) {
         guard let window, !window.isEmpty else { return (preferred, false) }
         let order = [preferred] + neighbours(preferred)
         for c in order where !frame(size: size, corner: c, visible: visible).intersects(window) { return (c, false) }
-        return (preferred, true)
+        guard !recent.isEmpty else { return (preferred, true) }
+        func distance(_ c: Corner) -> CGFloat {   // to the nearest recent action
+            let f = frame(size: size, corner: c, visible: visible)
+            return recent.map { p in hypot(min(max(p.x, f.minX), f.maxX) - p.x, min(max(p.y, f.minY), f.maxY) - p.y) }.min() ?? 0
+        }
+        let best = order.max { distance($0) < distance($1) } ?? preferred
+        return (distance(best) > distance(preferred) ? best : preferred, true)
+    }
+
+    /// Whether the card takes clicks: always when it covers nothing of the window being worked in; over that window
+    /// only once the pointer has rested on it for `dwell` seconds. A run's click lands in a blink (the pointer moved
+    /// and clicked at once), so it passes through to the app; a person who stops on the card gets its buttons.
+    static let dwell: Double = 0.5
+    static func interactive(covers: Bool, pointerOnCardFor seconds: Double?) -> Bool {
+        !covers || (seconds ?? 0) >= dwell
     }
 
     /// The other corners, nearest first: across the same edge, up or down the same side, then opposite.

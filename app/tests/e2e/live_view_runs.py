@@ -43,6 +43,11 @@ CASES = {
         "apps": [{"name": "Safari", "bundle": "com.apple.Safari"}, {"name": "TextEdit", "bundle": "com.apple.TextEdit"}],
         "folder": "parts", "answer": None,
     },
+    "music2": {
+        "goal": "Open NetEase Cloud Music, search 张悬 宝贝 and play it",
+        "apps": [{"name": "NetEase Cloud Music", "bundle": "com.netease.163music"}],
+        "folder": None, "answer": None,
+    },
     "music": {
         "goal": "Open NetEase Cloud Music, search Billie Eilish's BIRDS OF A FEATHER and play the live version.",
         "apps": [{"name": "NetEase Cloud Music", "bundle": "com.netease.163music"}],

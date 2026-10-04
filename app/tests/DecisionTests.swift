@@ -295,6 +295,18 @@ enum DecisionTests {
         check(LV.place(size: size, preferred: .topLeft, visible: vis, avoid: full) == (.topLeft, true),
               "a window filling the screen: the user's corner, letting clicks through")
         check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: .zero) == (.bottomRight, false), "an empty rect is nothing")
+        // A full-screen window: the corner farthest from where the run has acted, else the user's.
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: full, recent: [CGPoint(x: 1400, y: 150)]) == (.topLeft, true),
+              "acting near the bottom-right: the card goes top-left")
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: full, recent: [CGPoint(x: 700, y: 900)]).corner == .bottomRight,
+              "acting at the top middle: the bottom corners are as far, the user's stays")
+        check(LV.place(size: size, preferred: .topLeft, visible: vis, avoid: full, recent: [CGPoint(x: 100, y: 900), CGPoint(x: 120, y: 880)]).corner == .bottomRight,
+              "acting near the top-left: the opposite corner")
+        // Clicks: through the card over the window, unless the pointer rests on it.
+        check(LV.interactive(covers: false, pointerOnCardFor: nil), "clear of the window: clickable")
+        check(!LV.interactive(covers: true, pointerOnCardFor: nil), "over the window: clicks pass through")
+        check(!LV.interactive(covers: true, pointerOnCardFor: 0.05), "a pointer passing over (a run's click is instant): still through")
+        check(LV.interactive(covers: true, pointerOnCardFor: 0.6), "resting on it: clickable")
 
         // Coordinates: top-left global (ScreenCaptureKit, hands) to AppKit.
         check(LV.toAppKit(CGRect(x: 10, y: 20, width: 100, height: 50), mainHeight: 982) == CGRect(x: 10, y: 912, width: 100, height: 50), "flipped")

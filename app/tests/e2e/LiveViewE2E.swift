@@ -195,13 +195,13 @@ enum LiveViewE2E {
         check(rect(s, "frame").minX < vis.midX && rect(s, "frame").minY < vis.midY, "moved to bottom-left: \(rect(s, "frame"))")
         check(s["click_through"] as? Bool == false, "still takes clicks there")
 
-        // 5. A window filling the screen: the card becomes the capsule (no capture), which lets clicks through since
-        // it too would cover the window; hands' window capture under it has no card. It comes back after.
+        // 5. A window filling the screen (a maximized app): the card stays, with its picture, over the window and lets
+        // clicks through (a run's click reaches the app); hands' window capture under it has no card.
         setBounds(vtl)
-        s = waitFor { ($0["click_through"] as? Bool) == true && rect($0, "frame").size == LiveView.pill }
-        check(s["auto_collapsed"] as? Bool == true && rect(s, "frame").size == LiveView.pill, "over a full-screen window: the capsule")
-        check(s["click_through"] as? Bool == true, "which lets clicks through")
-        check(waitFor { ($0["streaming"] as? Bool) == false }["streaming"] as? Bool == false, "no capture behind the capsule")
+        s = waitFor { ($0["click_through"] as? Bool) == true }
+        check(s["covers"] as? Bool == true && rect(s, "frame").height > 200, "over a full-screen window: still the card, \(rect(s, "frame").size)")
+        check(s["click_through"] as? Bool == true, "letting clicks through (the pointer is not resting on it)")
+        check(s["streaming"] as? Bool == true, "with its picture")
         Thread.sleep(forTimeInterval: 0.5)
         s = snap()
         if let (id, wf) = docWindow(), let shot = capture(window: id, name: "5-hands-capture") {
@@ -214,8 +214,8 @@ enum LiveViewE2E {
 
         // 6. Steps: the words, the number, the agent's cursor where it acted.
         setBounds(home)
-        s = waitFor(6) { ($0["click_through"] as? Bool) == false && ($0["streaming"] as? Bool) == true && rect($0, "frame").height > 200 }
-        check(s["auto_collapsed"] as? Bool == false && s["streaming"] as? Bool == true, "room again: the card and its capture are back")
+        s = waitFor(6) { ($0["click_through"] as? Bool) == false && ($0["covers"] as? Bool) == false }
+        check(s["covers"] as? Bool == false && s["click_through"] as? Bool == false, "room again: clickable in a clear corner")
         LiveCard.stepped(n: 3, words: "Click “Save”", target: [home.midX - 10, home.midY - 10, 20, 20], click: true)
         s = waitFor { ($0["cursor"] as? String) != nil }
         check((s["title"] as? String ?? "").contains("3"), "the step's number: \(s["title"] ?? "")")
