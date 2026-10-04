@@ -295,8 +295,11 @@ struct HomeView: View {
     /// 报销单.csv in a folder seeded with expenses.csv).
     private func label(_ e: GoalExample) -> String {
         guard e.kind == .files else { return L(e.text, lang: lang) }
+        // The file itself, else the language the folder was seeded in (its other sample files), else the app's.
+        let seededEnglish = sampleFiles.contains { ["todo.txt", "draft.txt", "Meeting notes 0925.txt"].contains($0) }
+        let seededChinese = sampleFiles.contains { ["待办.txt", "草稿.txt", "会议纪要-0925.txt"].contains($0) }
         let file = sampleFiles.first { $0 == "报销单.csv" || $0 == "expenses.csv" }
-            ?? (lang == .zhHans ? "报销单.csv" : "expenses.csv")
+            ?? (seededEnglish ? "expenses.csv" : seededChinese ? "报销单.csv" : lang == .zhHans ? "报销单.csv" : "expenses.csv")
         return L("Make a folder called Receipts and move %@ into it", file, lang: lang)
     }
 
@@ -330,7 +333,7 @@ struct HomeView: View {
                                 .buttonStyle(.plain).help(L("Remove from the list", lang: lang))
                                 .accessibilityLabel(L("Remove from the list", lang: lang))
                             } else {
-                                Text(r.date.formatted(.relative(presentation: .named)))
+                                Text(r.date.formatted(.relative(presentation: .named).locale(Locale(identifier: lang == .zhHans ? "zh-Hans" : "en"))))   // the app's language, not the system's
                                     .font(.system(size: 11)).foregroundStyle(Brand.mist)
                             }
                         }
