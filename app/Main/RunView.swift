@@ -306,7 +306,9 @@ final class RunModel: ObservableObject {
             if tasks.isEmpty && stage != nil { setStage(.looking) }
             if !tasks.contains(where: { $0.id == id }) {
                 withAnimation(.easeOut(duration: 0.2)) {
-                    tasks.append(RunTask(id: id, title: e["title"] as? String ?? id))
+                    // Self-test tasks by their names in the app's language (their task files' titles are Chinese).
+                    let title = e["title"] as? String ?? id
+                    tasks.append(RunTask(id: id, title: free ? title : SelfTest.title(id: id, fallback: title, lang: ResolvedLang.current)))
                 }
             }
         case "preparing":
@@ -406,6 +408,9 @@ final class RunModel: ObservableObject {
                     MainWindow.comeBack(activate: false)
                 }
             } else if real {
+                // A Self-test run: the window comes back (not as the active window), on the screen where the next task
+                // is picked -- it stayed aside, and the way back to the list was not obvious.
+                if MainWindow.isAside { MainWindow.comeBack(activate: false) }
                 let passed = exit == 0 && (e["passed"] as? Int ?? 0) == (e["total"] as? Int ?? -1)
                 RunOverlay.shared.finish(passed: passed,
                                          summary: passed ? L("Task done, and the result checks out", lang: lang) : summary)
@@ -429,6 +434,8 @@ struct RunView: View {
     @StateObject private var run = RunModel()
     @EnvironmentObject var helper: HelperModel
     @State private var choice: PlayChoice = .mock
+    /// The task run last on this screen: "Run again" for it, "Start" for any other.
+    @State private var lastRun: String?
     @Environment(\.lang) private var lang
     let onBack: () -> Void
 
@@ -505,7 +512,7 @@ struct RunView: View {
                     Button(L("Stop", lang: lang)) { run.stop() }.buttonStyle(InkButtonStyle(prominent: false))
                         .keyboardShortcut(".", modifiers: .command)
                 } else {
-                    Button(L(run.phase == .idle ? "Start" : "Run again", lang: lang)) { run.start(choice) }
+                    Button(L(SelfTest.startLabel(selected: choice.id, lastRun: lastRun), lang: lang)) { lastRun = choice.id; run.start(choice) }
                         .buttonStyle(InkButtonStyle())
                         .keyboardShortcut(.defaultAction)
                 }

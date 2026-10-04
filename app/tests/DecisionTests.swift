@@ -210,6 +210,7 @@ enum DecisionTests {
         issueReportTests()
         runErrorTests()
         fileExampleTests()
+        selfTestTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -402,6 +403,24 @@ enum DecisionTests {
         check(F.files(at: dir.path) == ["a.pdf"], "files only: \(F.files(at: dir.path))")
         try? FileManager.default.removeItem(at: dir)
         check(L("Make a folder called Receipts and move %@ into it", "a.pdf", lang: .zhHans) != "Make a folder called Receipts and move a.pdf into it", "zh")
+    }
+
+    /// The Self-test screen's titles and Start button (Shared/SelfTest.swift).
+    static func selfTestTests() {
+        for (id, key) in SelfTest.titles {
+            check(SelfTest.title(id: id, fallback: "任务文件标题", lang: .en) == key, "en title for \(id)")
+            let zh = SelfTest.title(id: id, fallback: "任务文件标题", lang: .zhHans)
+            check(zh != key && zh.unicodeScalars.contains { $0.value >= 0x4E00 && $0.value <= 0x9FFF }, "zh title for \(id): \(zh)")
+        }
+        check(SelfTest.title(id: "Z99-unknown", fallback: "From the task file", lang: .en) == "From the task file", "an unknown task: its file's title")
+        check(SelfTest.startLabel(selected: "G07-finder-newfolder", lastRun: nil) == "Start", "nothing run yet: Start")
+        check(SelfTest.startLabel(selected: "G07-finder-newfolder", lastRun: "G07-finder-newfolder") == "Run again", "the one just run: Run again")
+        check(SelfTest.startLabel(selected: "G08-finder-move-one", lastRun: "G07-finder-newfolder") == "Start", "another one picked after a run: Start")
+        // Every task the screen offers has a title of ours.
+        for id in ["G07-finder-newfolder", "G08-finder-move-one", "G01-finder-sort", "G04-chinese-exact",
+                   "S01-rename", "S02-edit-save", "S03-zh-text", "S04-clipboard-protect", "S05-cancel", "S06-stale-binding"] {
+            check(SelfTest.titles[id] != nil, "a title for \(id)")
+        }
     }
 
     static func issueReportTests() {
