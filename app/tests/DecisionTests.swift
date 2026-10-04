@@ -213,6 +213,7 @@ enum DecisionTests {
         selfTestTests()
         notInstalledTests()
         folderPolicyTests()
+        diagnosticsTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -456,6 +457,51 @@ enum DecisionTests {
         check(FolderPolicy.confirmRenames(folder: "/Users/someone/Downloads", sample: sample), "Downloads: asked")
         check(FolderPolicy.confirmRenames(folder: "/Users/someone/DeskMind Playground 2", sample: sample), "a look-alike name: asked")
         check(FolderPolicy.confirmRenames(folder: "/Users/someone/DeskMind Playground/../Documents", sample: sample), "a path that leaves it: asked")
+    }
+
+    /// What a report carries besides the user's words (Shared/Diagnostics.swift): numbers and kinds, nothing named.
+    static func diagnosticsTests() {
+        let raw = """
+        target   /Users/alice/Downloads   (150 files)
+        goal     整理目录
+        these files are real and there is no undo. ctrl-c now if the target is wrong.
+        no files changed
+        errored  0 actions  75s  $0.00
+        provider_unavailable: system one endpoint http://127.0.0.1:18850 failed: HTTP Error 500: Internal Server Error -- RuntimeError: [metal::malloc] Attempting to allocate 98725039088 bytes which is greater than the maximum allowed buffer size
+        trace runs/do-20261005-015752
+        """
+        let s = Diagnostics.sanitize(raw, user: "alice")
+        check(s.contains("98725039088 bytes") && s.contains("HTTP Error 500"), "the error itself stays: \(s)")
+        check(!s.contains("alice") && !s.contains("/Users") && !s.contains("整理目录") && !s.contains("Downloads"),
+              "no user, path, goal or folder name: \(s)")
+        check(!s.contains("trace runs/"), "only the error lines")
+        let quoted = Diagnostics.sanitize("errored: could not rename '合同扫描件.pdf' to 'file-8.pdf'; KeyError: 'window_id' failed", user: "x")
+        check(!quoted.contains("合同") && !quoted.contains("file-8") && quoted.contains("'window_id'"),
+              "quoted names out, identifiers in: \(quoted)")
+        check(Diagnostics.sanitize("failed at ~/Documents/secret plan/notes.txt", user: "x") == "failed at <path> plan/notes.txt"
+              || !Diagnostics.sanitize("failed at ~/Documents/secret plan/notes.txt", user: "x").contains("Documents"), "~ paths")
+        let d = Diagnostics(error: raw, stepSeconds: [6.5, 41.3, 38.2], failedRequest: ["select_target": ("choice", 40), "operation": ("choice", 8)],
+                            folder: (150, 12), system: [("DeskMind", "0.4.0 (33)"), ("chip", "Apple M4")])
+        let md = d.markdown()
+        check(md.hasPrefix("<details>") && md.contains("6.5, 41.3, 38.2") && md.contains("select_target (choice, 40)")
+              && md.contains("150 files, 12 folders") && md.contains("chip: Apple M4"), "the section: \(md)")
+        check(!md.contains("alice") && !md.contains("整理目录"), "and nothing named in it")
+        check(Diagnostics().markdown().isEmpty, "nothing to say: no section")
+        // In a report, the section stays whole; a long instruction is what is shortened.
+        let long = String(repeating: "整理目录并把所有截图移到截图文件夹，", count: 200)
+        let u = IssueReport.url(kind: .error, goal: long, outcome: "It stopped.", steps: ["click"], appVersion: "0.4.0", macOS: "27.2",
+                                diagnostics: md)
+        let body = u.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "body" }?.value } ?? ""
+        check((u?.absoluteString.count ?? 99999) <= IssueReport.maxURL && body.contains("150 files, 12 folders"),
+              "within the URL limit, diagnostics kept (\(u?.absoluteString.count ?? 0))")
+        // Counting a folder lists no names.
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("diag-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: dir.appendingPathComponent("a.pdf").path, contents: Data())
+        let c = Diagnostics.count(folder: dir.path)
+        check(c?.files == 1 && c?.folders == 1, "folder counted: \(String(describing: c))")
+        try? FileManager.default.removeItem(at: dir)
+        check(Diagnostics.mac().contains { $0.0 == "memory" }, "the Mac's memory")
     }
 
     static func issueReportTests() {
