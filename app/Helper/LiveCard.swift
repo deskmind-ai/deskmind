@@ -350,10 +350,14 @@ final class LiveCard: NSObject {
         }
         guard !isCollapsed else { return }
 
-        // Everything but the window's own app (its sheets and popovers belong to it), the card included.
-        let pid = window.owningApplication?.processID
-        let drop = content.windows.filter { $0.owningApplication?.processID != pid }
-        let dropIDs = Set(drop.map { Int($0.windowID) })
+        // Everything but the window and what belongs to it (its sheets, popovers, menus): other apps, the card, and
+        // the same app's other documents (LiveView.leaveOut).
+        func onDisplay(_ w: SCWindow) -> LiveView.Shown {
+            LiveView.Shown(id: Int(w.windowID), pid: w.owningApplication?.processID, layer: w.windowLayer,
+                           title: w.title ?? "", frame: w.frame)
+        }
+        let dropIDs = Set(LiveView.leaveOut(content.windows.map(onDisplay), target: onDisplay(window)))
+        let drop = content.windows.filter { dropIDs.contains(Int($0.windowID)) }
         let pic = LiveView.pictureSize(window: frame.size, box: isLarge ? LiveView.maxPictureLarge : LiveView.maxPicture)
         let filter = SCContentFilter(display: display, excludingWindows: drop)
         let px = LiveView.capturePixels(picture: pic, window: frame.size, scale: CGFloat(filter.pointPixelScale),

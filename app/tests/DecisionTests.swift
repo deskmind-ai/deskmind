@@ -232,6 +232,24 @@ enum DecisionTests {
     /// The live view (Shared/LiveView.swift): which window, the card's size and corner, the cursor, the capture.
     static func liveViewTests() {
         typealias LV = LiveView
+        // What the picture leaves out: other apps, and the same app's other documents; not the target's own sheet or menus.
+        let target = LV.Shown(id: 1, pid: 50, layer: 0, title: "records.txt", frame: CGRect(x: 100, y: 100, width: 600, height: 400))
+        let others: [LV.Shown] = [
+            target,
+            LV.Shown(id: 2, pid: 50, layer: 0, title: "secret.rtf", frame: CGRect(x: 150, y: 150, width: 300, height: 200)),
+            LV.Shown(id: 3, pid: 50, layer: 0, title: "", frame: CGRect(x: 200, y: 128, width: 400, height: 220)),
+            LV.Shown(id: 4, pid: 50, layer: 101, title: "", frame: CGRect(x: 120, y: 90, width: 180, height: 300)),
+            LV.Shown(id: 5, pid: 50, layer: 0, title: "", frame: CGRect(x: 650, y: 150, width: 300, height: 200)),
+            LV.Shown(id: 6, pid: 77, layer: 0, title: "Mail", frame: CGRect(x: 0, y: 0, width: 800, height: 600)),
+            LV.Shown(id: 7, pid: nil, layer: 25, title: "", frame: CGRect(x: 0, y: 0, width: 1728, height: 33)),
+        ]
+        let out = Set(LV.leaveOut(others, target: target))
+        check(!out.contains(1), "never the target itself")
+        check(out.contains(2), "another document of the same app on top: left out")
+        check(!out.contains(3), "its sheet (untitled, within it): kept")
+        check(!out.contains(4), "its menu or popover (above the normal level): kept")
+        check(out.contains(5), "an untitled same-app window reaching outside it: left out")
+        check(out.contains(6) && out.contains(7), "other apps, and windows with no app: left out")
         // The window hands observes.
         check(LV.activeWindowID([["id": "812", "title": "a"], ["id": "77", "active": true]]) == 77, "the active window, a string id")
         check(LV.activeWindowID([["id": 9, "active": true]]) == 9, "an int id")

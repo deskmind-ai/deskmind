@@ -17,11 +17,13 @@ enum LiveViewE2E {
     nonisolated(unsafe) static var failures = 0
     nonisolated(unsafe) static var out = URL(fileURLWithPath: "/tmp")
     nonisolated(unsafe) static var doc = ""
+    /// Another document of the same app (red blocks), to cover the task's window with.
+    nonisolated(unsafe) static var otherDoc = ""
 
     static func main() {
         let args = CommandLine.arguments
         guard args.count >= 3 else { print("usage: LiveViewE2E <doc name> <out dir>"); exit(2) }
-        doc = args[1]; out = URL(fileURLWithPath: args[2])
+        doc = args[1]; out = URL(fileURLWithPath: args[2]); otherDoc = args.count > 3 ? args[3] : ""
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         Thread.detachNewThread {
@@ -179,6 +181,24 @@ enum LiveViewE2E {
             check(share(img, in: pictureArea(s, img)) { r, g, b in r > 230 && g > 230 && b > 230 } > 0.5, "the covered document still shows")
         }
         onMain { cover.orderOut(nil) }
+
+        // 2b. Covered by another window of the same app (another TextEdit document, red blocks): still only the task's
+        // window. Its sheets and popovers would belong to it; another document does not.
+        if !otherDoc.isEmpty {
+            osa("tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"\(otherDoc)\") to false")
+            Thread.sleep(forTimeInterval: 0.8)
+            osa("tell application \"TextEdit\" to set bounds of (first window whose name contains \"\(otherDoc)\") to {\(Int(home.minX) + 60), \(Int(home.minY) + 40), \(Int(home.maxX) - 60), \(Int(home.maxY) - 40)}")
+            osa("tell application \"TextEdit\" to set index of (first window whose name contains \"\(otherDoc)\") to 1")
+            Thread.sleep(forTimeInterval: 1.5)
+            s = snap()
+            if let img = capture(window: card, name: "2b-same-app") {
+                let red = share(img, in: pictureArea(s, img)) { r, g, b in r > 200 && r - g > 100 && r - b > 120 }
+                check(red < 0.01, "another document of the same app on top is not in the picture (red share \(String(format: "%.3f", red)))")
+                check(share(img, in: pictureArea(s, img)) { r, g, b in r > 230 && g > 230 && b > 230 } > 0.4, "the task's document still shows")
+            }
+            osa("tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"\(otherDoc)\") to true")
+            Thread.sleep(forTimeInterval: 0.8)
+        }
 
         // 3. It follows the window's shape.
         setBounds(CGRect(x: 160, y: 120, width: 400, height: 600))
