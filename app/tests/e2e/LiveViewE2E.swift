@@ -141,6 +141,7 @@ enum LiveViewE2E {
         let screen = onMain { NSScreen.screens[0].frame }   // the main display: top-left global = its own
         // The card's remembered corner and size start from the defaults (this test's own defaults domain).
         UserDefaults.standard.removeObject(forKey: "liveView.corner"); UserDefaults.standard.removeObject(forKey: "liveView.large")
+        UserDefaults.standard.removeObject(forKey: CardView.hintKey)
         let home = CGRect(x: 160, y: 120, width: 640, height: 420)
         setBounds(home)
         var stopped = false
@@ -168,6 +169,16 @@ enum LiveViewE2E {
             check(share(img, in: area) { r, g, b in r > 230 && g > 230 && b > 230 } > 0.5, "the picture is the white document")
             check(share(img, in: area) { r, g, b in r < 90 && g < 90 && b < 90 } > 0.001, "with its text")
         } else { check(false, "the card can be captured (it is shareable)") }
+
+        // 1b. The first time the pointer rests on it: a hint, once ever.
+        onMain { LiveCard.press("hover") }
+        check(!(snap()["hint"] as? String ?? "").isEmpty, "first hover: the hint (\(snap()["hint"] ?? ""))")
+        onMain { LiveCard.press("unhover") }
+        Thread.sleep(forTimeInterval: 3.6)
+        check((snap()["hint"] as? String ?? "x").isEmpty, "the hint goes after 3 s")
+        onMain { LiveCard.press("hover") }
+        check((snap()["hint"] as? String ?? "x").isEmpty, "not again on the next hover")
+        onMain { LiveCard.press("unhover") }
 
         // 2. Covered by another window: the picture is still the document.
         let cover = onMain { () -> NSWindow in
@@ -361,6 +372,19 @@ enum LiveViewE2E {
         check(cardWindows() == 1, "one card, not two: \(cardWindows())")
         s = waitFor(6) { ($0["visible"] as? Bool) == true }
         check(s["status"] as? String != "Didn't finish", "the new run's card")
+
+        // 15b. Didn't finish, with why: the reason over the dimmed last picture, and it stays a little longer.
+        waitFor(6) { ($0["visible"] as? Bool) == true }
+        onMain { LiveCard.finish(.failed, why: LiveView.endingNote(state: "budget_exhausted", failure: "")) }
+        s = waitFor { !($0["note"] as? String ?? "").isEmpty }
+        check(s["status"] as? String == "Didn't finish" && !(s["note"] as? String ?? "").isEmpty, "didn't finish, says why: \(s["note"] ?? "")")
+        Thread.sleep(forTimeInterval: 3.0)
+        check(snap()["visible"] as? Bool == true, "the reason stays to be read")
+        Thread.sleep(forTimeInterval: 1.6)
+        check(snap()["card"] as? Bool == false, "then gone")
+        onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], onStop: {}) }
+        LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
+        waitFor(6) { ($0["streaming"] as? Bool) == true }
 
         // 16. Ended with no word (the run's process went away): gone at once.
         onMain { LiveCard.finish(nil) }

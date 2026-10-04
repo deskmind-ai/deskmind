@@ -232,6 +232,20 @@ enum DecisionTests {
     /// The live view (Shared/LiveView.swift): which window, the card's size and corner, the cursor, the capture.
     static func liveViewTests() {
         typealias LV = LiveView
+        // Why a run didn't finish, from hands' summary.
+        check(LV.endingNote(state: "completed", failure: "") == nil, "finished: no reason")
+        check(LV.endingNote(state: "cancelled", failure: "") == nil, "stopped: no reason")
+        check(LV.endingNote(state: "budget_exhausted", failure: "")?.contains("steps") == true, "out of steps")
+        check(LV.endingNote(state: "errored", failure: "no_progress_loop")?.hasPrefix("Got stuck") == true, "stuck")
+        check(LV.endingNote(state: "errored", failure: "crash") == "It stopped on an error", "an error")
+        check(LV.endingNote(state: "gave_up", failure: "") != nil, "gave up")
+        check(LV.endingNote(state: "", failure: "") == nil, "no summary: nothing more than Didn't finish")
+        for k in ["completed", "gave_up", "budget_exhausted", "errored"] {
+            if let key = LV.endingNote(state: k, failure: k == "errored" ? "no_progress_loop" : "") {
+                check(L(key, lang: .zhHans) != key, "zh for \(key)")
+            }
+        }
+        check(L("Double-click to enlarge · drag to a corner", lang: .zhHans) != "Double-click to enlarge · drag to a corner", "zh hint")
         // The window hands observes.
         check(LV.activeWindowID([["id": "812", "title": "a"], ["id": "77", "active": true]]) == 77, "the active window, a string id")
         check(LV.activeWindowID([["id": 9, "active": true]]) == 9, "an int id")

@@ -67,6 +67,8 @@ final class LiveCard: NSObject {
     private var large = UserDefaults.standard.bool(forKey: largeKey)
     /// The run's own status (working, needs the user, paused, ended); `hidden` is the window's, layered on top.
     private var runStatus: LiveView.Status = .starting
+    /// Why the run didn't finish, once it has ended (an L() key).
+    private var endNote: String?
     private var windowHidden = false
     private var step = 0
     private var hadPicture = false
@@ -118,13 +120,15 @@ final class LiveCard: NSObject {
 
     /// The run has ended. With how it ended, the card says so for a moment, its last picture frozen, then goes; with
     /// nil it goes at once (unless it is already saying how the run ended).
-    static func finish(_ ending: LiveView.Status?) {
+    /// `why`: why it didn't finish (an L() key, see LiveView.endingNote), written over the dimmed last picture, which
+    /// then stays a little longer to be read.
+    static func finish(_ ending: LiveView.Status?, why: String? = nil) {
         lock.lock(); let card = shared; if ending == nil || card?.runStatus.isEnding == true { shared = nil }; lock.unlock()
         guard let card else { return }
         if let ending, !card.runStatus.isEnding {
             card.stopCapture()
-            card.set { $0.runStatus = ending }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            card.set { $0.runStatus = ending; $0.endNote = ending == .failed ? why : nil }
+            DispatchQueue.main.asyncAfter(deadline: .now() + (ending == .failed && why != nil ? 4 : 2.5)) {
                 lock.lock(); if shared === card { shared = nil }; lock.unlock()
                 card.close()
             }
@@ -244,10 +248,10 @@ final class LiveCard: NSObject {
     /// Size, place, show what the state says. Main thread.
     fileprivate func refresh() {
         guard let p = panel, let v = view else { return }
-        let (status, userCollapsed, large, step, app, hadPicture) = read { c -> (LiveView.Status, Bool, Bool, Int, String, Bool) in
+        let (status, userCollapsed, large, step, app, hadPicture, endNote) = read { c -> (LiveView.Status, Bool, Bool, Int, String, Bool, String?) in
             let s: LiveView.Status = c.runStatus.isEnding || c.runStatus == .waitingForUser ? c.runStatus
                 : (c.windowHidden && c.hadPicture ? .hidden : c.runStatus)
-            return (s, c.collapsed, c.large, c.step, c.appName, c.hadPicture)
+            return (s, c.collapsed, c.large, c.step, c.appName, c.hadPicture, c.endNote)
         }
         let lang = ResolvedLang.current
         let shownApp = v.appTitle.isEmpty ? app.components(separatedBy: " (").first ?? app : v.appTitle
@@ -279,8 +283,11 @@ final class LiveCard: NSObject {
         // While the run waits on the user nothing it does can land under the card: the card takes clicks then.
         covers = placed.covers && asking == nil
         p.ignoresMouseEvents = !LiveView.interactive(covers: covers, pointerOnCardFor: pointerSince.map { Date().timeIntervalSince($0) })
-        v.layoutCard(collapsed: collapsed, large: large, size: size, asking: asking != nil, dimmed: status == .hidden, note: status == .hidden || !hadPicture
-                     ? L(LiveView.word(status == .hidden ? .hidden : .starting), lang: lang) : nil)
+        let note: String? = if let endNote, status == .failed { L(endNote, lang: lang) }
+            else if status == .hidden || !hadPicture { L(LiveView.word(status == .hidden ? .hidden : .starting), lang: lang) }
+            else { nil }
+        v.layoutCard(collapsed: collapsed, large: large, size: size, asking: asking != nil,
+                     dimmed: status == .hidden || (endNote != nil && status == .failed), note: note)
         if p.frame != frame {
             if p.isVisible && !v.dragging && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 NSAnimationContext.runAnimationGroup { ctx in ctx.duration = 0.2; p.animator().setFrame(frame, display: true) }
@@ -515,6 +522,7 @@ extension LiveCard {
             out["cursor"] = v.cursorShown ? NSStringFromPoint(v.cursorPosition) : NSNull()
             out["picture"] = NSStringFromRect(v.picture.frame)
             out["note"] = v.noteText
+            out["hint"] = v.hintText
             out["face"] = v.faceName
             out["asking"] = card.asking != nil
             out["ask_options"] = v.ask.optionCount
@@ -533,6 +541,8 @@ extension LiveCard {
         case "click": card.clicked()
         case "option0", "option1", "option2", "option3": card.view?.ask.press(option: Int(String(control.last!))!)
         case "undo": card.view?.ask.pressUndo()
+        case "hover": card.view?.hoverChanged(true)
+        case "unhover": card.view?.hoverChanged(false)
         case "drop":
             if let p = card.panel, let point { p.setFrameOrigin(NSPoint(x: point.x - p.frame.width / 2, y: point.y - p.frame.height / 2)) }
             card.dropped()
@@ -566,6 +576,10 @@ final class CardView: NSView {
     var cursorShown: Bool { cursor.opacity > 0 && !cursor.isHidden }
     var cursorPosition: CGPoint { cursor.position }
     var noteText: String { note.isHidden ? "" : note.stringValue }
+    /// The one-time hint the first time the pointer rests on a card: what double-click and drag do.
+    private let hint = NSTextField(labelWithString: "")
+    static let hintKey = "liveView.hintSeen"
+    var hintText: String { hint.isHidden || hint.alphaValue == 0 ? "" : hint.stringValue }
     private let ripple = CALayer()
     private var buttons: [NSButton] = []
     private var largeButton: NSButton!
@@ -640,6 +654,17 @@ final class CardView: NSView {
         note.font = .systemFont(ofSize: 12, weight: .medium)
         note.textColor = NSColor(calibratedWhite: 0.2, alpha: 1)
         note.alignment = .center
+        note.maximumNumberOfLines = 2
+        note.lineBreakMode = .byWordWrapping
+        note.cell?.truncatesLastVisibleLine = true
+        hint.font = .systemFont(ofSize: 11, weight: .medium)
+        hint.textColor = NSColor(calibratedWhite: 1, alpha: 0.95)
+        hint.alignment = .center
+        hint.wantsLayer = true
+        hint.layer?.backgroundColor = NSColor(calibratedWhite: 0, alpha: 0.62).cgColor
+        hint.layer?.cornerRadius = 9
+        hint.isHidden = true
+        addSubview(hint)
 
         let lang = ResolvedLang.current
         largeButton = button("arrow.up.left.and.arrow.down.right", L("Larger", lang: lang)) { $0.toggleLarge() }
@@ -716,7 +741,13 @@ final class CardView: NSView {
         }
         note.isHidden = collapsed || text == nil
         note.stringValue = text ?? ""
-        note.frame = NSRect(x: 12, y: picture.frame.minY + (picture.frame.height - 16) / 2, width: size.width - 24, height: 16)
+        let wraps = text != nil && note.attributedStringValue.boundingRect(with: NSSize(width: size.width - 24, height: 40),
+                                                                            options: [.usesLineFragmentOrigin]).height > 18
+        let noteHeight: CGFloat = wraps ? 32 : 16
+        note.frame = NSRect(x: 12, y: picture.frame.minY + (picture.frame.height - noteHeight) / 2, width: size.width - 24, height: noteHeight)
+        let hw = min(size.width - 24, hint.intrinsicContentSize.width + 20)
+        hint.frame = NSRect(x: (size.width - hw) / 2, y: picture.frame.minY + 8, width: hw, height: 18)
+        if collapsed || asking { hint.isHidden = true }
         CATransaction.commit()
         for b in buttons where !b.isHidden { b.alphaValue = hovering || collapsed ? 1 : 0 }
         resetTracking()
@@ -822,9 +853,24 @@ final class CardView: NSView {
     override func mouseExited(with event: NSEvent) { hover(false) }
     private func hover(_ on: Bool) {
         hovering = on
+        if on, !collapsed, ask.isHidden, !UserDefaults.standard.bool(forKey: Self.hintKey) { showHint() }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.15
             for b in buttons where !b.isHidden { b.animator().alphaValue = on || collapsed ? 1 : 0 }
+        }
+    }
+
+    /// Once ever: what the card does beyond its buttons, over the bottom of the picture for 3 s.
+    private func showHint() {
+        UserDefaults.standard.set(true, forKey: Self.hintKey)
+        hint.stringValue = L("Double-click to enlarge · drag to a corner", lang: ResolvedLang.current)
+        let hw = min(bounds.width - 24, hint.intrinsicContentSize.width + 20)
+        hint.frame = NSRect(x: (bounds.width - hw) / 2, y: picture.frame.minY + 8, width: hw, height: 18)
+        hint.alphaValue = 1; hint.isHidden = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in ctx.duration = 0.3; self.hint.animator().alphaValue = 0 },
+                                                 completionHandler: { self.hint.isHidden = true })
         }
     }
 

@@ -291,6 +291,22 @@ enum L10n {
         "Apps read from the screen": "看屏幕操作应用",
         "Answers a question": "回答问题",
         "View": "查看",
+        // The live view card: why a run didn't finish, the one-time hint (Helper/LiveCard.swift).
+        "It couldn't find a way to do this": "它没找到完成这件事的办法",
+        "It ran out of steps before finishing": "步数用完了，还没做完",
+        "Got stuck: the same step kept failing": "卡住了：同一步一直失败",
+        "It stopped on an error": "出错停下了",
+        "Double-click to enlarge · drag to a corner": "双击放大 · 拖到任一角落",
+        // The first setup in three steps (Main/HomeView.swift SetupCard).
+        "The first setup takes about 8 minutes. The models download in the background while you allow the permissions.":
+            "第一次准备大约 8 分钟。模型在后台下载，你可以同时完成授权。",
+        "Allow DeskMind to work this Mac": "允许 DeskMind 操作这台 Mac",
+        "Download the local models": "下载本地模型",
+        "in the background": "在后台进行",
+        "Try your first task": "试第一个任务",
+        "unlocks when 1 and 2 are done": "前两步完成后解锁",
+        "Pick one of the examples above, or type your own.": "点上面的任一示例，或者输入你自己的任务。",
+        "The examples above start working as soon as the first two steps are done.": "前两步完成后，上面的示例就能直接运行。",
         // Replay and GIF (Main/Replay.swift).
         "Replay": "回放过程",
         "Export GIF": "导出动图",

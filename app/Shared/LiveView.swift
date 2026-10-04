@@ -227,6 +227,19 @@ enum LiveView {
     /// The picture above a question: smaller, the question is what matters now.
     static let askPictureHeight: CGFloat = 112
 
+    /// Why a run didn't finish, from the summary hands writes (its state and failure class), said on the card's
+    /// last picture: the key, for L(); nil when it finished, was stopped, or there is nothing more to say than
+    /// "Didn't finish".
+    static func endingNote(state: String, failure: String) -> String? {
+        switch state {
+        case "completed", "cancelled": nil
+        case "gave_up": "It couldn't find a way to do this"
+        case "budget_exhausted": "It ran out of steps before finishing"
+        case "errored": failure == "no_progress_loop" ? "Got stuck: the same step kept failing" : "It stopped on an error"
+        default: nil
+        }
+    }
+
     /// The header's word for a status: the key, for L().
     static func word(_ s: Status) -> String {
         switch s {

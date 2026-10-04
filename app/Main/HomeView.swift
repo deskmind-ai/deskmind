@@ -606,6 +606,10 @@ struct SetupCard: View {
     @Binding var expanded: Bool
     @Environment(\.lang) private var lang
 
+    /// The required permissions and the helper: step 1's count.
+    private var grantsTotal: Int { 1 + Grant.allCases.filter(\.required).count }
+    private var grantsDone: Int { (model.helperReady ? 1 : 0) + Grant.allCases.filter { $0.required && model.granted($0) }.count }
+
     var body: some View {
         VStack(spacing: 0) {
             if model.requiredDone {
@@ -623,6 +627,15 @@ struct SetupCard: View {
                 if expanded { Divider().overlay(Brand.line) }
             }
             if expanded || !model.requiredDone {
+                // Three steps, each with one thing to do: the permissions and the download run side by side (the
+                // download does not wait for the permissions), then the first task.
+                if !model.requiredDone {
+                    Text(L("The first setup takes about 8 minutes. The models download in the background while you allow the permissions.", lang: lang))
+                        .font(.system(size: 12)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12).padding(.bottom, 2)
+                }
+                SetupStep(n: 1, title: L("Allow DeskMind to work this Mac", lang: lang),
+                          progress: "\(grantsDone)/\(grantsTotal)", done: model.helperReady && grantsDone == grantsTotal)
                 PermissionRow(symbol: "person.badge.clock", title: L("Background helper", lang: lang),
                               subtitle: model.helperReady
                                   ? L("DeskMind Hands is standing by. Restarting it won't close this window.", lang: lang)
@@ -631,10 +644,6 @@ struct SetupCard: View {
                               done: model.helperReady, actionTitle: L("Launch", lang: lang)) {
                     model.register()
                 }
-                Divider().overlay(Brand.line)
-                BrainRow()
-                Divider().overlay(Brand.line)
-                EyesRow()
                 ForEach(Grant.allCases) { g in
                     Divider().overlay(Brand.line)
                     PermissionRow(symbol: g.symbol, title: g.title(lang), subtitle: g.subtitle(lang),
@@ -642,6 +651,19 @@ struct SetupCard: View {
                         .disabled(!model.helperReady)
                         .opacity(model.helperReady ? 1 : 0.45)
                 }
+                SetupStep(n: 2, title: L("Download the local models", lang: lang),
+                          progress: model.status["brain"] as? String == "ready" ? L("Ready", lang: lang) : L("in the background", lang: lang),
+                          done: model.status["brain"] as? String == "ready")
+                BrainRow()
+                Divider().overlay(Brand.line)
+                EyesRow()
+                SetupStep(n: 3, title: L("Try your first task", lang: lang),
+                          progress: model.requiredDone ? L("Ready", lang: lang) : L("unlocks when 1 and 2 are done", lang: lang),
+                          done: false, active: model.requiredDone)
+                Text(model.requiredDone ? L("Pick one of the examples above, or type your own.", lang: lang)
+                                        : L("The examples above start working as soon as the first two steps are done.", lang: lang))
+                    .font(.system(size: 12)).foregroundStyle(model.requiredDone ? Brand.ink : Brand.sage)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 34).padding(.bottom, 12)
             }
         }
         .padding(.horizontal, 18).padding(.vertical, 4)
@@ -749,5 +771,34 @@ struct EyesButton: View {
                 .buttonStyle(InkButtonStyle(prominent: false))
                 .disabled(d.phase == .verifying)
         }
+    }
+}
+
+/// A step of the first setup: its number (a check once done), what it is, how far it has got.
+struct SetupStep: View {
+    let n: Int
+    let title: String
+    let progress: String
+    let done: Bool
+    /// Its turn has come (the first task, once the first two steps are done): the orange ring.
+    var active = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(done ? Brand.ink : Color.clear).frame(width: 22, height: 22)
+                Circle().strokeBorder(active ? Brand.dot : Brand.ink, lineWidth: done ? 0 : 1.5).frame(width: 22, height: 22)
+                if done {
+                    Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Brand.paper)
+                } else {
+                    Text("\(n)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(active ? Brand.dot : Brand.ink)
+                }
+            }
+            Text(title).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
+            Spacer()
+            Text(progress).font(.system(size: 11)).foregroundStyle(Brand.sage)
+        }
+        .padding(.top, 14).padding(.bottom, 6)
+        .accessibilityElement(children: .combine)
     }
 }

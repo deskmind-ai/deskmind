@@ -694,7 +694,8 @@ enum Runner {
         try? inPipe.fileHandleForWriting.close()
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
         // Before the clean-up closes the run's windows: how it ended, for a moment, on its last picture.
-        LiveCard.finish(Runner.stopRequested ? .stopped : freeState == "completed" ? .done : .failed)
+        LiveCard.finish(Runner.stopRequested ? .stopped : freeState == "completed" ? .done : .failed,
+                        why: LiveView.endingNote(state: freeState, failure: freeFailure))
         cleanUp(quitTextEdit: !textEditWasRunning)
         pruneRuns(keep: 10)
         current = nil
