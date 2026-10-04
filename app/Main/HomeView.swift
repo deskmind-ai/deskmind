@@ -641,7 +641,7 @@ struct SetupCard: View {
                 // Three steps, each with one thing to do: the permissions and the download run side by side (the
                 // download does not wait for the permissions), then the first task.
                 if !model.requiredDone {
-                    Text(L("The first setup takes about 8 minutes. Start the model download first: you can allow the permissions while it runs.", lang: lang))
+                    Text(L("Most of the first setup is the model download: start it first, and allow the permissions while it runs.", lang: lang))
                         .font(.system(size: 12)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12).padding(.bottom, 2)
                 }

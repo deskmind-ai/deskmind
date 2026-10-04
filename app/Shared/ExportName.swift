@@ -14,7 +14,8 @@ enum ExportName {
     /// usually to the minute, so two exports within a minute, or two runs of the same task, would otherwise collide.
     static func unique(dir: URL, stamp: String, title: String, ext: String,
                        exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL {
-        let base = "\(stamp) \(Self.title(title))"
+        let t = Self.title(title)
+        let base = t.isEmpty ? stamp : "\(stamp) \(t)"
         var url = dir.appendingPathComponent("\(base).\(ext)")
         var n = 2
         while exists(url) { url = dir.appendingPathComponent("\(base) \(n).\(ext)"); n += 1 }

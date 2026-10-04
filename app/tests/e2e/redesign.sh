@@ -9,8 +9,8 @@ OUT="${1:-$(mktemp -d -t deskmind-redesign)}"
 mkdir -p "$OUT"
 BIN="$OUT/RedesignE2E"
 swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$BIN" \
-  Shared/L10n.swift Shared/ExportName.swift Shared/XiaoFangMotion.swift Main/Brand.swift Main/Listening.swift \
-  Main/ReplayGIF.swift tests/e2e/RedesignE2E.swift
+  Shared/L10n.swift Shared/ExportName.swift Shared/XiaoFangMotion.swift Shared/MarkPath.swift Shared/ReplayPlan.swift \
+  Main/Brand.swift Main/Listening.swift Main/ReplayGIF.swift tests/e2e/RedesignE2E.swift
 status=0
 "$BIN" "$OUT" || status=$?
 echo "pictures and GIFs: $OUT"

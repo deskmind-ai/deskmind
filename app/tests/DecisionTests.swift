@@ -211,6 +211,9 @@ enum DecisionTests {
         setupStepsTests()
         exportNameTests()
         xiaoFangMotionTests()
+        askFlowTests()
+        replayPlanTests()
+        markPathTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -243,7 +246,7 @@ enum DecisionTests {
         check(LV.endingNote(state: "errored", failure: "crash") == "It stopped on an error", "an error")
         check(LV.endingNote(state: "gave_up", failure: "") != nil, "gave up")
         check(LV.endingNote(state: "", failure: "") == nil, "no summary: nothing more than Didn't finish")
-        for k in ["completed", "gave_up", "budget_exhausted", "errored"] {
+        for k in ["gave_up", "budget_exhausted", "errored"] {
             if let key = LV.endingNote(state: k, failure: k == "errored" ? "no_progress_loop" : "") {
                 check(L(key, lang: .zhHans) != key, "zh for \(key)")
             }
@@ -420,7 +423,8 @@ enum DecisionTests {
                     "about 5.3 GB — press Download", "paused", "checking the files", "didn't finish — try again below", "loading",
                     "unlocks when 1 and 2 are done", "Pick one of the examples above, or type your own.",
                     "The examples above start working as soon as the first two steps are done.",
-                    "The first setup takes about 8 minutes. Start the model download first: you can allow the permissions while it runs."] {
+                    "Most of the first setup is the model download: start it first, and allow the permissions while it runs.", "Making the GIF…",
+                    "Answer it in the card in the corner of the screen."] {
             check(L(key, lang: .zhHans) != key, "zh for “\(key)”")
         }
     }
@@ -442,6 +446,8 @@ enum DecisionTests {
                                       exists: { taken.contains($0.lastPathComponent) })
         check(third.lastPathComponent == "10-4-26 14.05 Open Music 3.gif", "and “ 3”")
         check(third.deletingLastPathComponent().path == dir.path, "in the folder asked for")
+        let untitled = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: " / ", ext: "gif", exists: { _ in false })
+        check(untitled.lastPathComponent == "10-4-26 14.05.gif", "no title: the stamp alone, no trailing space")
     }
 
     /// 小方 listening (Shared/XiaoFangMotion.swift).
@@ -460,12 +466,66 @@ enum DecisionTests {
         check(X.sway.count == 4 && X.sway.last?.angle == 0 && X.sway.map(\.angle).map(abs).max() == 3, "one ±3° sway, back to upright")
         check(abs(X.sway.map(\.seconds).reduce(0, +) - 0.64) < 0.001, "the sway takes 640 ms (the design's spec)")
         check(X.blinkAfter == 1.2 && X.dozeAfter == 8, "blink after 1.2 s, doze after 8 s")
+        check(X.typed(old: "Ope", new: "Open"), "a key: typing")
+        check(X.typed(old: "Open", new: "Ope"), "a delete: typing")
+        check(X.typed(old: "你", new: "你好"), "an input-method word: typing")
+        check(!X.typed(old: "", new: "Open NetEase Cloud Music and play it"), "an example put in: not typing (no sway)")
+        check(!X.typed(old: "Open NetEase Cloud Music", new: ""), "cleared after Start: not typing")
         // The dot: 156, 155 of the 200-wide mark, scaled by the drawn width.
         let d = X.dot(in: CGRect(x: 100, y: 40, width: 76, height: 82))
         check(abs(d.x - (100 + 156 * 0.38)) < 0.001 && abs(d.y - (40 + 155 * 0.38)) < 0.001, "the dot's centre: \(d)")
         // SwiftUI global (the window's, top-left) to window base (bottom-left): only y flips, x stays.
         let b = X.windowBase(CGPoint(x: 50, y: 132), contentHeight: 300)
         check(b == CGPoint(x: 50, y: 168), "window base: \(b)")
+    }
+
+    /// What the window and the island do when the run asks and is answered (Shared/AskFlow.swift).
+    static func askFlowTests() {
+        typealias A = AskFlow
+        let card = A.asked(inCard: true, approval: false, appActive: false, userTyping: true)
+        check(card.needsYou == true && !card.comeBack && !card.notify && card.remind, "in the card: needs you, window stays, a reminder later")
+        check(card.say == "Needs you — answer in the card", "the island says where to answer")
+        let away = A.asked(inCard: false, approval: false, appActive: false, userTyping: false)
+        check(away.comeBack && away.activate && away.notify && !away.remind, "in the window, DeskMind behind: it comes back active, a notification")
+        let typing = A.asked(inCard: false, approval: true, appActive: true, userTyping: true)
+        check(typing.comeBack && !typing.activate && typing.notify, "the user typing elsewhere: back, not key (their keys stay theirs)")
+        check(typing.say == "Waiting for your approval in DeskMind", "an approval says so")
+        let front = A.asked(inCard: false, approval: false, appActive: true, userTyping: false)
+        check(front.activate && !front.notify && front.say == "Waiting for your answer in DeskMind", "DeskMind in front: no notification")
+        for (name, fx) in [("answered in the window", A.answeredInWindow), ("answered in the card", A.answeredInCard), ("a step", A.stepped)] {
+            check(fx.needsYou == false && fx.cancelReminder, "\(name): needs-you off, the reminder cancelled")
+        }
+        check(A.answeredInWindow.say == "Got your answer. Carrying on…" && A.answeredInCard.say == "Answered — carrying on", "each answer says so")
+        check(A.typeInWindow.comeBack && A.typeInWindow.activate && A.typeInWindow.needsYou == nil && !A.typeInWindow.cancelReminder,
+              "Neither — let me type it: the window, active; still waiting")
+        check(A.reminderAfter == 20, "the reminder after 20 s")
+        for key in [card.say, away.say, typing.say, front.say, A.answeredInWindow.say, A.answeredInCard.say].compactMap({ $0 }) {
+            check(L(key, lang: .zhHans) != key, "zh for “\(key)”")
+        }
+    }
+
+    /// Which steps a replay and its GIF show (Shared/ReplayPlan.swift).
+    static func replayPlanTests() {
+        let steps = (1...20).map { (n: $0, shot: $0 == 3 ? "" : "/shots/\($0).png", words: "step \($0)") }
+        let gone: Set<String> = ["/shots/5.png"]
+        let frames = ReplayPlan.frames(steps, exists: { !gone.contains($0) })
+        check(frames.count == 18 && !frames.contains { $0.n == 3 || $0.n == 5 }, "no screenshot, or deleted: left out (\(frames.count))")
+        check(frames.map(\.n) == frames.map(\.n).sorted() && frames.first?.words == "step 1", "in order, with their words")
+        let gif = ReplayPlan.gifFrames(frames)
+        check(gif.count == 16 && gif.first?.n == 4 && gif.last?.n == 20, "the GIF: the last 16 steps")
+        check(ReplayPlan.gifFrames(Array(frames.prefix(4))).count == 4, "fewer than 16: all of them")
+        check(ReplayPlan.frames(steps, exists: { _ in false }).isEmpty, "\"Clear all\": nothing to replay (no buttons)")
+    }
+
+    /// The brand mark's path commands (Shared/MarkPath.swift).
+    static func markPathTests() {
+        check(MarkPath.cgPath("M0 0H10V5H0Z").boundingBoxOfPath == CGRect(x: 0, y: 0, width: 10, height: 5), "M, H, V, Z: a 10 × 5 box")
+        let q = MarkPath.cgPath("M0 0Q10 10 20 0").boundingBoxOfPath
+        check(abs(q.width - 20) < 0.01 && abs(q.height - 5) < 0.01, "Q: a quadratic curve peaks halfway (\(q))")
+        let head = MarkPath.cgPath("M45 28H153Q166 28 166 41V127H147V65H53V104H34V41Q34 28 45 28Z").boundingBoxOfPath
+        check(head == CGRect(x: 34, y: 28, width: 132, height: 99), "小方's frame: 34…166 × 28…127 (\(head))")
+        check(MarkPath.cgPath("M1,2 H3").currentPoint == CGPoint(x: 3, y: 2), "commas as separators")
+        check(MarkPath.cgPath("").isEmpty, "empty")
     }
 
     static func issueReportTests() {

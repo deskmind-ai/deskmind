@@ -8,8 +8,7 @@ import SwiftUI
 enum Replay {
     /// The frames of a run: the steps that kept a screenshot that is still on disk ("Clear all" deletes them).
     static func frames(_ steps: [RunStep]) -> [ReplayFrame] {
-        steps.filter { !$0.shot.isEmpty && FileManager.default.fileExists(atPath: $0.shot) }
-            .map { ReplayFrame(n: $0.n, image: $0.shot, words: $0.human) }
+        ReplayPlan.frames(steps.map { (n: $0.n, shot: $0.shot, words: $0.human) })
     }
 }
 

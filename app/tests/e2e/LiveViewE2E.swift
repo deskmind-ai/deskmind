@@ -141,7 +141,7 @@ enum LiveViewE2E {
         let screen = onMain { NSScreen.screens[0].frame }   // the main display: top-left global = its own
         // The card's remembered corner and size start from the defaults (this test's own defaults domain).
         UserDefaults.standard.removeObject(forKey: "liveView.corner"); UserDefaults.standard.removeObject(forKey: "liveView.large")
-        UserDefaults.standard.removeObject(forKey: CardView.hintKey)
+        UserDefaults.standard.removeObject(forKey: LiveView.hintKey)
         let home = CGRect(x: 160, y: 120, width: 640, height: 420)
         setBounds(home)
         var stopped = false
@@ -341,6 +341,21 @@ enum LiveViewE2E {
             check(answered?.0 == pick, "\(q) sent after its 3 s")
         }
 
+        // 7d. Collapsed by the user when a question comes: opened up for it, folded back after.
+        onMain { LiveCard.press("collapse") }
+        s = waitFor { rect($0, "frame").height == LiveView.pill.height }
+        check(rect(s, "frame").size == LiveView.pill, "collapsed: the capsule")
+        answered = nil
+        LiveCard.ask(question: "Which order?", options: ["R-2291", "R-3307"], approval: false)
+        s = waitFor { ($0["asking"] as? Bool) == true && rect($0, "frame").width == LiveView.askWidth }
+        check(rect(s, "frame").width == LiveView.askWidth, "a question opens the capsule up")
+        onMain { LiveCard.press("option1") }
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.4)
+        s = waitFor { rect($0, "frame").height == LiveView.pill.height }
+        check(answered?.0 == "R-3307" && rect(s, "frame").size == LiveView.pill, "answered: back to the capsule the user chose")
+        onMain { LiveCard.press("collapse") }
+        waitFor { rect($0, "frame").height > LiveView.pill.height }
+
         // 8. The window minimized: the last picture, dimmed, with a note; back when it is.
         osa("tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"\(doc)\") to true")
         s = waitFor(6) { ($0["window_hidden"] as? Bool) == true && !($0["note"] as? String ?? "").isEmpty }
@@ -442,8 +457,11 @@ enum LiveViewE2E {
         onMain { LiveCard.press("option0") }
         waitFor { ($0["ask_picked"] as? String) != nil }
         onMain { LiveCard.finish(.done) }
+        s = waitFor { ($0["asking"] as? Bool) == false }
+        check(s["asking"] as? Bool == false && s["status"] as? String == "Done", "the run ended: the question goes, the card says Done")
         Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.4)
         check(oldAnswer == nil, "the run ended: its pick is dropped")
+        check((snap()["status"] as? String ?? "Done") == "Done", "and its countdown never put it back to Working")
         onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], onStop: {}, onAnswer: { r, _ in oldAnswer = r; return true }) }
         LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
         waitFor(6) { ($0["visible"] as? Bool) == true }
@@ -451,7 +469,9 @@ enum LiveViewE2E {
         waitFor { ($0["asking"] as? Bool) == true }
         onMain { LiveCard.press("option0") }
         waitFor { ($0["ask_picked"] as? String) != nil }
-        onMain { LiveCard.finish(.failed) }
+        onMain { LiveCard.finish(.failed, why: LiveView.endingNote(state: "gave_up", failure: "")) }
+        s = waitFor { ($0["asking"] as? Bool) == false && !($0["note"] as? String ?? "").isEmpty }
+        check(s["asking"] as? Bool == false && !(s["note"] as? String ?? "").isEmpty, "ended while asking: the reason shows, not the question")
         onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], onStop: {}, onAnswer: { r, _ in newAnswer = r; return true }) }
         LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
         LiveCard.ask(question: "The new run's question?", options: ["new A", "new B"], approval: false)

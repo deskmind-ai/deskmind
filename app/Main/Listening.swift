@@ -96,7 +96,8 @@ struct ListeningXiaoFang: View {
     private func typed(old: String, new: String) {
         pauseWork?.cancel(); dozeWork?.cancel()
         if new.isEmpty { typing = false; dozing = true; return }
-        let burstBegins = !typing
+        // A burst of typing begins with one sway; text put in at once (an example, a paste) only wakes it.
+        let burstBegins = !typing && XiaoFangMotion.typed(old: old, new: new)
         typing = true; dozing = false
         if burstBegins && !reduceMotion {
             // One sway as a burst of typing begins: like a nod, never during the burst.
@@ -118,26 +119,8 @@ struct ListeningXiaoFang: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + XiaoFangMotion.dozeAfter, execute: doze)
     }
 
-    /// The few SVG path commands the brand mark uses (M, H, V, Q, Z), absolute.
-    static func path(_ d: String) -> Path {
-        var p = Path()
-        let scanner = Scanner(string: d)
-        scanner.charactersToBeSkipped = CharacterSet(charactersIn: " ,")
-        var cur = CGPoint.zero
-        func num() -> CGFloat { CGFloat(scanner.scanDouble() ?? 0) }
-        while !scanner.isAtEnd {
-            guard let c = scanner.scanCharacter() else { break }
-            switch c {
-            case "M": cur = CGPoint(x: num(), y: num()); p.move(to: cur)
-            case "H": cur = CGPoint(x: num(), y: cur.y); p.addLine(to: cur)
-            case "V": cur = CGPoint(x: cur.x, y: num()); p.addLine(to: cur)
-            case "Q": let c1 = CGPoint(x: num(), y: num()); cur = CGPoint(x: num(), y: num()); p.addQuadCurve(to: cur, control: c1)
-            case "Z": p.closeSubpath()
-            default: break
-            }
-        }
-        return p
-    }
+    /// A path of the brand mark (Shared/MarkPath.swift).
+    static func path(_ d: String) -> Path { Path(MarkPath.cgPath(d)) }
 }
 
 /// The orange dot flying from 小方 into the notch when a task starts (about 450 ms, over everything, taking no clicks).

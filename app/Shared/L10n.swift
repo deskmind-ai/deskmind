@@ -297,9 +297,11 @@ enum L10n {
         "Got stuck: the same step kept failing": "卡住了：同一步一直失败",
         "It stopped on an error": "出错停下了",
         "Double-click to enlarge · drag to a corner": "双击放大 · 拖到任一角落",
+        "Answer it in the card in the corner of the screen.": "请在屏幕角落的卡片里回答。",
         // The first setup in three steps (Main/HomeView.swift SetupCard).
-        "The first setup takes about 8 minutes. Start the model download first: you can allow the permissions while it runs.":
-            "第一次准备大约 8 分钟。建议先开始下载模型，下载的同时去完成授权。",
+        "Most of the first setup is the model download: start it first, and allow the permissions while it runs.":
+            "第一次准备的大部分时间花在下载模型上：先开始下载，下载的同时去完成授权。",
+        "Making the GIF…": "正在生成动图…",
         "Allow DeskMind to work this Mac": "允许 DeskMind 操作这台 Mac",
         "Download the local models": "下载本地模型",
         "checking the files": "正在校验文件",

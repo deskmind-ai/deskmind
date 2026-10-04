@@ -5,23 +5,15 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 
-/// A step as replayed: its screenshot and what it did, in words.
-struct ReplayFrame: Identifiable {
-    let id = UUID()
-    let n: Int
-    let image: String
-    let words: String
-}
-
 enum ReplayGIF {
     static let moviesDir = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("DeskMind", isDirectory: true)
 
     /// The run as a GIF in Movies › DeskMind: up to 16 steps (the last ones when there are more), 720 px wide, each
     /// with its step and words in a band at the bottom; the first frame names the task. Returns the file, or nil.
-    @MainActor
+    /// Decodes and draws every frame: call it off the main thread (it draws into its own bitmaps).
     static func exportGIF(title: String, frames all: [ReplayFrame], lang: ResolvedLang, dir: URL = moviesDir) -> URL? {
-        let frames = Array(all.suffix(16))
+        let frames = ReplayPlan.gifFrames(all)
         guard !frames.isEmpty else { return nil }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .short)
@@ -53,7 +45,6 @@ enum ReplayGIF {
     /// One frame: the screenshot fitted above a 48 px ink band with the words (or, for the cover, paper with the
     /// task's name). Drawn at one pixel a point -- an NSImage's lockFocus would draw at the screen's scale, a GIF twice
     /// as wide and four times the size.
-    @MainActor
     private static func render(size: CGSize, image: NSImage?, band: String, sub: String?) -> CGImage? {
         guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
                                          bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,

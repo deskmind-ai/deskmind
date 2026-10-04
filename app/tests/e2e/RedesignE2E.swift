@@ -102,7 +102,7 @@ enum RedesignE2E {
         let title = "Open Music / play: the live version"
 
         // 1. Three exports of the same run within the minute: three files, none over another.
-        let urls = (0..<3).compactMap { _ in onMain { MainActor.assumeIsolated { ReplayGIF.exportGIF(title: title, frames: all, lang: .en, dir: dir) } } }
+        let urls = (0..<3).compactMap { _ in ReplayGIF.exportGIF(title: title, frames: all, lang: .en, dir: dir) }   // off the main thread, as the app does
         check(urls.count == 3, "three exports made: \(urls.count)")
         check(Set(urls.map(\.path)).count == 3, "three different files")
         let names = urls.map(\.lastPathComponent)
@@ -124,9 +124,9 @@ enum RedesignE2E {
         // 3. A step whose screenshot is gone is left out; no step with a screenshot: no GIF.
         var some = Array(all.prefix(3))
         some.append(ReplayFrame(n: 4, image: frames.appendingPathComponent("gone.png").path, words: "gone"))
-        let partial = onMain { MainActor.assumeIsolated { ReplayGIF.exportGIF(title: "partial", frames: some, lang: .en, dir: dir) } }
+        let partial = ReplayGIF.exportGIF(title: "partial", frames: some, lang: .en, dir: dir)
         check(partial.map { gifFrames($0).count } == 4, "a missing screenshot is skipped: cover + 3")
-        check(onMain { MainActor.assumeIsolated { ReplayGIF.exportGIF(title: "none", frames: [], lang: .en, dir: dir) } } == nil, "no frames: no GIF")
+        check(ReplayGIF.exportGIF(title: "none", frames: [], lang: .en, dir: dir) == nil, "no frames: no GIF")
     }
 
     // MARK: 小方

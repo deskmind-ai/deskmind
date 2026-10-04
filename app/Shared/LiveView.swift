@@ -14,6 +14,8 @@ import Foundation
 enum LiveView {
     /// The setting (View menu), on by default: the run request carries it as "live_view".
     static let enabledKey = "liveView.enabled"
+    /// Set once the card's one-time hint (double-click, drag) has been shown.
+    static let hintKey = "liveView.hintSeen"
 
     /// The picture fits in this box, in points: the usual card, and the larger one (expand, or a double click).
     static let maxPicture = CGSize(width: 360, height: 240)

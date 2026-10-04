@@ -226,6 +226,7 @@ final class RunModel: ObservableObject {
     /// The window does not come back by itself: the result is in the island, whose "Show Details" brings it.
     private func wrapUp() {
         setStage(nil)
+        reminder?.cancel(); reminder = nil
         if recording {
             recording = false
             RunRecorder.shared.stop { [weak self] url in
@@ -282,9 +283,34 @@ final class RunModel: ObservableObject {
     /// helper. The card goes away at once; if the helper had nothing waiting, the next step says what happened.
     func answer(_ reply: String, approve: Bool) {
         ask = nil
-        let lang = ResolvedLang.current
-        if real { RunOverlay.shared.say(L("Got your answer. Carrying on…", lang: lang)); MainWindow.stepAside() }
+        apply(AskFlow.answeredInWindow, question: nil)
+        if real { MainWindow.stepAside() }
         Task.detached { _ = DeskMindIPC.request(["op": "answer", "reply": reply, "approve": approve]) }
+    }
+
+    /// A reminder for a question in the live view that waits (AskFlow.reminderAfter).
+    private var reminder: DispatchWorkItem?
+
+    /// Carry out what AskFlow decided for a question event (island, window, notifications), for a real run.
+    private func apply(_ fx: AskFlow.Effects, question q: PendingAsk?) {
+        guard real else { return }
+        let lang = ResolvedLang.current
+        if fx.cancelReminder { reminder?.cancel(); reminder = nil }
+        if let on = fx.needsYou { RunOverlay.shared.setNeedsYou(on) }
+        if let say = fx.say { RunOverlay.shared.say(L(say, lang: lang)) }
+        if fx.comeBack { MainWindow.comeBack(activate: fx.activate) }
+        guard let q else { return }
+        let title = q.approval ? L("DeskMind needs your approval", lang: lang) : L("DeskMind has a question", lang: lang)
+        if fx.notify { RunOverlay.notify(title: title, body: q.question) }
+        if fx.remind {
+            reminder?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.ask != nil else { return }
+                RunOverlay.notify(title: title, body: L("Answer it in the card in the corner of the screen.", lang: lang))
+            }
+            reminder = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + AskFlow.reminderAfter, execute: work)
+        }
     }
 
     /// Show a past run as it ended (from the recent runs list): its steps, answer and changes, nothing running.
@@ -350,36 +376,20 @@ final class RunModel: ObservableObject {
             let q = PendingAsk(question: e["question"] as? String ?? "", approval: e["approval"] as? Bool ?? false,
                                options: e["options"] as? [String] ?? [])
             withAnimation(.easeOut(duration: 0.2)) { ask = q }
-            let lang = ResolvedLang.current
-            if real { RunOverlay.shared.setNeedsYou(true) }
-            // Shown in the live view, it is answered there: the window stays where it is, the island only says so.
-            if e["in_card"] as? Bool == true {
-                if real { RunOverlay.shared.say(L("Needs you — answer in the card", lang: lang)) }
-                return
-            }
-            // The answer is typed in DeskMind's window: it comes back for it. Not as the key window while the user is
-            // typing in another app -- their next keys, Return included, would land in the answer and send it.
-            let typing = MainWindow.userTypedRecently()
-            if real { MainWindow.comeBack(activate: !typing) }
-            if real {
-                RunOverlay.shared.say(q.approval ? L("Waiting for your approval in DeskMind", lang: lang)
-                                                 : L("Waiting for your answer in DeskMind", lang: lang))
-            }
-            if !NSApp.isActive || typing {
-                RunOverlay.notify(title: q.approval ? L("DeskMind needs your approval", lang: lang)
-                                                    : L("DeskMind has a question", lang: lang), body: q.question)
-            }
+            // In the live view it is answered there; otherwise in this window (AskFlow.asked says what comes back).
+            apply(AskFlow.asked(inCard: e["in_card"] as? Bool == true, approval: q.approval, appActive: NSApp.isActive,
+                                userTyping: MainWindow.userTypedRecently()), question: q)
         case "answered":
             // Answered in the live view: this window's question card goes.
             withAnimation(.easeOut(duration: 0.2)) { ask = nil }
-            if real { RunOverlay.shared.setNeedsYou(false); RunOverlay.shared.say(L("Answered — carrying on", lang: ResolvedLang.current)) }
+            apply(AskFlow.answeredInCard, question: nil)
         case "answer_in_window":
             // The user chose to type an answer: the window comes back, active (they asked for it), with the question.
-            MainWindow.comeBack(activate: true)
+            apply(AskFlow.typeInWindow, question: nil)
         case "step":
             let id = e["task"] as? String ?? "?"
             ask = nil   // a step after a question means it was answered (or timed out)
-            if real { RunOverlay.shared.setNeedsYou(false) }
+            apply(AskFlow.stepped, question: nil)
             if stage != nil { setStage(nil) }
             guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
             let step = RunStep(n: e["n"] as? Int ?? tasks[i].steps.count + 1,

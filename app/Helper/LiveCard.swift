@@ -190,7 +190,8 @@ final class LiveCard: NSObject {
     static func ask(question: String, options: [String], approval: Bool) -> Bool {
         guard let card = current else { return false }
         let kind = LiveView.askKind(options: options, approval: approval)
-        card.set { c in c.runStatus = .waitingForUser; c.collapsed = false }
+        // Opened up while it asks (refresh), without forgetting that the user had collapsed it: it folds back after.
+        card.set { c in c.runStatus = .waitingForUser }
         DispatchQueue.main.async {
             card.cancelPending()
             card.asking = Ask(question: question, options: LiveView.askOptions(options), kind: kind, picked: nil)
@@ -262,7 +263,8 @@ final class LiveCard: NSObject {
         let detail = status == .working && step > 0 ? L("Step %d", step, lang: lang) : L(LiveView.word(status), lang: lang)
         v.title.stringValue = shownApp.isEmpty ? detail : "\(shownApp) · \(detail)"
         v.setStatus(status)
-        v.toolTip = status == .waitingForUser ? L("Click to answer in DeskMind", lang: lang) : nil
+        // A question in the card is answered with its buttons; a click on the card opens DeskMind only otherwise.
+        v.toolTip = status == .waitingForUser && asking == nil ? L("Click to answer in DeskMind", lang: lang) : nil
 
         let screen = targetScreen()
         let visible = screen.visibleFrame
@@ -586,7 +588,7 @@ extension LiveCard {
 
 /// Header (小方 and its status dot, title, buttons on hover), picture with the agent's cursor, the action line; or the
 /// capsule.
-final class CardView: NSView {
+private final class CardView: NSView {
     weak var card: LiveCard?
     let picture = CALayer()
     let line = NSTextField(labelWithString: "")
@@ -609,7 +611,6 @@ final class CardView: NSView {
     var noteText: String { note.isHidden ? "" : note.stringValue }
     /// The one-time hint the first time the pointer rests on a card: what double-click and drag do.
     private let hint = NSTextField(labelWithString: "")
-    static let hintKey = "liveView.hintSeen"
     var hintText: String { hint.isHidden || hint.alphaValue == 0 ? "" : hint.stringValue }
     private let ripple = CALayer()
     private var buttons: [NSButton] = []
@@ -624,6 +625,15 @@ final class CardView: NSView {
     static let mist = NSColor(srgbRed: 0xB2 / 255.0, green: 0xBB / 255.0, blue: 0xAF / 255.0, alpha: 1)
     static let paper = NSColor(srgbRed: 0xF4 / 255.0, green: 0xF1 / 255.0, blue: 0xEA / 255.0, alpha: 1)
     private static let chrome = NSColor(srgbRed: 0x26 / 255.0, green: 0x2B / 255.0, blue: 0x28 / 255.0, alpha: 0.96)
+    static let ink = NSColor(srgbRed: 0x26 / 255.0, green: 0x2B / 255.0, blue: 0x28 / 255.0, alpha: 1)
+    // The question's colours on the dark card: a button's fill and border, the progress track, the quiet text, and
+    // the links (orange-tinted for Neither and Undo, sage for Stop).
+    static let buttonFill = NSColor(srgbRed: 0x31 / 255.0, green: 0x36 / 255.0, blue: 0x32 / 255.0, alpha: 1)
+    static let buttonBorder = NSColor(srgbRed: 0x4A / 255.0, green: 0x52 / 255.0, blue: 0x4B / 255.0, alpha: 1)
+    static let track = NSColor(srgbRed: 0x3A / 255.0, green: 0x3F / 255.0, blue: 0x3B / 255.0, alpha: 1)
+    static let quiet = NSColor(srgbRed: 0x8C / 255.0, green: 0x95 / 255.0, blue: 0x8C / 255.0, alpha: 1)
+    static let warmLink = NSColor(srgbRed: 0xF2 / 255.0, green: 0xC9 / 255.0, blue: 0xBC / 255.0, alpha: 1)
+    static let sageLink = NSColor(srgbRed: 0xB9 / 255.0, green: 0xC1 / 255.0, blue: 0xB8 / 255.0, alpha: 1)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -884,7 +894,7 @@ final class CardView: NSView {
     override func mouseExited(with event: NSEvent) { hover(false) }
     private func hover(_ on: Bool) {
         hovering = on
-        if on, !collapsed, ask.isHidden, !UserDefaults.standard.bool(forKey: Self.hintKey) { showHint() }
+        if on, !collapsed, ask.isHidden, !UserDefaults.standard.bool(forKey: LiveView.hintKey) { showHint() }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.15
             for b in buttons where !b.isHidden { b.animator().alphaValue = on || collapsed ? 1 : 0 }
@@ -893,7 +903,7 @@ final class CardView: NSView {
 
     /// Once ever: what the card does beyond its buttons, over the bottom of the picture for 3 s.
     private func showHint() {
-        UserDefaults.standard.set(true, forKey: Self.hintKey)
+        UserDefaults.standard.set(true, forKey: LiveView.hintKey)
         hint.stringValue = L("Double-click to enlarge · drag to a corner", lang: ResolvedLang.current)
         let hw = min(bounds.width - 24, hint.intrinsicContentSize.width + 20)
         hint.frame = NSRect(x: (bounds.width - hw) / 2, y: picture.frame.minY + 8, width: hw, height: 18)
@@ -926,7 +936,7 @@ final class CardView: NSView {
 }
 
 /// A button that works on the first click in a panel that never becomes active.
-final class FirstMouseButton: NSButton {
+private final class FirstMouseButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -935,7 +945,7 @@ final class FirstMouseButton: NSButton {
 /// A question the run waits on: the question in words, then its options as buttons (or Allow / Don't for an
 /// approval, or a way to DeskMind's window for one that needs typing), "Neither" and "Stop", and a line that says the
 /// keyboard stays the user's. After a pick: what was picked, a countdown and Undo. The card never takes keyboard focus.
-final class AskView: NSView {
+private final class AskView: NSView {
     weak var card: LiveCard?
     private var current: LiveCard.Ask?
     private let question = NSTextField(wrappingLabelWithString: "")
@@ -964,7 +974,7 @@ final class AskView: NSView {
         question.textColor = CardView.paper
         question.maximumNumberOfLines = 4
         foot.font = .systemFont(ofSize: 11.5)
-        foot.textColor = NSColor(srgbRed: 0x8C / 255.0, green: 0x95 / 255.0, blue: 0x8C / 255.0, alpha: 1)
+        foot.textColor = CardView.quiet
         foot.maximumNumberOfLines = 2
         picked.font = .systemFont(ofSize: 14, weight: .semibold)
         picked.textColor = CardView.paper
@@ -973,7 +983,7 @@ final class AskView: NSView {
             b.isBordered = false; b.target = self; b.action = sel
         }
         progressTrack.wantsLayer = true
-        progressTrack.layer?.backgroundColor = NSColor(srgbRed: 0x3A / 255.0, green: 0x3F / 255.0, blue: 0x3B / 255.0, alpha: 1).cgColor
+        progressTrack.layer?.backgroundColor = CardView.track.cgColor
         progressTrack.layer?.cornerRadius = 1.5
         progress.backgroundColor = CardView.orange.cgColor
         progress.cornerRadius = 1.5
@@ -1007,9 +1017,9 @@ final class AskView: NSView {
             }
             options.forEach { addSubview($0) }
         }
-        other.attributedTitle = linkTitle(L("Neither — let me type it…", lang: lang), color: NSColor(srgbRed: 0xF2 / 255.0, green: 0xC9 / 255.0, blue: 0xBC / 255.0, alpha: 1))
-        stop.attributedTitle = linkTitle(L("Stop this task", lang: lang), color: NSColor(srgbRed: 0xB9 / 255.0, green: 0xC1 / 255.0, blue: 0xB8 / 255.0, alpha: 1))
-        undo.attributedTitle = linkTitle(L("Undo", lang: lang), color: NSColor(srgbRed: 0xF2 / 255.0, green: 0xC9 / 255.0, blue: 0xBC / 255.0, alpha: 1))
+        other.attributedTitle = linkTitle(L("Neither — let me type it…", lang: lang), color: CardView.warmLink)
+        stop.attributedTitle = linkTitle(L("Stop this task", lang: lang), color: CardView.sageLink)
+        undo.attributedTitle = linkTitle(L("Undo", lang: lang), color: CardView.warmLink)
         foot.stringValue = a.picked != nil ? L("It goes to DeskMind when the line runs out — Undo to change it.", lang: lang)
             : a.kind == .approve ? L("Covers this one step — it asks again next time.", lang: lang)
             : L("Pick one and it carries on — your keyboard stays yours.", lang: lang)
@@ -1035,8 +1045,8 @@ final class AskView: NSView {
         b.wantsLayer = true
         b.layer?.cornerRadius = 12
         b.layer?.borderWidth = 1
-        b.layer?.borderColor = NSColor(srgbRed: 0x4A / 255.0, green: 0x52 / 255.0, blue: 0x4B / 255.0, alpha: 1).cgColor
-        b.layer?.backgroundColor = NSColor(srgbRed: 0x31 / 255.0, green: 0x36 / 255.0, blue: 0x32 / 255.0, alpha: 1).cgColor
+        b.layer?.borderColor = CardView.buttonBorder.cgColor
+        b.layer?.backgroundColor = CardView.buttonFill.cgColor
         let title = NSMutableAttributedString(string: "   \(i + 1)   ", attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .bold), .foregroundColor: CardView.orange])
         title.append(NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: CardView.paper]))
         b.attributedTitle = title
@@ -1053,10 +1063,10 @@ final class AskView: NSView {
         b.isBordered = false
         b.wantsLayer = true
         b.layer?.cornerRadius = 12
-        b.layer?.backgroundColor = (primary ? CardView.paper : NSColor(srgbRed: 0x31 / 255.0, green: 0x36 / 255.0, blue: 0x32 / 255.0, alpha: 1)).cgColor
-        if !primary { b.layer?.borderWidth = 1; b.layer?.borderColor = NSColor(srgbRed: 0x4A / 255.0, green: 0x52 / 255.0, blue: 0x4B / 255.0, alpha: 1).cgColor }
+        b.layer?.backgroundColor = (primary ? CardView.paper : CardView.buttonFill).cgColor
+        if !primary { b.layer?.borderWidth = 1; b.layer?.borderColor = CardView.buttonBorder.cgColor }
         b.attributedTitle = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: primary ? .bold : .regular),
-                                                                         .foregroundColor: primary ? NSColor(srgbRed: 0x26 / 255.0, green: 0x2B / 255.0, blue: 0x28 / 255.0, alpha: 1) : CardView.paper])
+                                                                         .foregroundColor: primary ? CardView.ink : CardView.paper])
         return b
     }
 
@@ -1140,7 +1150,7 @@ final class AskView: NSView {
     @objc private func stopPressed() { card?.stopRun() }
     @objc private func undoPressed() { card?.undo() }
 
-    /// For the e2e test: press an option by its index (or "allow" / "dont"), or Undo.
+    /// For the e2e test: press a button by its index (an option, or Allow / Don't for an approval), or Undo.
     func press(option i: Int) { if i < options.count { optionPressed(options[i]) } }
     func pressUndo() { undoPressed() }
     var optionCount: Int { options.count }
