@@ -3,9 +3,14 @@
 // looking at -- and the island at the top says what it does, not what it looks like.
 //
 // It lives in the helper, which holds Screen Recording: the picture never crosses the socket. The window is
-// captured from its display with every other window left out and the stream cropped to the window (sourceRect), so
-// a window covered by others still shows whole. Built by leaving windows out, like the recorder (ScreenRecorder.
+// captured from its display with every other window left out and the capture cropped to the window (sourceRect),
+// so a window covered by others still shows whole. Built by leaving windows out, like the recorder (ScreenRecorder.
 // filter): a filter that names the window puts the purple "being shared" badge on it (macOS 26 and later).
+//
+// One picture at a time (SCScreenshotManager), about five a second, not a stream: while any SCStream runs, the
+// models' GPU work on this Mac took about 20 % longer (a fixed MLX load: 102 ms a round without, 121-125 ms with a
+// stream at 2 or 10 fps, at 1x or 2x; 102 ms with one-shot captures, even ten a second; macOS 27.2, M4 Pro) --
+// every step of the run would have waited for the card.
 //
 // The card:
 // - header: a status dot, the app, the step or the status; on hover, Larger/Smaller, Collapse and Stop;
@@ -33,7 +38,7 @@ import CoreMedia
 import QuartzCore
 import ScreenCaptureKit
 
-final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
+final class LiveCard: NSObject {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var shared: LiveCard?
     private static let cornerKey = "liveView.corner", largeKey = "liveView.large"
@@ -46,7 +51,8 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
     /// hands has looked at the screen at least once (see LiveView.pick).
     private var observedOnce = false
     private let bundles: [String]
-    private var stream: SCStream?
+    /// What to capture now (nil: nothing -- collapsed, no window, or the run has ended), and what it was made from.
+    private var target: (filter: SCContentFilter, config: SCStreamConfiguration)?
     private var shown: (window: Int, frame: CGRect, display: CGDirectDisplayID, drop: Set<Int>, pixels: CGSize)?
     private var watching = true
     /// Collapsed to the capsule: no capture. `autoCollapsed`: by the card itself, because the card would cover the
@@ -59,14 +65,11 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
     private var windowHidden = false
     private var step = 0
     private var hadPicture = false
-    /// How often the window is looked for (s), frames per second at most, and pixels per point of the picture.
-    /// Tunable without a rebuild (`defaults write ai.deskmind.hands liveView.poll 1.0`), for measuring what the card
-    /// costs the run.
+    /// How often the window is looked for (s), the pause between two pictures (s), and pixels per point of the
+    /// picture. Tunable without a rebuild (`defaults write ai.deskmind.hands liveView.interval 0.5`).
     private let poll = max(0.2, UserDefaults.standard.object(forKey: "liveView.poll") as? Double ?? 0.5)
-    private let fps = max(1, UserDefaults.standard.object(forKey: "liveView.fps") as? Int ?? 10)
+    private let interval = max(0.05, UserDefaults.standard.object(forKey: "liveView.interval") as? Double ?? 0.2)
     private let pixelScale = max(1, UserDefaults.standard.object(forKey: "liveView.scale") as? Double ?? 2)
-    /// Frames arrive here; the watch loop runs on its own thread.
-    private let frames = DispatchQueue(label: "ai.deskmind.livecard.frames", qos: .userInitiated)
 
     // MARK: main thread only
 
@@ -95,6 +98,7 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
         if let old { old.set { $0.watching = false }; old.stopCapture(); DispatchQueue.main.async { old.close() } }
         DispatchQueue.main.async { card.makePanel() }
         card.watch()
+        card.capture()
     }
 
     /// The run has ended. With how it ended, the card says so for a moment, its last picture frozen, then goes; with
@@ -343,55 +347,52 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
         state.lock(); defer { state.unlock() }
         guard watching, !collapsed, !autoCollapsed else { return }
         if let s = shown, s.window == id, s.frame == frame, s.display == display.displayID, s.drop == dropIDs,
-           s.pixels == pixels, stream != nil { return }
+           s.pixels == pixels, target != nil { return }
         let cfg = SCStreamConfiguration()
         cfg.sourceRect = LiveView.sourceRect(window: frame, display: display.frame)
         (cfg.width, cfg.height) = px
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))   // a glance, not a movie
         cfg.showsCursor = false      // the run never moves the pointer; the card draws where it acted
-        cfg.queueDepth = 3
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
         shown = (id, frame, display.displayID, dropIDs, pixels)
-        if let s = stream {
-            s.updateContentFilter(filter) { _ in }
-            s.updateConfiguration(cfg) { _ in }
-        } else {
-            let s = SCStream(filter: filter, configuration: cfg, delegate: self)
-            do { try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: frames) } catch { return }
-            stream = s
-            s.startCapture { err in if let err { NSLog("DeskMind Hands: live view: \(err.localizedDescription)") } }
-        }
+        target = (filter, cfg)
     }
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, let buf = sampleBuffer.imageBuffer,
-              let surface = CVPixelBufferGetIOSurface(buf)?.takeUnretainedValue() else { return }
-        // Only complete frames: an idle or blank one carries no new picture.
-        if let info = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
-           let raw = info[.status] as? Int, SCFrameStatus(rawValue: raw) != .complete { return }
-        let first = read { c -> Bool in let f = !c.hadPicture; c.hadPicture = true; return f }
-        DispatchQueue.main.async { [weak self] in
-            self?.view?.show(surface)
-            if first { self?.refresh() }
+    /// The pictures: one capture of the current target, then a pause, while the card lives (its own thread).
+    private func capture() {
+        Thread.detachNewThread { [weak self] in
+            var loggedFailure: SCContentFilter?
+            while let self, self.read({ $0.watching }) {
+                if let t = self.read({ $0.target }) {
+                    let done = DispatchSemaphore(value: 0)
+                    var image: CGImage?
+                    var failure: String?
+                    SCScreenshotManager.captureImage(contentFilter: t.filter, configuration: t.config) { img, err in
+                        image = img; failure = err?.localizedDescription
+                        done.signal()
+                    }
+                    _ = done.wait(timeout: .now() + 3)
+                    // A window that just left the screen fails until the next check retargets: said once, not five
+                    // times a second.
+                    if let failure, loggedFailure !== t.filter { loggedFailure = t.filter; NSLog("DeskMind Hands: live view: \(failure)") }
+                    // Still wanted (not stopped, collapsed or retargeted while it was taken)?
+                    if let image, self.read({ $0.target?.filter === t.filter && $0.watching }) {
+                        let first = self.read { c -> Bool in let f = !c.hadPicture; c.hadPicture = true; return f }
+                        DispatchQueue.main.async { [weak self] in
+                            self?.view?.show(image)
+                            if first { self?.refresh() }
+                        }
+                    }
+                }
+                Thread.sleep(forTimeInterval: self.interval)
+            }
         }
-    }
-
-    /// The system stopped the stream (the display went to sleep or away): started again at the next check.
-    func stream(_ stream: SCStream, didStopWithError error: any Error) {
-        state.lock(); defer { state.unlock() }
-        if self.stream === stream { self.stream = nil; self.shown = nil }
     }
 
     private func stopCapture() {
         state.lock()
-        let s = stream
-        stream = nil; shown = nil
+        target = nil; shown = nil
         if runStatus.isEnding { watching = false }
         state.unlock()
-        guard let s else { return }
-        let stopped = DispatchSemaphore(value: 0)
-        s.stopCapture { _ in stopped.signal() }
-        _ = stopped.wait(timeout: .now() + 5)
     }
 
     private static func content() -> SCShareableContent? {
@@ -412,7 +413,7 @@ extension LiveCard {
     static func snapshot() -> [String: Any] {
         guard let card = current else { return ["card": false] }
         let (status, collapsed, large, streaming, watching, hidden, auto) = card.read {
-            ($0.runStatus, $0.collapsed, $0.large, $0.stream != nil, $0.watching, $0.windowHidden, $0.autoCollapsed)
+            ($0.runStatus, $0.collapsed, $0.large, $0.target != nil, $0.watching, $0.windowHidden, $0.autoCollapsed)
         }
         var out: [String: Any] = ["card": true, "status": LiveView.word(status), "collapsed": collapsed, "large": large,
                                   "auto_collapsed": auto,
@@ -615,9 +616,9 @@ private final class CardView: NSView {
         if s.isEnding { cursor.opacity = 0 }
     }
 
-    func show(_ surface: IOSurface) {
+    func show(_ image: CGImage) {
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        picture.contents = surface
+        picture.contents = image
         CATransaction.commit()
     }
 

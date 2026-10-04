@@ -193,6 +193,10 @@ def main() -> int:
         "screenshots": len(shots), "screenshots_with_card": with_card,
         "helper_windows_after_end": len(left),
     }
+    if folder:
+        # The app closes what a run opened in its own runs folder only; this script's folder is not one of those.
+        subprocess.run(["osascript", "-e", f'tell application "TextEdit" to close (every document whose path contains "{folder}") saving no'],
+                       capture_output=True)
     (out / f"{a.case}-{'off' if a.off else 'on'}.json").write_text(json.dumps(report, indent=2, ensure_ascii=False))
     print(json.dumps(report, indent=2, ensure_ascii=False))
     ok = not with_card and not left and (a.off or bool(seen_card))
