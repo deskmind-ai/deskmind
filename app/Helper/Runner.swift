@@ -333,6 +333,27 @@ enum Runner {
         var mayNeedVision: Bool { goal != nil && apps.contains { !Self.accessibleApps.contains($0.bundle) } }
     }
 
+    /// Bring back the window of each named app that runs with none (see AppWindow), without bringing it forward,
+    /// and wait a moment for it to appear.
+    static func reopenWindowless(_ bundles: [String]) {
+        for b in bundles {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: b).first else { continue }
+            func windows() -> Int {
+                let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                    as? [[String: Any]] ?? []
+                return list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier
+                    && ($0[kCGWindowLayer as String] as? Int ?? -1) == 0 }.count
+            }
+            guard AppWindow.shouldReopen(bundle: b, running: true, ordinaryWindows: windows()) else { continue }
+            let open = Process()
+            open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            open.arguments = ["-g", "-b", b]
+            try? open.run(); open.waitUntilExit()
+            for _ in 0..<30 where windows() == 0 { Thread.sleep(forTimeInterval: 0.1) }
+            NSLog("DeskMind Hands: \(b) ran with no window; reopened it (\(windows()) now)")
+        }
+    }
+
     /// Stop the run: the main app's Stop, or the live view's.
     static func requestStop() {
         if busy { cancelled = true }
@@ -430,6 +451,7 @@ enum Runner {
                 return
             }
         }
+        if spec.goal != nil { reopenWindowless(spec.apps.map(\.bundle)) }
         p.arguments = args
         p.currentDirectoryURL = work
         var env = [
