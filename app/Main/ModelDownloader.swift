@@ -251,7 +251,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
             if switchToMirror() { return }
             let lang = ResolvedLang.current
             phase = .failed(status == 401 || status == 403
-                            ? L("No permission to download (HTTP %d): the model repository is still private", status, lang: lang)
+                            ? L("The download server refused the request (HTTP %d). Try again later.", status, lang: lang)
                             : L("Download failed (HTTP %d): %@", status, item.file.path, lang: lang))
             return
         }

@@ -118,7 +118,6 @@ enum L10n {
         "Drag into the list in System Settings": "拖到系统设置的列表里",
 
         // MARK: Examples screen (Main/RunView.swift)
-        "Try examples": "试试示例",
         "Real run · the local model works in %@ inside a sandbox folder, never touching your files":
             "真实操作 · 本地模型在沙盒文件夹里操作%@，不碰你的文件",
         "Mock desktop · works on virtual windows in memory, never touching your files":
@@ -162,12 +161,11 @@ enum L10n {
             "本地模型没有及时回应。确认首页的「本地模型」已就绪，再跑一次。",
         "The last task is still running. Wait for it to finish, or click “Stop” first.":
             "上一个任务还在进行，等它结束或先点「停止」。",
-        "This run hit an error. Run it again; if it keeps happening, send us the details below.":
-            "这次运行出错了。再跑一次；如果反复出现，把下面的详细信息发给我们。",
 
         // MARK: Results of the user's own instruction (Main/RunView.swift FreeResult)
         // The file example names the sample files the helper seeds in each language.
         "Make a folder called Receipts and move expenses.csv into it": "新建一个「报销」文件夹，把 报销单.csv 移进去",
+        "Make a folder called Receipts and move %@ into it": "新建一个「报销」文件夹，把 %@ 移进去",
         "Show in Finder": "在访达中显示",
         "Reset folder": "重置文件夹",
         "Cancel": "取消",
@@ -177,7 +175,7 @@ enum L10n {
         "Created": "新建",
         "New folder": "新文件夹",
         "This Mac has %.0f GB of memory. The local model needs about 7 GB while it runs, so it may be slow or fail to load; quit other apps before starting.": "这台 Mac 只有 %.0f GB 内存。本地模型运行时约占 7 GB，可能很慢或加载失败；开始前请先退出其他应用。",
-        "Only %.1f GB of disk space is free. The download needs about 7.5 GB; free up some space first.": "磁盘只剩 %.1f GB。下载模型约需 7.5 GB，请先腾出空间。",
+        "Only %.1f GB of disk space is free. The download needs about 7.5 GB free; free up some space first.": "磁盘只剩 %.1f GB。下载模型需要约 7.5 GB 可用空间，请先腾出空间。",
         "Moved": "移动",
         "Paused while you use your Mac": "你在用电脑，已暂停，停手后继续",
         "Using your mouse and screen for now": "正在使用你的鼠标和屏幕",
@@ -211,7 +209,21 @@ enum L10n {
         "Deleted": "删除",
         "No files changed": "没有文件被改动",
         "Did it do what you asked?": "它做对了吗？",
-        "Thanks, noted.": "谢谢，已记下。",
+        "Saved on this Mac.": "已记在这台 Mac 上。",
+        "What went wrong?": "哪里不对？",
+        "It did what I asked": "做对了",
+        "It didn't do what I asked": "没做对",
+        "It guessed instead of asking": "它没问就猜了",
+        "Wrong result": "结果不对",
+        "It got stuck": "卡住了",
+        "Report on GitHub": "在 GitHub 上反馈",
+        "Opens a GitHub issue for you to check and submit. Nothing is sent from DeskMind.":
+            "会打开一个 GitHub issue 页面，由你检查后提交；DeskMind 不会发送任何内容。",
+        "This run hit an error. Run it again; if it keeps happening, report it on GitHub.":
+            "这次运行出错了。再跑一次；如果反复出现，请在 GitHub 上反馈。",
+        "Report an Issue…": "反馈问题…",
+        "DeskMind on GitHub": "GitHub 上的 DeskMind",
+        "Self-test": "自检",
 
         // MARK: Home (Main/HomeView.swift)
         "What should DeskMind do?": "让 DeskMind 帮你做什么？",
@@ -246,10 +258,21 @@ enum L10n {
         "Connecting": "连接中",
         "Model": "加载模型",
         "Vision": "加载视觉",
-        "Hands": "启动中",
         "Looking": "观察屏幕",
         "%ds": "%d 秒",
         "Keep DeskMind Open While a Task Runs": "运行任务时保持 DeskMind 窗口打开",
+        "Show a Live View of the Task": "显示任务窗口的实时画面",
+        // The live view (Helper/LiveCard.swift).
+        "DeskMind live view": "DeskMind 实时画面",
+        "Click to answer in DeskMind": "点击在 DeskMind 里回答",
+        "Larger": "放大",
+        "Smaller": "缩小",
+        "Collapse": "收起",
+        "Stop the task": "停止任务",
+        "Working": "工作中",
+        "Needs you": "需要你",
+        "Paused": "已暂停",
+        "Window not visible": "窗口不可见",
         "Starting the recording…": "正在开始录屏…",
         "Next task…": "下一个任务…",
         "Clear all": "全部清除",
@@ -275,8 +298,8 @@ enum L10n {
         "No folder — no files will be changed": "没有附加文件夹，不会改动任何文件",
         "Apps that can't be read through accessibility may be brought to the front for a moment. Touching the mouse or keyboard pauses DeskMind.":
             "读不到辅助功能信息的应用可能会被短暂切到前台。运行中动鼠标或键盘会让 DeskMind 暂停。",
-        "Apps without accessibility need the vision model: a one-time download of 3.3 GB. Without it, DeskMind can only use apps it can read.":
-            "没有辅助功能信息的应用需要视觉模型：一次性下载 3.3 GB。没有它，DeskMind 只能操作读得到的应用。",
+        "Optional: for an app whose window can't be read through accessibility (NetEase Cloud Music and the like), DeskMind uses a vision model, a one-time 3.3 GB download. You can start without it.":
+            "可选：如果应用的窗口无法通过辅助功能读取（比如网易云音乐），DeskMind 会用视觉模型，需一次性下载 3.3 GB。不下载也可以先开始。",
 
         // MARK: Vision model row (Main/HomeView.swift EyesRow)
         "Vision model": "视觉模型",
@@ -334,7 +357,7 @@ enum L10n {
         "DeskMind is working in %@": "DeskMind 正在操作 %@",
         "Done": "完成了",
         "Couldn't finish": "没能完成",
-        "Didn't finish": "出错",
+        "Didn't finish": "没做完",
         "Stopped": "已停止",
         "Show Details": "查看详情",
         "Dismiss": "关闭",
@@ -355,8 +378,8 @@ enum L10n {
         "No model list to download": "没有可下载的模型清单",
         "Not enough disk space: %.1f GB needed, only %.1f GB free": "磁盘空间不够：还需要 %.1f GB，现在只剩 %.1f GB",
         "Download interrupted: %@ (click again to pick up where it stopped)": "下载中断：%@（再点一次会接着下载）",
-        "No permission to download (HTTP %d): the model repository is still private":
-            "没有下载权限（HTTP %d）：模型仓库还是私有的",
+        "The download server refused the request (HTTP %d). Try again later.":
+            "下载服务器拒绝了请求（HTTP %d），请稍后再试。",
         "Download failed (HTTP %d): %@": "下载失败（HTTP %d）：%@",
         "Checksum mismatch: %@ (deleted, please retry)": "校验失败：%@（已删除，请重试）",
         "Couldn't write %@: %@": "无法写入 %@：%@",

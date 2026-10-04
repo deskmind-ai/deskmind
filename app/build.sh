@@ -34,13 +34,13 @@ mkdir -p "$MAIN/Contents/MacOS" "$MAIN/Contents/Library/LaunchAgents" "$HELPER/C
 
 # Unit tests first (what needs no screen): a failure stops the build.
 swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$OUT/decision-tests" \
-  Shared/L10n.swift Shared/Decision.swift Shared/Island.swift Shared/AppMention.swift Shared/Routing.swift Shared/FileMention.swift Shared/DownloadSource.swift tests/DecisionTests.swift
+  Shared/L10n.swift Shared/Decision.swift Shared/Island.swift Shared/AppMention.swift Shared/Routing.swift Shared/FileMention.swift Shared/DownloadSource.swift Shared/LiveView.swift Shared/IssueReport.swift Shared/AppWindow.swift tests/DecisionTests.swift
 "$OUT/decision-tests"
 
 swiftc -O -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$HELPER/Contents/MacOS/DeskMindHands" \
-  Shared/Protocol.swift Shared/Models.swift Shared/Routing.swift Shared/L10n.swift Shared/Decision.swift Helper/ServerAuth.swift Helper/BrainServer.swift Helper/EyesServer.swift Helper/ScreenRecorder.swift Helper/Runner.swift Helper/HandsHelper.swift
+  Shared/Protocol.swift Shared/Models.swift Shared/Routing.swift Shared/L10n.swift Shared/Decision.swift Helper/ServerAuth.swift Helper/BrainServer.swift Helper/EyesServer.swift Helper/ScreenRecorder.swift Shared/LiveView.swift Shared/AppWindow.swift Helper/LiveCard.swift Helper/Runner.swift Helper/HandsHelper.swift
 swiftc -O -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$MAIN/Contents/MacOS/DeskMind" \
-  Shared/Protocol.swift Shared/Models.swift Shared/Routing.swift Shared/L10n.swift Main/Brand.swift Main/GrantPanel.swift Main/RunView.swift Main/RunOverlay.swift Main/ModelDownloader.swift Shared/AppMention.swift Shared/FileMention.swift Shared/DownloadSource.swift Main/AppScope.swift Main/History.swift Main/GoalRunView.swift Main/HomeView.swift Shared/Decision.swift Shared/Island.swift Main/Recording.swift Main/IslandView.swift Main/DeskMindApp.swift
+  Shared/Protocol.swift Shared/Models.swift Shared/Routing.swift Shared/L10n.swift Main/Brand.swift Main/GrantPanel.swift Main/RunView.swift Main/RunOverlay.swift Main/ModelDownloader.swift Shared/AppMention.swift Shared/FileMention.swift Shared/DownloadSource.swift Main/AppScope.swift Main/History.swift Main/GoalRunView.swift Main/HomeView.swift Shared/Decision.swift Shared/Island.swift Main/Recording.swift Main/IslandView.swift Shared/LiveView.swift Shared/IssueReport.swift Main/DeskMindApp.swift
 
 cp Resources/Main-Info.plist "$MAIN/Contents/Info.plist"
 mkdir -p "$MAIN/Contents/Resources" "$HELPER/Contents/Resources"
@@ -55,9 +55,10 @@ done
 iconutil -c icns "$ICONSET" -o "$MAIN/Contents/Resources/AppIcon.icns"
 cp "$MAIN/Contents/Resources/AppIcon.icns" "$HELPER/Contents/Resources/AppIcon.icns"
 cp Resources/Helper-Info.plist "$HELPER/Contents/Info.plist"
-# VERSION (e.g. from a v1.2.3 tag) and BUILD_NUMBER (e.g. the CI run number) override the plists' own.
+# VERSION (e.g. from a v1.2.3 tag) and BUILD_NUMBER (e.g. the CI run number) override the plists' own. A pre-release
+# (v1.2.3-rc.1) names its DMG in full; the bundle's version is the numbers alone (1.2.3), the form macOS expects.
 for plist in "$MAIN/Contents/Info.plist" "$HELPER/Contents/Info.plist"; do
-  if [ -n "${VERSION:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist"; fi
+  if [ -n "${VERSION:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION%%-*}" "$plist"; fi
   if [ -n "${BUILD_NUMBER:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$plist"; fi
 done
 cp Resources/models.json "$HELPER/Contents/Resources/"
@@ -97,7 +98,7 @@ codesign --verify --deep --strict "$MAIN" && echo "built and signed: $MAIN ($SIG
 [ "$DIST" = 1 ] || exit 0
 
 # The release: a DMG with the app and a link to /Applications, signed, notarized and stapled.
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MAIN/Contents/Info.plist")"
+VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MAIN/Contents/Info.plist")}"
 DMG="$OUT/DeskMind-$VERSION.dmg"
 STAGE="$OUT/dmg"; rm -rf "$STAGE" "$DMG"; mkdir -p "$STAGE"
 ditto "$MAIN" "$STAGE/DeskMind.app"

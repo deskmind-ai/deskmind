@@ -195,6 +195,11 @@ enum MainWindow {
 
     /// Back where it was. `activate` when the user has something to do there (a question, the details); otherwise
     /// it is only brought in front, and the app the user is in keeps the keyboard.
+    /// A key was pressed in the last `seconds`, in any app (the HID system's own count; no keys are read).
+    static func userTypedRecently(_ seconds: Double = 2) -> Bool {
+        CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown) < seconds
+    }
+
     static func comeBack(activate: Bool = false) {
         let windows = aside.isEmpty ? [window].compactMap { $0 } : aside
         aside = []

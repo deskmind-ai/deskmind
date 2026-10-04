@@ -361,7 +361,7 @@ enum Hardware {
         }
         let disk = freeDiskGB
         if modelsMissing && disk < 7.5 {
-            out.append(L("Only %.1f GB of disk space is free. The download needs about 7.5 GB; free up some space first.", disk, lang: lang))
+            out.append(L("Only %.1f GB of disk space is free. The download needs about 7.5 GB free; free up some space first.", disk, lang: lang))
         }
         return out
     }
@@ -476,6 +476,7 @@ struct DeskMindApp: App {
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
     @AppStorage(RunRecorder.wholeScreenKey) private var recordWholeScreen = false
     @AppStorage(MainWindow.keepOpenKey) private var keepOpen = false
+    @AppStorage(LiveView.enabledKey) private var liveView = true
     var body: some Scene {
         WindowGroup(L("DeskMind", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
             LocalizedRoot {
@@ -498,6 +499,18 @@ struct DeskMindApp: App {
                 // By default the window steps aside while a task works in other apps (the status stays at the top).
                 Toggle(L("Keep DeskMind Open While a Task Runs", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
                        isOn: $keepOpen)
+                // A corner card with the window the task works in, live, and the step it is taking.
+                Toggle(L("Show a Live View of the Task", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                       isOn: $liveView)
+            }
+            // Help: where to report a problem, and the project.
+            CommandGroup(replacing: .help) {
+                Button(L("Report an Issue…", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
+                    NSWorkspace.shared.open(URL(string: IssueReport.repo + "/issues/new")!)
+                }
+                Button(L("DeskMind on GitHub", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
+                    NSWorkspace.shared.open(URL(string: IssueReport.repo)!)
+                }
             }
         }
     }

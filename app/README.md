@@ -25,7 +25,7 @@ signed and notarized
 2. Open DeskMind and grant the helper, DeskMind Hands, Accessibility and Screen Recording. The app walks you through it.
 3. The first launch downloads the planner models once: about 5.3 GB, from Hugging Face or, if that is slow, from
    ModelScope.
-4. Click **Try examples** for a run in a sandbox folder, or type your own goal, pick the apps it may use, and start.
+4. Click one of the examples under the box (the file example works in a sample folder), or type your own goal, pick the apps it may use, and start. While it works, a small card in a corner shows the window it is working in (View › Show a Live View of the Task turns it off).
    ⌘. stops a run; touching the mouse or keyboard pauses it until you let go.
 
 ## Requirements

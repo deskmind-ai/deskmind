@@ -206,7 +206,183 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
+        liveViewTests()
+        issueReportTests()
+        // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
+        check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
+        check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
+        check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: false, ordinaryWindows: 0, documentBased: false), "not running: hands launches it")
+        check(!AppWindow.shouldReopen(bundle: "com.apple.TextEdit", running: true, ordinaryWindows: 0, documentBased: false), "TextEdit, listed")
+        check(!AppWindow.shouldReopen(bundle: "com.apple.Preview", running: true, ordinaryWindows: 0, documentBased: false), "Preview, listed")
+        check(!AppWindow.shouldReopen(bundle: "com.apple.finder", running: true, ordinaryWindows: 0, documentBased: false), "Finder: hands opens the folder")
+        check(!AppWindow.shouldReopen(bundle: "com.example.editor", running: true, ordinaryWindows: 0, documentBased: true), "any document-based app")
+        check(AppWindow.documentBased(info: ["CFBundleDocumentTypes": [["CFBundleTypeName": "Image"], ["NSDocumentClass": "PVDocument"]]]), "an NSDocumentClass")
+        check(!AppWindow.documentBased(info: ["CFBundleDocumentTypes": [["CFBundleTypeName": "MP3", "LSHandlerRank": "Owner"]]]), "types without a document class")
+        check(!AppWindow.documentBased(info: nil) && !AppWindow.documentBased(info: [:]), "no Info.plist, no types")
+        check(AppWindow.shouldLaunch(bundle: "com.netease.163music", running: false), "not running: launched first")
+        check(AppWindow.shouldLaunch(bundle: "com.apple.Safari", running: false), "Safari too (it opens its start page)")
+        check(!AppWindow.shouldLaunch(bundle: "com.netease.163music", running: true), "running: no launch")
+        check(!AppWindow.shouldLaunch(bundle: "com.apple.TextEdit", running: false) && !AppWindow.shouldLaunch(bundle: "com.apple.finder", running: false),
+              "TextEdit and Finder: hands opens their documents and folders")
+
         print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
+
+    /// The live view (Shared/LiveView.swift): which window, the card's size and corner, the cursor, the capture.
+    static func liveViewTests() {
+        typealias LV = LiveView
+        // The window hands observes.
+        check(LV.activeWindowID([["id": "812", "title": "a"], ["id": "77", "active": true]]) == 77, "the active window, a string id")
+        check(LV.activeWindowID([["id": 9, "active": true]]) == 9, "an int id")
+        check(LV.activeWindowID([["id": "x", "active": true], ["id": "3"]]) == nil, "no usable active id")
+        check(LV.activeWindowID([["id": "3", "active": false]]) == nil, "none active")
+        check(LV.activeWindowID([]) == nil, "no windows")
+
+        // Which window to show.
+        func w(_ id: Int, _ app: String, _ bundle: String, layer: Int = 0, on: Bool = true, _ wd: CGFloat, _ ht: CGFloat) -> LV.Candidate {
+            LV.Candidate(id: id, appName: app, bundle: bundle, layer: layer, onScreen: on, frame: CGRect(x: 0, y: 0, width: wd, height: ht))
+        }
+        let te = "com.apple.TextEdit"
+        let wins = [w(1, "TextEdit", te, 400, 300), w(2, "TextEdit", te, 800, 600), w(3, "Safari", "com.apple.Safari", 1200, 800),
+                    w(4, "TextEdit", te, on: false, 900, 900), w(5, "TextEdit", te, layer: 3, 990, 990),
+                    w(6, "TextEdit", te, 60, 40)]
+        check(LV.pick(wins, active: 1, app: "TextEdit", bundles: []) == 1, "the observed window first")
+        check(LV.pick(wins, active: 3, app: "TextEdit", bundles: []) == 3, "the observed window even in another app")
+        check(LV.pick(wins, active: 4, app: "TextEdit", bundles: [te]) == nil,
+              "observed but off screen (minimized, another Space): none, never another window of the app")
+        check(LV.pick(wins, active: 99, app: "TextEdit", bundles: [te]) == nil, "observed but gone (closed): none")
+        check(LV.pick(wins, active: nil, app: "TextEdit (no window open)", bundles: []) == 2, "the app's name before the note")
+        check(LV.pick(wins, active: nil, app: "textedit", bundles: []) == 2, "names compared without case")
+        check(LV.pick(wins, active: nil, app: "", bundles: ["com.apple.safari"]) == 3, "no observation yet: the task's apps")
+        check(LV.pick(wins, active: nil, app: "", bundles: [te, "com.apple.Safari"]) == 3, "the largest of the task's apps")
+        check(LV.pick(wins, active: nil, app: "Music", bundles: []) == nil, "nothing to show")
+        check(LV.pick(wins, active: nil, app: "文本编辑", bundles: [te]) == 2, "another language's name: by bundle")
+        check(LV.pick([w(6, "TextEdit", te, 60, 40)], active: nil, app: "TextEdit", bundles: []) == nil, "a sliver is not a window to show")
+        check(LV.pick([w(5, "TextEdit", te, layer: 3, 990, 990)], active: nil, app: "TextEdit", bundles: [te]) == nil,
+              "a floating panel or menu is not the window")
+        check(LV.pick([], active: 1, app: "TextEdit", bundles: [te]) == nil, "no windows at all")
+        check(LV.pick([], active: nil, app: "", bundles: []) == nil, "nothing known")
+        check(LV.pick(wins, active: nil, app: "TextEdit", bundles: [te], observed: false) == nil,
+              "before hands has looked: nothing, not a guess that could be the user's own window")
+        check(LV.pick(wins, active: 1, app: "", bundles: [], observed: false) == 1, "a window hands named is shown at once")
+
+        // The picture and the card.
+        check(LV.pictureSize(window: CGSize(width: 1200, height: 800)) == CGSize(width: 360, height: 240), "wide fits the width")
+        check(LV.pictureSize(window: CGSize(width: 1200, height: 800), box: LV.maxPictureLarge) == CGSize(width: 720, height: 480), "larger")
+        check(LV.pictureSize(window: CGSize(width: 600, height: 1200)) == CGSize(width: 220, height: 240),
+              "tall fits the height, the card not narrower than its header")
+        check(LV.pictureSize(window: CGSize(width: 300, height: 100)) == CGSize(width: 300, height: 100), "never enlarged")
+        check(LV.pictureSize(window: .zero) == CGSize(width: 360, height: 225), "no window yet: a placeholder shape")
+        check(LV.cardSize(picture: CGSize(width: 360, height: 240)) == CGSize(width: 360, height: 240 + LV.headerHeight + LV.lineHeight),
+              "header + picture + line")
+
+        // Corners.
+        let vis = CGRect(x: 0, y: 80, width: 1512, height: 870)   // above a Dock, below the menu bar
+        let size = CGSize(width: 360, height: 302)
+        check(LV.frame(size: size, corner: .bottomRight, visible: vis) == CGRect(x: 1512 - 16 - 360, y: 96, width: 360, height: 302), "bottom-right")
+        check(LV.frame(size: size, corner: .topLeft, visible: vis) == CGRect(x: 16, y: 80 + 870 - 16 - 302, width: 360, height: 302), "top-left")
+        check(LV.nearestCorner(center: CGPoint(x: 1400, y: 900), visible: vis) == .topRight, "dropped top-right")
+        check(LV.nearestCorner(center: CGPoint(x: 100, y: 100), visible: vis) == .bottomLeft, "dropped bottom-left")
+        check(LV.nearestCorner(center: CGPoint(x: 756, y: 515), visible: vis) == .topRight, "the exact middle goes up and right")
+        check(Set([LV.Corner.bottomRight] + LV.neighbours(.bottomRight)) == Set(LV.Corner.allCases), "every corner is tried")
+        for c in LV.Corner.allCases { check(!LV.neighbours(c).contains(c) && LV.neighbours(c).count == 3, "neighbours of \(c)") }
+
+        // Out of the window's way.
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: nil) == (.bottomRight, false), "nothing to avoid")
+        let leftHalf = CGRect(x: 0, y: 80, width: 700, height: 870)
+        check(LV.place(size: size, preferred: .bottomLeft, visible: vis, avoid: leftHalf) == (.bottomRight, false),
+              "a window on the left: across the bottom edge")
+        let bottomHalf = CGRect(x: 0, y: 80, width: 1512, height: 400)
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: bottomHalf) == (.topRight, false),
+              "a window along the bottom: up the same side")
+        let full = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        check(LV.place(size: size, preferred: .topLeft, visible: vis, avoid: full) == (.topLeft, true),
+              "a window filling the screen: the user's corner, letting clicks through")
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: .zero) == (.bottomRight, false), "an empty rect is nothing")
+        // A full-screen window: the corner farthest from where the run has acted, else the user's.
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: full, recent: [CGPoint(x: 1400, y: 150)]) == (.topLeft, true),
+              "acting near the bottom-right: the card goes top-left")
+        check(LV.place(size: size, preferred: .bottomRight, visible: vis, avoid: full, recent: [CGPoint(x: 700, y: 900)]).corner == .bottomRight,
+              "acting at the top middle: the bottom corners are as far, the user's stays")
+        check(LV.place(size: size, preferred: .topLeft, visible: vis, avoid: full, recent: [CGPoint(x: 100, y: 900), CGPoint(x: 120, y: 880)]).corner == .bottomRight,
+              "acting near the top-left: the opposite corner")
+        // Clicks: through the card over the window, unless the pointer rests on it.
+        check(LV.interactive(covers: false, pointerOnCardFor: nil), "clear of the window: clickable")
+        check(!LV.interactive(covers: true, pointerOnCardFor: nil), "over the window: clicks pass through")
+        check(!LV.interactive(covers: true, pointerOnCardFor: 0.05), "a pointer passing over (a run's click is instant): still through")
+        check(LV.interactive(covers: true, pointerOnCardFor: 0.6), "resting on it: clickable")
+
+        // Coordinates: top-left global (ScreenCaptureKit, hands) to AppKit.
+        check(LV.toAppKit(CGRect(x: 10, y: 20, width: 100, height: 50), mainHeight: 982) == CGRect(x: 10, y: 912, width: 100, height: 50), "flipped")
+        check(LV.toAppKit(CGRect(x: 1600, y: -100, width: 100, height: 50), mainHeight: 982) == CGRect(x: 1600, y: 1032, width: 100, height: 50),
+              "a display above the main one")
+
+        // The agent's cursor in the picture.
+        let win = CGRect(x: 100, y: 200, width: 800, height: 600)
+        check(LV.cursor(at: CGPoint(x: 500, y: 500), window: win, picture: CGSize(width: 400, height: 300)) == CGPoint(x: 200, y: 150), "the middle")
+        check(LV.cursor(at: CGPoint(x: 100, y: 200), window: win, picture: CGSize(width: 400, height: 300)) == CGPoint(x: 0, y: 300),
+              "the window's top-left is the picture's top-left (a layer counts y up)")
+        check(LV.cursor(at: CGPoint(x: 50, y: 500), window: win, picture: CGSize(width: 400, height: 300)) == nil, "outside the window: no cursor")
+        check(LV.cursor(at: CGPoint(x: 1, y: 1), window: .zero, picture: CGSize(width: 400, height: 300)) == nil, "no window")
+        check(LV.targetCenter([100, 200, 40, 20]) == CGPoint(x: 120, y: 210), "a target_rect's centre")
+        check(LV.targetCenter([100.5, 200, 41, 20.0] as [Any]) == CGPoint(x: 121, y: 210), "floats")
+        check(LV.targetCenter(nil) == nil && LV.targetCenter([1, 2, 3]) == nil && LV.targetCenter("x") == nil, "no target")
+        check(LV.targetCenter([1, 2, -3, 4]) == nil, "a negative size is nonsense")
+
+        // The capture.
+        check(LV.capturePixels(picture: CGSize(width: 360, height: 240), window: CGSize(width: 1200, height: 800), scale: 2) == (720, 480), "twice the card")
+        check(LV.capturePixels(picture: CGSize(width: 201, height: 101), window: CGSize(width: 201, height: 101), scale: 1) == (200, 100),
+              "the window's own pixels, even")
+        check(LV.capturePixels(picture: CGSize(width: 1, height: 1), window: CGSize(width: 1, height: 1), scale: 1) == (2, 2), "never empty")
+        check(LV.sourceRect(window: CGRect(x: 1600, y: 100, width: 400, height: 300), display: CGRect(x: 1512, y: 0, width: 1920, height: 1080))
+              == CGRect(x: 88, y: 100, width: 400, height: 300), "in the display's coordinates")
+        check(LV.sourceRect(window: CGRect(x: -100, y: 0, width: 400, height: 300), display: CGRect(x: 0, y: 0, width: 1512, height: 982))
+              == CGRect(x: 0, y: 0, width: 300, height: 300), "clipped to the display")
+        check(LV.sourceRect(window: CGRect(x: 5000, y: 0, width: 10, height: 10), display: CGRect(x: 0, y: 0, width: 1512, height: 982)) == .zero,
+              "off the display")
+
+        // 小方's face in the title bar.
+        check(LV.face(.working) == .look && LV.face(.starting) == .look, "at work: looking at the cursor")
+        check(LV.face(.waitingForUser) == .up, "needs you: eyes up")
+        check(LV.face(.done) == .happy, "done: ^ ^")
+        check([LV.Status.paused, .hidden, .failed, .stopped].allSatisfy { LV.face($0) == .flat }, "paused, hidden, unfinished, stopped: – –")
+        check(LV.gaze(cursor: nil, picture: CGSize(width: 360, height: 240)) == CGPoint(x: 0, y: 0.6), "no cursor: ahead, a little down")
+        check(LV.gaze(cursor: CGPoint(x: 0, y: 0), picture: CGSize(width: 360, height: 240)) == CGPoint(x: -1.2, y: 1.2), "bottom-left: left and down")
+        check(LV.gaze(cursor: CGPoint(x: 360, y: 240), picture: CGSize(width: 360, height: 240)) == CGPoint(x: 1.2, y: 0.4), "top-right: right, barely down")
+        check(LV.gaze(cursor: CGPoint(x: 900, y: -50), picture: CGSize(width: 360, height: 240)).x == 1.2, "clamped to the picture")
+        check(LV.gaze(cursor: CGPoint(x: 10, y: 10), picture: .zero) == CGPoint(x: 0, y: 0.6), "no picture yet")
+
+        // Statuses.
+        check([LV.Status.done, .failed, .stopped].allSatisfy(\.isEnding), "endings")
+        check(![LV.Status.starting, .working, .waitingForUser, .paused, .hidden].contains(where: \.isEnding), "not endings")
+        let allStatuses: [LV.Status] = [.starting, .working, .waitingForUser, .paused, .hidden, .done, .failed, .stopped]
+        for st in allStatuses {
+            check(L(LV.word(st), lang: .zhHans) != LV.word(st), "a Chinese word for \(LV.word(st))")
+        }
+    }
+
+
+    /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
+    static func issueReportTests() {
+        let u = IssueReport.url(kind: .guessed, goal: "Add Lisa Wong's order to ledger.csv\nthen save", outcome: "It said it finished.",
+                                steps: ["double_click", "type_text", "type_text", "save"], appVersion: "0.4.0", macOS: "Version 27.2")
+        let q = URLComponents(url: u!, resolvingAgainstBaseURL: false)!.queryItems ?? []
+        let title = q.first { $0.name == "title" }?.value ?? "", body = q.first { $0.name == "body" }?.value ?? ""
+        check(u!.absoluteString.hasPrefix("https://github.com/deskmind-ai/deskmind/issues/new?"), "the hub's new-issue form")
+        check(title == "Guessed instead of asking: Add Lisa Wong's order to ledger.csv then save", "title: \(title)")
+        check(body.hasPrefix("> Check this text before submitting; remove anything personal."), "the reminder, visible")
+        check(body.contains("> Add Lisa Wong's order to ledger.csv\n> then save"), "the instruction, quoted line by line")
+        check(body.contains("**Steps**: 4 (type_text ×2, double_click, save)"), "steps as a count and kinds only: \(body)")
+        check(body.contains("What it should have asked") && body.contains("issues?q=is%3Aissue+ambiguous"), "the guessed prompt and the ambiguous issues")
+        check(body.contains("DeskMind 0.4.0 · macOS Version 27.2"), "versions")
+        check(!IssueReport.body(kind: .stuck, goal: "g", outcome: "", steps: [], appVersion: "1", macOS: "2").contains("Steps"),
+              "no steps: no Steps line")
+        check(IssueReport.stepSummary([]) == "0" && IssueReport.stepSummary(["", ""]) == "2", "no kinds")
+        let long = IssueReport.url(kind: .stuck, goal: String(repeating: "很长的指令 ", count: 2000), outcome: "o", steps: ["click"], appVersion: "1", macOS: "2")
+        check(long != nil && long!.absoluteString.count <= IssueReport.maxURL, "a very long instruction is cut to fit: \(long?.absoluteString.count ?? -1)")
+        check(IssueReport.oneLine("a\nb", max: 10) == "a b" && IssueReport.oneLine("abcdefghijk", max: 5) == "abcd…", "one line, cut with …")
+        for k in IssueReport.Kind.allCases { check(L(k.label, lang: .zhHans) != k.label, "a Chinese label for \(k.label)") }
+    }
+
 }

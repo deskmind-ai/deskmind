@@ -84,7 +84,7 @@ enum RunStage: String, CaseIterable {
         case .starting: "Connecting"
         case .brain: "Model"
         case .eyes: "Vision"
-        case .hands: "Hands"
+        case .hands: "Starting"
         case .looking: "Looking"
         }
     }
