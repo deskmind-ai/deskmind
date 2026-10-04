@@ -344,7 +344,9 @@ enum Runner {
                 return list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier
                     && ($0[kCGWindowLayer as String] as? Int ?? -1) == 0 }.count
             }
-            guard AppWindow.shouldReopen(bundle: b, running: true, ordinaryWindows: windows()) else { continue }
+            let info = app.bundleURL.flatMap { Bundle(url: $0)?.infoDictionary }
+            guard AppWindow.shouldReopen(bundle: b, running: true, ordinaryWindows: windows(),
+                                         documentBased: AppWindow.documentBased(info: info)) else { continue }
             let open = Process()
             open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
             open.arguments = ["-g", "-b", b]
