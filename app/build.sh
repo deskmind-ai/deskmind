@@ -55,9 +55,10 @@ done
 iconutil -c icns "$ICONSET" -o "$MAIN/Contents/Resources/AppIcon.icns"
 cp "$MAIN/Contents/Resources/AppIcon.icns" "$HELPER/Contents/Resources/AppIcon.icns"
 cp Resources/Helper-Info.plist "$HELPER/Contents/Info.plist"
-# VERSION (e.g. from a v1.2.3 tag) and BUILD_NUMBER (e.g. the CI run number) override the plists' own.
+# VERSION (e.g. from a v1.2.3 tag) and BUILD_NUMBER (e.g. the CI run number) override the plists' own. A pre-release
+# (v1.2.3-rc.1) names its DMG in full; the bundle's version is the numbers alone (1.2.3), the form macOS expects.
 for plist in "$MAIN/Contents/Info.plist" "$HELPER/Contents/Info.plist"; do
-  if [ -n "${VERSION:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist"; fi
+  if [ -n "${VERSION:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${VERSION%%-*}" "$plist"; fi
   if [ -n "${BUILD_NUMBER:-}" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$plist"; fi
 done
 cp Resources/models.json "$HELPER/Contents/Resources/"
@@ -97,7 +98,7 @@ codesign --verify --deep --strict "$MAIN" && echo "built and signed: $MAIN ($SIG
 [ "$DIST" = 1 ] || exit 0
 
 # The release: a DMG with the app and a link to /Applications, signed, notarized and stapled.
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MAIN/Contents/Info.plist")"
+VERSION="${VERSION:-$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MAIN/Contents/Info.plist")}"
 DMG="$OUT/DeskMind-$VERSION.dmg"
 STAGE="$OUT/dmg"; rm -rf "$STAGE" "$DMG"; mkdir -p "$STAGE"
 ditto "$MAIN" "$STAGE/DeskMind.app"

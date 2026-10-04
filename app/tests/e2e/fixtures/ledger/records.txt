@@ -1,0 +1,9 @@
+Date,Customer,Order,Amount,Status
+2026-09-02,Mark Chen,R-1180,560,Paid
+2026-09-04,Amy Park,R-4402,275,Paid
+2026-09-05,Lisa Wong,R-2291,1340,Paid
+2026-09-08,David Kim,R-2615,88,Pending
+2026-09-10,Sara Lopez,R-2740,412,Paid
+2026-09-15,Lisa Wang,R-3012,640,Paid
+2026-09-27,Lisa Wong,R-3307,96,Paid
+2026-09-28,Grace Liu,R-3325,318,Paid
