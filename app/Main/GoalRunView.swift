@@ -19,6 +19,8 @@ struct GoalRunView: View {
     @StateObject private var run = RunModel()
     @State private var started = false
     @State private var confirming: GoalRequest?
+    @State private var replaying = false
+    @State private var gifNote = ""
     @State private var next = ""
     /// The folder the next instruction runs in: this run's, unless the user takes it off.
     @State private var nextFolder: String??
@@ -109,6 +111,29 @@ struct GoalRunView: View {
             }
 
             if run.phase == .done || run.phase == .failed {
+                // What it did, from its step screenshots: replayed here, or as a GIF to share (no recording needed).
+                let frames = Replay.frames(run.tasks.flatMap(\.steps))
+                if !frames.isEmpty {
+                    HStack(spacing: 10) {
+                        Button { replaying = true } label: { Label(L("Replay", lang: lang), systemImage: "play.fill") }
+                            .buttonStyle(InkButtonStyle(prominent: false))
+                        Button(L("Export GIF", lang: lang)) {
+                            if let url = Replay.exportGIF(title: goal, frames: frames, lang: lang) {
+                                gifNote = L("Saved in Movies › DeskMind", lang: lang)
+                                NSWorkspace.shared.activateFileViewerSelecting([url])
+                            } else {
+                                gifNote = L("Couldn't make the GIF", lang: lang)
+                            }
+                        }
+                        .buttonStyle(InkButtonStyle(prominent: false))
+                        if !gifNote.isEmpty { Text(gifNote).font(.system(size: 11)).foregroundStyle(Brand.sage) }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 28).padding(.bottom, 4)
+                    .sheet(isPresented: $replaying) {
+                        ReplayView(title: goal, frames: frames) { replaying = false }.environment(\.lang, lang)
+                    }
+                }
                 nextPrompt.padding(.horizontal, 28).padding(.top, 4)
             }
 
