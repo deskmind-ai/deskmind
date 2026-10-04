@@ -200,6 +200,33 @@ enum LiveView {
         return CGPoint(x: (x * 10).rounded() / 10, y: (y * 10).rounded() / 10)
     }
 
+    // MARK: a question in the card
+
+    /// What kind of question the card shows: options to pick, an approval (yes / no), or one that needs typing (the
+    /// card sends the user to DeskMind's window for it).
+    enum AskKind: Equatable { case choose, approve, free }
+
+    static func askKind(options: [String], approval: Bool) -> AskKind {
+        approval ? .approve : (askOptions(options).isEmpty ? .free : .choose)
+    }
+
+    /// The options as buttons: trimmed, empty and repeated ones dropped, four at most (more go under "Neither").
+    static func askOptions(_ options: [String]) -> [String] {
+        var out: [String] = []
+        for o in options {
+            let t = o.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty && !out.contains(t) { out.append(t) }
+        }
+        return Array(out.prefix(4))
+    }
+
+    /// After a pick, this long to undo it before the answer goes to the run.
+    static let undoSeconds: Double = 3
+    /// The card while it asks: wider, so a question and its options read without cramping.
+    static let askWidth: CGFloat = 420
+    /// The picture above a question: smaller, the question is what matters now.
+    static let askPictureHeight: CGFloat = 112
+
     /// The header's word for a status: the key, for L().
     static func word(_ s: Status) -> String {
         switch s {

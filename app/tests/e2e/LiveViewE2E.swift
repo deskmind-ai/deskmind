@@ -145,7 +145,11 @@ enum LiveViewE2E {
         setBounds(home)
         var stopped = false
         let goal = "Add Lisa Wong's order to the ledger and save it"
-        onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], goal: goal, onStop: { stopped = true }) }
+        var answered: (String, Bool)? = nil
+        var openedWindow = false
+        onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], goal: goal, onStop: { stopped = true },
+                                onAnswer: { reply, approve in answered = (reply, approve); return true },
+                                onOpenWindow: { openedWindow = true }) }
         LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
 
         // 1. It appears, in its corner, with the window's picture.
@@ -238,6 +242,47 @@ enum LiveViewE2E {
         LiveCard.stepped(n: 5, words: "Type “hello”", target: nil, click: false)
         s = waitFor { ($0["status"] as? String) == "Working" }
         check(s["status"] as? String == "Working", "a step: working again")
+
+        // 7b. A question answered in the card: options, a pick, Undo, the answer after the countdown; an approval; one
+        // that needs typing (DeskMind's window); answered in the window instead (the card stops asking).
+        let pre = rect(snap(), "frame")
+        LiveCard.ask(question: "records.txt has two orders for Lisa Wong. Which one goes in the ledger?",
+                     options: ["2026-09-05 · R-2291 · 1340", "2026-09-27 · R-3307 · 96", " ", "2026-09-27 · R-3307 · 96"], approval: false)
+        s = waitFor { ($0["asking"] as? Bool) == true && rect($0, "frame").width == LiveView.askWidth }
+        check(s["asking"] as? Bool == true && s["ask_options"] as? Int == 2, "the question in the card, two options (blank and repeat dropped)")
+        check(rect(s, "frame").width == LiveView.askWidth && rect(s, "frame").height > pre.height, "the card opens up for it: \(rect(s, "frame").size)")
+        check(s["status"] as? String == "Needs you" && s["face"] as? String == "up", "needs you, 小方 looking up")
+        check(s["click_through"] as? Bool == false, "it takes clicks while it asks")
+        Thread.sleep(forTimeInterval: 0.6)
+        _ = capture(window: s["window_number"] as? Int ?? 0, name: "7b-ask")
+        onMain { LiveCard.press("option1") }
+        s = waitFor { ($0["ask_picked"] as? String) != nil }
+        check(s["ask_picked"] as? String == "2026-09-27 · R-3307 · 96" && answered == nil, "picked, not sent yet")
+        _ = capture(window: s["window_number"] as? Int ?? 0, name: "7b-picked")
+        onMain { LiveCard.press("undo") }
+        s = waitFor { $0["ask_picked"] is NSNull }
+        check(s["ask_picked"] is NSNull && s["asking"] as? Bool == true, "undo: the question is back")
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.3)
+        check(answered == nil, "an undone pick is never sent")
+        onMain { LiveCard.press("option1") }
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.5)
+        check(answered?.0 == "2026-09-27 · R-3307 · 96" && answered?.1 == true, "after the countdown the answer goes to the run")
+        s = waitFor { ($0["asking"] as? Bool) == false }
+        check(s["asking"] as? Bool == false && rect(s, "frame").width < LiveView.askWidth, "and the card goes back to the picture")
+        answered = nil
+        LiveCard.ask(question: "Send this email to Alex Chen?", options: [], approval: true)
+        s = waitFor { ($0["asking"] as? Bool) == true }
+        check(s["ask_options"] as? Int == 2, "an approval: Allow this once / Don't")
+        onMain { LiveCard.press("option0") }
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.5)
+        check(answered?.0 == "" && answered?.1 == true, "allowed")
+        LiveCard.ask(question: "Which folder should the photos go in?", options: [], approval: false)
+        s = waitFor { ($0["asking"] as? Bool) == true }
+        onMain { LiveCard.press("option0") }
+        check(openedWindow, "a typed answer: DeskMind's window is asked for")
+        LiveCard.questionClosed()
+        s = waitFor { ($0["asking"] as? Bool) == false }
+        check(s["asking"] as? Bool == false, "answered in the window: the card stops asking")
 
         // 8. The window minimized: the last picture, dimmed, with a note; back when it is.
         osa("tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"\(doc)\") to true")

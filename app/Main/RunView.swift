@@ -350,11 +350,16 @@ final class RunModel: ObservableObject {
             let q = PendingAsk(question: e["question"] as? String ?? "", approval: e["approval"] as? Bool ?? false,
                                options: e["options"] as? [String] ?? [])
             withAnimation(.easeOut(duration: 0.2)) { ask = q }
+            let lang = ResolvedLang.current
+            // Shown in the live view, it is answered there: the window stays where it is, the island only says so.
+            if e["in_card"] as? Bool == true {
+                if real { RunOverlay.shared.say(L("Needs you — answer in the card", lang: lang)) }
+                return
+            }
             // The answer is typed in DeskMind's window: it comes back for it. Not as the key window while the user is
             // typing in another app -- their next keys, Return included, would land in the answer and send it.
             let typing = MainWindow.userTypedRecently()
             if real { MainWindow.comeBack(activate: !typing) }
-            let lang = ResolvedLang.current
             if real {
                 RunOverlay.shared.say(q.approval ? L("Waiting for your approval in DeskMind", lang: lang)
                                                  : L("Waiting for your answer in DeskMind", lang: lang))
@@ -363,6 +368,13 @@ final class RunModel: ObservableObject {
                 RunOverlay.notify(title: q.approval ? L("DeskMind needs your approval", lang: lang)
                                                     : L("DeskMind has a question", lang: lang), body: q.question)
             }
+        case "answered":
+            // Answered in the live view: this window's question card goes.
+            withAnimation(.easeOut(duration: 0.2)) { ask = nil }
+            if real { RunOverlay.shared.say(L("Answered — carrying on", lang: ResolvedLang.current)) }
+        case "answer_in_window":
+            // The user chose to type an answer: the window comes back, active (they asked for it), with the question.
+            MainWindow.comeBack(activate: true)
         case "step":
             let id = e["task"] as? String ?? "?"
             ask = nil   // a step after a question means it was answered (or timed out)

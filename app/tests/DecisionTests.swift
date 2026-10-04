@@ -353,6 +353,12 @@ enum DecisionTests {
         check(LV.gaze(cursor: CGPoint(x: 900, y: -50), picture: CGSize(width: 360, height: 240)).x == 1.2, "clamped to the picture")
         check(LV.gaze(cursor: CGPoint(x: 10, y: 10), picture: .zero) == CGPoint(x: 0, y: 0.6), "no picture yet")
 
+        // A question in the card.
+        check(LV.askKind(options: ["a", "b"], approval: false) == .choose, "options: pick one")
+        check(LV.askKind(options: [], approval: true) == .approve && LV.askKind(options: ["x"], approval: true) == .approve, "an approval")
+        check(LV.askKind(options: ["  ", ""], approval: false) == .free, "no usable options: it needs typing")
+        check(LV.askOptions([" 2026-09-05 ", "2026-09-05", "b", "", "c", "d", "e"]) == ["2026-09-05", "b", "c", "d"], "trimmed, deduplicated, four at most")
+
         // Statuses.
         check([LV.Status.done, .failed, .stopped].allSatisfy(\.isEnding), "endings")
         check(![LV.Status.starting, .working, .waitingForUser, .paused, .hidden].contains(where: \.isEnding), "not endings")

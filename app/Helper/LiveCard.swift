@@ -53,6 +53,10 @@ final class LiveCard: NSObject {
     private var appName = ""
     /// hands has looked at the screen at least once (see LiveView.pick).
     private var observedOnce = false
+    /// A question the run is waiting on, answered in the card (main thread).
+    struct Ask { var question: String; var options: [String]; var kind: LiveView.AskKind
+        var picked: (reply: String, approve: Bool, label: String)?; var token = 0; var deadline: Date? }
+    fileprivate var asking: Ask?
     private let bundles: [String]
     /// What to capture now (nil: nothing -- collapsed, no window, or the run has ended), and what it was made from.
     private var target: (filter: SCContentFilter, config: SCStreamConfiguration)?
@@ -86,18 +90,24 @@ final class LiveCard: NSObject {
 
     /// What Stop on the card does (Runner.requestStop in the helper; a test's own in tests/e2e).
     private let onStop: () -> Void
+    /// Hands an answer to the run (Runner.answer, which also tells the app); and asks the app to show its window for a
+    /// typed answer. A test's own in tests/e2e.
+    private let onAnswer: (String, Bool) -> Bool
+    private let onOpenWindow: () -> Void
 
     /// The instruction: the action line until the first step.
     private let goal: String
 
-    private init(bundles: [String], goal: String, onStop: @escaping () -> Void) {
-        self.bundles = bundles; self.goal = goal; self.onStop = onStop
+    private init(bundles: [String], goal: String, onStop: @escaping () -> Void,
+                 onAnswer: @escaping (String, Bool) -> Bool, onOpenWindow: @escaping () -> Void) {
+        self.bundles = bundles; self.goal = goal; self.onStop = onStop; self.onAnswer = onAnswer; self.onOpenWindow = onOpenWindow
     }
 
     // MARK: from Runner
 
-    static func start(bundles: [String], goal: String = "", onStop: @escaping () -> Void) {
-        let card = LiveCard(bundles: bundles, goal: goal, onStop: onStop)
+    static func start(bundles: [String], goal: String = "", onStop: @escaping () -> Void,
+                      onAnswer: @escaping (String, Bool) -> Bool = { _, _ in false }, onOpenWindow: @escaping () -> Void = {}) {
+        let card = LiveCard(bundles: bundles, goal: goal, onStop: onStop, onAnswer: onAnswer, onOpenWindow: onOpenWindow)
         lock.lock(); let old = shared; shared = card; lock.unlock()
         // A card still saying how the last run ended goes now, not over the new one.
         if let old { old.set { $0.watching = false }; old.stopCapture(); DispatchQueue.main.async { old.close() } }
@@ -140,6 +150,7 @@ final class LiveCard: NSObject {
             c.step = n
             if c.runStatus != .working && !c.runStatus.isEnding { c.runStatus = .working }
         }
+        questionClosed()   // a step after a question: it was answered
         let p = LiveView.targetCenter(target)
         DispatchQueue.main.async {
             card.view?.line.stringValue = words
@@ -158,6 +169,31 @@ final class LiveCard: NSObject {
         card.set { c in if !c.runStatus.isEnding { c.runStatus = s } }
         DispatchQueue.main.async {
             if let words { card.view?.line.stringValue = words }
+            card.refresh()
+        }
+    }
+
+    /// The run asks the user something: the card shows the question (opening up if it was collapsed) and its
+    /// options, and is answered there. Returns whether a card is showing it (so the app need not bring its window).
+    @discardableResult
+    static func ask(question: String, options: [String], approval: Bool) -> Bool {
+        guard let card = current else { return false }
+        let kind = LiveView.askKind(options: options, approval: approval)
+        card.set { c in c.runStatus = .waitingForUser; c.collapsed = false }
+        DispatchQueue.main.async {
+            card.asking = Ask(question: question, options: LiveView.askOptions(options), kind: kind, picked: nil)
+            card.refresh()
+        }
+        return true
+    }
+
+    /// The question is over (answered in DeskMind's window, or the run went on): the card goes back to the picture.
+    static func questionClosed() {
+        guard let card = current else { return }
+        card.set { c in if c.runStatus == .waitingForUser { c.runStatus = .working } }
+        DispatchQueue.main.async {
+            guard card.asking != nil else { return }
+            card.asking = nil
             card.refresh()
         }
     }
@@ -229,14 +265,21 @@ final class LiveCard: NSObject {
         // A window filling the screen (most people keep their apps that way) leaves no clear corner: the card stays,
         // over the window, in the corner farthest from where the run has acted, letting clicks through until the
         // user rests the pointer on it. (It used to become the capsule, and a maximized app never had a picture.)
-        let collapsed = userCollapsed
-        let size = collapsed ? LiveView.pill : cardSize
+        let collapsed = userCollapsed && asking == nil
+        var size = collapsed ? LiveView.pill : cardSize
+        if let a = asking, !collapsed {
+            v.showAsk(a, lang: lang)
+            size = CGSize(width: LiveView.askWidth, height: LiveView.headerHeight + LiveView.askPictureHeight + v.askHeight(width: LiveView.askWidth))
+        } else {
+            v.hideAsk()
+        }
         let recent = recentTargets.map { LiveView.toAppKit(CGRect(origin: $0, size: .zero), mainHeight: mainHeight).origin }
         let placed = LiveView.place(size: size, preferred: corner, visible: visible, avoid: avoid, recent: recent)
         let frame = LiveView.frame(size: size, corner: placed.corner, visible: visible)
-        covers = placed.covers
+        // While the run waits on the user nothing it does can land under the card: the card takes clicks then.
+        covers = placed.covers && asking == nil
         p.ignoresMouseEvents = !LiveView.interactive(covers: covers, pointerOnCardFor: pointerSince.map { Date().timeIntervalSince($0) })
-        v.layoutCard(collapsed: collapsed, large: large, size: size, dimmed: status == .hidden, note: status == .hidden || !hadPicture
+        v.layoutCard(collapsed: collapsed, large: large, size: size, asking: asking != nil, dimmed: status == .hidden, note: status == .hidden || !hadPicture
                      ? L(LiveView.word(status == .hidden ? .hidden : .starting), lang: lang) : nil)
         if p.frame != frame {
             if p.isVisible && !v.dragging && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
@@ -289,17 +332,42 @@ final class LiveCard: NSObject {
 
     /// A click on the card: a question waiting opens DeskMind, a capsule opens up.
     fileprivate func clicked() {
+        if asking != nil { return }   // its buttons answer it
         if read({ $0.runStatus == .waitingForUser }) {
-            let helper = Bundle.main.bundleURL   // …/DeskMind.app/Contents/Library/LoginItems/DeskMind Hands.app
-            let main = helper.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-                .deletingLastPathComponent()
-            let url = main.pathExtension == "app" ? main
-                : NSWorkspace.shared.urlForApplication(withBundleIdentifier: "ai.deskmind.app")
-            if let url { NSWorkspace.shared.openApplication(at: url, configuration: .init()) }
+            onOpenWindow()
         } else if read({ $0.collapsed }) {
             toggleCollapsed()
         }
     }
+
+    // MARK: answering in the card (main thread)
+
+    /// An option or an approval picked: shown as picked, with a few seconds to undo, then handed to the run.
+    fileprivate func pick(reply: String, approve: Bool, label: String) {
+        guard var a = asking, a.picked == nil else { return }
+        a.token += 1
+        a.picked = (reply, approve, label)
+        a.deadline = Date().addingTimeInterval(LiveView.undoSeconds)
+        asking = a
+        refresh()
+        let token = a.token
+        DispatchQueue.main.asyncAfter(deadline: .now() + LiveView.undoSeconds) { [weak self] in
+            guard let self, let now = self.asking, now.token == token, let p = now.picked else { return }
+            self.asking = nil
+            self.set { $0.runStatus = .working }
+            if !self.onAnswer(p.reply, p.approve) { NSLog("DeskMind Hands: live view: the run took no answer") }
+        }
+    }
+
+    fileprivate func undo() {
+        guard var a = asking, a.picked != nil else { return }
+        a.token += 1; a.picked = nil; a.deadline = nil
+        asking = a
+        refresh()
+    }
+
+    /// "Neither — let me type it…" and a question that needs typing: DeskMind's window, where typing belongs.
+    fileprivate func answerInWindow() { onOpenWindow() }
 
     /// Let go after a drag: the nearest corner of the screen it was dropped on, kept for later runs.
     fileprivate func dropped() {
@@ -448,6 +516,9 @@ extension LiveCard {
             out["picture"] = NSStringFromRect(v.picture.frame)
             out["note"] = v.noteText
             out["face"] = v.faceName
+            out["asking"] = card.asking != nil
+            out["ask_options"] = v.ask.optionCount
+            out["ask_picked"] = card.asking?.picked?.label ?? NSNull()
         }
         return out
     }
@@ -460,6 +531,8 @@ extension LiveCard {
         case "collapse": card.toggleCollapsed()
         case "stop": card.stopRun()
         case "click": card.clicked()
+        case "option0", "option1", "option2", "option3": card.view?.ask.press(option: Int(String(control.last!))!)
+        case "undo": card.view?.ask.pressUndo()
         case "drop":
             if let p = card.panel, let point { p.setFrameOrigin(NSPoint(x: point.x - p.frame.width / 2, y: point.y - p.frame.height / 2)) }
             card.dropped()
@@ -472,7 +545,7 @@ extension LiveCard {
 
 /// Header (小方 and its status dot, title, buttons on hover), picture with the agent's cursor, the action line; or the
 /// capsule.
-private final class CardView: NSView {
+final class CardView: NSView {
     weak var card: LiveCard?
     let picture = CALayer()
     let line = NSTextField(labelWithString: "")
@@ -487,6 +560,8 @@ private final class CardView: NSView {
     private var faceKind: LiveView.Face = .look
     private var gaze = CGPoint(x: 0, y: 0.6)
     var faceName: String { faceKind.rawValue }
+    /// The question, while the run waits on the user: under the (smaller) picture, in place of the action line.
+    let ask = AskView(frame: .zero)
     private let cursor = CALayer()
     var cursorShown: Bool { cursor.opacity > 0 && !cursor.isHidden }
     var cursorPosition: CGPoint { cursor.position }
@@ -572,6 +647,8 @@ private final class CardView: NSView {
                    button("chevron.down", L("Collapse", lang: lang)) { $0.toggleCollapsed() },
                    button("stop.fill", L("Stop the task", lang: lang)) { $0.stopRun() }]
         for b in buttons { b.alphaValue = 0; addSubview(b) }
+        ask.isHidden = true
+        addSubview(ask)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
     }
@@ -595,7 +672,17 @@ private final class CardView: NSView {
         if let card, let act = actions[ObjectIdentifier(b)] { act(card) }
     }
 
-    func layoutCard(collapsed: Bool, large big: Bool, size: CGSize, dimmed: Bool, note text: String?) {
+    func showAsk(_ a: LiveCard.Ask, lang: ResolvedLang) {
+        ask.card = card
+        ask.configure(a, lang: lang)
+        ask.isHidden = false
+    }
+
+    func hideAsk() { ask.isHidden = true }
+
+    func askHeight(width: CGFloat) -> CGFloat { ask.height(width: width) }
+
+    func layoutCard(collapsed: Bool, large big: Bool, size: CGSize, asking: Bool = false, dimmed: Bool, note text: String?) {
         self.collapsed = collapsed
         let h = LiveView.headerHeight, lh = LiveView.lineHeight
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -610,11 +697,13 @@ private final class CardView: NSView {
         } else {
             layer?.cornerRadius = 14
             picture.isHidden = false
-            picture.frame = CGRect(x: 0, y: lh, width: size.width, height: size.height - h - lh)
+            let below = asking ? ask.height(width: size.width) : lh
+            picture.frame = CGRect(x: 0, y: below, width: size.width, height: size.height - h - below)
+            if asking { ask.frame = NSRect(x: 0, y: 0, width: size.width, height: below) }
             picture.opacity = dimmed ? 0.35 : 1
             face.position = CGPoint(x: 21, y: size.height - h / 2)
             title.frame = NSRect(x: 37, y: size.height - h + (h - 16) / 2, width: size.width - 37 - 92, height: 16)
-            line.isHidden = false
+            line.isHidden = asking
             line.frame = NSRect(x: 12, y: (lh - 16) / 2, width: size.width - 24, height: 16)
             for (i, b) in buttons.enumerated() {
                 b.isHidden = false
@@ -627,7 +716,7 @@ private final class CardView: NSView {
         }
         note.isHidden = collapsed || text == nil
         note.stringValue = text ?? ""
-        note.frame = NSRect(x: 12, y: lh + (size.height - h - lh - 16) / 2, width: size.width - 24, height: 16)
+        note.frame = NSRect(x: 12, y: picture.frame.minY + (picture.frame.height - 16) / 2, width: size.width - 24, height: 16)
         CATransaction.commit()
         for b in buttons where !b.isHidden { b.alphaValue = hovering || collapsed ? 1 : 0 }
         resetTracking()
@@ -760,6 +849,219 @@ private final class CardView: NSView {
 }
 
 /// A button that works on the first click in a panel that never becomes active.
-private final class FirstMouseButton: NSButton {
+final class FirstMouseButton: NSButton {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+// MARK: - the question in the card
+
+/// A question the run waits on: the question in words, then its options as buttons (or Allow / Don't for an
+/// approval, or a way to DeskMind's window for one that needs typing), "Neither" and "Stop", and a line that says the
+/// keyboard stays the user's. After a pick: what was picked, a countdown and Undo. The card never takes keyboard focus.
+final class AskView: NSView {
+    weak var card: LiveCard?
+    private var current: LiveCard.Ask?
+    private let question = NSTextField(wrappingLabelWithString: "")
+    private var options: [NSButton] = []
+    private let other = FirstMouseButton(title: "", target: nil, action: nil)
+    private let stop = FirstMouseButton(title: "", target: nil, action: nil)
+    private let foot = NSTextField(wrappingLabelWithString: "")
+    private let picked = NSTextField(labelWithString: "")
+    private let undo = FirstMouseButton(title: "", target: nil, action: nil)
+    private let progressTrack = NSView()
+    private let progress = CALayer()
+    /// The pick the countdown is running for: started once, not again on every refresh.
+    private var countdownToken = -1
+    private static let pad: CGFloat = 14, optionHeight: CGFloat = 44, gap: CGFloat = 8
+    /// The height the question took: kept after a pick, so the card does not jump while the countdown runs.
+    private var questionHeight: CGFloat = 0
+
+    override var isFlipped: Bool { true }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        question.font = .systemFont(ofSize: 15, weight: .semibold)
+        question.textColor = CardView.paper
+        question.maximumNumberOfLines = 4
+        foot.font = .systemFont(ofSize: 11.5)
+        foot.textColor = NSColor(srgbRed: 0x8C / 255.0, green: 0x95 / 255.0, blue: 0x8C / 255.0, alpha: 1)
+        foot.maximumNumberOfLines = 2
+        picked.font = .systemFont(ofSize: 14, weight: .semibold)
+        picked.textColor = CardView.paper
+        picked.lineBreakMode = .byTruncatingTail
+        for (b, sel) in [(other, #selector(otherPressed)), (stop, #selector(stopPressed)), (undo, #selector(undoPressed))] {
+            b.isBordered = false; b.target = self; b.action = sel
+        }
+        progressTrack.wantsLayer = true
+        progressTrack.layer?.backgroundColor = NSColor(srgbRed: 0x3A / 255.0, green: 0x3F / 255.0, blue: 0x3B / 255.0, alpha: 1).cgColor
+        progressTrack.layer?.cornerRadius = 1.5
+        progress.backgroundColor = CardView.orange.cgColor
+        progress.cornerRadius = 1.5
+        progress.anchorPoint = CGPoint(x: 0, y: 0)
+        progressTrack.layer?.addSublayer(progress)
+        addSubview(progressTrack)
+        for v in [question, other, stop, foot, picked, undo] as [NSView] { addSubview(v) }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func linkTitle(_ text: String, color: NSColor) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 12.5), .foregroundColor: color])
+    }
+
+    func configure(_ a: LiveCard.Ask, lang: ResolvedLang) {
+        let changed = current?.question != a.question || current?.options != a.options || current?.kind != a.kind
+        current = a
+        question.stringValue = a.question
+        if changed {
+            options.forEach { $0.removeFromSuperview() }
+            options = []
+            switch a.kind {
+            case .choose:
+                for (i, o) in a.options.enumerated() { options.append(optionButton(index: i, text: o)) }
+            case .approve:
+                options = [plainButton(L("Allow this once", lang: lang), primary: true, tag: 100),
+                           plainButton(L("Don't", lang: lang), primary: false, tag: 101)]
+            case .free:
+                options = [plainButton(L("Answer in DeskMind", lang: lang), primary: true, tag: 200)]
+            }
+            options.forEach { addSubview($0) }
+        }
+        other.attributedTitle = linkTitle(L("Neither — let me type it…", lang: lang), color: NSColor(srgbRed: 0xF2 / 255.0, green: 0xC9 / 255.0, blue: 0xBC / 255.0, alpha: 1))
+        stop.attributedTitle = linkTitle(L("Stop this task", lang: lang), color: NSColor(srgbRed: 0xB9 / 255.0, green: 0xC1 / 255.0, blue: 0xB8 / 255.0, alpha: 1))
+        undo.attributedTitle = linkTitle(L("Undo", lang: lang), color: NSColor(srgbRed: 0xF2 / 255.0, green: 0xC9 / 255.0, blue: 0xBC / 255.0, alpha: 1))
+        foot.stringValue = a.picked != nil ? L("It goes to DeskMind when the line runs out — Undo to change it.", lang: lang)
+            : a.kind == .approve ? L("Covers this one step — it asks again next time.", lang: lang)
+            : L("Pick one and it carries on — your keyboard stays yours.", lang: lang)
+        if let p = a.picked { picked.stringValue = L("Picked: %@", p.label, lang: lang) }
+        let isPicked = a.picked != nil
+        question.isHidden = isPicked
+        options.forEach { $0.isHidden = isPicked }
+        other.isHidden = isPicked || a.kind != .choose
+        stop.isHidden = isPicked
+        picked.isHidden = !isPicked
+        undo.isHidden = !isPicked
+        progressTrack.isHidden = !isPicked
+        needsLayout = true
+        layoutSubtreeIfNeeded()
+        if isPicked && countdownToken != a.token { countdownToken = a.token; runCountdown(until: a.deadline) }
+        setAccessibilityLabel(isPicked ? picked.stringValue : a.question)
+    }
+
+    private func optionButton(index i: Int, text: String) -> NSButton {
+        let b = FirstMouseButton(title: "", target: self, action: #selector(optionPressed(_:)))
+        b.tag = i
+        b.isBordered = false
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 12
+        b.layer?.borderWidth = 1
+        b.layer?.borderColor = NSColor(srgbRed: 0x4A / 255.0, green: 0x52 / 255.0, blue: 0x4B / 255.0, alpha: 1).cgColor
+        b.layer?.backgroundColor = NSColor(srgbRed: 0x31 / 255.0, green: 0x36 / 255.0, blue: 0x32 / 255.0, alpha: 1).cgColor
+        let title = NSMutableAttributedString(string: "   \(i + 1)   ", attributes: [.font: NSFont.systemFont(ofSize: 13, weight: .bold), .foregroundColor: CardView.orange])
+        title.append(NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: .medium), .foregroundColor: CardView.paper]))
+        b.attributedTitle = title
+        b.alignment = .left
+        (b.cell as? NSButtonCell)?.lineBreakMode = .byTruncatingTail
+        b.toolTip = text
+        b.setAccessibilityLabel(text)
+        return b
+    }
+
+    private func plainButton(_ text: String, primary: Bool, tag: Int) -> NSButton {
+        let b = FirstMouseButton(title: "", target: self, action: #selector(optionPressed(_:)))
+        b.tag = tag
+        b.isBordered = false
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 12
+        b.layer?.backgroundColor = (primary ? CardView.paper : NSColor(srgbRed: 0x31 / 255.0, green: 0x36 / 255.0, blue: 0x32 / 255.0, alpha: 1)).cgColor
+        if !primary { b.layer?.borderWidth = 1; b.layer?.borderColor = NSColor(srgbRed: 0x4A / 255.0, green: 0x52 / 255.0, blue: 0x4B / 255.0, alpha: 1).cgColor }
+        b.attributedTitle = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14, weight: primary ? .bold : .regular),
+                                                                         .foregroundColor: primary ? NSColor(srgbRed: 0x26 / 255.0, green: 0x2B / 255.0, blue: 0x28 / 255.0, alpha: 1) : CardView.paper])
+        return b
+    }
+
+    /// The height this needs at `width` (top-left layout).
+    func height(width: CGFloat) -> CGFloat {
+        guard let a = current else { return LiveView.lineHeight }
+        let w = width - 2 * Self.pad
+        if a.picked != nil { return max(questionHeight, Self.pad + 26 + 10 + 3 + Self.pad) }
+        let q = ceil(question.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 200)).height ?? 20)
+        let rows: CGFloat = a.kind == .approve ? 1 : CGFloat(max(options.count, 1))
+        let f = ceil(foot.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 60)).height ?? 16)
+        questionHeight = Self.pad + q + 10 + rows * Self.optionHeight + (rows - 1) * Self.gap + 10 + 20 + 8 + f + Self.pad
+        return questionHeight
+    }
+
+    override func layout() {
+        super.layout()
+        guard let a = current else { return }
+        let w = bounds.width - 2 * Self.pad
+        var y = Self.pad
+        if a.picked != nil {
+            y = max(Self.pad, (bounds.height - (26 + 10 + 3)) / 2)   // centred where the question was
+            picked.frame = NSRect(x: Self.pad, y: y + 3, width: w - 70, height: 20)
+            undo.frame = NSRect(x: bounds.width - Self.pad - 60, y: y, width: 60, height: 26)
+            y += 26 + 10
+            progressTrack.frame = NSRect(x: Self.pad, y: y, width: w, height: 3)
+            let f = ceil(foot.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 60)).height ?? 16)
+            foot.frame = NSRect(x: Self.pad, y: bounds.height - Self.pad - f, width: w, height: f)
+            return
+        }
+        let q = ceil(question.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 200)).height ?? 20)
+        question.frame = NSRect(x: Self.pad, y: y, width: w, height: q)
+        y += q + 10
+        if a.kind == .approve, options.count == 2 {
+            let half = (w - Self.gap) / 2
+            options[0].frame = NSRect(x: Self.pad, y: y, width: half, height: Self.optionHeight)
+            options[1].frame = NSRect(x: Self.pad + half + Self.gap, y: y, width: half, height: Self.optionHeight)
+            y += Self.optionHeight
+        } else {
+            for (i, b) in options.enumerated() {
+                b.frame = NSRect(x: Self.pad, y: y, width: w, height: Self.optionHeight)
+                y += Self.optionHeight + (i < options.count - 1 ? Self.gap : 0)
+            }
+        }
+        y += 10
+        other.sizeToFit(); stop.sizeToFit()
+        other.frame.origin = NSPoint(x: Self.pad, y: y)
+        stop.frame.origin = NSPoint(x: bounds.width - Self.pad - stop.frame.width, y: y)
+        y += 20 + 8
+        let f = ceil(foot.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: w, height: 60)).height ?? 16)
+        foot.frame = NSRect(x: Self.pad, y: y, width: w, height: f)
+    }
+
+    /// The line under the pick shrinks to nothing as the undo time runs out.
+    private func runCountdown(until deadline: Date?) {
+        guard let deadline else { return }
+        let left = max(0, deadline.timeIntervalSinceNow)
+        let full = progressTrack.bounds.width
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        progress.bounds = CGRect(x: 0, y: 0, width: full, height: 3)
+        progress.position = .zero
+        CATransaction.commit()
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        let a = CABasicAnimation(keyPath: "bounds.size.width")
+        a.fromValue = full * CGFloat(left / LiveView.undoSeconds); a.toValue = 0; a.duration = left
+        a.fillMode = .forwards; a.isRemovedOnCompletion = false
+        progress.add(a, forKey: "countdown")
+    }
+
+    @objc private func optionPressed(_ b: NSButton) {
+        guard let card, let a = current else { return }
+        switch b.tag {
+        case 100: card.pick(reply: "", approve: true, label: L("Allow this once", lang: ResolvedLang.current))
+        case 101: card.pick(reply: "", approve: false, label: L("Don't", lang: ResolvedLang.current))
+        case 200: card.answerInWindow()
+        default: if b.tag < a.options.count { card.pick(reply: a.options[b.tag], approve: true, label: a.options[b.tag]) }
+        }
+    }
+    @objc private func otherPressed() { card?.answerInWindow() }
+    @objc private func stopPressed() { card?.stopRun() }
+    @objc private func undoPressed() { card?.undo() }
+
+    /// For the e2e test: press an option by its index (or "allow" / "dont"), or Undo.
+    func press(option i: Int) { if i < options.count { optionPressed(options[i]) } }
+    func pressUndo() { undoPressed() }
+    var optionCount: Int { options.count }
 }

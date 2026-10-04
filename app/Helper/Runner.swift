@@ -393,6 +393,7 @@ enum Runner {
         line.append(0x0A)
         do { try h.write(contentsOf: line) } catch { return false }
         asking = false
+        LiveCard.questionClosed()   // answered in DeskMind's window: the card stops asking
         return true
     }
 
@@ -531,7 +532,15 @@ enum Runner {
         // The live view, for the user's own instructions: until the run ends, however it ends.
         if spec.liveView && spec.goal != nil {
             LiveCard.start(bundles: spec.apps.isEmpty ? ["com.apple.finder"] : spec.apps.map(\.bundle),
-                           goal: spec.goal ?? "", onStop: Runner.requestStop)
+                           goal: spec.goal ?? "", onStop: Runner.requestStop,
+                           // Answered in the card: to the run, and the app is told (its own question card closes).
+                           onAnswer: { reply, approve in
+                               let ok = Runner.answer(reply: reply, approve: approve)
+                               if ok { _ = emit(["event": "answered", "reply": reply, "approve": approve, "from": "card"]) }
+                               return ok
+                           },
+                           // "Neither — let me type it…": the app brings its window back with the question in it.
+                           onOpenWindow: { _ = emit(["event": "answer_in_window"]) })
         }
         defer { LiveCard.finish(nil) }
 
@@ -562,12 +571,13 @@ enum Runner {
                           let q = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(10).utf8))) as? [String: Any]
                     else { continue }
                     answerLock.lock(); asking = true; answerLock.unlock()
-                    LiveCard.status(.waitingForUser, words: q["approval"] as? Bool == true
-                                    ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
-                                    : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
+                    // Answered in the live view when it is showing; the app then leaves its window where it is.
+                    let inCard = LiveCard.ask(question: q["question"] as? String ?? "", options: q["options"] as? [String] ?? [],
+                                              approval: q["approval"] as? Bool ?? false)
                     // "options": the alternatives the question lists (hands' ambiguity), answers the user can click.
                     _ = emit(["event": "ask", "question": q["question"] as? String ?? "",
-                              "approval": q["approval"] as? Bool ?? false, "options": q["options"] as? [String] ?? []])
+                              "approval": q["approval"] as? Bool ?? false, "options": q["options"] as? [String] ?? [],
+                              "in_card": inCard])
                 }
             }
         }
