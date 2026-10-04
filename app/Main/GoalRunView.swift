@@ -118,7 +118,7 @@ struct GoalRunView: View {
                         Button { replaying = true } label: { Label(L("Replay", lang: lang), systemImage: "play.fill") }
                             .buttonStyle(InkButtonStyle(prominent: false))
                         Button(L("Export GIF", lang: lang)) {
-                            if let url = Replay.exportGIF(title: goal, frames: frames, lang: lang) {
+                            if let url = ReplayGIF.exportGIF(title: goal, frames: frames, lang: lang) {
                                 gifNote = L("Saved in Movies › DeskMind", lang: lang)
                                 NSWorkspace.shared.activateFileViewerSelecting([url])
                             } else {

@@ -208,6 +208,9 @@ enum DecisionTests {
 
         liveViewTests()
         issueReportTests()
+        setupStepsTests()
+        exportNameTests()
+        xiaoFangMotionTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -384,6 +387,87 @@ enum DecisionTests {
 
 
     /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
+    /// The first setup's three steps (Shared/SetupSteps.swift).
+    static func setupStepsTests() {
+        typealias S = SetupSteps
+        // Step 1: the helper and each required permission.
+        check(S.grants(helperReady: false, required: [false, false]) == (0, 3), "nothing yet: 0/3")
+        check(S.grants(helperReady: true, required: [true, false]) == (2, 3), "helper + one: 2/3")
+        check(S.grants(helperReady: true, required: [true, true]) == (3, 3), "all: 3/3")
+        check(S.grants(helperReady: false, required: [true, true]) == (2, 3), "permissions without the helper: not done")
+        // Step 2 follows the real state; it never says the download runs when it waits for a click.
+        for lang in [ResolvedLang.en, .zhHans] {
+            check(S.download(brain: "ready", transfer: .idle, lang: lang) == L("Ready", lang: lang), "ready (\(lang))")
+            check(S.download(brain: "ready", transfer: .downloading(done: 1, total: 2), lang: lang) == L("Ready", lang: lang),
+                  "ready wins over a stale transfer (\(lang))")
+            let idle = S.download(brain: "missing", transfer: .idle, lang: lang)
+            check(idle == L("about 5.3 GB — press Download", lang: lang), "missing and idle: asks for Download (\(lang)): \(idle)")
+            check(S.download(brain: "missing", transfer: .paused, lang: lang) == L("paused", lang: lang), "paused (\(lang))")
+            check(S.download(brain: "missing", transfer: .failed, lang: lang) == L("didn't finish — try again below", lang: lang), "failed (\(lang))")
+            check(S.download(brain: "missing", transfer: .verifying, lang: lang) == L("checking the files", lang: lang), "verifying (\(lang))")
+            check(S.download(brain: "loading", transfer: .done, lang: lang) == L("loading", lang: lang), "downloaded, loading (\(lang))")
+            check(S.download(brain: "stopped", transfer: .idle, lang: lang).isEmpty, "the helper not up: nothing claimed (\(lang))")
+            let unlocked = S.firstTask(unlocked: true, lang: lang), locked = S.firstTask(unlocked: false, lang: lang)
+            check(unlocked.progress == L("Ready", lang: lang) && locked.progress == L("unlocks when 1 and 2 are done", lang: lang),
+                  "step 3 locked until 1 and 2 (\(lang))")
+            check(unlocked.hint != locked.hint && !unlocked.hint.isEmpty, "step 3's line says what to do (\(lang))")
+        }
+        check(S.download(brain: "missing", transfer: .downloading(done: 1_250_000_000, total: 5_300_000_000), lang: .en) == "1.2 / 5.3 GB"
+              || S.download(brain: "missing", transfer: .downloading(done: 1_250_000_000, total: 5_300_000_000), lang: .en) == "1.3 / 5.3 GB",
+              "downloading: GB so far")
+        // Every key the setup shows has its Chinese.
+        for key in ["Allow DeskMind to work this Mac", "Download the local models", "Try your first task",
+                    "about 5.3 GB — press Download", "paused", "checking the files", "didn't finish — try again below", "loading",
+                    "unlocks when 1 and 2 are done", "Pick one of the examples above, or type your own.",
+                    "The examples above start working as soon as the first two steps are done.",
+                    "The first setup takes about 8 minutes. Start the model download first: you can allow the permissions while it runs."] {
+            check(L(key, lang: .zhHans) != key, "zh for “\(key)”")
+        }
+    }
+
+    /// Export file names (Shared/ExportName.swift): never over a file already there.
+    static func exportNameTests() {
+        let dir = URL(fileURLWithPath: "/x/DeskMind")
+        check(ExportName.title("a/b:c") == "a b c", "no / or : in the name")
+        check(ExportName.title("Open Music / play: the live\nversion") == "Open Music play the live version", "single spaces, one line")
+        check(ExportName.title(String(repeating: "长", count: 60)).count == 40, "40 characters at most")
+        let free = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: "Open Music", ext: "gif", exists: { _ in false })
+        check(free.lastPathComponent == "10-4-26 14.05 Open Music.gif", "free: \(free.lastPathComponent)")
+        var taken: Set<String> = ["10-4-26 14.05 Open Music.gif"]
+        let second = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: "Open Music", ext: "gif",
+                                       exists: { taken.contains($0.lastPathComponent) })
+        check(second.lastPathComponent == "10-4-26 14.05 Open Music 2.gif", "same minute, same task: “ 2” (\(second.lastPathComponent))")
+        taken.insert(second.lastPathComponent)
+        let third = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: "Open Music", ext: "gif",
+                                      exists: { taken.contains($0.lastPathComponent) })
+        check(third.lastPathComponent == "10-4-26 14.05 Open Music 3.gif", "and “ 3”")
+        check(third.deletingLastPathComponent().path == dir.path, "in the folder asked for")
+    }
+
+    /// 小方 listening (Shared/XiaoFangMotion.swift).
+    static func xiaoFangMotionTests() {
+        typealias X = XiaoFangMotion
+        check(X.rise(understood: false, dozing: true) == 46, "dozing: only the head shows")
+        check(X.rise(understood: false, dozing: false) == 18, "typing: head up on the edge")
+        check(X.rise(understood: true, dozing: true) == 0 && X.rise(understood: true, dozing: false) == 0, "understood: standing")
+        check(X.gaze(dozing: true, understood: true, unsure: true, characters: 9) == .zero, "dozing: eyes closed, straight")
+        check(X.gaze(dozing: false, understood: true, unsure: true, characters: 9).height == 7, "understood: down at the line below")
+        check(X.gaze(dozing: false, understood: false, unsure: true, characters: 9).width < 0, "unsure: toward Attach folder")
+        let start = X.gaze(dozing: false, understood: false, unsure: false, characters: 0)
+        let end = X.gaze(dozing: false, understood: false, unsure: false, characters: 200)
+        check(start.width == -5 && end.width == 5 && X.gaze(dozing: false, understood: false, unsure: false, characters: 14).width == 0,
+              "eyes follow the sentence, left to right, then stay")
+        check(X.sway.count == 4 && X.sway.last?.angle == 0 && X.sway.map(\.angle).map(abs).max() == 3, "one ±3° sway, back to upright")
+        check(abs(X.sway.map(\.seconds).reduce(0, +) - 0.64) < 0.001, "the sway takes 640 ms (the design's spec)")
+        check(X.blinkAfter == 1.2 && X.dozeAfter == 8, "blink after 1.2 s, doze after 8 s")
+        // The dot: 156, 155 of the 200-wide mark, scaled by the drawn width.
+        let d = X.dot(in: CGRect(x: 100, y: 40, width: 76, height: 82))
+        check(abs(d.x - (100 + 156 * 0.38)) < 0.001 && abs(d.y - (40 + 155 * 0.38)) < 0.001, "the dot's centre: \(d)")
+        // SwiftUI global (the window's, top-left) to window base (bottom-left): only y flips, x stays.
+        let b = X.windowBase(CGPoint(x: 50, y: 132), contentHeight: 300)
+        check(b == CGPoint(x: 50, y: 168), "window base: \(b)")
+    }
+
     static func issueReportTests() {
         let u = IssueReport.url(kind: .guessed, goal: "Add Lisa Wong's order to ledger.csv\nthen save", outcome: "It said it finished.",
                                 steps: ["double_click", "type_text", "type_text", "save"], appVersion: "0.4.0", macOS: "Version 27.2")

@@ -101,11 +101,8 @@ struct HomeView: View {
             // 小方 listens from behind the top edge of the box (Listening.swift).
             ZStack(alignment: .topTrailing) {
                 ListeningXiaoFang(text: goal, understood: !apps.isEmpty && model.requiredDone,
-                                  unsure: !filesWithoutFolder.isEmpty && apps.isEmpty, dotAway: dotAway)
-                    .background(GeometryReader { g in
-                        Color.clear.onAppear { xiaofangFrame = g.frame(in: .global) }
-                            .onChange(of: g.frame(in: .global)) { _, f in xiaofangFrame = f }
-                    })
+                                  unsure: !filesWithoutFolder.isEmpty && apps.isEmpty, dotAway: dotAway,
+                                  onFrame: { xiaofangFrame = $0 })
                     .padding(.trailing, 56)
                     .offset(y: -76)
                 prompt.zIndex(1)
@@ -395,11 +392,10 @@ struct HomeView: View {
     /// The run starts: 小方's dot flies into the notch (where the island lights up), then comes back to it.
     private func launch(_ r: GoalRequest) {
         if let w = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }), xiaofangFrame != .zero {
-            // The dot's centre in 小方's frame (the brand mark's 200 × 216, the dot at 156, 155), standing (rise 0).
-            let local = CGPoint(x: xiaofangFrame.minX + 156 / 200 * ListeningXiaoFang.size.width,
-                                y: xiaofangFrame.minY + 155 / 216 * ListeningXiaoFang.size.height)
+            // 小方's frame is in the window's coordinates, origin top-left (SwiftUI's global space is the window's on
+            // macOS, not the screen's), and includes its rise.
             let h = w.contentView?.bounds.height ?? w.frame.height
-            let screen = w.convertPoint(toScreen: NSPoint(x: local.x, y: h - local.y))
+            let screen = w.convertPoint(toScreen: XiaoFangMotion.windowBase(XiaoFangMotion.dot(in: xiaofangFrame), contentHeight: h))
             dotAway = true
             DotFlight.launch(from: screen)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dotAway = false }
@@ -603,12 +599,27 @@ struct ConfirmSheet: View {
 /// required ones are all in place.
 struct SetupCard: View {
     @EnvironmentObject var model: HelperModel
+    @EnvironmentObject var downloader: ModelDownloader
     @Binding var expanded: Bool
     @Environment(\.lang) private var lang
 
-    /// The required permissions and the helper: step 1's count.
-    private var grantsTotal: Int { 1 + Grant.allCases.filter(\.required).count }
-    private var grantsDone: Int { (model.helperReady ? 1 : 0) + Grant.allCases.filter { $0.required && model.granted($0) }.count }
+    /// Step 2 in a few words (SetupSteps.download), from where the download and the model really are.
+    private var downloadProgress: String {
+        let transfer: SetupSteps.Transfer = switch downloader.phase {
+        case .idle: .idle
+        case .downloading: .downloading(done: downloader.bytesDone, total: downloader.bytesTotal)
+        case .verifying: .verifying
+        case .paused: .paused
+        case .failed: .failed
+        case .done: .done
+        }
+        return SetupSteps.download(brain: model.status["brain"] as? String ?? "", transfer: transfer, lang: lang)
+    }
+
+    /// Step 1's count: the helper and the required permissions.
+    private var grants: (done: Int, total: Int) {
+        SetupSteps.grants(helperReady: model.helperReady, required: Grant.allCases.filter(\.required).map { model.granted($0) })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -630,12 +641,12 @@ struct SetupCard: View {
                 // Three steps, each with one thing to do: the permissions and the download run side by side (the
                 // download does not wait for the permissions), then the first task.
                 if !model.requiredDone {
-                    Text(L("The first setup takes about 8 minutes. The models download in the background while you allow the permissions.", lang: lang))
+                    Text(L("The first setup takes about 8 minutes. Start the model download first: you can allow the permissions while it runs.", lang: lang))
                         .font(.system(size: 12)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12).padding(.bottom, 2)
                 }
                 SetupStep(n: 1, title: L("Allow DeskMind to work this Mac", lang: lang),
-                          progress: "\(grantsDone)/\(grantsTotal)", done: model.helperReady && grantsDone == grantsTotal)
+                          progress: "\(grants.done)/\(grants.total)", done: grants.done == grants.total)
                 PermissionRow(symbol: "person.badge.clock", title: L("Background helper", lang: lang),
                               subtitle: model.helperReady
                                   ? L("DeskMind Hands is standing by. Restarting it won't close this window.", lang: lang)
@@ -652,16 +663,14 @@ struct SetupCard: View {
                         .opacity(model.helperReady ? 1 : 0.45)
                 }
                 SetupStep(n: 2, title: L("Download the local models", lang: lang),
-                          progress: model.status["brain"] as? String == "ready" ? L("Ready", lang: lang) : L("in the background", lang: lang),
-                          done: model.status["brain"] as? String == "ready")
+                          progress: downloadProgress, done: model.status["brain"] as? String == "ready")
                 BrainRow()
                 Divider().overlay(Brand.line)
                 EyesRow()
-                SetupStep(n: 3, title: L("Try your first task", lang: lang),
-                          progress: model.requiredDone ? L("Ready", lang: lang) : L("unlocks when 1 and 2 are done", lang: lang),
+                let first = SetupSteps.firstTask(unlocked: model.requiredDone, lang: lang)
+                SetupStep(n: 3, title: L("Try your first task", lang: lang), progress: first.progress,
                           done: false, active: model.requiredDone)
-                Text(model.requiredDone ? L("Pick one of the examples above, or type your own.", lang: lang)
-                                        : L("The examples above start working as soon as the first two steps are done.", lang: lang))
+                Text(first.hint)
                     .font(.system(size: 12)).foregroundStyle(model.requiredDone ? Brand.ink : Brand.sage)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 34).padding(.bottom, 12)
             }

@@ -21,6 +21,9 @@ struct ListeningXiaoFang: View {
     let unsure: Bool
     /// The dot has flown off (a task just started): 小方 stands without it for a moment.
     var dotAway = false
+    /// Where the figure is drawn, in the window's coordinates (SwiftUI's global space, origin top-left), its rise
+    /// included: where the dot takes off from.
+    var onFrame: (CGRect) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var typing = false
@@ -31,14 +34,11 @@ struct ListeningXiaoFang: View {
     @State private var pauseWork: DispatchWorkItem?
     @State private var dozeWork: DispatchWorkItem?
 
-    static let size = CGSize(width: 76, height: 82)
+    static let size = XiaoFangMotion.size
 
-    private var rise: CGFloat { understood ? 0 : (dozing && text.isEmpty ? 46 : (dozing ? 46 : 18)) }
+    private var rise: CGFloat { XiaoFangMotion.rise(understood: understood, dozing: dozing) }
     private var gaze: CGSize {
-        if dozing { return .zero }
-        if understood { return CGSize(width: -2, height: 7) }
-        if unsure { return CGSize(width: -6, height: 4) }
-        return CGSize(width: -5 + min(Double(text.count) / 28, 1) * 10, height: 4)
+        XiaoFangMotion.gaze(dozing: dozing, understood: understood, unsure: unsure, characters: text.count)
     }
 
     var body: some View {
@@ -74,6 +74,11 @@ struct ListeningXiaoFang: View {
             }
         }
         .frame(width: Self.size.width, height: Self.size.height)
+        .background(GeometryReader { g in
+            // Measured inside the rise and hop below, so it is where the figure is, not where it would stand.
+            Color.clear.onAppear { onFrame(g.frame(in: .global)) }
+                .onChange(of: g.frame(in: .global)) { _, f in onFrame(f) }
+        })
         .rotationEffect(.degrees(unsure ? -6 : sway), anchor: UnitPoint(x: 0.5, y: 0.92))
         .offset(y: rise + (hop ? -10 : 0))
         .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.62), value: rise)
@@ -89,19 +94,18 @@ struct ListeningXiaoFang: View {
     }
 
     private func typed(old: String, new: String) {
+        pauseWork?.cancel(); dozeWork?.cancel()
         if new.isEmpty { typing = false; dozing = true; return }
         let burstBegins = !typing
         typing = true; dozing = false
         if burstBegins && !reduceMotion {
             // One sway as a burst of typing begins: like a nod, never during the burst.
-            let steps: [(Double, Double)] = [(-3, 0.19), (2, 0.2), (-0.6, 0.15), (0, 0.1)]
             var t = 0.0
-            for (angle, d) in steps {
+            for (angle, d) in XiaoFangMotion.sway {
                 DispatchQueue.main.asyncAfter(deadline: .now() + t) { withAnimation(.easeOut(duration: d)) { sway = angle } }
                 t += d
             }
         }
-        pauseWork?.cancel(); dozeWork?.cancel()
         let pause = DispatchWorkItem {
             typing = false
             guard !reduceMotion else { return }
@@ -110,8 +114,8 @@ struct ListeningXiaoFang: View {
         }
         let doze = DispatchWorkItem { if !understood { dozing = true } }
         pauseWork = pause; dozeWork = doze
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: pause)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: doze)
+        DispatchQueue.main.asyncAfter(deadline: .now() + XiaoFangMotion.blinkAfter, execute: pause)
+        DispatchQueue.main.asyncAfter(deadline: .now() + XiaoFangMotion.dozeAfter, execute: doze)
     }
 
     /// The few SVG path commands the brand mark uses (M, H, V, Q, Z), absolute.

@@ -379,6 +379,7 @@ enum Runner {
 
     /// Stop the run: the main app's Stop, or the live view's.
     static func requestStop() {
+        LiveCard.questionClosed()   // a pick still counting down in the card goes nowhere
         if busy { cancelled = true }
         stopRequested = true
         current?.terminate()

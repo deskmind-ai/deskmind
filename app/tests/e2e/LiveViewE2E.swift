@@ -295,6 +295,52 @@ enum LiveViewE2E {
         s = waitFor { ($0["asking"] as? Bool) == false }
         check(s["asking"] as? Bool == false, "answered in the window: the card stops asking")
 
+        // 7c. Picks that must not reach the run: Stop during the countdown; a question answered in the window and the
+        // next one picked at once (the first countdown must not hand on the second pick early); two questions in a row,
+        // each picked at once, each with its own full countdown.
+        answered = nil; stopped = false
+        LiveCard.ask(question: "Which order?", options: ["R-2291", "R-3307"], approval: false)
+        waitFor { ($0["asking"] as? Bool) == true }
+        onMain { LiveCard.press("option0") }
+        waitFor { ($0["ask_picked"] as? String) != nil }
+        onMain { LiveCard.press("stop") }
+        check(stopped, "stop pressed while a pick counts down")
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.4)
+        check(answered == nil && snap()["asking"] as? Bool == false, "stopped: the pick is dropped, never sent")
+        check(snap()["status"] as? String != "Needs you", "and the card no longer says it needs you")
+
+        LiveCard.ask(question: "Q1: which order?", options: ["R-2291", "R-3307"], approval: false)
+        waitFor { ($0["asking"] as? Bool) == true }
+        onMain { LiveCard.press("option0") }
+        s = waitFor { ($0["ask_picked"] as? String) != nil }
+        let runs1 = s["ask_countdowns"] as? Int ?? -1
+        LiveCard.questionClosed()   // Q1 answered in DeskMind's window meanwhile
+        waitFor { ($0["asking"] as? Bool) == false }
+        LiveCard.ask(question: "Q2: which folder?", options: ["Receipts", "Archive"], approval: false)
+        waitFor { ($0["asking"] as? Bool) == true && ($0["ask_picked"] is NSNull) }
+        Thread.sleep(forTimeInterval: 1.0)
+        onMain { LiveCard.press("option1") }
+        s = waitFor { ($0["ask_picked"] as? String) != nil }
+        check(s["ask_countdowns"] as? Int == runs1 + 1, "Q2's pick has its own countdown")
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds - 0.7)   // past Q1's deadline, before Q2's
+        check(answered == nil, "Q1's countdown did not hand on Q2's pick early")
+        Thread.sleep(forTimeInterval: 1.2)
+        check(answered?.0 == "Archive", "Q2's pick after its own 3 s: \(answered?.0 ?? "nothing")")
+
+        for (q, pick) in [("Q3?", "yes-3"), ("Q4?", "yes-4")] {
+            answered = nil
+            LiveCard.ask(question: q, options: [pick, "no"], approval: false)
+            waitFor { ($0["asking"] as? Bool) == true && ($0["ask_picked"] is NSNull) }
+            let before = snap()["ask_countdowns"] as? Int ?? -1
+            onMain { LiveCard.press("option0") }
+            s = waitFor { ($0["ask_picked"] as? String) != nil }
+            check(s["ask_countdowns"] as? Int == before + 1, "\(q) picked at once: a fresh countdown")
+            Thread.sleep(forTimeInterval: LiveView.undoSeconds - 0.6)
+            check(answered == nil, "\(q) not sent before its 3 s")
+            Thread.sleep(forTimeInterval: 1.1)
+            check(answered?.0 == pick, "\(q) sent after its 3 s")
+        }
+
         // 8. The window minimized: the last picture, dimmed, with a note; back when it is.
         osa("tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"\(doc)\") to true")
         s = waitFor(6) { ($0["window_hidden"] as? Bool) == true && !($0["note"] as? String ?? "").isEmpty }
@@ -385,6 +431,36 @@ enum LiveViewE2E {
         onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], onStop: {}) }
         LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
         waitFor(6) { ($0["streaming"] as? Bool) == true }
+
+        // 15c. A pick counting down when the run ends: sent to no run, the ended one or the next one asking at once.
+        var oldAnswer: String?, newAnswer: String?
+        onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], onStop: {}, onAnswer: { r, _ in oldAnswer = r; return true }) }
+        LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
+        waitFor(6) { ($0["visible"] as? Bool) == true }
+        LiveCard.ask(question: "The old run's question?", options: ["old A", "old B"], approval: false)
+        waitFor { ($0["asking"] as? Bool) == true }
+        onMain { LiveCard.press("option0") }
+        waitFor { ($0["ask_picked"] as? String) != nil }
+        onMain { LiveCard.finish(.done) }
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.4)
+        check(oldAnswer == nil, "the run ended: its pick is dropped")
+        onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], onStop: {}, onAnswer: { r, _ in oldAnswer = r; return true }) }
+        LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
+        waitFor(6) { ($0["visible"] as? Bool) == true }
+        LiveCard.ask(question: "The old run's question?", options: ["old A", "old B"], approval: false)
+        waitFor { ($0["asking"] as? Bool) == true }
+        onMain { LiveCard.press("option0") }
+        waitFor { ($0["ask_picked"] as? String) != nil }
+        onMain { LiveCard.finish(.failed) }
+        onMain { LiveCard.start(bundles: ["com.apple.TextEdit"], onStop: {}, onAnswer: { r, _ in newAnswer = r; return true }) }
+        LiveCard.observed(windows: [["id": "\(wid)", "active": true]], app: "TextEdit")
+        LiveCard.ask(question: "The new run's question?", options: ["new A", "new B"], approval: false)
+        waitFor { ($0["asking"] as? Bool) == true }
+        Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.4)
+        check(oldAnswer == nil && newAnswer == nil, "a new run asking at once: the old pick reaches neither run")
+        s = snap()
+        check(s["asking"] as? Bool == true && s["ask_picked"] is NSNull, "the new question still waits, nothing picked")
+        LiveCard.questionClosed()
 
         // 16. Ended with no word (the run's process went away): gone at once.
         onMain { LiveCard.finish(nil) }

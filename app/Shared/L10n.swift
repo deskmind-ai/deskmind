@@ -280,10 +280,10 @@ enum L10n {
         "Don't": "不要",
         "Answer in DeskMind": "在 DeskMind 里回答",
         "Picked: %@": "已选：%@",
-        "Undo": "撤回",
+        "Undo": "撤销",
         "Pick one and it carries on — your keyboard stays yours.": "点一下就继续，不会抢走你的键盘。",
         "Covers this one step — it asks again next time.": "只对这一步有效，下次还会问。",
-        "It goes to DeskMind when the line runs out — Undo to change it.": "进度条走完才交给 DeskMind，想改就点撤回。",
+        "It goes to DeskMind when the line runs out — Undo to change it.": "进度条走完才交给 DeskMind，想改就点撤销。",
         "Needs you — answer in the card": "需要你 · 在卡片里回答",
         "Answered — carrying on": "已回答，继续中",
         // Home (Main/HomeView.swift): the example cards and the recent runs.
@@ -298,11 +298,15 @@ enum L10n {
         "It stopped on an error": "出错停下了",
         "Double-click to enlarge · drag to a corner": "双击放大 · 拖到任一角落",
         // The first setup in three steps (Main/HomeView.swift SetupCard).
-        "The first setup takes about 8 minutes. The models download in the background while you allow the permissions.":
-            "第一次准备大约 8 分钟。模型在后台下载，你可以同时完成授权。",
+        "The first setup takes about 8 minutes. Start the model download first: you can allow the permissions while it runs.":
+            "第一次准备大约 8 分钟。建议先开始下载模型，下载的同时去完成授权。",
         "Allow DeskMind to work this Mac": "允许 DeskMind 操作这台 Mac",
         "Download the local models": "下载本地模型",
-        "in the background": "在后台进行",
+        "checking the files": "正在校验文件",
+        "paused": "已暂停",
+        "didn't finish — try again below": "没下完，在下面重试",
+        "about 5.3 GB — press Download": "约 5.3 GB，点「下载」开始",
+        "loading": "正在载入",
         "Try your first task": "试第一个任务",
         "unlocks when 1 and 2 are done": "前两步完成后解锁",
         "Pick one of the examples above, or type your own.": "点上面的任一示例，或者输入你自己的任务。",

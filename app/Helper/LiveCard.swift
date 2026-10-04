@@ -57,6 +57,12 @@ final class LiveCard: NSObject {
     struct Ask { var question: String; var options: [String]; var kind: LiveView.AskKind
         var picked: (reply: String, approve: Bool, label: String)?; var token = 0; var deadline: Date? }
     fileprivate var asking: Ask?
+    /// The pick counting down to the run (main thread): cancelled by Undo, a new question, Stop, the end of the run
+    /// and the card closing, so a pick reaches only the run and the question it was made for.
+    private var pendingAnswer: DispatchWorkItem?
+    /// The last pick's token (main thread). One counter for every question, card and run: a countdown that outlived
+    /// its question can never match a newer pick.
+    nonisolated(unsafe) private static var lastToken = 0
     private let bundles: [String]
     /// What to capture now (nil: nothing -- collapsed, no window, or the run has ended), and what it was made from.
     private var target: (filter: SCContentFilter, config: SCStreamConfiguration)?
@@ -127,6 +133,7 @@ final class LiveCard: NSObject {
         guard let card else { return }
         if let ending, !card.runStatus.isEnding {
             card.stopCapture()
+            DispatchQueue.main.async { card.dropQuestion() }
             card.set { $0.runStatus = ending; $0.endNote = ending == .failed ? why : nil }
             DispatchQueue.main.asyncAfter(deadline: .now() + (ending == .failed && why != nil ? 4 : 2.5)) {
                 lock.lock(); if shared === card { shared = nil }; lock.unlock()
@@ -185,6 +192,7 @@ final class LiveCard: NSObject {
         let kind = LiveView.askKind(options: options, approval: approval)
         card.set { c in c.runStatus = .waitingForUser; c.collapsed = false }
         DispatchQueue.main.async {
+            card.cancelPending()
             card.asking = Ask(question: question, options: LiveView.askOptions(options), kind: kind, picked: nil)
             card.refresh()
         }
@@ -195,11 +203,7 @@ final class LiveCard: NSObject {
     static func questionClosed() {
         guard let card = current else { return }
         card.set { c in if c.runStatus == .waitingForUser { c.runStatus = .working } }
-        DispatchQueue.main.async {
-            guard card.asking != nil else { return }
-            card.asking = nil
-            card.refresh()
-        }
+        DispatchQueue.main.async { card.dropQuestion() }
     }
 
     private static var current: LiveCard? { lock.lock(); defer { lock.unlock() }; return shared }
@@ -313,6 +317,7 @@ final class LiveCard: NSObject {
     }
 
     private func close() {
+        cancelPending(); asking = nil
         hoverTimer?.invalidate(); hoverTimer = nil
         guard let p = panel else { return }
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
@@ -335,7 +340,11 @@ final class LiveCard: NSObject {
         if nowCollapsed { stopCapture() }   // started again by the next check
     }
 
-    fileprivate func stopRun() { onStop() }
+    fileprivate func stopRun() {
+        dropQuestion()
+        set { c in if c.runStatus == .waitingForUser { c.runStatus = .working } }
+        onStop()
+    }
 
     /// A click on the card: a question waiting opens DeskMind, a capsule opens up.
     fileprivate func clicked() {
@@ -352,24 +361,45 @@ final class LiveCard: NSObject {
     /// An option or an approval picked: shown as picked, with a few seconds to undo, then handed to the run.
     fileprivate func pick(reply: String, approve: Bool, label: String) {
         guard var a = asking, a.picked == nil else { return }
-        a.token += 1
+        Self.lastToken += 1
+        a.token = Self.lastToken
         a.picked = (reply, approve, label)
         a.deadline = Date().addingTimeInterval(LiveView.undoSeconds)
         asking = a
         refresh()
         let token = a.token
-        DispatchQueue.main.asyncAfter(deadline: .now() + LiveView.undoSeconds) { [weak self] in
-            guard let self, let now = self.asking, now.token == token, let p = now.picked else { return }
+        cancelPending()
+        // Handed on only if, when the countdown ends, this is still the run's card (not replaced by a new run's),
+        // the run has not ended, and the same pick of the same question is still showing, its deadline passed.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, Self.current === self, !self.read({ $0.runStatus.isEnding }),
+                  let now = self.asking, now.token == token, let p = now.picked,
+                  let deadline = now.deadline, Date() >= deadline.addingTimeInterval(-0.05) else { return }
+            self.pendingAnswer = nil
             self.asking = nil
             self.set { $0.runStatus = .working }
             if !self.onAnswer(p.reply, p.approve) { NSLog("DeskMind Hands: live view: the run took no answer") }
         }
+        pendingAnswer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + LiveView.undoSeconds, execute: work)
     }
 
     fileprivate func undo() {
         guard var a = asking, a.picked != nil else { return }
-        a.token += 1; a.picked = nil; a.deadline = nil
+        cancelPending()
+        Self.lastToken += 1
+        a.token = Self.lastToken; a.picked = nil; a.deadline = nil
         asking = a
+        refresh()
+    }
+
+    private func cancelPending() { pendingAnswer?.cancel(); pendingAnswer = nil }
+
+    /// The question is over, whatever was picked: nothing more goes to the run from it.
+    fileprivate func dropQuestion() {
+        cancelPending()
+        guard asking != nil else { return }
+        asking = nil
         refresh()
     }
 
@@ -527,6 +557,7 @@ extension LiveCard {
             out["asking"] = card.asking != nil
             out["ask_options"] = v.ask.optionCount
             out["ask_picked"] = card.asking?.picked?.label ?? NSNull()
+            out["ask_countdowns"] = v.ask.countdownRuns
         }
         return out
     }
@@ -918,6 +949,8 @@ final class AskView: NSView {
     private let progress = CALayer()
     /// The pick the countdown is running for: started once, not again on every refresh.
     private var countdownToken = -1
+    /// How many countdowns have started (each pick has its own).
+    private(set) var countdownRuns = 0
     private static let pad: CGFloat = 14, optionHeight: CGFloat = 44, gap: CGFloat = 8
     /// The height the question took: kept after a pick, so the card does not jump while the countdown runs.
     private var questionHeight: CGFloat = 0
@@ -1080,6 +1113,7 @@ final class AskView: NSView {
     /// The line under the pick shrinks to nothing as the undo time runs out.
     private func runCountdown(until deadline: Date?) {
         guard let deadline else { return }
+        countdownRuns += 1
         let left = max(0, deadline.timeIntervalSinceNow)
         let full = progressTrack.bounds.width
         CATransaction.begin(); CATransaction.setDisableActions(true)
