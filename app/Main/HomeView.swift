@@ -29,6 +29,15 @@ struct GoalExample: Identifiable {
         ]
     }
 
+    /// What kind of task it is, on its card (an English key, for L()).
+    var kindLabel: String {
+        switch kind {
+        case .files: "Files"
+        case .app: "Apps read from the screen"
+        case .question: "Answers a question"
+        }
+    }
+
     var symbol: String {
         switch kind {
         case .files: "doc.on.doc"
@@ -59,6 +68,9 @@ struct HomeView: View {
     @State private var sampleFiles: [String] = []
     @State private var confirmClear = false
     @State private var hovered: UUID?
+    /// 小方's frame in the window (for the dot's flight), and the dot gone off to work for a moment.
+    @State private var xiaofangFrame: CGRect = .zero
+    @State private var dotAway = false
     @FocusState private var promptFocused: Bool
     @Environment(\.lang) private var lang
 
@@ -75,10 +87,9 @@ struct HomeView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 14) {
-                XiaoFang(mood: model.requiredDone ? (trimmed.isEmpty ? .rest : .idle) : .notice, size: 56)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(L("What should DeskMind do?", lang: lang))
-                        .font(.system(size: 22, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
+                        .font(.system(size: 26, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
                     Text(model.requiredDone ? L("Everything runs on this Mac, offline.", lang: lang)
                                             : L("Finish the setup below first.", lang: lang))
                         .font(.system(size: 12)).foregroundStyle(Brand.sage)
@@ -87,7 +98,19 @@ struct HomeView: View {
             }
             .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 14)
 
-            prompt.padding(.horizontal, 28)
+            // 小方 listens from behind the top edge of the box (Listening.swift).
+            ZStack(alignment: .topTrailing) {
+                ListeningXiaoFang(text: goal, understood: !apps.isEmpty && model.requiredDone,
+                                  unsure: !filesWithoutFolder.isEmpty && apps.isEmpty, dotAway: dotAway)
+                    .background(GeometryReader { g in
+                        Color.clear.onAppear { xiaofangFrame = g.frame(in: .global) }
+                            .onChange(of: g.frame(in: .global)) { _, f in xiaofangFrame = f }
+                    })
+                    .padding(.trailing, 56)
+                    .offset(y: -76)
+                prompt.zIndex(1)
+            }
+            .padding(.horizontal, 28)
             scopeLine.padding(.horizontal, 32).padding(.top, 6)
             examples.padding(.top, 10)
 
@@ -148,7 +171,7 @@ struct HomeView: View {
                 confirming = nil
                 var r = r
                 r.record = record
-                onRun(r)
+                launch(r)
             }, onCancel: { confirming = nil })
             // Said explicitly: a sheet is its own window, and not every macOS passed the environment down to it.
             .environmentObject(eyes).environmentObject(model).environment(\.lang, lang)
@@ -180,8 +203,8 @@ struct HomeView: View {
             TextField(L("Describe a task in your own words…", lang: lang), text: $goal, axis: .vertical)
                 .lineLimit(3...6)
                 .textFieldStyle(.plain)
-                .font(.system(size: 14, design: .rounded)).foregroundStyle(Brand.ink)
-                .padding(12)
+                .font(.system(size: 16, design: .rounded)).foregroundStyle(Brand.ink)
+                .padding(14)
                 .focused($promptFocused)
                 .onSubmit(start)
             Rectangle().fill(Brand.line).frame(height: 1)
@@ -225,9 +248,10 @@ struct HomeView: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
         }
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Brand.card))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .strokeBorder(dropping ? Brand.dot : Brand.line, lineWidth: dropping ? 2 : 1))
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Brand.card)
+            .shadow(color: Brand.ink.opacity(0.08), radius: 10, y: 3))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(dropping ? Brand.dot : Brand.ink, lineWidth: dropping ? 2 : 1.5))
     }
 
     /// What the instruction will use, or what is missing, in one line under the prompt.
@@ -268,25 +292,29 @@ struct HomeView: View {
         .font(.system(size: 11)).foregroundStyle(Brand.ink)
     }
 
-    /// One per row, so every example is seen: side by side in a sideways scroller, the second was cut off and the
-    /// third off screen, and a mouse wheel does not scroll sideways.
+    /// The examples as three cards, each saying what kind of task it is: every one seen at once, the whole card a
+    /// button.
     @ViewBuilder var examples: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        HStack(alignment: .top, spacing: 8) {
             ForEach(GoalExample.all) { e in
                 Button { use(e) } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: e.symbol).font(.system(size: 10)).foregroundStyle(Brand.sage)
-                        Text(label(e)).font(.system(size: 11)).foregroundStyle(Brand.ink).lineLimit(1).truncationMode(.tail)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L(e.kindLabel, lang: lang)).font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(e.kind == .question ? Brand.dot : Brand.sage)
+                        Text(label(e)).font(.system(size: 12, design: .rounded)).foregroundStyle(Brand.ink)
+                            .lineLimit(4).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(Brand.card))
-                    .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Brand.card))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Brand.line, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help(label(e))
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)   // as tall as the longest card, no taller
         .padding(.horizontal, 28)
     }
 
@@ -336,6 +364,11 @@ struct HomeView: View {
                                 Text(r.date.formatted(.relative(presentation: .named).locale(Locale(identifier: lang == .zhHans ? "zh-Hans" : "en"))))   // the app's language, not the system's
                                     .font(.system(size: 11)).foregroundStyle(Brand.mist)
                             }
+                            // What that run did, one click away (it was only in the context menu).
+                            Button(L("View", lang: lang)) { onOpen(r) }
+                                .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.ink)
+                                .padding(.horizontal, 9).padding(.vertical, 3)
+                                .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
                         }
                         .padding(.vertical, 7).contentShape(Rectangle())
                     }
@@ -359,11 +392,26 @@ struct HomeView: View {
 
     // MARK: actions
 
+    /// The run starts: 小方's dot flies into the notch (where the island lights up), then comes back to it.
+    private func launch(_ r: GoalRequest) {
+        if let w = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }), xiaofangFrame != .zero {
+            // The dot's centre in 小方's frame (the brand mark's 200 × 216, the dot at 156, 155), standing (rise 0).
+            let local = CGPoint(x: xiaofangFrame.minX + 156 / 200 * ListeningXiaoFang.size.width,
+                                y: xiaofangFrame.minY + 155 / 216 * ListeningXiaoFang.size.height)
+            let h = w.contentView?.bounds.height ?? w.frame.height
+            let screen = w.convertPoint(toScreen: NSPoint(x: local.x, y: h - local.y))
+            dotAway = true
+            DotFlight.launch(from: screen)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dotAway = false }
+        }
+        onRun(r)
+    }
+
     private func start() {
         guard canStart else { return }
         let r = GoalRequest(goal: trimmed, folder: folder, apps: apps)
         prewarm(r.displayApps.map(\.bundleID))
-        if ConfirmSheet.canSkip(r) { onRun(r) } else { confirming = r }
+        if ConfirmSheet.canSkip(r) { launch(r) } else { confirming = r }
     }
 
     /// See Runner.prewarm in the helper. Fire and forget: nothing waits on it.

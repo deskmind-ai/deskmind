@@ -286,6 +286,11 @@ enum L10n {
         "It goes to DeskMind when the line runs out — Undo to change it.": "进度条走完才交给 DeskMind，想改就点撤回。",
         "Needs you — answer in the card": "需要你 · 在卡片里回答",
         "Answered — carrying on": "已回答，继续中",
+        // Home (Main/HomeView.swift): the example cards and the recent runs.
+        "Files": "整理文件",
+        "Apps read from the screen": "看屏幕操作应用",
+        "Answers a question": "回答问题",
+        "View": "查看",
         "Starting the recording…": "正在开始录屏…",
         "Next task…": "下一个任务…",
         "Clear all": "全部清除",
