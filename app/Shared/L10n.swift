@@ -250,6 +250,7 @@ enum L10n {
         "Looking": "观察屏幕",
         "%ds": "%d 秒",
         "Keep DeskMind Open While a Task Runs": "运行任务时保持 DeskMind 窗口打开",
+        "Show a Live View of the Task": "显示任务窗口的实时画面",
         "Starting the recording…": "正在开始录屏…",
         "Next task…": "下一个任务…",
         "Clear all": "全部清除",

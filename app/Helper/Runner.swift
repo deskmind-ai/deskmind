@@ -301,6 +301,8 @@ enum Runner {
         /// The user agreed (on the confirmation sheet) that these apps may be brought to the front for a moment when
         /// they ignore background input.
         var foregroundOK = false
+        /// Show the window the run works in, live, in a corner card (LiveCard; the View menu's setting).
+        var liveView = false
         var real = false
         var planner = BrainServer.url
         var model = BrainServer.modelName
@@ -318,6 +320,7 @@ enum Runner {
                 return (name.isEmpty ? b : name, b)
             }
             foregroundOK = req["foreground_ok"] as? Bool ?? false
+            liveView = req["live_view"] as? Bool ?? false
             real = (req["real"] as? Bool ?? false) || goal != nil
             planner = req["planner"] as? String ?? planner
             model = req["model"] as? String ?? model
@@ -441,7 +444,8 @@ enum Runner {
         // within the run's own time limit) instead of giving up after a minute, and the app says it is paused.
         env["HANDS_FLASH_WAIT_S"] = "1800"
         // Someone looking at DeskMind's own window is watching the run, not working: no long wait for them.
-        env["HANDS_SPECTATOR_APPS"] = "ai.deskmind.app"
+        // The helper's live view never takes the front, but a click on it would make the helper the front app.
+        env["HANDS_SPECTATOR_APPS"] = "ai.deskmind.app,ai.deskmind.hands"
         // "Let DeskMind use it for a while" writes the end time here (see takeOver()); hands then does not wait.
         env["HANDS_TAKEOVER_FILE"] = Runner.takeoverFile.path
         // Before a run may finish, the goal's own words are checked against what the run did (hands done_check.py): a
@@ -467,6 +471,11 @@ enum Runner {
         current = p; Runner.stopRequested = false
         answerLock.lock(); answers = inPipe.fileHandleForWriting; asking = false; answerLock.unlock()
         _ = emit(["event": "start", "set": set, "real": spec.real, "pid": Int(p.processIdentifier)])
+        // The live view, for the user's own instructions: until the run ends, however it ends.
+        if spec.liveView && spec.goal != nil {
+            LiveCard.start(bundles: spec.apps.isEmpty ? ["com.apple.finder"] : spec.apps.map(\.bundle))
+        }
+        defer { LiveCard.stop() }
 
         let reader = DispatchGroup()
         reader.enter()
@@ -487,6 +496,7 @@ enum Runner {
                         let info = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(11).utf8))) as? [String: Any]
                         _ = emit(["event": "waiting", "what": info?["what"] as? String ?? "",
                                   "app": info?["app"] as? String ?? ""])
+                        LiveCard.say(L("Paused while you use your Mac", lang: ResolvedLang.current))
                         continue
                     }
                     if line.hasPrefix("HANDS_RESUME") { _ = emit(["event": "resumed"]); continue }
@@ -494,6 +504,9 @@ enum Runner {
                           let q = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(10).utf8))) as? [String: Any]
                     else { continue }
                     answerLock.lock(); asking = true; answerLock.unlock()
+                    LiveCard.say(q["approval"] as? Bool == true
+                                 ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
+                                 : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
                     // "options": the alternatives the question lists (hands' ambiguity), answers the user can click.
                     _ = emit(["event": "ask", "question": q["question"] as? String ?? "",
                               "approval": q["approval"] as? Bool ?? false, "options": q["options"] as? [String] ?? []])
@@ -546,6 +559,9 @@ enum Runner {
                     if t == "obs", let app = e["focused_app"] as? String, !app.isEmpty {
                         currentApp = app
                     }
+                    if t == "obs" {
+                        LiveCard.observed(windows: e["windows"] as? [[String: Any]] ?? [], app: e["focused_app"] as? String ?? "")
+                    }
                     if t == "step" {
                         let kind = (e["kind"] as? String) ?? ""
                         if kind == "done", let text = e["text"] as? String, text.hasPrefix("answer: ") {
@@ -556,6 +572,7 @@ enum Runner {
                             ? [e["question"] as? String, (e["reply"] as? String).map { "→ \($0)" }].compactMap { $0 }
                                 .joined(separator: " ")
                             : nil
+                        LiveCard.say(humanize(e))
                         listening = listening && emit([
                             "event": "step", "task": taskID, "n": e["n"] ?? 0,
                             "describe": e["describe"] ?? (kind.isEmpty ? "step" : kind),
@@ -606,6 +623,7 @@ enum Runner {
         answerLock.lock(); answers = nil; asking = false; answerLock.unlock()
         try? inPipe.fileHandleForWriting.close()
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
+        LiveCard.stop()   // before the clean-up closes the run's windows
         cleanUp(quitTextEdit: !textEditWasRunning)
         pruneRuns(keep: 10)
         current = nil

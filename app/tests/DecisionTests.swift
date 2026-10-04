@@ -206,6 +206,40 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
+        // The live view: which window, the card's size and place, the capture's size and crop.
+        check(LiveView.activeWindowID([["id": "812", "title": "a"], ["id": "77", "active": true]]) == 77, "the active window, as a string id")
+        check(LiveView.activeWindowID([["id": 9, "active": true]]) == 9, "an int id")
+        check(LiveView.activeWindowID([["id": "x", "active": true], ["id": "3"]]) == nil, "no usable active id")
+        let wins = [
+            LiveView.Candidate(id: 1, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 0, onScreen: true,
+                               frame: CGRect(x: 0, y: 0, width: 400, height: 300)),
+            LiveView.Candidate(id: 2, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 0, onScreen: true,
+                               frame: CGRect(x: 0, y: 0, width: 800, height: 600)),
+            LiveView.Candidate(id: 3, appName: "Safari", bundle: "com.apple.Safari", layer: 0, onScreen: true,
+                               frame: CGRect(x: 0, y: 0, width: 1200, height: 800)),
+            LiveView.Candidate(id: 4, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 0, onScreen: false,
+                               frame: CGRect(x: 0, y: 0, width: 900, height: 900)),
+            LiveView.Candidate(id: 5, appName: "TextEdit", bundle: "com.apple.TextEdit", layer: 3, onScreen: true,
+                               frame: CGRect(x: 0, y: 0, width: 990, height: 990)),
+        ]
+        check(LiveView.pick(wins, active: 1, app: "TextEdit", bundles: []) == 1, "the observed window first")
+        check(LiveView.pick(wins, active: 4, app: "TextEdit", bundles: []) == 2, "off screen: the app's largest ordinary window")
+        check(LiveView.pick(wins, active: nil, app: "TextEdit (no window open)", bundles: []) == 2, "the app's name before the note")
+        check(LiveView.pick(wins, active: nil, app: "", bundles: ["com.apple.safari"]) == 3, "no observation yet: the task's apps")
+        check(LiveView.pick(wins, active: nil, app: "Music", bundles: []) == nil, "nothing to show")
+        check(LiveView.pick(wins, active: nil, app: "文本编辑", bundles: ["com.apple.TextEdit"]) == 2, "another language's name: by bundle")
+        check(LiveView.pictureSize(window: CGSize(width: 1200, height: 800)) == CGSize(width: 360, height: 240), "wide fits the width")
+        check(LiveView.pictureSize(window: CGSize(width: 600, height: 1200)) == CGSize(width: 120, height: 240), "tall fits the height")
+        check(LiveView.pictureSize(window: CGSize(width: 200, height: 100)) == CGSize(width: 200, height: 100), "never enlarged")
+        let card = LiveView.cardFrame(picture: CGSize(width: 360, height: 240), visible: CGRect(x: 0, y: 80, width: 1512, height: 870))
+        check(card == CGRect(x: 1512 - 16 - 360, y: 96, width: 360, height: 240 + LiveView.lineHeight), "bottom-right: \(card)")
+        check(LiveView.capturePixels(picture: CGSize(width: 360, height: 240), window: CGSize(width: 1200, height: 800), scale: 2) == (720, 480), "twice the card")
+        check(LiveView.capturePixels(picture: CGSize(width: 201, height: 101), window: CGSize(width: 201, height: 101), scale: 1) == (200, 100), "the window's own pixels, even")
+        check(LiveView.sourceRect(window: CGRect(x: 1600, y: 100, width: 400, height: 300), display: CGRect(x: 1512, y: 0, width: 1920, height: 1080))
+              == CGRect(x: 88, y: 100, width: 400, height: 300), "in the display's coordinates")
+        check(LiveView.sourceRect(window: CGRect(x: -100, y: 0, width: 400, height: 300), display: CGRect(x: 0, y: 0, width: 1512, height: 982))
+              == CGRect(x: 0, y: 0, width: 300, height: 300), "clipped to the display")
+
         print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
