@@ -206,6 +206,23 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
+        // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
+        check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
+        check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
+        check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: false, ordinaryWindows: 0, documentBased: false), "not running: hands launches it")
+        check(!AppWindow.shouldReopen(bundle: "com.apple.TextEdit", running: true, ordinaryWindows: 0, documentBased: false), "TextEdit, listed")
+        check(!AppWindow.shouldReopen(bundle: "com.apple.Preview", running: true, ordinaryWindows: 0, documentBased: false), "Preview, listed")
+        check(!AppWindow.shouldReopen(bundle: "com.apple.finder", running: true, ordinaryWindows: 0, documentBased: false), "Finder: hands opens the folder")
+        check(!AppWindow.shouldReopen(bundle: "com.example.editor", running: true, ordinaryWindows: 0, documentBased: true), "any document-based app")
+        check(AppWindow.documentBased(info: ["CFBundleDocumentTypes": [["CFBundleTypeName": "Image"], ["NSDocumentClass": "PVDocument"]]]), "an NSDocumentClass")
+        check(!AppWindow.documentBased(info: ["CFBundleDocumentTypes": [["CFBundleTypeName": "MP3", "LSHandlerRank": "Owner"]]]), "types without a document class")
+        check(!AppWindow.documentBased(info: nil) && !AppWindow.documentBased(info: [:]), "no Info.plist, no types")
+        check(AppWindow.shouldLaunch(bundle: "com.netease.163music", running: false), "not running: launched first")
+        check(AppWindow.shouldLaunch(bundle: "com.apple.Safari", running: false), "Safari too (it opens its start page)")
+        check(!AppWindow.shouldLaunch(bundle: "com.netease.163music", running: true), "running: no launch")
+        check(!AppWindow.shouldLaunch(bundle: "com.apple.TextEdit", running: false) && !AppWindow.shouldLaunch(bundle: "com.apple.finder", running: false),
+              "TextEdit and Finder: hands opens their documents and folders")
+
         print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }

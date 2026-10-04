@@ -330,6 +330,50 @@ enum Runner {
         var mayNeedVision: Bool { goal != nil && apps.contains { !Self.accessibleApps.contains($0.bundle) } }
     }
 
+    /// Bring back the window of each named app that runs with none (see AppWindow), without bringing it forward,
+    /// and wait a moment for it to appear.
+    static func reopenWindowless(_ bundles: [String]) {
+        for b in bundles {
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: b).first else {
+                // Not running: launched in the background, and the run waits for its window (up to 15 s -- a music app
+                // takes several seconds to show one).
+                guard AppWindow.shouldLaunch(bundle: b, running: false) else { continue }
+                let open = Process()
+                open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                open.arguments = ["-g", "-b", b]
+                try? open.run(); open.waitUntilExit()
+                var shown = 0
+                for _ in 0..<150 {
+                    if let pid = NSRunningApplication.runningApplications(withBundleIdentifier: b).first?.processIdentifier {
+                        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                            as? [[String: Any]] ?? []
+                        shown = list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid
+                            && ($0[kCGWindowLayer as String] as? Int ?? -1) == 0 }.count
+                        if shown > 0 { break }
+                    }
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                NSLog("DeskMind Hands: \(b) was not running; launched it (\(shown) window(s))")
+                continue
+            }
+            func windows() -> Int {
+                let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                    as? [[String: Any]] ?? []
+                return list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == app.processIdentifier
+                    && ($0[kCGWindowLayer as String] as? Int ?? -1) == 0 }.count
+            }
+            let info = app.bundleURL.flatMap { Bundle(url: $0)?.infoDictionary }
+            guard AppWindow.shouldReopen(bundle: b, running: true, ordinaryWindows: windows(),
+                                         documentBased: AppWindow.documentBased(info: info)) else { continue }
+            let open = Process()
+            open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            open.arguments = ["-g", "-b", b]
+            try? open.run(); open.waitUntilExit()
+            for _ in 0..<30 where windows() == 0 { Thread.sleep(forTimeInterval: 0.1) }
+            NSLog("DeskMind Hands: \(b) ran with no window; reopened it (\(windows()) now)")
+        }
+    }
+
     /// Hand the user's answer to the question the running `hands do` asked. One JSON line on its stdin, which is
     /// what it blocks on: {"reply": "...", "approve": true}.
     static func answer(reply: String, approve: Bool) -> Bool {
@@ -419,6 +463,12 @@ enum Runner {
                 _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""])
                 return
             }
+        }
+        if spec.goal != nil {
+            if spec.apps.contains(where: { NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundle).isEmpty }) {
+                _ = emit(["event": "preparing", "what": "apps"])
+            }
+            reopenWindowless(spec.apps.map(\.bundle))
         }
         p.arguments = args
         p.currentDirectoryURL = work
