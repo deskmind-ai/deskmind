@@ -13,13 +13,22 @@ swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$BIN" 
   Shared/L10n.swift Shared/LiveView.swift Helper/LiveCard.swift tests/e2e/LiveViewE2E.swift
 DOC="liveview-e2e-$$.txt"
 printf 'Date,Customer,Order,Amount\n2026-09-02,Mark Chen,R-1180,560\n2026-09-27,Lisa Wong,R-3307,96\n' > "$OUT/$DOC"
+# Another document of the same app, all red blocks: covers the task's window in one scenario (it must not show).
+OTHER="liveview-e2e-other-$$.rtf"
+printf '{\\rtf1\\ansi{\\fonttbl\\f0 Menlo;}{\\colortbl;\\red255\\green0\\blue0;}\\f0\\fs160\\cf1 \\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\par\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\par\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\par\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\u9608?\\par}' > "$OUT/$OTHER"
 open -g -a TextEdit "$OUT/$DOC"
 for _ in $(seq 1 50); do
   osascript -e "tell application \"TextEdit\" to count (windows whose name contains \"$DOC\")" 2>/dev/null | grep -q '^1$' && break
   sleep 0.2
 done
+open -g -a TextEdit "$OUT/$OTHER"
+for _ in $(seq 1 50); do
+  osascript -e "tell application \"TextEdit\" to count (windows whose name contains \"$OTHER\")" 2>/dev/null | grep -q '^1$' && break
+  sleep 0.2
+done
+osascript -e "tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"$OTHER\") to true" >/dev/null
 status=0
-"$BIN" "$DOC" "$OUT" || status=$?
+"$BIN" "$DOC" "$OUT" "$OTHER" || status=$?
 osascript -e "tell application \"TextEdit\" to close (every document whose path contains \"$OUT\") saving no" >/dev/null 2>&1 || true
 echo "pictures: $OUT"
 exit $status

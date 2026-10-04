@@ -17,6 +17,28 @@ enum LiveView {
     /// Set once the card's one-time hint (double-click, drag) has been shown.
     static let hintKey = "liveView.hintSeen"
 
+    /// A window on the display, as far as choosing what the picture leaves out goes.
+    struct Shown: Equatable {
+        let id: Int
+        let pid: Int32?
+        let layer: Int
+        let title: String
+        let frame: CGRect
+    }
+
+    /// The windows the picture of `target` leaves out: every other app's (the card included), and the same app's other
+    /// windows -- another document on top must not show in the card. What belongs to the target stays: windows above
+    /// the normal level (menus, popovers, floating panels) and an untitled window within its frame (a sheet).
+    static func leaveOut(_ windows: [Shown], target: Shown) -> [Int] {
+        windows.filter { w in
+            guard w.id != target.id else { return false }
+            guard w.pid != nil, w.pid == target.pid else { return true }
+            if w.layer > 0 { return false }
+            let sheet = w.title.isEmpty && target.frame.insetBy(dx: -2, dy: -2).contains(w.frame)
+            return !sheet
+        }.map(\.id)
+    }
+
     /// The picture fits in this box, in points: the usual card, and the larger one (expand, or a double click).
     static let maxPicture = CGSize(width: 360, height: 240)
     static let maxPictureLarge = CGSize(width: 720, height: 480)
