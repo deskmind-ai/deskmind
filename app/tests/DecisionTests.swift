@@ -212,6 +212,7 @@ enum DecisionTests {
         fileExampleTests()
         selfTestTests()
         notInstalledTests()
+        folderPolicyTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -444,6 +445,17 @@ enum DecisionTests {
               "a file named like an app is not the app")
         check(L("%@ isn't installed on this Mac. Install it, or name an app you have.", "WeChat", lang: .zhHans).contains("微信") == false
               && L("%@ isn't installed on this Mac. Install it, or name an app you have.", "微信", lang: .zhHans).contains("没有安装"), "zh text")
+    }
+
+    /// Renames wait for approval in a person's own folder, not the sample one (Shared/FolderPolicy.swift).
+    static func folderPolicyTests() {
+        let sample = "/Users/someone/DeskMind Playground"
+        check(!FolderPolicy.confirmRenames(folder: sample, sample: sample), "the sample folder: renames unasked")
+        check(!FolderPolicy.confirmRenames(folder: sample + "/", sample: sample), "with a trailing slash")
+        check(!FolderPolicy.confirmRenames(folder: sample + "/Receipts", sample: sample), "a folder inside it")
+        check(FolderPolicy.confirmRenames(folder: "/Users/someone/Downloads", sample: sample), "Downloads: asked")
+        check(FolderPolicy.confirmRenames(folder: "/Users/someone/DeskMind Playground 2", sample: sample), "a look-alike name: asked")
+        check(FolderPolicy.confirmRenames(folder: "/Users/someone/DeskMind Playground/../Documents", sample: sample), "a path that leaves it: asked")
     }
 
     static func issueReportTests() {
