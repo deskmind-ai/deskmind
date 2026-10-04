@@ -164,12 +164,14 @@ jobs:
           DMG="build/release/DeskMind-${GITHUB_REF_NAME#v}.dmg"
           (cd "$(dirname "$DMG")" && shasum -a 256 "$(basename "$DMG")") | tee "$DMG.sha256"   # checkable where it is downloaded
           NOTES="app/release-notes/${GITHUB_REF_NAME}.md"
+          # The same DMG under a fixed name, so the website can link releases/latest/download/DeskMind.dmg directly.
+          ALIAS="build/release/DeskMind.dmg"; cp "$DMG" "$ALIAS"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --clobber
+            gh release upload "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" "$ALIAS" --clobber
           elif [ -f "$NOTES" ]; then
-            gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --draft --title "DeskMind ${GITHUB_REF_NAME#v}" --notes-file "$NOTES"
+            gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" "$ALIAS" --draft --title "DeskMind ${GITHUB_REF_NAME#v}" --notes-file "$NOTES"
           else
-            gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" --draft --title "DeskMind ${GITHUB_REF_NAME#v}" --generate-notes
+            gh release create "$GITHUB_REF_NAME" "$DMG" "$DMG.sha256" "$ALIAS" --draft --title "DeskMind ${GITHUB_REF_NAME#v}" --generate-notes
           fi
 
       - name: Clean up signing material
