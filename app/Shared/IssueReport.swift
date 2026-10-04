@@ -40,12 +40,15 @@ enum IssueReport {
     static let maxURL = 7000
 
     /// `steps`: each step's operation (hands' describe up to the first space: "click", "type_text"), nothing more.
+    /// `diagnostics`: the folded section of numbers and kinds (Diagnostics.markdown), kept whole -- the instruction
+    /// is what is shortened when the URL runs long.
     static func url(kind: Kind, goal: String, outcome: String, steps: [String], appVersion: String,
-                    macOS: String) -> URL? {
+                    macOS: String, diagnostics: String = "") -> URL? {
         let title = "\(kind.titlePrefix): \(oneLine(goal, max: 80))"
         var goalText = goal
         while true {
             let body = self.body(kind: kind, goal: goalText, outcome: outcome, steps: steps, appVersion: appVersion, macOS: macOS)
+                + (diagnostics.isEmpty ? "" : "\n" + diagnostics)
             var c = URLComponents(string: repo + "/issues/new")!
             c.queryItems = [URLQueryItem(name: "title", value: title), URLQueryItem(name: "body", value: body)]
             guard let u = c.url else { return nil }

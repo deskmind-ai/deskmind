@@ -13,6 +13,8 @@ struct RunStep: Identifiable {
     let describe: String
     let detail: String
     let ok: Bool
+    /// How long the decision took (s): for a report's diagnostics.
+    var latency: Double = 0
     /// The operation alone ("type_text"), with nothing read from the screen: what a public report may carry.
     var operation: String { String(describe.split(separator: " ").first ?? "") }
 }
@@ -70,6 +72,26 @@ final class RunModel: ObservableObject {
 
     var passed: Int { tasks.filter { $0.strict == true }.count }
     @Published var rawError = ""
+    /// The request that failed, as its questions' kinds and sizes (the helper's "request_failed").
+    private var failedRequest: [String: (type: String, options: Int)] = [:]
+
+    /// The folded diagnostics a GitHub report carries (Shared/Diagnostics.swift): no screen content, names or paths.
+    func diagnostics() -> String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Library/LoginItems/DeskMind Hands.app/Contents/Resources/runtime/hands/.version")
+        let runtime = (try? String(contentsOf: helper, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "?"
+        let models = Bundle.main.url(forResource: "models", withExtension: "json")
+            .flatMap { try? Data(contentsOf: $0) }
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["name"] as? String ?? "?"
+        var system: [(String, String)] = [
+            ("DeskMind", "\(info["CFBundleShortVersionString"] as? String ?? "?") (\(info["CFBundleVersion"] as? String ?? "?"))"),
+            ("runtime", runtime), ("models", models),
+            ("macOS", ProcessInfo.processInfo.operatingSystemVersionString)]
+        system += Diagnostics.mac()
+        return Diagnostics(error: rawError, stepSeconds: tasks.flatMap(\.steps).map(\.latency).filter { $0 > 0 },
+                           failedRequest: failedRequest, folder: goalRequest?.folder.flatMap(Diagnostics.count(folder:)),
+                           system: system).markdown()
+    }
     /// The last finished run's count, so the status chip can word it in the current language.
     @Published var result = (passed: 0, total: 0)
 
@@ -144,7 +166,7 @@ final class RunModel: ObservableObject {
 
     /// The run under way: the status at the top of the screen, the clock, and the request to the helper.
     private func go(_ req: [String: Any]) {
-        tasks = []; summary = ""; phase = .running; started = Date(); elapsed = 0
+        tasks = []; summary = ""; phase = .running; started = Date(); elapsed = 0; failedRequest = [:]
         queue = []; streamEnded = false; player?.invalidate(); player = nil
         tick?.invalidate()
         tick = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
@@ -301,6 +323,10 @@ final class RunModel: ObservableObject {
 
     func apply(_ e: [String: Any]) {
         switch e["event"] as? String {
+        case "request_failed":
+            for (k, v) in e["questions"] as? [String: [String: Any]] ?? [:] {
+                failedRequest[k] = (v["type"] as? String ?? "?", (v["options"] as? NSNumber)?.intValue ?? 0)
+            }
         case "task":
             let id = e["task"] as? String ?? "?"
             if tasks.isEmpty && stage != nil { setStage(.looking) }
@@ -352,7 +378,8 @@ final class RunModel: ObservableObject {
                                shot: e["shot"] as? String ?? "",
                                describe: e["describe"] as? String ?? "",
                                detail: e["detail"] as? String ?? "",
-                               ok: e["ok"] as? Bool ?? true)
+                               ok: e["ok"] as? Bool ?? true,
+                               latency: (e["latency"] as? NSNumber)?.doubleValue ?? 0)
             withAnimation(.easeOut(duration: 0.15)) { tasks[i].steps.append(step) }
             DecisionPanel.shared.update(step: e)
             if real { RunOverlay.shared.update(app: step.app, step: step.n, line: step.human) }
@@ -541,7 +568,8 @@ struct RunFailure: View {
                                                  outcome: run.summary,
                                                  steps: steps,
                                                  appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
-                                                 macOS: ProcessInfo.processInfo.operatingSystemVersionString) {
+                                                 macOS: ProcessInfo.processInfo.operatingSystemVersionString,
+                                                 diagnostics: run.diagnostics()) {
                         NSWorkspace.shared.open(url)
                     }
                 }
@@ -768,7 +796,8 @@ struct FreeResult: View {
             + (task.folder == nil ? "" : " Files: \(task.created.count) created, \(task.modified.count) modified, \(task.deleted.count) deleted.")
         if let url = IssueReport.url(kind: kind, goal: task.title, outcome: outcome, steps: task.steps.map(\.operation),
                                      appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
-                                     macOS: ProcessInfo.processInfo.operatingSystemVersionString) {
+                                     macOS: ProcessInfo.processInfo.operatingSystemVersionString,
+                                     diagnostics: RunModel.shared?.diagnostics() ?? "") {
             NSWorkspace.shared.open(url)
         }
     }
