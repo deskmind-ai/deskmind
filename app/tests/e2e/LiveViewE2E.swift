@@ -222,6 +222,7 @@ enum LiveViewE2E {
         check(s["line"] as? String == "Click “Save”", "the step's words")
         let pic = rect(s, "picture"), cur = NSPointFromString(s["cursor"] as? String ?? "{-1,-1}")
         check(abs(cur.x - pic.width / 2) < 4 && abs(cur.y - pic.height / 2) < 4, "the cursor where it acted: \(cur) in \(pic.size)")
+        check(s["face"] as? String == "look", "小方 looks at the cursor while it works")
         LiveCard.stepped(n: 4, words: "Scroll", target: [5, 5, 2, 2], click: false)
         s = waitFor { $0["cursor"] is NSNull }
         check(s["cursor"] is NSNull, "a target outside the window: no cursor")
@@ -230,6 +231,7 @@ enum LiveViewE2E {
         LiveCard.status(.waitingForUser, words: "Waiting for your answer in DeskMind")
         s = waitFor { ($0["status"] as? String) == "Needs you" }
         check(s["status"] as? String == "Needs you" && s["line"] as? String == "Waiting for your answer in DeskMind", "needs you")
+        check(s["face"] as? String == "up", "小方 looks up at you")
         LiveCard.status(.paused, words: "Paused while you use your Mac")
         s = waitFor { ($0["status"] as? String) == "Paused" }
         check(s["status"] as? String == "Paused", "paused")
@@ -241,6 +243,7 @@ enum LiveViewE2E {
         osa("tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"\(doc)\") to true")
         s = waitFor(6) { ($0["window_hidden"] as? Bool) == true && !($0["note"] as? String ?? "").isEmpty }
         check(s["window_hidden"] as? Bool == true && !(s["note"] as? String ?? "").isEmpty, "minimized: \(s["note"] ?? "")")
+        check(s["face"] as? String == "flat", "小方's eyes – – while the window is out of sight")
         check(s["visible"] as? Bool == true, "the card stays")
         osa("tell application \"TextEdit\" to set miniaturized of (first window whose name contains \"\(doc)\") to false")
         s = waitFor(6) { ($0["window_hidden"] as? Bool) == false }
@@ -297,6 +300,7 @@ enum LiveViewE2E {
         onMain { LiveCard.finish(.done) }
         s = snap()
         check(s["status"] as? String == "Done" && s["streaming"] as? Bool == false, "done: says so, capture stopped")
+        check(waitFor { ($0["face"] as? String) == "happy" }["face"] as? String == "happy", "小方 ^ ^ when done")
         Thread.sleep(forTimeInterval: 1.0)
         check(snap()["visible"] as? Bool == true, "still there a moment later")
         Thread.sleep(forTimeInterval: 2.5)

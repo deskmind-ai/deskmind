@@ -177,6 +177,29 @@ enum LiveView {
         var isEnding: Bool { self == .done || self == .failed || self == .stopped }
     }
 
+    /// 小方's eyes in the card's title bar (its frame and the orange dot at its foot are the card's status light):
+    /// looking at the agent's cursor while it works, up at you when it needs you, ^ ^ when done, – – when paused,
+    /// stopped, unfinished or the window is out of sight.
+    enum Face: String { case look, up, happy, flat }
+
+    static func face(_ s: Status) -> Face {
+        switch s {
+        case .starting, .working: .look
+        case .waitingForUser: .up
+        case .done: .happy
+        case .paused, .hidden, .failed, .stopped: .flat
+        }
+    }
+
+    /// Where the eyes look, in points from their resting place: toward the agent's cursor in the picture
+    /// (left-right across the picture, and down), straight ahead and a little down when there is none.
+    static func gaze(cursor: CGPoint?, picture: CGSize) -> CGPoint {
+        guard let c = cursor, picture.width > 0, picture.height > 0 else { return CGPoint(x: 0, y: 0.6) }
+        let x = (min(max(c.x / picture.width, 0), 1) - 0.5) * 2.4
+        let y = 0.4 + (1 - min(max(c.y / picture.height, 0), 1)) * 0.8   // a layer counts y up; lower = more down
+        return CGPoint(x: (x * 10).rounded() / 10, y: (y * 10).rounded() / 10)
+    }
+
     /// The header's word for a status: the key, for L().
     static func word(_ s: Status) -> String {
         switch s {

@@ -337,6 +337,17 @@ enum DecisionTests {
         check(LV.sourceRect(window: CGRect(x: 5000, y: 0, width: 10, height: 10), display: CGRect(x: 0, y: 0, width: 1512, height: 982)) == .zero,
               "off the display")
 
+        // 小方's face in the title bar.
+        check(LV.face(.working) == .look && LV.face(.starting) == .look, "at work: looking at the cursor")
+        check(LV.face(.waitingForUser) == .up, "needs you: eyes up")
+        check(LV.face(.done) == .happy, "done: ^ ^")
+        check([LV.Status.paused, .hidden, .failed, .stopped].allSatisfy { LV.face($0) == .flat }, "paused, hidden, unfinished, stopped: – –")
+        check(LV.gaze(cursor: nil, picture: CGSize(width: 360, height: 240)) == CGPoint(x: 0, y: 0.6), "no cursor: ahead, a little down")
+        check(LV.gaze(cursor: CGPoint(x: 0, y: 0), picture: CGSize(width: 360, height: 240)) == CGPoint(x: -1.2, y: 1.2), "bottom-left: left and down")
+        check(LV.gaze(cursor: CGPoint(x: 360, y: 240), picture: CGSize(width: 360, height: 240)) == CGPoint(x: 1.2, y: 0.4), "top-right: right, barely down")
+        check(LV.gaze(cursor: CGPoint(x: 900, y: -50), picture: CGSize(width: 360, height: 240)).x == 1.2, "clamped to the picture")
+        check(LV.gaze(cursor: CGPoint(x: 10, y: 10), picture: .zero) == CGPoint(x: 0, y: 0.6), "no picture yet")
+
         // Statuses.
         check([LV.Status.done, .failed, .stopped].allSatisfy(\.isEnding), "endings")
         check(![LV.Status.starting, .working, .waitingForUser, .paused, .hidden].contains(where: \.isEnding), "not endings")

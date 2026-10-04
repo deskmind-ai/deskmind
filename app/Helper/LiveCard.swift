@@ -13,7 +13,8 @@
 // every step of the run would have waited for the card.
 //
 // The card:
-// - header: a status dot, the app, the step or the status; on hover, Larger/Smaller, Collapse and Stop;
+// - header: 小方 (its eyes on the agent's cursor, up at you when it needs you, ^ ^ when done; the orange dot at its foot
+//   is the status light), the app, the step or the status; on hover, Larger/Smaller, Collapse and Stop;
 // - the picture, with the agent's cursor where the last step acted (the run never moves the real pointer);
 // - the step being taken, in words.
 // Dragged, it snaps to the nearest corner and stays there for later runs; double-clicked, it grows. Collapsed, it
@@ -446,6 +447,7 @@ extension LiveCard {
             out["cursor"] = v.cursorShown ? NSStringFromPoint(v.cursorPosition) : NSNull()
             out["picture"] = NSStringFromRect(v.picture.frame)
             out["note"] = v.noteText
+            out["face"] = v.faceName
         }
         return out
     }
@@ -468,7 +470,8 @@ extension LiveCard {
 
 // MARK: - the card's view
 
-/// Header (status dot, title, buttons on hover), picture with the agent's cursor, the action line; or the capsule.
+/// Header (小方 and its status dot, title, buttons on hover), picture with the agent's cursor, the action line; or the
+/// capsule.
 private final class CardView: NSView {
     weak var card: LiveCard?
     let picture = CALayer()
@@ -476,7 +479,14 @@ private final class CardView: NSView {
     let title = NSTextField(labelWithString: "")
     var appTitle = ""
     private let note = NSTextField(labelWithString: "")
+    /// 小方 in the title bar: its frame, its eyes, and the orange dot at its foot (the status light).
+    private let face = CALayer()
+    private let faceFrame = CAShapeLayer()
+    private let eyes = CAShapeLayer()
     private let dot = CALayer()
+    private var faceKind: LiveView.Face = .look
+    private var gaze = CGPoint(x: 0, y: 0.6)
+    var faceName: String { faceKind.rawValue }
     private let cursor = CALayer()
     var cursorShown: Bool { cursor.opacity > 0 && !cursor.isHidden }
     var cursorPosition: CGPoint { cursor.position }
@@ -527,9 +537,21 @@ private final class CardView: NSView {
         cursor.opacity = 0
         picture.addSublayer(cursor)
 
-        dot.bounds = CGRect(x: 0, y: 0, width: 8, height: 8)
-        dot.cornerRadius = 4
-        layer?.addSublayer(dot)
+        face.bounds = CGRect(x: 0, y: 0, width: 20, height: 17)
+        face.isGeometryFlipped = true   // drawn top-left, like the brand mark
+        faceFrame.path = CGPath(roundedRect: CGRect(x: 1, y: 1, width: 15, height: 13), cornerWidth: 3.5, cornerHeight: 3.5, transform: nil)
+        faceFrame.fillColor = nil
+        faceFrame.strokeColor = Self.paper.cgColor
+        faceFrame.lineWidth = 2
+        face.addSublayer(faceFrame)
+        eyes.lineCap = .round
+        face.addSublayer(eyes)
+        dot.bounds = CGRect(x: 0, y: 0, width: 7, height: 7)
+        dot.cornerRadius = 3.5
+        dot.position = CGPoint(x: 16.5, y: 13.5)
+        face.addSublayer(dot)
+        layer?.addSublayer(face)
+        drawEyes(animated: false)
 
         for t in [title, line, note] {
             t.lineBreakMode = .byTruncatingTail
@@ -580,8 +602,8 @@ private final class CardView: NSView {
         if collapsed {
             layer?.cornerRadius = size.height / 2
             picture.isHidden = true
-            dot.position = CGPoint(x: 18, y: size.height / 2)
-            title.frame = NSRect(x: 30, y: (size.height - 16) / 2, width: size.width - 30 - 40, height: 16)
+            face.position = CGPoint(x: 22, y: size.height / 2)
+            title.frame = NSRect(x: 38, y: (size.height - 16) / 2, width: size.width - 38 - 40, height: 16)
             line.isHidden = true
             buttons[2].frame = NSRect(x: size.width - 32, y: (size.height - 20) / 2, width: 20, height: 20)
             for (i, b) in buttons.enumerated() { b.isHidden = i != 2 }
@@ -590,8 +612,8 @@ private final class CardView: NSView {
             picture.isHidden = false
             picture.frame = CGRect(x: 0, y: lh, width: size.width, height: size.height - h - lh)
             picture.opacity = dimmed ? 0.35 : 1
-            dot.position = CGPoint(x: 16, y: size.height - h / 2)
-            title.frame = NSRect(x: 28, y: size.height - h + (h - 16) / 2, width: size.width - 28 - 92, height: 16)
+            face.position = CGPoint(x: 21, y: size.height - h / 2)
+            title.frame = NSRect(x: 37, y: size.height - h + (h - 16) / 2, width: size.width - 37 - 92, height: 16)
             line.isHidden = false
             line.frame = NSRect(x: 12, y: (lh - 16) / 2, width: size.width - 24, height: 16)
             for (i, b) in buttons.enumerated() {
@@ -628,6 +650,35 @@ private final class CardView: NSView {
             dot.add(a, forKey: "pulse")
         }
         if s.isEnding { cursor.opacity = 0 }
+        let kind = LiveView.face(s)
+        if kind != faceKind { faceKind = kind; drawEyes(animated: true) }
+    }
+
+    /// The eyes for the current face and gaze (face coordinates, top-left; resting centres 6 and 10.5, height 6).
+    private func drawEyes(animated: Bool) {
+        let path = CGMutablePath()
+        let y: CGFloat = faceKind == .up ? 4.6 : 6 + gaze.y
+        let dx: CGFloat = faceKind == .look ? gaze.x : 0
+        for cx in [CGFloat(6), 10.5] {
+            let x = cx + dx
+            switch faceKind {
+            case .look: path.addEllipse(in: CGRect(x: x - 1.2, y: y - 1.2, width: 2.4, height: 2.4))
+            case .up: path.addEllipse(in: CGRect(x: x - 1.5, y: y - 1.5, width: 3, height: 3))
+            case .happy:
+                path.move(to: CGPoint(x: x - 1.6, y: 6.8)); path.addQuadCurve(to: CGPoint(x: x + 1.6, y: 6.8), control: CGPoint(x: x, y: 4.4))
+            case .flat:
+                path.move(to: CGPoint(x: x - 1.6, y: 6.2)); path.addLine(to: CGPoint(x: x + 1.6, y: 6.2))
+            }
+        }
+        let filled = faceKind == .look || faceKind == .up
+        CATransaction.begin()
+        CATransaction.setDisableActions(!animated || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        CATransaction.setAnimationDuration(0.25)
+        eyes.path = path
+        eyes.fillColor = filled ? Self.paper.cgColor : nil
+        eyes.strokeColor = filled ? nil : Self.paper.cgColor
+        eyes.lineWidth = filled ? 0 : 1.4
+        CATransaction.commit()
     }
 
     func show(_ image: CGImage) {
@@ -646,6 +697,9 @@ private final class CardView: NSView {
 
     /// The agent's cursor glides to where the step acted; a click leaves a ring.
     func moveCursor(to p: CGPoint?, ripple click: Bool) {
+        // 小方 looks where the agent acts.
+        let look = LiveView.gaze(cursor: collapsed ? nil : p, picture: picture.bounds.size)
+        if look != gaze { gaze = look; if faceKind == .look { drawEyes(animated: true) } }
         guard let p, !collapsed else { cursor.opacity = 0; return }
         let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         CATransaction.begin()
