@@ -71,7 +71,9 @@ struct HomeView: View {
     /// Files the instruction names with no folder attached: said before the run, with the way to attach one. Not a
     /// block -- the files may already be open in their app.
     private var filesWithoutFolder: [String] { folder == nil ? FileMention.named(in: trimmed) : [] }
-    private var canStart: Bool { !trimmed.isEmpty && !needsApp && model.requiredDone }
+    private var canStart: Bool { !trimmed.isEmpty && !needsApp && missingApps.isEmpty && model.requiredDone }
+    /// Apps the instruction names that this Mac does not have: said here, before anything runs.
+    private var missingApps: [String] { AppScope.notInstalled(trimmed, lang: lang) }
     private var isSample: Bool { folder != nil && folder == samplePath }
 
     var body: some View {
@@ -240,6 +242,11 @@ struct HomeView: View {
             if !folderNote.isEmpty {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.dot)
                 Text(folderNote).fixedSize(horizontal: false, vertical: true)
+            } else if !missingApps.isEmpty {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.dot)
+                Text(L("%@ isn't installed on this Mac. Install it, or name an app you have.",
+                       missingApps.joined(separator: ", "), lang: lang))
+                    .fixedSize(horizontal: false, vertical: true)
             } else if !filesWithoutFolder.isEmpty {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.dot)
                 Text(L("The instruction names %@, but no folder is attached. Attach the folder they're in, or open them first.",

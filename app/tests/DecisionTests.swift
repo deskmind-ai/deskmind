@@ -211,6 +211,7 @@ enum DecisionTests {
         runErrorTests()
         fileExampleTests()
         selfTestTests()
+        notInstalledTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -421,6 +422,28 @@ enum DecisionTests {
                    "S01-rename", "S02-edit-save", "S03-zh-text", "S04-clipboard-protect", "S05-cancel", "S06-stale-binding"] {
             check(SelfTest.titles[id] != nil, "a title for \(id)")
         }
+    }
+
+    /// Apps an instruction names that the Mac does not have (Shared/AppMention.notInstalled).
+    static func notInstalledTests() {
+        let known: [String: (shown: String, names: [String])] = [
+            "com.netease.163music": ("NetEase Cloud Music", ["NetEase Cloud Music", "网易云音乐", "网易云"]),
+            "com.tencent.xinWeChat": ("WeChat", ["WeChat", "微信"]),
+        ]
+        let none: Set<String> = []
+        check(AppMention.notInstalled(in: "Open NetEase Cloud Music, search 张悬 宝贝 and play it", known: known, installed: none)
+              == ["NetEase Cloud Music"], "not installed: said")
+        check(AppMention.notInstalled(in: "打开网易云音乐，搜索最好的时光并播放", known: known, installed: none) == ["NetEase Cloud Music"], "zh name")
+        check(AppMention.notInstalled(in: "Open NetEase Cloud Music and play it", known: known, installed: ["com.netease.163music"]).isEmpty,
+              "installed: nothing to say")
+        check(AppMention.notInstalled(in: "用微信把网易云里的歌发给我", known: known, installed: none) == ["WeChat", "NetEase Cloud Music"],
+              "two, in the order named")
+        check(AppMention.notInstalled(in: "Make a folder called Receipts and move expenses.csv into it", known: known, installed: none).isEmpty,
+              "a file task names no app")
+        check(AppMention.notInstalled(in: "Rename wechat-export.txt to notes.txt", known: known, installed: none).isEmpty,
+              "a file named like an app is not the app")
+        check(L("%@ isn't installed on this Mac. Install it, or name an app you have.", "WeChat", lang: .zhHans).contains("微信") == false
+              && L("%@ isn't installed on this Mac. Install it, or name an app you have.", "微信", lang: .zhHans).contains("没有安装"), "zh text")
     }
 
     static func issueReportTests() {

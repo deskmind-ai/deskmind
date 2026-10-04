@@ -125,6 +125,7 @@ enum L10n {
         "6 smoke tests": "6 个冒烟任务",
         "Mock desktop": "模拟桌面",
         "Make a new folder": "新建一个文件夹",
+        "%@ isn't installed on this Mac. Install it, or name an app you have.": "这台 Mac 上没有安装%@。请先安装，或换成已有的应用。",
         // The mock desktop's six smoke tasks (Shared/SelfTest.swift).
         "Rename a file and keep its contents": "重命名文件并保留内容",
         "Open a document, add a line and save": "打开文档、追加一行并保存",
