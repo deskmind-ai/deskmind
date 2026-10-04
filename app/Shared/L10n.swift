@@ -157,6 +157,10 @@ enum L10n {
             "助手的权限好像失效了：回到首页检查「辅助功能」「屏幕录制」，然后再跑一次。",
         "Couldn't see the window this time (it happens when the Mac is busy). Wait a moment and run it again.":
             "这次没能读到窗口的画面（机器太忙时会这样）。稍等一下再跑一次。",
+        "The local model couldn't handle this step. Please report it on GitHub so it can be fixed.":
+            "本地模型处理不了这一步。请到 GitHub 报告，方便我们修复。",
+        "The local model couldn't handle this step (%@). Please report it on GitHub so it can be fixed.":
+            "本地模型处理不了这一步（%@）。请到 GitHub 报告，方便我们修复。",
         "The local model didn't answer in time. Check that “Local model” is ready on the home screen, then run it again.":
             "本地模型没有及时回应。确认首页的「本地模型」已就绪，再跑一次。",
         "The last task is still running. Wait for it to finish, or click “Stop” first.":

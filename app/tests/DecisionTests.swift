@@ -208,6 +208,7 @@ enum DecisionTests {
 
         liveViewTests()
         issueReportTests()
+        runErrorTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -364,6 +365,25 @@ enum DecisionTests {
 
 
     /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
+    /// A failed run in one sentence (Shared/RunErrorText.swift), against real messages.
+    static func runErrorTests() {
+        let refused = "errored  0 actions  6s  $0.00\nprovider_unavailable: system one endpoint http://127.0.0.1:18850 failed: HTTP Error 400: Bad Request -- choice criteria must be a map with 1..255 options\ntrace runs/do-20261005-022054"
+        let en = RunErrorText.friendly(refused, lang: .en)
+        check(en.hasPrefix("The local model couldn't handle this step (choice criteria must be a map with 1..255 options)"),
+              "a 400 says the model refused the step, and why: \(en)")
+        check(!en.contains("in time"), "a refusal is not called a timeout")
+        let old = "provider_unavailable: system one endpoint http://127.0.0.1:18850 failed: HTTP Error 400: Bad Request"
+        check(RunErrorText.friendly(old, lang: .en) == L("The local model couldn't handle this step. Please report it on GitHub so it can be fixed.", lang: .en),
+              "a 400 with no message (an older hands)")
+        let timeout = "provider_unavailable: system one endpoint http://127.0.0.1:18850 failed: <urlopen error timed out>"
+        check(RunErrorText.friendly(timeout, lang: .en).contains("didn't answer in time"), "a timeout is still a timeout")
+        check(RunErrorText.friendly("provider_unavailable: ... failed: <urlopen error [Errno 61] Connection refused>", lang: .en)
+                .contains("didn't answer in time"), "connection refused: not ready")
+        check(RunErrorText.friendly(refused, lang: .zhHans).hasPrefix("本地模型处理不了这一步（choice criteria"), "zh")
+        check(RunErrorText.friendly("see failed: capture failed", lang: .en).hasPrefix("Couldn't see the window"), "capture")
+        check(RunErrorText.friendly("something else", lang: .en).hasPrefix("This run hit an error"), "anything else")
+    }
+
     static func issueReportTests() {
         let u = IssueReport.url(kind: .guessed, goal: "Add Lisa Wong's order to ledger.csv\nthen save", outcome: "It said it finished.",
                                 steps: ["double_click", "type_text", "type_text", "save"], appVersion: "0.4.0", macOS: "Version 27.2")

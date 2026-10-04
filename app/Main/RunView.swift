@@ -75,31 +75,7 @@ final class RunModel: ObservableObject {
 
     /// A failed run in one sentence the user can act on; the raw text stays available under "Details".
     /// (The helper's "local model not ready" error is already such a sentence: apply() shows it as it is.)
-    static func friendly(_ raw: String) -> String {
-        let r = raw.lowercased()
-        let lang = ResolvedLang.current
-        if r.contains("screen recording") || r.contains("tcc") || r.contains("accessibility") && r.contains("not") {
-            return L("The helper seems to have lost its permissions. Check “Accessibility” and “Screen Recording” on the home screen, then run it again.",
-                     lang: lang)
-        }
-        if r.contains("quarantined") || r.contains("capture failed") || r.contains("see failed") {
-            return L("Couldn't see the window this time (it happens when the Mac is busy). Wait a moment and run it again.",
-                     lang: lang)
-        }
-        if r.contains("provider_unavailable") || r.contains("timed out") || r.contains("connection refused")
-            || r.contains("18850") {
-            return L("The local model didn't answer in time. Check that “Local model” is ready on the home screen, then run it again.",
-                     lang: lang)
-        }
-        if r.contains("no folder is attached") {
-            return L("The instruction names files, but no folder is attached and none of them is open. Attach the folder they're in, or open them, then run it again.",
-                     lang: lang)
-        }
-        if r.contains("a run is already in progress") {
-            return L("The last task is still running. Wait for it to finish, or click “Stop” first.", lang: lang)
-        }
-        return L("This run hit an error. Run it again; if it keeps happening, report it on GitHub.", lang: lang)
-    }
+    static func friendly(_ raw: String) -> String { RunErrorText.friendly(raw, lang: ResolvedLang.current) }
 
     func start(_ choice: PlayChoice) {
         let req: [String: Any] = choice.real
