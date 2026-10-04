@@ -51,8 +51,12 @@ enum LiveView {
     /// app is read from its pixels with no window list), the largest ordinary window of the app it works in, by the
     /// name the observation gives it ("TextEdit"); else of the task's apps, by bundle id -- the system names apps in
     /// its own language ("文本编辑"), which need not be the one hands read; else none.
-    static func pick(_ windows: [Candidate], active: Int?, app: String, bundles: [String]) -> Int? {
+    ///
+    /// `observed`: hands has looked at the screen at least once. Until then nothing is shown -- the largest window of
+    /// the app could be one of the user's own, and a card is easily screenshotted and shared.
+    static func pick(_ windows: [Candidate], active: Int?, app: String, bundles: [String], observed: Bool = true) -> Int? {
         if let active { return windows.contains(where: { $0.id == active && $0.onScreen }) ? active : nil }
+        guard observed else { return nil }
         // "TextEdit (no window open)": the app's name is what comes before the note.
         let name = app.components(separatedBy: " (").first?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
         let wanted = Set(bundles.map { $0.lowercased() })
@@ -136,8 +140,8 @@ enum LiveView {
 
     /// The pixels to capture for a picture of `picture` points: twice that (a Retina card), never more than the
     /// window's own pixels. Even numbers, as video buffers want.
-    static func capturePixels(picture: CGSize, window: CGSize, scale: CGFloat) -> (Int, Int) {
-        let w = min(picture.width * 2, window.width * scale), h = min(picture.height * 2, window.height * scale)
+    static func capturePixels(picture: CGSize, window: CGSize, scale: CGFloat, perPoint: CGFloat = 2) -> (Int, Int) {
+        let w = min(picture.width * perPoint, window.width * scale), h = min(picture.height * perPoint, window.height * scale)
         return (max(2, Int(w) / 2 * 2), max(2, Int(h) / 2 * 2))
     }
 

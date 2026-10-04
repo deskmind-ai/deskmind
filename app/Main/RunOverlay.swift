@@ -184,7 +184,8 @@ final class RunOverlay {
         model.ending = model.stoppedByUser ? .stopped : (passed ? .done : .failed)
         model.line = summary
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { model.resultOpen = true }
-        if !NSApp.isActive {
+        // DeskMind is often still the active app with its window aside: the notification is the result's way in then.
+        if !NSApp.isActive || MainWindow.isAside {
             let lang = ResolvedLang.current
             Self.notify(title: passed ? L("DeskMind finished the task", lang: lang) : L("DeskMind couldn't finish the task", lang: lang),
                         body: L("%@: %@", model.title, summary, lang: lang))

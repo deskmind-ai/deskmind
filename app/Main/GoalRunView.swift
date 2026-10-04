@@ -304,7 +304,9 @@ struct AskCard: View {
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Brand.card)
             .shadow(color: Brand.ink.opacity(0.08), radius: 8, y: 2))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Brand.dot.opacity(0.5), lineWidth: 1))
-        .onAppear { focused = !ask.approval }
+        // The field takes the keys only when DeskMind is the active app and the user is not typing elsewhere: their
+        // keys meant for another app must not become the answer.
+        .onAppear { focused = !ask.approval && NSApp.isActive && !MainWindow.userTypedRecently() }
     }
 
     private func submit() {

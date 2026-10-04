@@ -195,10 +195,13 @@ enum LiveViewE2E {
         check(rect(s, "frame").minX < vis.midX && rect(s, "frame").minY < vis.midY, "moved to bottom-left: \(rect(s, "frame"))")
         check(s["click_through"] as? Bool == false, "still takes clicks there")
 
-        // 5. A window filling the screen: the card stays and lets clicks through; hands' window capture has no card.
+        // 5. A window filling the screen: the card becomes the capsule (no capture), which lets clicks through since
+        // it too would cover the window; hands' window capture under it has no card. It comes back after.
         setBounds(vtl)
-        s = waitFor { ($0["click_through"] as? Bool) == true }
-        check(s["click_through"] as? Bool == true, "over a full-screen window it lets clicks through")
+        s = waitFor { ($0["click_through"] as? Bool) == true && rect($0, "frame").size == LiveView.pill }
+        check(s["auto_collapsed"] as? Bool == true && rect(s, "frame").size == LiveView.pill, "over a full-screen window: the capsule")
+        check(s["click_through"] as? Bool == true, "which lets clicks through")
+        check(waitFor { ($0["streaming"] as? Bool) == false }["streaming"] as? Bool == false, "no capture behind the capsule")
         Thread.sleep(forTimeInterval: 0.5)
         s = snap()
         if let (id, wf) = docWindow(), let shot = capture(window: id, name: "5-hands-capture") {
@@ -211,7 +214,8 @@ enum LiveViewE2E {
 
         // 6. Steps: the words, the number, the agent's cursor where it acted.
         setBounds(home)
-        waitFor { ($0["click_through"] as? Bool) == false }
+        s = waitFor(6) { ($0["click_through"] as? Bool) == false && ($0["streaming"] as? Bool) == true && rect($0, "frame").height > 200 }
+        check(s["auto_collapsed"] as? Bool == false && s["streaming"] as? Bool == true, "room again: the card and its capture are back")
         LiveCard.stepped(n: 3, words: "Click “Save”", target: [home.midX - 10, home.midY - 10, 20, 20], click: true)
         s = waitFor { ($0["cursor"] as? String) != nil }
         check((s["title"] as? String ?? "").contains("3"), "the step's number: \(s["title"] ?? "")")

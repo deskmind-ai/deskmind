@@ -55,6 +55,8 @@ struct HomeView: View {
     @State private var confirming: GoalRequest?
     @State private var confirmReset = false
     @State private var samplePath = ""
+    /// What the sample folder holds (the helper lists it): which expenses file the file example names.
+    @State private var sampleFiles: [String] = []
     @State private var confirmClear = false
     @State private var hovered: UUID?
     @FocusState private var promptFocused: Bool
@@ -108,9 +110,13 @@ struct HomeView: View {
                     }
                 }
                 .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Brand.sage)
+                // The project, always one click away (issues, the source, a star).
+                Button("GitHub") { NSWorkspace.shared.open(URL(string: IssueReport.repo)!) }
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Brand.sage)
+                    .help(L("DeskMind on GitHub", lang: lang))
                 Spacer()
                 // The mock desktop's smoke set and the sandbox tasks: open once the permissions are in place.
-                Button(L("Try examples", lang: lang)) { onExamples() }
+                Button(L("Self-test", lang: lang)) { onExamples() }
                     .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
                     .disabled(!model.permissionsDone).opacity(model.permissionsDone ? 1 : 0.4)
             }
@@ -262,24 +268,36 @@ struct HomeView: View {
         .font(.system(size: 11)).foregroundStyle(Brand.ink)
     }
 
+    /// One per row, so every example is seen: side by side in a sideways scroller, the second was cut off and the
+    /// third off screen, and a mouse wheel does not scroll sideways.
     @ViewBuilder var examples: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                ForEach(GoalExample.all) { e in
-                    Button { use(e) } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: e.symbol).font(.system(size: 10)).foregroundStyle(Brand.sage)
-                            Text(L(e.text, lang: lang)).font(.system(size: 11)).foregroundStyle(Brand.ink).lineLimit(1)
-                        }
-                        .padding(.horizontal, 9).padding(.vertical, 4)
-                        .background(Capsule().fill(Brand.card))
-                        .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(GoalExample.all) { e in
+                Button { use(e) } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: e.symbol).font(.system(size: 10)).foregroundStyle(Brand.sage)
+                        Text(label(e)).font(.system(size: 11)).foregroundStyle(Brand.ink).lineLimit(1).truncationMode(.tail)
                     }
-                    .buttonStyle(.plain)
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Capsule().fill(Brand.card))
+                    .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
                 }
+                .buttonStyle(.plain)
+                .help(label(e))
             }
-            .padding(.horizontal, 28)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 28)
+    }
+
+    /// An example's words. The file example names the expenses file the sample folder actually holds: it is seeded
+    /// once, in the language of the moment, and the language may have changed since (the Chinese example named
+    /// 报销单.csv in a folder seeded with expenses.csv).
+    private func label(_ e: GoalExample) -> String {
+        guard e.kind == .files else { return L(e.text, lang: lang) }
+        let file = sampleFiles.first { $0 == "报销单.csv" || $0 == "expenses.csv" }
+            ?? (lang == .zhHans ? "报销单.csv" : "expenses.csv")
+        return L("Make a folder called Receipts and move %@ into it", file, lang: lang)
     }
 
     @ViewBuilder var recent: some View {
@@ -352,7 +370,7 @@ struct HomeView: View {
     }
 
     private func use(_ e: GoalExample) {
-        goal = L(e.text, lang: lang)
+        goal = label(e)
         switch e.kind {
         // The file example is about the sample files: attach the sample folder unless a folder is attached.
         case .files: if folder == nil { useSample() }
@@ -398,6 +416,7 @@ struct HomeView: View {
             await MainActor.run {
                 guard let r, r["ok"] as? Bool == true, let path = r["path"] as? String else { return }
                 samplePath = path
+                sampleFiles = r["files"] as? [String] ?? []
                 then?(path)
             }
         }
@@ -440,10 +459,14 @@ struct ConfirmSheet: View {
                         Image(nsImage: a.icon).resizable().frame(width: 28, height: 28)
                         Text(a.displayName(lang)).font(.system(size: 14, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
                         Spacer()
-                        Toggle(L("Don't ask again for this app", lang: lang), isOn: Binding(
-                            get: { remember.contains(a.bundleID) },
-                            set: { on in if on { remember.insert(a.bundleID) } else { remember.remove(a.bundleID) } }))
-                            .toggleStyle(.checkbox).font(.system(size: 11)).foregroundStyle(Brand.sage)
+                        // Not while the vision model is missing: the sheet is shown for that anyway (see skip), and a
+                        // box that changes nothing is a broken promise.
+                        if !(request.mayNeedVision && DeskMindModels.eyesDir() == nil) {
+                            Toggle(L("Don't ask again for this app", lang: lang), isOn: Binding(
+                                get: { remember.contains(a.bundleID) },
+                                set: { on in if on { remember.insert(a.bundleID) } else { remember.remove(a.bundleID) } }))
+                                .toggleStyle(.checkbox).font(.system(size: 11)).foregroundStyle(Brand.sage)
+                        }
                     }
                 }
             }
@@ -510,7 +533,9 @@ struct ConfirmSheet: View {
     /// The vision model is not here yet: say so, and offer the download right here.
     @ViewBuilder var eyesNote: some View {
         VStack(alignment: .leading, spacing: 6) {
-            note("eye", L("Apps without accessibility need the vision model: a one-time download of 3.3 GB. Without it, DeskMind can only use apps it can read.", lang: lang))
+            // Optional, and said so: the Safari example showed this as if a second big download stood between the user
+            // and their first task.
+            note("eye", L("Optional: for an app whose window can't be read through accessibility (NetEase Cloud Music and the like), DeskMind uses a vision model, a one-time 3.3 GB download. You can start without it.", lang: lang))
             HStack(spacing: 8) {
                 EyesProgress()
                 Spacer()

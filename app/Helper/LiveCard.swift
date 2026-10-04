@@ -43,18 +43,28 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
     private let state = NSLock()
     private var activeWindow: Int?
     private var appName = ""
+    /// hands has looked at the screen at least once (see LiveView.pick).
+    private var observedOnce = false
     private let bundles: [String]
     private var stream: SCStream?
     private var shown: (window: Int, frame: CGRect, display: CGDirectDisplayID, drop: Set<Int>, pixels: CGSize)?
     private var watching = true
-    /// Collapsed to the capsule: no capture.
+    /// Collapsed to the capsule: no capture. `autoCollapsed`: by the card itself, because the card would cover the
+    /// window being worked in from every corner (a window filling the screen); it opens again when that is over.
     private var collapsed = false
+    private var autoCollapsed = false
     private var large = UserDefaults.standard.bool(forKey: largeKey)
     /// The run's own status (working, needs the user, paused, ended); `hidden` is the window's, layered on top.
     private var runStatus: LiveView.Status = .starting
     private var windowHidden = false
     private var step = 0
     private var hadPicture = false
+    /// How often the window is looked for (s), frames per second at most, and pixels per point of the picture.
+    /// Tunable without a rebuild (`defaults write ai.deskmind.hands liveView.poll 1.0`), for measuring what the card
+    /// costs the run.
+    private let poll = max(0.2, UserDefaults.standard.object(forKey: "liveView.poll") as? Double ?? 0.5)
+    private let fps = max(1, UserDefaults.standard.object(forKey: "liveView.fps") as? Int ?? 10)
+    private let pixelScale = max(1, UserDefaults.standard.object(forKey: "liveView.scale") as? Double ?? 2)
     /// Frames arrive here; the watch loop runs on its own thread.
     private let frames = DispatchQueue(label: "ai.deskmind.livecard.frames", qos: .userInitiated)
 
@@ -108,6 +118,7 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
     /// An observation: the window hands is looking at, and its app.
     static func observed(windows: [[String: Any]], app: String) {
         current?.set { c in
+            c.observedOnce = true
             if let id = LiveView.activeWindowID(windows) { c.activeWindow = id }
             if !app.isEmpty { c.appName = app }
         }
@@ -174,7 +185,7 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Size, place, show what the state says. Main thread.
     fileprivate func refresh() {
         guard let p = panel, let v = view else { return }
-        let (status, collapsed, large, step, app, hadPicture) = read { c -> (LiveView.Status, Bool, Bool, Int, String, Bool) in
+        let (status, userCollapsed, large, step, app, hadPicture) = read { c -> (LiveView.Status, Bool, Bool, Int, String, Bool) in
             let s: LiveView.Status = c.runStatus.isEnding || c.runStatus == .waitingForUser ? c.runStatus
                 : (c.windowHidden && c.hadPicture ? .hidden : c.runStatus)
             return (s, c.collapsed, c.large, c.step, c.appName, c.hadPicture)
@@ -188,20 +199,24 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let screen = targetScreen()
         let visible = screen.visibleFrame
-        let size: CGSize
-        if collapsed {
-            size = LiveView.pill
-        } else {
-            let pic = LiveView.pictureSize(window: lastWindow?.size ?? .zero,
-                                           box: large ? LiveView.maxPictureLarge : LiveView.maxPicture)
-            size = LiveView.cardSize(picture: pic)
-        }
         let mainHeight = NSScreen.screens.first?.frame.height ?? visible.maxY
         let avoid = lastWindow.map { LiveView.toAppKit($0, mainHeight: mainHeight) }.flatMap { $0.intersects(screen.frame) ? $0 : nil }
-        let placed = LiveView.place(size: size, preferred: corner, visible: visible, avoid: collapsed ? nil : avoid)
+        let pic = LiveView.pictureSize(window: lastWindow?.size ?? .zero, box: large ? LiveView.maxPictureLarge : LiveView.maxPicture)
+        let cardSize = LiveView.cardSize(picture: pic)
+        // A card that would cover the window being worked in from every corner becomes the capsule, which covers
+        // little; the card comes back when the window leaves room for it.
+        let cardPlaced = LiveView.place(size: cardSize, preferred: corner, visible: visible, avoid: avoid)
+        let auto = !userCollapsed && cardPlaced.covers
+        if auto != read({ $0.autoCollapsed }) {
+            state.lock(); autoCollapsed = auto; state.unlock()
+            if auto { DispatchQueue.global().async { self.stopCapture() } }   // the capsule shows no picture
+        }
+        let collapsed = userCollapsed || auto
+        let size = collapsed ? LiveView.pill : cardSize
+        let placed = collapsed ? LiveView.place(size: size, preferred: corner, visible: visible, avoid: avoid) : cardPlaced
         let frame = LiveView.frame(size: size, corner: placed.corner, visible: visible)
-        // A card that would cover the window lets clicks through (and keeps its buttons out of reach) -- the run may
-        // click under it.
+        // Even the capsule would cover the window: it lets clicks through, so a click the run makes there reaches the
+        // app (its Stop is then out of reach; the island's is not).
         p.ignoresMouseEvents = placed.covers
         v.layoutCard(collapsed: collapsed, large: large, size: size, dimmed: status == .hidden, note: status == .hidden || !hadPicture
                      ? L(LiveView.word(status == .hidden ? .hidden : .starting), lang: lang) : nil)
@@ -281,7 +296,7 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
         Thread.detachNewThread { [weak self] in
             while let self, self.read({ $0.watching }) {
                 self.update()
-                Thread.sleep(forTimeInterval: 0.5)
+                Thread.sleep(forTimeInterval: self.poll)
             }
         }
     }
@@ -295,9 +310,9 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         state.lock()
         guard watching, !runStatus.isEnding else { state.unlock(); return }
-        let (active, app, isCollapsed, isLarge) = (activeWindow, appName, collapsed, large)
+        let (active, app, isCollapsed, isLarge, observed) = (activeWindow, appName, collapsed || autoCollapsed, large, observedOnce)
         state.unlock()
-        guard let id = LiveView.pick(candidates, active: active, app: app, bundles: bundles),
+        guard let id = LiveView.pick(candidates, active: active, app: app, bundles: bundles, observed: observed),
               let window = content.windows.first(where: { Int($0.windowID) == id }),
               let display = content.displays.first(where: { !$0.frame.intersection(window.frame).isNull })
                 ?? content.displays.first else {
@@ -322,16 +337,17 @@ final class LiveCard: NSObject, SCStreamOutput, SCStreamDelegate {
         let dropIDs = Set(drop.map { Int($0.windowID) })
         let pic = LiveView.pictureSize(window: frame.size, box: isLarge ? LiveView.maxPictureLarge : LiveView.maxPicture)
         let filter = SCContentFilter(display: display, excludingWindows: drop)
-        let px = LiveView.capturePixels(picture: pic, window: frame.size, scale: CGFloat(filter.pointPixelScale))
+        let px = LiveView.capturePixels(picture: pic, window: frame.size, scale: CGFloat(filter.pointPixelScale),
+                                        perPoint: CGFloat(pixelScale))
         let pixels = CGSize(width: px.0, height: px.1)
         state.lock(); defer { state.unlock() }
-        guard watching, !collapsed else { return }
+        guard watching, !collapsed, !autoCollapsed else { return }
         if let s = shown, s.window == id, s.frame == frame, s.display == display.displayID, s.drop == dropIDs,
            s.pixels == pixels, stream != nil { return }
         let cfg = SCStreamConfiguration()
         cfg.sourceRect = LiveView.sourceRect(window: frame, display: display.frame)
         (cfg.width, cfg.height) = px
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: 10)   // a glance, not a movie
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))   // a glance, not a movie
         cfg.showsCursor = false      // the run never moves the pointer; the card draws where it acted
         cfg.queueDepth = 3
         cfg.pixelFormat = kCVPixelFormatType_32BGRA
@@ -395,10 +411,11 @@ extension LiveCard {
     /// What the card shows and does now, for an end-to-end test to check.
     static func snapshot() -> [String: Any] {
         guard let card = current else { return ["card": false] }
-        let (status, collapsed, large, streaming, watching, hidden) = card.read {
-            ($0.runStatus, $0.collapsed, $0.large, $0.stream != nil, $0.watching, $0.windowHidden)
+        let (status, collapsed, large, streaming, watching, hidden, auto) = card.read {
+            ($0.runStatus, $0.collapsed, $0.large, $0.stream != nil, $0.watching, $0.windowHidden, $0.autoCollapsed)
         }
         var out: [String: Any] = ["card": true, "status": LiveView.word(status), "collapsed": collapsed, "large": large,
+                                  "auto_collapsed": auto,
                                   "streaming": streaming, "watching": watching, "window_hidden": hidden,
                                   "corner": card.corner.rawValue]
         if let p = card.panel {
@@ -457,8 +474,11 @@ private final class CardView: NSView {
     private var downAt: NSPoint?
     private(set) var dragging = false
 
-    static let orange = NSColor(calibratedRed: 0.85, green: 0.40, blue: 0.24, alpha: 1)
-    private static let chrome = NSColor(calibratedRed: 0.149, green: 0.169, blue: 0.157, alpha: 0.96)
+    // DeskMind's colours (Main/Brand.swift): ink for the chrome, the orange dot for the agent, mist for quiet states.
+    static let orange = NSColor(srgbRed: 0xC9 / 255.0, green: 0x55 / 255.0, blue: 0x36 / 255.0, alpha: 1)
+    static let mist = NSColor(srgbRed: 0xB2 / 255.0, green: 0xBB / 255.0, blue: 0xAF / 255.0, alpha: 1)
+    static let paper = NSColor(srgbRed: 0xF4 / 255.0, green: 0xF1 / 255.0, blue: 0xEA / 255.0, alpha: 1)
+    private static let chrome = NSColor(srgbRed: 0x26 / 255.0, green: 0x2B / 255.0, blue: 0x28 / 255.0, alpha: 0.96)
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -578,12 +598,11 @@ private final class CardView: NSView {
     }
 
     func setStatus(_ s: LiveView.Status) {
+        // Orange is the agent at work and the run needing the user (it pulses faster); an ending is quiet.
         let color: NSColor = switch s {
-        case .working, .starting: Self.orange
-        case .waitingForUser: NSColor.systemYellow
-        case .done: NSColor.systemGreen
-        case .failed: NSColor.systemRed
-        case .paused, .hidden, .stopped: NSColor(calibratedWhite: 0.7, alpha: 1)
+        case .working, .starting, .waitingForUser: Self.orange
+        case .done: Self.paper
+        case .failed, .paused, .hidden, .stopped: Self.mist
         }
         dot.backgroundColor = color.cgColor
         dot.removeAnimation(forKey: "pulse")

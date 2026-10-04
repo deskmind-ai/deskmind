@@ -120,6 +120,7 @@ def main() -> int:
     ap.add_argument("case", choices=sorted(CASES))
     ap.add_argument("--off", action="store_true", help="the card off (the baseline)")
     ap.add_argument("--out", default="/tmp/deskmind-liveview-runs")
+    ap.add_argument("--max-steps", type=int, default=0, help="stop the run (as the app's Stop does) after this many steps")
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -156,6 +157,9 @@ def main() -> int:
         kind = e.get("event")
         if kind == "step":
             print(f"  step {e.get('n')}: {e.get('human')}  ({e.get('latency')} s)")
+            if a.max_steps and len([x for x in events if x.get("event") == "step"]) == a.max_steps:
+                request({"op": "stop"})
+                print(f"  stopped after {a.max_steps} steps")
         elif kind == "ask":
             print(f"  ask: {e.get('question')}")
             if case["answer"]:

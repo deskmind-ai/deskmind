@@ -207,6 +207,7 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
         liveViewTests()
+        issueReportTests()
 
         print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
@@ -246,6 +247,9 @@ enum DecisionTests {
               "a floating panel or menu is not the window")
         check(LV.pick([], active: 1, app: "TextEdit", bundles: [te]) == nil, "no windows at all")
         check(LV.pick([], active: nil, app: "", bundles: []) == nil, "nothing known")
+        check(LV.pick(wins, active: nil, app: "TextEdit", bundles: [te], observed: false) == nil,
+              "before hands has looked: nothing, not a guess that could be the user's own window")
+        check(LV.pick(wins, active: 1, app: "", bundles: [], observed: false) == 1, "a window hands named is shown at once")
 
         // The picture and the card.
         check(LV.pictureSize(window: CGSize(width: 1200, height: 800)) == CGSize(width: 360, height: 240), "wide fits the width")
@@ -317,6 +321,30 @@ enum DecisionTests {
         for st in allStatuses {
             check(L(LV.word(st), lang: .zhHans) != LV.word(st), "a Chinese word for \(LV.word(st))")
         }
+    }
+
+
+    /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
+    static func issueReportTests() {
+        let u = IssueReport.url(kind: .guessed, goal: "Add Lisa Wong's order to ledger.csv\nthen save", outcome: "It said it finished.",
+                                steps: ["Open “records.txt”", "Type “R-3307” into “ledger”"], appVersion: "0.4.0", macOS: "Version 27.2")
+        let q = URLComponents(url: u!, resolvingAgainstBaseURL: false)!.queryItems ?? []
+        let title = q.first { $0.name == "title" }?.value ?? "", body = q.first { $0.name == "body" }?.value ?? ""
+        check(u!.absoluteString.hasPrefix("https://github.com/deskmind-ai/deskmind/issues/new?"), "the hub's new-issue form")
+        check(title == "Guessed instead of asking: Add Lisa Wong's order to ledger.csv then save", "title: \(title)")
+        check(body.contains("> Add Lisa Wong's order to ledger.csv\n> then save"), "the instruction, quoted line by line")
+        check(body.contains("1. Open “records.txt”") && body.contains("2. Type “R-3307” into “ledger”"), "the steps")
+        check(body.contains("What it should have asked") && body.contains("DeskMind 0.4.0 · macOS Version 27.2"), "the prompt and versions")
+        check(body.hasPrefix("<!-- This issue is public."), "a reminder that it is public, hidden in the rendered issue")
+        check(!IssueReport.body(kind: .stuck, goal: "g", outcome: "", steps: [], total: 0, appVersion: "1", macOS: "2").contains("Steps"),
+              "no steps: no Steps heading")
+        let many = (1...200).map { "Type “\(String(repeating: "x", count: 100))” into field \($0)" }
+        let long = IssueReport.url(kind: .stuck, goal: "g", outcome: "o", steps: many, appVersion: "1", macOS: "2")
+        check(long != nil && long!.absoluteString.count <= IssueReport.maxURL, "a long run is trimmed to fit: \(long?.absoluteString.count ?? -1)")
+        check((URLComponents(url: long!, resolvingAgainstBaseURL: false)!.queryItems?.first { $0.name == "body" }?.value ?? "").contains("more"),
+              "and says how many steps were left out")
+        check(IssueReport.oneLine("a\nb", max: 10) == "a b" && IssueReport.oneLine("abcdefghijk", max: 5) == "abcd…", "one line, cut with …")
+        for k in IssueReport.Kind.allCases { check(L(k.label, lang: .zhHans) != k.label, "a Chinese label for \(k.label)") }
     }
 
 }

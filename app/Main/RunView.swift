@@ -96,7 +96,7 @@ final class RunModel: ObservableObject {
         if r.contains("a run is already in progress") {
             return L("The last task is still running. Wait for it to finish, or click “Stop” first.", lang: lang)
         }
-        return L("This run hit an error. Run it again; if it keeps happening, send us the details below.", lang: lang)
+        return L("This run hit an error. Run it again; if it keeps happening, report it on GitHub.", lang: lang)
     }
 
     func start(_ choice: PlayChoice) {
@@ -348,14 +348,16 @@ final class RunModel: ObservableObject {
             let q = PendingAsk(question: e["question"] as? String ?? "", approval: e["approval"] as? Bool ?? false,
                                options: e["options"] as? [String] ?? [])
             withAnimation(.easeOut(duration: 0.2)) { ask = q }
-            // The answer is typed in DeskMind's window: it comes back for it.
-            if real { MainWindow.comeBack(activate: true) }
+            // The answer is typed in DeskMind's window: it comes back for it. Not as the key window while the user is
+            // typing in another app -- their next keys, Return included, would land in the answer and send it.
+            let typing = MainWindow.userTypedRecently()
+            if real { MainWindow.comeBack(activate: !typing) }
             let lang = ResolvedLang.current
             if real {
                 RunOverlay.shared.say(q.approval ? L("Waiting for your approval in DeskMind", lang: lang)
                                                  : L("Waiting for your answer in DeskMind", lang: lang))
             }
-            if !NSApp.isActive {
+            if !NSApp.isActive || typing {
                 RunOverlay.notify(title: q.approval ? L("DeskMind needs your approval", lang: lang)
                                                     : L("DeskMind has a question", lang: lang), body: q.question)
             }
@@ -420,6 +422,11 @@ final class RunModel: ObservableObject {
                            : L("Stopped before finishing.", lang: lang))
                 }
                 RunOverlay.shared.finish(passed: completed, summary: summary)
+                // The window stays aside after a run, the result in the island -- which shrinks after a few
+                // seconds. An answer, and the first task that finishes, bring it back (not as the active window).
+                if MainWindow.isAside && (!answer.isEmpty || (completed && !UserDefaults.standard.bool(forKey: "starNudge.seen"))) {
+                    MainWindow.comeBack(activate: false)
+                }
             } else if real {
                 let passed = exit == 0 && (e["passed"] as? Int ?? 0) == (e["total"] as? Int ?? -1)
                 RunOverlay.shared.finish(passed: passed,
@@ -453,7 +460,7 @@ struct RunView: View {
             // below them. The state is the chip's.
             HStack(alignment: .center, spacing: 14) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(L("Try examples", lang: lang)).font(.system(size: 22, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
+                    Text(L("Self-test", lang: lang)).font(.system(size: 22, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
                     Text(choice.real
                          ? L("Real run · the local model works in %@ inside a sandbox folder, never touching your files",
                              L(choice.app, lang: lang), lang: lang)
@@ -542,6 +549,18 @@ struct RunFailure: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(run.summary).font(.system(size: 12, weight: .medium)).foregroundStyle(Brand.dot)
                     .fixedSize(horizontal: false, vertical: true)
+                Button(L("Report on GitHub", lang: lang)) {
+                    let steps = run.tasks.flatMap { $0.steps.map(\.human) }
+                    if let url = IssueReport.url(kind: .error, goal: run.goalRequest?.goal ?? run.tasks.first?.title ?? "",
+                                                 outcome: run.summary + (run.rawError.isEmpty ? "" : "\n\n```\n\(String(run.rawError.suffix(600)))\n```"),
+                                                 steps: steps,
+                                                 appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
+                                                 macOS: ProcessInfo.processInfo.operatingSystemVersionString) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.ink).underline()
+                .help(L("Opens a GitHub issue for you to check and submit. Nothing is sent from DeskMind.", lang: lang))
                 if !run.rawError.isEmpty && run.rawError != run.summary {
                     DisclosureGroup(L("Details", lang: lang)) {
                         ScrollView { Text(run.rawError).font(.system(size: 10).monospaced()).textSelection(.enabled)
@@ -644,8 +663,11 @@ struct TaskCard: View {
 struct FreeResult: View {
     let task: RunTask
     @State private var sent = false
-    /// The GitHub star line: offered once, on the first task that finished, and never again once seen.
+    @State private var verdict = ""
+    /// The GitHub star line: offered once, on the first task that finished (once the window shows it), and after a 👍
+    /// until the user has followed it once.
     @AppStorage("starNudge.seen") private var starSeen = false
+    @AppStorage("starNudge.followed") private var starFollowed = false
     @State private var showStar = false
     @Environment(\.lang) private var lang
 
@@ -668,7 +690,8 @@ struct FreeResult: View {
             if showStar { star.transition(.opacity) }
         }
         .onAppear {
-            if task.strict == true && !starSeen { starSeen = true; showStar = true }
+            // Not while the window is aside: the line was used up by a result nobody saw.
+            if task.strict == true && !starSeen && !MainWindow.isAside { starSeen = true; showStar = true }
         }
     }
 
@@ -679,7 +702,8 @@ struct FreeResult: View {
                 .font(.system(size: 12, design: .rounded)).foregroundStyle(Brand.sage)
             Spacer()
             Button(L("Star on GitHub", lang: lang)) {
-                NSWorkspace.shared.open(URL(string: "https://github.com/deskmind-ai/deskmind")!)
+                starFollowed = true
+                NSWorkspace.shared.open(URL(string: IssueReport.repo)!)
                 withAnimation(.easeOut(duration: 0.2)) { showStar = false }
             }
             .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.ink).underline()
@@ -716,22 +740,49 @@ struct FreeResult: View {
         }
     }
 
+    /// 👍/👎, kept on this Mac. A 👎 asks what went wrong and offers a GitHub issue filled in with the run (opened in
+    /// the browser for the user to check and submit; nothing is sent from here) -- "it guessed instead of asking" is
+    /// the report the next training round needs. A 👍 offers the star line.
     @ViewBuilder var feedback: some View {
-        HStack(spacing: 8) {
-            Text(sent ? L("Thanks, noted.", lang: lang) : L("Did it do what you asked?", lang: lang))
-                .font(.system(size: 12, design: .rounded)).foregroundStyle(Brand.sage)
-            Spacer()
-            ForEach(["up", "down"], id: \.self) { v in
-                Button { record(v) } label: {
-                    Text(v == "up" ? "👍" : "👎").font(.system(size: 14))
-                        .padding(.horizontal, 10).padding(.vertical, 3)
-                        .background(Capsule().fill(Brand.paper))
-                        .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(!sent ? L("Did it do what you asked?", lang: lang)
+                     : verdict == "down" ? L("What went wrong?", lang: lang) : L("Saved on this Mac.", lang: lang))
+                    .font(.system(size: 12, design: .rounded)).foregroundStyle(Brand.sage)
+                Spacer()
+                ForEach(["up", "down"], id: \.self) { v in
+                    Button { record(v) } label: {
+                        Text(v == "up" ? "👍" : "👎").font(.system(size: 14))
+                            .padding(.horizontal, 10).padding(.vertical, 3)
+                            .background(Capsule().fill(Brand.paper))
+                            .overlay(Capsule().strokeBorder(verdict == v ? Brand.ink : Brand.line, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(sent)
+                    .opacity(sent && verdict != v ? 0.45 : 1)
+                    .accessibilityLabel(v == "up" ? L("It did what I asked", lang: lang) : L("It didn't do what I asked", lang: lang))
                 }
-                .buttonStyle(.plain)
-                .disabled(sent)
-                .opacity(sent ? 0.45 : 1)
             }
+            if verdict == "down" {
+                HStack(spacing: 6) {
+                    ForEach([IssueReport.Kind.guessed, .wrong, .stuck], id: \.self) { k in
+                        Button(L(k.label, lang: lang)) { report(k) }.buttonStyle(InkButtonStyle(prominent: false))
+                    }
+                }
+                Text(L("Opens a GitHub issue for you to check and submit. Nothing is sent from DeskMind.", lang: lang))
+                    .font(.system(size: 11)).foregroundStyle(Brand.sage)
+            }
+        }
+    }
+
+    private func report(_ kind: IssueReport.Kind) {
+        let outcome = !task.answer.isEmpty ? "Answer: \(task.answer)"
+            : (task.strict == true ? "It said it finished." : "It stopped before finishing.")
+            + (task.folder == nil ? "" : " Files: \(task.created.count) created, \(task.modified.count) modified, \(task.deleted.count) deleted.")
+        if let url = IssueReport.url(kind: kind, goal: task.title, outcome: outcome, steps: task.steps.map(\.human),
+                                     appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
+                                     macOS: ProcessInfo.processInfo.operatingSystemVersionString) {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -798,7 +849,10 @@ struct FreeResult: View {
         } else {
             try? line.write(to: url)
         }
-        withAnimation(.easeOut(duration: 0.2)) { sent = true }
+        withAnimation(.easeOut(duration: 0.2)) {
+            sent = true; self.verdict = verdict
+            if verdict == "up" && !starFollowed { showStar = true }
+        }
     }
 }
 
