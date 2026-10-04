@@ -327,22 +327,21 @@ enum DecisionTests {
     /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
     static func issueReportTests() {
         let u = IssueReport.url(kind: .guessed, goal: "Add Lisa Wong's order to ledger.csv\nthen save", outcome: "It said it finished.",
-                                steps: ["Open “records.txt”", "Type “R-3307” into “ledger”"], appVersion: "0.4.0", macOS: "Version 27.2")
+                                steps: ["double_click", "type_text", "type_text", "save"], appVersion: "0.4.0", macOS: "Version 27.2")
         let q = URLComponents(url: u!, resolvingAgainstBaseURL: false)!.queryItems ?? []
         let title = q.first { $0.name == "title" }?.value ?? "", body = q.first { $0.name == "body" }?.value ?? ""
         check(u!.absoluteString.hasPrefix("https://github.com/deskmind-ai/deskmind/issues/new?"), "the hub's new-issue form")
         check(title == "Guessed instead of asking: Add Lisa Wong's order to ledger.csv then save", "title: \(title)")
+        check(body.hasPrefix("> Check this text before submitting; remove anything personal."), "the reminder, visible")
         check(body.contains("> Add Lisa Wong's order to ledger.csv\n> then save"), "the instruction, quoted line by line")
-        check(body.contains("1. Open “records.txt”") && body.contains("2. Type “R-3307” into “ledger”"), "the steps")
-        check(body.contains("What it should have asked") && body.contains("DeskMind 0.4.0 · macOS Version 27.2"), "the prompt and versions")
-        check(body.hasPrefix("<!-- This issue is public."), "a reminder that it is public, hidden in the rendered issue")
-        check(!IssueReport.body(kind: .stuck, goal: "g", outcome: "", steps: [], total: 0, appVersion: "1", macOS: "2").contains("Steps"),
-              "no steps: no Steps heading")
-        let many = (1...200).map { "Type “\(String(repeating: "x", count: 100))” into field \($0)" }
-        let long = IssueReport.url(kind: .stuck, goal: "g", outcome: "o", steps: many, appVersion: "1", macOS: "2")
-        check(long != nil && long!.absoluteString.count <= IssueReport.maxURL, "a long run is trimmed to fit: \(long?.absoluteString.count ?? -1)")
-        check((URLComponents(url: long!, resolvingAgainstBaseURL: false)!.queryItems?.first { $0.name == "body" }?.value ?? "").contains("more"),
-              "and says how many steps were left out")
+        check(body.contains("**Steps**: 4 (type_text ×2, double_click, save)"), "steps as a count and kinds only: \(body)")
+        check(body.contains("What it should have asked") && body.contains("issues?q=is%3Aissue+ambiguous"), "the guessed prompt and the ambiguous issues")
+        check(body.contains("DeskMind 0.4.0 · macOS Version 27.2"), "versions")
+        check(!IssueReport.body(kind: .stuck, goal: "g", outcome: "", steps: [], appVersion: "1", macOS: "2").contains("Steps"),
+              "no steps: no Steps line")
+        check(IssueReport.stepSummary([]) == "0" && IssueReport.stepSummary(["", ""]) == "2", "no kinds")
+        let long = IssueReport.url(kind: .stuck, goal: String(repeating: "很长的指令 ", count: 2000), outcome: "o", steps: ["click"], appVersion: "1", macOS: "2")
+        check(long != nil && long!.absoluteString.count <= IssueReport.maxURL, "a very long instruction is cut to fit: \(long?.absoluteString.count ?? -1)")
         check(IssueReport.oneLine("a\nb", max: 10) == "a b" && IssueReport.oneLine("abcdefghijk", max: 5) == "abcd…", "one line, cut with …")
         for k in IssueReport.Kind.allCases { check(L(k.label, lang: .zhHans) != k.label, "a Chinese label for \(k.label)") }
     }

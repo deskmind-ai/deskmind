@@ -1,7 +1,8 @@
 // A report about a run, as a new GitHub issue on DeskMind's repository, filled in for the user to read, edit and
 // submit in their browser. Nothing is sent from the app: the URL opens the issue form, and the user decides. What
-// goes in is what the run screen shows -- the instruction, how it ended, the steps in words -- plus the app and macOS
-// versions; no screenshots, no file contents, no paths.
+// goes in: the instruction the user typed, how it ended, how many steps it took and of what kind ("type_text x5"),
+// and the app and macOS versions. Nothing read from the screen -- no step text, window titles, labels, file contents
+// or paths -- since the issue is public; the user can add what helps.
 //
 // Foundation only, so tests/DecisionTests.swift checks it.
 
@@ -38,37 +39,42 @@ enum IssueReport {
     /// The most a URL carries comfortably (browsers and GitHub cut long ones): the steps are trimmed to fit.
     static let maxURL = 7000
 
+    /// `steps`: each step's operation (hands' describe up to the first space: "click", "type_text"), nothing more.
     static func url(kind: Kind, goal: String, outcome: String, steps: [String], appVersion: String,
                     macOS: String) -> URL? {
         let title = "\(kind.titlePrefix): \(oneLine(goal, max: 80))"
-        var shown = Array(steps.prefix(40))
+        var goalText = goal
         while true {
-            let body = self.body(kind: kind, goal: goal, outcome: outcome, steps: shown, total: steps.count,
-                                 appVersion: appVersion, macOS: macOS)
+            let body = self.body(kind: kind, goal: goalText, outcome: outcome, steps: steps, appVersion: appVersion, macOS: macOS)
             var c = URLComponents(string: repo + "/issues/new")!
             c.queryItems = [URLQueryItem(name: "title", value: title), URLQueryItem(name: "body", value: body)]
             guard let u = c.url else { return nil }
-            if u.absoluteString.count <= maxURL || shown.isEmpty { return u }
-            shown.removeLast(max(1, shown.count / 4))
+            if u.absoluteString.count <= maxURL || goalText.count < 40 { return u }
+            goalText = String(goalText.prefix(goalText.count * 3 / 4)) + "…"   // a very long instruction
         }
     }
 
-    static func body(kind: Kind, goal: String, outcome: String, steps: [String], total: Int, appVersion: String,
+    /// "9 (type_text ×5, click ×3, save)": how many steps, and of what kind, most common first.
+    static func stepSummary(_ ops: [String]) -> String {
+        var count: [String: Int] = [:]
+        for op in ops where !op.isEmpty { count[op, default: 0] += 1 }
+        let kinds = count.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .map { $0.value > 1 ? "\($0.key) ×\($0.value)" : $0.key }
+        return kinds.isEmpty ? "\(ops.count)" : "\(ops.count) (\(kinds.joined(separator: ", ")))"
+    }
+
+    static func body(kind: Kind, goal: String, outcome: String, steps: [String], appVersion: String,
                      macOS: String) -> String {
-        var b = "<!-- This issue is public. Check the instruction and the steps below for anything private before you submit. -->\n\n"
+        var b = "> Check this text before submitting; remove anything personal. This issue is public.\n\n"
         b += "**What I asked**\n\n> \(goal.replacingOccurrences(of: "\n", with: "\n> "))\n\n"
         b += "**What happened**\n\n\(outcome.isEmpty ? "(no result)" : outcome)\n\n"
         switch kind {
         case .guessed: b += "**What it should have asked**\n\n(Which choice was ambiguous, and what you would have answered.)\n\n"
+            b += "More examples of tasks that should ask: \(repo)/issues?q=is%3Aissue+ambiguous\n\n"
         case .wrong: b += "**What I expected**\n\n(The result you wanted.)\n\n"
         case .stuck, .error: break
         }
-        if !steps.isEmpty {
-            b += "**Steps**\n\n"
-            for (i, s) in steps.enumerated() { b += "\(i + 1). \(oneLine(s, max: 140))\n" }
-            if total > steps.count { b += "… and \(total - steps.count) more\n" }
-            b += "\n"
-        }
+        if !steps.isEmpty { b += "**Steps**: \(stepSummary(steps))\n\n" }
         b += "DeskMind \(appVersion) · macOS \(macOS)\n"
         return b
     }

@@ -13,6 +13,8 @@ struct RunStep: Identifiable {
     let describe: String
     let detail: String
     let ok: Bool
+    /// The operation alone ("type_text"), with nothing read from the screen: what a public report may carry.
+    var operation: String { String(describe.split(separator: " ").first ?? "") }
 }
 
 /// What the examples screen offers. The real ones are diag tasks: each runs in a fresh sandbox folder copied from
@@ -550,9 +552,10 @@ struct RunFailure: View {
                 Text(run.summary).font(.system(size: 12, weight: .medium)).foregroundStyle(Brand.dot)
                     .fixedSize(horizontal: false, vertical: true)
                 Button(L("Report on GitHub", lang: lang)) {
-                    let steps = run.tasks.flatMap { $0.steps.map(\.human) }
+                    let steps = run.tasks.flatMap { $0.steps.map(\.operation) }
                     if let url = IssueReport.url(kind: .error, goal: run.goalRequest?.goal ?? run.tasks.first?.title ?? "",
-                                                 outcome: run.summary + (run.rawError.isEmpty ? "" : "\n\n```\n\(String(run.rawError.suffix(600)))\n```"),
+                                                 // The one-line summary, not the raw details: those hold paths with the user's name.
+                                                 outcome: run.summary,
                                                  steps: steps,
                                                  appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
                                                  macOS: ProcessInfo.processInfo.operatingSystemVersionString) {
@@ -776,10 +779,11 @@ struct FreeResult: View {
     }
 
     private func report(_ kind: IssueReport.Kind) {
-        let outcome = !task.answer.isEmpty ? "Answer: \(task.answer)"
+        // How it ended, in DeskMind's words only: the answer itself was read from the screen, and stays out.
+        let outcome = !task.answer.isEmpty ? "It gave an answer."
             : (task.strict == true ? "It said it finished." : "It stopped before finishing.")
             + (task.folder == nil ? "" : " Files: \(task.created.count) created, \(task.modified.count) modified, \(task.deleted.count) deleted.")
-        if let url = IssueReport.url(kind: kind, goal: task.title, outcome: outcome, steps: task.steps.map(\.human),
+        if let url = IssueReport.url(kind: kind, goal: task.title, outcome: outcome, steps: task.steps.map(\.operation),
                                      appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
                                      macOS: ProcessInfo.processInfo.operatingSystemVersionString) {
             NSWorkspace.shared.open(url)
