@@ -387,16 +387,22 @@ enum Runner {
 
     /// Hand the user's answer to the question the running `hands do` asked. One JSON line on its stdin, which is
     /// what it blocks on: {"reply": "...", "approve": true}.
-    static func answer(reply: String, approve: Bool) -> Bool {
+    /// Returns the answered question's id (its `ask_id`), or nil when nothing was waiting.
+    @discardableResult
+    static func answer(reply: String, approve: Bool) -> Int? {
         answerLock.lock(); defer { answerLock.unlock() }
         guard asking, let h = answers,
-              var line = try? JSONSerialization.data(withJSONObject: ["reply": reply, "approve": approve]) else { return false }
+              var line = try? JSONSerialization.data(withJSONObject: ["reply": reply, "approve": approve]) else { return nil }
         line.append(0x0A)
-        do { try h.write(contentsOf: line) } catch { return false }
+        do { try h.write(contentsOf: line) } catch { return nil }
         asking = false
         LiveCard.questionClosed()   // answered in DeskMind's window: the card stops asking
-        return true
+        return askID
     }
+
+    /// The id of the run's latest question (under answerLock): an answer's acknowledgement names it, so the app
+    /// clears that question and never a newer one.
+    nonisolated(unsafe) private static var askID = 0
 
     static func run(_ spec: Spec, emit unlocked: @escaping ([String: Any]) -> Bool) {
         // Two threads emit during a run -- the trace poller and the stdout reader that sees questions -- and their
@@ -536,15 +542,18 @@ enum Runner {
                            goal: spec.goal ?? "", onStop: Runner.requestStop,
                            // Answered in the card: to the run, and the app is told (its own question card closes).
                            onAnswer: { reply, approve in
-                               let ok = Runner.answer(reply: reply, approve: approve)
-                               if ok { _ = emit(["event": "answered", "reply": reply, "approve": approve, "from": "card"]) }
-                               return ok
+                               guard let id = Runner.answer(reply: reply, approve: approve) else { return false }
+                               _ = emit(["event": "answered", "reply": reply, "approve": approve, "from": "card", "ask_id": id])
+                               return true
                            },
                            // "Neither — let me type it…": the app brings its window back with the question in it.
                            onOpenWindow: { _ = emit(["event": "answer_in_window"]) })
         }
         defer { LiveCard.finish(nil) }
 
+        // Questions wait for the trace to be read up to them (QuestionGate), so a step taken before a question never
+        // arrives after it and closes it.
+        let gate = QuestionGate()
         let reader = DispatchGroup()
         reader.enter()
         DispatchQueue.global().async {
@@ -571,14 +580,9 @@ enum Runner {
                     guard line.hasPrefix("HANDS_ASK "),
                           let q = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(10).utf8))) as? [String: Any]
                     else { continue }
-                    answerLock.lock(); asking = true; answerLock.unlock()
-                    // Answered in the live view when it is showing; the app then leaves its window where it is.
-                    let inCard = LiveCard.ask(question: q["question"] as? String ?? "", options: q["options"] as? [String] ?? [],
-                                              approval: q["approval"] as? Bool ?? false)
-                    // "options": the alternatives the question lists (hands' ambiguity), answers the user can click.
-                    _ = emit(["event": "ask", "question": q["question"] as? String ?? "",
-                              "approval": q["approval"] as? Bool ?? false, "options": q["options"] as? [String] ?? [],
-                              "in_card": inCard])
+                    answerLock.lock(); asking = true; askID += 1; let id = askID; answerLock.unlock()
+                    var tagged = q; tagged["ask_id"] = id
+                    gate.asked(tagged)
                 }
             }
         }
@@ -683,9 +687,22 @@ enum Runner {
             }
         }
 
+        /// A question, passed on once the steps before it are: to the live view and to the app.
+        func pass(_ q: [String: Any]) {
+            let id = q["ask_id"] as? Int ?? 0
+            answerLock.lock(); let open = asking && askID == id; answerLock.unlock()
+            guard open else { return }   // answered already, or a newer question came
+            // Answered in the live view when it is showing; the app then leaves its window where it is.
+            let inCard = LiveCard.ask(question: q["question"] as? String ?? "", options: q["options"] as? [String] ?? [],
+                                      approval: q["approval"] as? Bool ?? false)
+            // "options": the alternatives the question lists (hands' ambiguity), answers the user can click.
+            _ = emit(["event": "ask", "question": q["question"] as? String ?? "",
+                      "approval": q["approval"] as? Bool ?? false, "options": q["options"] as? [String] ?? [],
+                      "in_card": inCard, "ask_id": id])
+        }
+
         while p.isRunning {
-            poll()
-            Thread.sleep(forTimeInterval: 0.25)
+            gate.cycle(timeout: 0.25, poll: poll, pass: pass)
         }
         poll()
         // Bounded: a grandchild that inherited stdout (Peekaboo's server) could hold the pipe open past hands' exit.

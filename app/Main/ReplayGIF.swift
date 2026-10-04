@@ -13,44 +13,56 @@ enum ReplayGIF {
     /// with its step and words in a band at the bottom; the first frame names the task. Returns the file, or nil.
     /// Decodes and draws every frame: call it off the main thread (it draws into its own bitmaps).
     static func exportGIF(title: String, frames all: [ReplayFrame], lang: ResolvedLang, dir: URL = moviesDir) -> URL? {
-        let frames = ReplayPlan.gifFrames(all)
-        guard !frames.isEmpty else { return nil }
+        // The steps whose screenshots load, the last 16 of them (read from the end): what the GIF shows. Its frame
+        // count, the cover's step count and the last frame's longer pause all come from these.
+        var usable: [(ReplayFrame, NSImage)] = []
+        for f in all.reversed() where usable.count < ReplayPlan.gifSteps {
+            if let img = NSImage(contentsOfFile: f.image), img.size.width > 0 { usable.insert((f, img), at: 0) }
+        }
+        guard let first = usable.first?.1 else { return nil }
+        let width: CGFloat = 720
+        let size = CGSize(width: width, height: (width * first.size.height / first.size.width).rounded() + 48)
+        var images: [CGImage] = []
+        for (f, img) in usable {
+            if let frame = render(size: size, image: img, band: "\(f.n)  \(f.words)", sub: nil) { images.append(frame) }
+        }
+        guard !images.isEmpty,
+              let cover = render(size: size, image: nil, band: title, sub: L("DeskMind · %d steps", images.count, lang: lang))
+        else { return nil }
+
+        // One export at a time, from the name to the finished file: two result windows exporting at once could
+        // otherwise both find the same name free.
+        writing.lock(); defer { writing.unlock() }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let stamp = DateFormatter.localizedString(from: Date(), dateStyle: .short, timeStyle: .short)
             .replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: ".")
         // Never over a GIF already there (the stamp is to the minute): ExportName adds " 2", " 3"…
         let url = ExportName.unique(dir: dir, stamp: stamp, title: title, ext: "gif")
-        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.gif.identifier as CFString, frames.count + 1, nil) else { return nil }
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.gif.identifier as CFString, images.count + 1, nil)
+        else { return nil }
         CGImageDestinationSetProperties(dest, [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFLoopCount: 0]] as CFDictionary)
-        let width: CGFloat = 720
-        var size = CGSize(width: width, height: 450)
-        if let first = NSImage(contentsOfFile: frames[0].image), first.size.width > 0 {
-            size.height = (width * first.size.height / first.size.width).rounded() + 48
-        }
-        if let cover = render(size: size, image: nil, band: title, sub: L("DeskMind · %d steps", frames.count, lang: lang)) {
-            CGImageDestinationAddImage(dest, cover, delay(1.6))
-        }
-        for (i, f) in frames.enumerated() {
-            guard let img = NSImage(contentsOfFile: f.image),
-                  let frame = render(size: size, image: img, band: "\(f.n)  \(f.words)", sub: nil) else { continue }
-            CGImageDestinationAddImage(dest, frame, delay(i == frames.count - 1 ? 2.6 : 1.3))
+        CGImageDestinationAddImage(dest, cover, delay(1.6))
+        for (i, frame) in images.enumerated() {
+            CGImageDestinationAddImage(dest, frame, delay(i == images.count - 1 ? 2.6 : 1.3))
         }
         return CGImageDestinationFinalize(dest) ? url : nil
     }
+
+    private static let writing = NSLock()
 
     private static func delay(_ s: Double) -> CFDictionary {
         [kCGImagePropertyGIFDictionary: [kCGImagePropertyGIFDelayTime: s]] as CFDictionary
     }
 
     /// One frame: the screenshot fitted above a 48 px ink band with the words (or, for the cover, paper with the
-    /// task's name). Drawn at one pixel a point -- an NSImage's lockFocus would draw at the screen's scale, a GIF twice
-    /// as wide and four times the size.
+    /// task's name). Drawn at one pixel a point, in sRGB -- an NSImage's lockFocus would draw at the screen's scale, a
+    /// GIF twice as wide and four times the size.
     private static func render(size: CGSize, image: NSImage?, band: String, sub: String?) -> CGImage? {
-        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
-                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
-              let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
-        rep.size = size
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let cg = CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
+                                 bytesPerRow: 0, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let context = NSGraphicsContext(cgContext: cg, flipped: false)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
         let paper = NSColor(srgbRed: 0xF4 / 255.0, green: 0xF1 / 255.0, blue: 0xEA / 255.0, alpha: 1)
@@ -79,6 +91,6 @@ enum ReplayGIF {
             }
         }
         NSGraphicsContext.restoreGraphicsState()
-        return rep.cgImage
+        return cg.makeImage()
     }
 }

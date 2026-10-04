@@ -290,6 +290,8 @@ final class RunModel: ObservableObject {
 
     /// A reminder for a question in the live view that waits (AskFlow.reminderAfter).
     private var reminder: DispatchWorkItem?
+    /// The waiting question's id (the helper's `ask_id`): an `answered` for another question changes nothing.
+    private var askID: Int?
 
     /// Carry out what AskFlow decided for a question event (island, window, notifications), for a real run.
     private func apply(_ fx: AskFlow.Effects, question q: PendingAsk?) {
@@ -376,11 +378,13 @@ final class RunModel: ObservableObject {
             let q = PendingAsk(question: e["question"] as? String ?? "", approval: e["approval"] as? Bool ?? false,
                                options: e["options"] as? [String] ?? [])
             withAnimation(.easeOut(duration: 0.2)) { ask = q }
+            askID = e["ask_id"] as? Int
             // In the live view it is answered there; otherwise in this window (AskFlow.asked says what comes back).
             apply(AskFlow.asked(inCard: e["in_card"] as? Bool == true, approval: q.approval, appActive: NSApp.isActive,
                                 userTyping: MainWindow.userTypedRecently()), question: q)
         case "answered":
-            // Answered in the live view: this window's question card goes.
+            // Answered in the live view: this window's question card goes -- if it is that question.
+            guard AskFlow.answerApplies(answered: e["ask_id"] as? Int, waiting: askID) else { return }
             withAnimation(.easeOut(duration: 0.2)) { ask = nil }
             apply(AskFlow.answeredInCard, question: nil)
         case "answer_in_window":

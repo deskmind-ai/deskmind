@@ -22,4 +22,7 @@ enum ReplayPlan {
     }
 
     static func gifFrames(_ all: [ReplayFrame]) -> [ReplayFrame] { Array(all.suffix(gifSteps)) }
+
+    /// Where Play starts: where it is, or from the first step when it has reached the last.
+    static func playFrom(index: Int, count: Int) -> Int { index >= count - 1 ? 0 : index }
 }

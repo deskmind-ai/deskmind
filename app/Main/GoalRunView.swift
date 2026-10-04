@@ -121,10 +121,12 @@ struct GoalRunView: View {
                 // What it did, from its step screenshots: replayed here, or as a GIF to share (no recording needed).
                 if !frames.isEmpty {
                     HStack(spacing: 10) {
-                        Button { replaying = true } label: { Label(L("Replay", lang: lang), systemImage: "play.fill") }
+                        Button { refreshFrames(run.phase); replaying = !frames.isEmpty } label: { Label(L("Replay", lang: lang), systemImage: "play.fill") }
                             .buttonStyle(InkButtonStyle(prominent: false))
                         Button(L("Export GIF", lang: lang)) {
                             // Off the main thread: up to 17 frames to decode and draw.
+                            refreshFrames(run.phase)   // screenshots may have been cleared since the run ended
+                            guard !frames.isEmpty else { return }
                             exporting = true; gifNote = L("Making the GIF…", lang: lang)
                             let (title, all, lang) = (goal, frames, lang)
                             Task.detached {

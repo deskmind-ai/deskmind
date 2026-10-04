@@ -73,6 +73,8 @@ final class LiveCard: NSObject {
     private var large = UserDefaults.standard.bool(forKey: largeKey)
     /// The run's own status (working, needs the user, paused, ended); `hidden` is the window's, layered on top.
     private var runStatus: LiveView.Status = .starting
+    /// A question is showing: the card is open for it even if the user collapsed it, and its picture keeps coming.
+    private var askOpen = false
     /// Why the run didn't finish, once it has ended (an L() key).
     private var endNote: String?
     private var windowHidden = false
@@ -191,7 +193,7 @@ final class LiveCard: NSObject {
         guard let card = current else { return false }
         let kind = LiveView.askKind(options: options, approval: approval)
         // Opened up while it asks (refresh), without forgetting that the user had collapsed it: it folds back after.
-        card.set { c in c.runStatus = .waitingForUser }
+        card.set { c in c.runStatus = .waitingForUser; c.askOpen = true }
         DispatchQueue.main.async {
             card.cancelPending()
             card.asking = Ask(question: question, options: LiveView.askOptions(options), kind: kind, picked: nil)
@@ -378,7 +380,7 @@ final class LiveCard: NSObject {
                   let now = self.asking, now.token == token, let p = now.picked,
                   let deadline = now.deadline, Date() >= deadline.addingTimeInterval(-0.05) else { return }
             self.pendingAnswer = nil
-            self.asking = nil
+            self.dropQuestion()
             self.set { $0.runStatus = .working }
             if !self.onAnswer(p.reply, p.approve) { NSLog("DeskMind Hands: live view: the run took no answer") }
         }
@@ -402,6 +404,8 @@ final class LiveCard: NSObject {
         cancelPending()
         guard asking != nil else { return }
         asking = nil
+        set { $0.askOpen = false }
+        if read({ $0.collapsed }) { stopCapture() }   // back to the capsule the user chose: no picture needed
         refresh()
     }
 
@@ -436,7 +440,7 @@ final class LiveCard: NSObject {
         }
         state.lock()
         guard watching, !runStatus.isEnding else { state.unlock(); return }
-        let (active, app, isCollapsed, isLarge, observed) = (activeWindow, appName, collapsed, large, observedOnce)
+        let (active, app, isCollapsed, isLarge, observed) = (activeWindow, appName, collapsed && !askOpen, large, observedOnce)
         state.unlock()
         guard let id = LiveView.pick(candidates, active: active, app: app, bundles: bundles, observed: observed),
               let window = content.windows.first(where: { Int($0.windowID) == id }),
@@ -471,7 +475,7 @@ final class LiveCard: NSObject {
                                         perPoint: CGFloat(pixelScale))
         let pixels = CGSize(width: px.0, height: px.1)
         state.lock(); defer { state.unlock() }
-        guard watching, !collapsed else { return }
+        guard watching, !(collapsed && !askOpen) else { return }
         if let s = shown, s.window == id, s.frame == frame, s.display == display.displayID, s.drop == dropIDs,
            s.pixels == pixels, target != nil { return }
         let cfg = SCStreamConfiguration()

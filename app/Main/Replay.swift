@@ -39,7 +39,10 @@ struct ReplayView: View {
             HStack(spacing: 10) {
                 Button { playing = false; i = max(0, i - 1) } label: { Image(systemName: "chevron.left") }
                     .buttonStyle(InkButtonStyle(prominent: false)).accessibilityLabel(L("Previous step", lang: lang))
-                Button { playing.toggle() } label: { Image(systemName: playing ? "pause.fill" : "play.fill") }
+                Button {
+                    if !playing { i = ReplayPlan.playFrom(index: i, count: frames.count) }
+                    playing.toggle()
+                } label: { Image(systemName: playing ? "pause.fill" : "play.fill") }
                     .buttonStyle(InkButtonStyle()).accessibilityLabel(playing ? L("Pause", lang: lang) : L("Play", lang: lang))
                 Button { playing = false; i = min(frames.count - 1, i + 1) } label: { Image(systemName: "chevron.right") }
                     .buttonStyle(InkButtonStyle(prominent: false)).accessibilityLabel(L("Next step", lang: lang))

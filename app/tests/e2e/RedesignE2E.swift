@@ -105,9 +105,10 @@ enum RedesignE2E {
         let urls = (0..<3).compactMap { _ in ReplayGIF.exportGIF(title: title, frames: all, lang: .en, dir: dir) }   // off the main thread, as the app does
         check(urls.count == 3, "three exports made: \(urls.count)")
         check(Set(urls.map(\.path)).count == 3, "three different files")
+        // (The exact " 2", " 3" are checked in DecisionTests with a fixed stamp: here the minute may turn.)
         let names = urls.map(\.lastPathComponent)
-        check(names.count == 3 && !names[0].contains("/") && !names[0].contains(":") && names[1].hasSuffix(" 2.gif")
-              && names[2].hasSuffix(" 3.gif"), "names: \(names)")
+        check(names.allSatisfy { !$0.contains("/") && !$0.contains(":") && $0.hasSuffix(".gif") && $0.contains("Open Music play") },
+              "names: \(names)")
         let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
         check(files.filter { $0.hasSuffix(".gif") }.count == 3, "all three are on disk")
 
@@ -121,11 +122,36 @@ enum RedesignE2E {
             check(bytes > 0 && bytes <= 5_000_000, "under 5 MB: \(bytes) bytes")
         }
 
+        // 2b. Three exports at once, from three threads (two result windows): three files, each whole.
+        let group = DispatchGroup(), lock = NSLock()
+        var together: [URL] = []
+        for _ in 0..<3 {
+            group.enter()
+            DispatchQueue.global().async {
+                if let u = ReplayGIF.exportGIF(title: "at once", frames: Array(all.prefix(4)), lang: .en, dir: dir) {
+                    lock.lock(); together.append(u); lock.unlock()
+                }
+                group.leave()
+            }
+        }
+        group.wait()
+        check(Set(together.map(\.path)).count == 3, "three exports at once: three files (\(together.map(\.lastPathComponent)))")
+        check(together.allSatisfy { gifFrames($0).count == 5 }, "each one whole: cover + 4")
+
         // 3. A step whose screenshot is gone is left out; no step with a screenshot: no GIF.
         var some = Array(all.prefix(3))
         some.append(ReplayFrame(n: 4, image: frames.appendingPathComponent("gone.png").path, words: "gone"))
         let partial = ReplayGIF.exportGIF(title: "partial", frames: some, lang: .en, dir: dir)
-        check(partial.map { gifFrames($0).count } == 4, "a missing screenshot is skipped: cover + 3")
+        check(partial.map { gifFrames($0).count } == 4, "a missing last screenshot is skipped: cover + 3")
+        check(partial.map { gifFrames($0).delays.last } == 2.6, "and the last step that has one gets the long pause")
+        var gap = Array(all.prefix(3))
+        gap.insert(ReplayFrame(n: 99, image: frames.appendingPathComponent("gone.png").path, words: "gone"), at: 1)
+        let middle = ReplayGIF.exportGIF(title: "gap", frames: gap, lang: .en, dir: dir)
+        check(middle.map { gifFrames($0).count } == 4 && middle.map { gifFrames($0).delays } == [1.6, 1.3, 1.3, 2.6],
+              "a missing screenshot mid-way: cover + 3, timed")
+        let late = Array(all.suffix(17)) + [ReplayFrame(n: 40, image: frames.appendingPathComponent("gone.png").path, words: "gone")]
+        check(ReplayGIF.exportGIF(title: "late", frames: late, lang: .en, dir: dir).map { gifFrames($0).count } == 17,
+              "the last 16 steps that have screenshots (a gone one does not take a place)")
         check(ReplayGIF.exportGIF(title: "none", frames: [], lang: .en, dir: dir) == nil, "no frames: no GIF")
     }
 

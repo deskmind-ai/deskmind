@@ -214,6 +214,7 @@ enum DecisionTests {
         askFlowTests()
         replayPlanTests()
         markPathTests()
+        questionGateTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -487,6 +488,8 @@ enum DecisionTests {
         check(X.typed(old: "Ope", new: "Open"), "a key: typing")
         check(X.typed(old: "Open", new: "Ope"), "a delete: typing")
         check(X.typed(old: "你", new: "你好"), "an input-method word: typing")
+        check(X.typed(old: "", new: "我想打开网易"), "拼音 committing six characters at once: typing")
+        check(X.typed(old: "打开", new: "打开网易云音乐播放"), "seven more: typing")
         check(!X.typed(old: "", new: "Open NetEase Cloud Music and play it"), "an example put in: not typing (no sway)")
         check(!X.typed(old: "Open NetEase Cloud Music", new: ""), "cleared after Start: not typing")
         // The dot: 156, 155 of the 200-wide mark, scaled by the drawn width.
@@ -514,8 +517,11 @@ enum DecisionTests {
             check(fx.needsYou == false && fx.cancelReminder, "\(name): needs-you off, the reminder cancelled")
         }
         check(A.answeredInWindow.say == "Got your answer. Carrying on…" && A.answeredInCard.say == "Answered — carrying on", "each answer says so")
-        check(A.typeInWindow.comeBack && A.typeInWindow.activate && A.typeInWindow.needsYou == nil && !A.typeInWindow.cancelReminder,
-              "Neither — let me type it: the window, active; still waiting")
+        check(A.typeInWindow.comeBack && A.typeInWindow.activate && A.typeInWindow.needsYou == nil && A.typeInWindow.cancelReminder,
+              "Neither — let me type it: the window, active; still waiting, no reminder to answer in the card")
+        check(A.answerApplies(answered: 3, waiting: 3), "an answer to the question waiting: applies")
+        check(!A.answerApplies(answered: 3, waiting: 4), "a late answer to the previous question: the newer one stays")
+        check(A.answerApplies(answered: nil, waiting: 4) && A.answerApplies(answered: 3, waiting: nil), "no id to compare: applies")
         check(A.reminderAfter == 20, "the reminder after 20 s")
         for key in [card.say, away.say, typing.say, front.say, A.answeredInWindow.say, A.answeredInCard.say].compactMap({ $0 }) {
             check(L(key, lang: .zhHans) != key, "zh for “\(key)”")
@@ -533,6 +539,9 @@ enum DecisionTests {
         check(gif.count == 16 && gif.first?.n == 4 && gif.last?.n == 20, "the GIF: the last 16 steps")
         check(ReplayPlan.gifFrames(Array(frames.prefix(4))).count == 4, "fewer than 16: all of them")
         check(ReplayPlan.frames(steps, exists: { _ in false }).isEmpty, "\"Clear all\": nothing to replay (no buttons)")
+        check(ReplayPlan.playFrom(index: 17, count: 18) == 0, "Play at the last step: from the first")
+        check(ReplayPlan.playFrom(index: 5, count: 18) == 5, "Play mid-way: from where it is")
+        check(ReplayPlan.playFrom(index: 0, count: 1) == 0, "one frame")
     }
 
     /// The brand mark's path commands (Shared/MarkPath.swift).
@@ -544,6 +553,34 @@ enum DecisionTests {
         check(head == CGRect(x: 34, y: 28, width: 132, height: 99), "小方's frame: 34…166 × 28…127 (\(head))")
         check(MarkPath.cgPath("M1,2 H3").currentPoint == CGPoint(x: 3, y: 2), "commas as separators")
         check(MarkPath.cgPath("").isEmpty, "empty")
+    }
+
+    /// The order of a run's questions and steps (Shared/QuestionGate.swift).
+    static func questionGateTests() {
+        let gate = QuestionGate()
+        var trace = ["step 1"], read = 0, log: [String] = []
+        func poll() { while read < trace.count { log.append(trace[read]); read += 1 } }
+        gate.cycle(timeout: 0.01, poll: poll, pass: { _ in log.append("ask") })
+        check(log == ["step 1"], "a turn with no question: the steps")
+        // hands flushes step 2, then asks; the question is seen before the trace is read again.
+        trace.append("step 2")
+        gate.asked(["question": "Which order?"])
+        let t0 = Date()
+        gate.cycle(timeout: 2, poll: poll, pass: { q in log.append("ask \(q["question"] as? String ?? "")") })
+        check(log == ["step 1", "step 2", "ask Which order?"], "the step before the question comes first: \(log)")
+        check(Date().timeIntervalSince(t0) < 0.5, "a question wakes the loop at once")
+        // The answer, then step 3: a step after the question (it closes it), and the question is not passed again.
+        trace.append("step 3")
+        gate.cycle(timeout: 0.01, poll: poll, pass: { _ in log.append("ask again") })
+        check(log.last == "step 3" && !log.contains("ask again"), "then the step after it, once")
+        // A question that comes while the trace is being read waits for the next turn, after the steps before it.
+        log = []
+        gate.cycle(timeout: 0.01, poll: { trace.append("step 4"); gate.asked(["question": "Q2"]); poll() },
+                   pass: { _ in log.append("ask Q2 early") })
+        check(log == ["step 4"], "a question during the read: not this turn")
+        // (hands waits on the answer meanwhile, so no later step can be written before the question is shown.)
+        gate.cycle(timeout: 0.5, poll: { poll() }, pass: { q in log.append("ask \(q["question"] as? String ?? "")") })
+        check(log == ["step 4", "ask Q2"], "next turn: read, then the question (\(log))")
     }
 
     static func issueReportTests() {

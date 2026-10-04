@@ -38,8 +38,16 @@ enum AskFlow {
     static let answeredInWindow = Effects(needsYou: false, cancelReminder: true, say: "Got your answer. Carrying on…")
     /// Answered in the live view (the helper's `answered` event).
     static let answeredInCard = Effects(needsYou: false, cancelReminder: true, say: "Answered — carrying on")
-    /// "Neither — let me type it…" in the card: the window, active (the user asked for it). Still waiting.
-    static let typeInWindow = Effects(comeBack: true, activate: true)
+    /// "Neither — let me type it…" in the card: the window, active (the user asked for it). Still waiting, but in the
+    /// window now: no reminder to answer in the card.
+    static let typeInWindow = Effects(comeBack: true, activate: true, cancelReminder: true)
+
+    /// Whether an answer's acknowledgement is for the question waiting: the same id (or no id to compare, from an
+    /// older helper). A late acknowledgement must never clear a newer question.
+    static func answerApplies(answered: Int?, waiting: Int?) -> Bool {
+        guard let answered, let waiting else { return true }
+        return answered == waiting
+    }
     /// A step after a question: it was answered, or timed out.
     static let stepped = Effects(needsYou: false, cancelReminder: true)
 }

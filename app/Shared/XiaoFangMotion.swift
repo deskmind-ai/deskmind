@@ -15,9 +15,10 @@ enum XiaoFangMotion {
     /// The sway as a burst of typing begins (degrees, seconds): once a burst, never during one.
     static let sway: [(angle: Double, seconds: Double)] = [(-3, 0.19), (2, 0.2), (-0.6, 0.15), (0, 0.1)]
 
-    /// Whether a change to the text is typing (a key or two at a time), not text put in at once: an example
-    /// picked, a paste, the box cleared after Start.
-    static func typed(old: String, new: String) -> Bool { !new.isEmpty && abs(new.count - old.count) <= 2 }
+    /// Whether a change to the text is typing, not text put in at once (an example picked, a long paste, the box
+    /// cleared after Start). An input method commits a few characters at a time (拼音 often 2-6), so up to 8 is typing.
+    static let typingChunk = 8
+    static func typed(old: String, new: String) -> Bool { !new.isEmpty && abs(new.count - old.count) <= typingChunk }
 
     /// Where the eyes look, from their resting place (brand-mark units): down at the line below once it understood,
     /// down-left at Attach folder when unsure, else along your sentence as it grows.

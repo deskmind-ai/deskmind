@@ -369,10 +369,18 @@ enum LiveViewE2E {
         LiveCard.ask(question: "Which order?", options: ["R-2291", "R-3307"], approval: false)
         s = waitFor { ($0["asking"] as? Bool) == true && rect($0, "frame").width == LiveView.askWidth }
         check(rect(s, "frame").width == LiveView.askWidth, "a question opens the capsule up")
+        s = waitFor { ($0["streaming"] as? Bool) == true }
+        check(s["streaming"] as? Bool == true, "and its picture comes back (the capture runs while it asks)")
+        Thread.sleep(forTimeInterval: 0.8)
+        if let img = capture(window: s["window_number"] as? Int ?? 0, name: "7d-collapsed-ask") {
+            check(share(img, in: pictureArea(snap(), img)) { r, g, b in r > 230 && g > 230 && b > 230 } > 0.3,
+                  "the picture is the document, not blank or frozen")
+        }
         onMain { LiveCard.press("option1") }
         Thread.sleep(forTimeInterval: LiveView.undoSeconds + 0.4)
         s = waitFor { rect($0, "frame").height == LiveView.pill.height }
         check(answered?.0 == "R-3307" && rect(s, "frame").size == LiveView.pill, "answered: back to the capsule the user chose")
+        check(waitFor { ($0["streaming"] as? Bool) == false }["streaming"] as? Bool == false, "and the capture pauses again")
         onMain { LiveCard.press("collapse") }
         waitFor { rect($0, "frame").height > LiveView.pill.height }
 
