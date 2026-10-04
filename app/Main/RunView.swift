@@ -351,6 +351,7 @@ final class RunModel: ObservableObject {
                                options: e["options"] as? [String] ?? [])
             withAnimation(.easeOut(duration: 0.2)) { ask = q }
             let lang = ResolvedLang.current
+            if real { RunOverlay.shared.setNeedsYou(true) }
             // Shown in the live view, it is answered there: the window stays where it is, the island only says so.
             if e["in_card"] as? Bool == true {
                 if real { RunOverlay.shared.say(L("Needs you — answer in the card", lang: lang)) }
@@ -371,13 +372,14 @@ final class RunModel: ObservableObject {
         case "answered":
             // Answered in the live view: this window's question card goes.
             withAnimation(.easeOut(duration: 0.2)) { ask = nil }
-            if real { RunOverlay.shared.say(L("Answered — carrying on", lang: ResolvedLang.current)) }
+            if real { RunOverlay.shared.setNeedsYou(false); RunOverlay.shared.say(L("Answered — carrying on", lang: ResolvedLang.current)) }
         case "answer_in_window":
             // The user chose to type an answer: the window comes back, active (they asked for it), with the question.
             MainWindow.comeBack(activate: true)
         case "step":
             let id = e["task"] as? String ?? "?"
             ask = nil   // a step after a question means it was answered (or timed out)
+            if real { RunOverlay.shared.setNeedsYou(false) }
             if stage != nil { setStage(nil) }
             guard let i = tasks.firstIndex(where: { $0.id == id }) else { return }
             let step = RunStep(n: e["n"] as? Int ?? tasks[i].steps.count + 1,

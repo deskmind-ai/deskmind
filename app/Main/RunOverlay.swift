@@ -34,6 +34,8 @@ final class OverlayModel: ObservableObject {
     @Published var typical: Int?
     /// How the run ended, once it has (see finish()).
     @Published var ending: Island.Ending?
+    /// The run waits on the user's answer (asked in the live view or the window): 小方 looks up from the island.
+    @Published var needsYou = false
     /// The result is shown open (for a few seconds after the end); then it collapses to the notch.
     @Published var resultOpen = false
     /// Stop was pressed: the run's end is "stopped", not a failure.
@@ -113,7 +115,7 @@ final class RunOverlay {
     }
 
     func show(title: String, line: String? = nil) {
-        model.phase = .running; model.app = ""; model.step = 0; model.waiting = false; model.takenOver = false
+        model.phase = .running; model.app = ""; model.step = 0; model.waiting = false; model.takenOver = false; model.needsYou = false
         model.ending = nil; model.resultOpen = false; model.stoppedByUser = false
         generation += 1
         model.holdUntil = nil; stopCountdown()
@@ -177,9 +179,14 @@ final class RunOverlay {
         withAnimation(.easeOut(duration: 0.2)) { model.line = line }
     }
 
+    /// The run asks the user something (true) or has its answer (false).
+    func setNeedsYou(_ on: Bool) {
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { model.needsYou = on }
+    }
+
     func finish(passed: Bool, summary: String) {
         if model.takenOver { takeOver(seconds: 0) }   // the screen is the user's again when the task ends
-        model.waiting = false; model.holdUntil = nil; stopCountdown()
+        model.waiting = false; model.holdUntil = nil; model.needsYou = false; stopCountdown()
         model.phase = passed ? .passed : .failed
         model.ending = model.stoppedByUser ? .stopped : (passed ? .done : .failed)
         model.line = summary
@@ -239,12 +246,12 @@ struct OverlayView: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            XiaoFang(mood: model.phase == .running ? .idle : (model.phase == .passed ? .done : .notice), size: 40)
+            XiaoFang(mood: model.phase == .running ? (model.needsYou ? .notice : .idle) : (model.phase == .passed ? .done : .notice), size: 40)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     if model.phase == .running {
                         Circle().fill(Brand.dot).frame(width: 7, height: 7)
-                        Text(model.waiting ? L("DeskMind needs the screen for a moment", lang: lang)
+                        Text(model.needsYou ? L("Needs you", lang: lang) : model.waiting ? L("DeskMind needs the screen for a moment", lang: lang)
                              : (model.app.isEmpty ? L("DeskMind is getting ready", lang: lang)
                                                   : L("DeskMind is working in %@", model.app, lang: lang)))
                     } else {
