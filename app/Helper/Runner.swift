@@ -337,7 +337,28 @@ enum Runner {
     /// and wait a moment for it to appear.
     static func reopenWindowless(_ bundles: [String]) {
         for b in bundles {
-            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: b).first else { continue }
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: b).first else {
+                // Not running: launched in the background, and the run waits for its window (up to 15 s -- a music app
+                // takes several seconds to show one).
+                guard AppWindow.shouldLaunch(bundle: b, running: false) else { continue }
+                let open = Process()
+                open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                open.arguments = ["-g", "-b", b]
+                try? open.run(); open.waitUntilExit()
+                var shown = 0
+                for _ in 0..<150 {
+                    if let pid = NSRunningApplication.runningApplications(withBundleIdentifier: b).first?.processIdentifier {
+                        let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+                            as? [[String: Any]] ?? []
+                        shown = list.filter { ($0[kCGWindowOwnerPID as String] as? Int32) == pid
+                            && ($0[kCGWindowLayer as String] as? Int ?? -1) == 0 }.count
+                        if shown > 0 { break }
+                    }
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                NSLog("DeskMind Hands: \(b) was not running; launched it (\(shown) window(s))")
+                continue
+            }
             func windows() -> Int {
                 let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
                     as? [[String: Any]] ?? []
@@ -453,7 +474,12 @@ enum Runner {
                 return
             }
         }
-        if spec.goal != nil { reopenWindowless(spec.apps.map(\.bundle)) }
+        if spec.goal != nil {
+            if spec.apps.contains(where: { NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundle).isEmpty }) {
+                _ = emit(["event": "preparing", "what": "apps"])
+            }
+            reopenWindowless(spec.apps.map(\.bundle))
+        }
         p.arguments = args
         p.currentDirectoryURL = work
         var env = [
