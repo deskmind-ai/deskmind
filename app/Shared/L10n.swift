@@ -229,6 +229,10 @@ enum L10n {
         "Wrong result": "结果不对",
         "It got stuck": "卡住了",
         "Report on GitHub": "在 GitHub 上反馈",
+        "Save Full Log…": "保存完整日志…",
+        "Saves the run's steps, screenshots and logs as a .zip on this Mac, for you to look through and attach if you want.": "把这次运行的步骤、截图和日志存成 .zip 放在这台 Mac 上，你可以先检查，再决定要不要附上。",
+        "The log could not be saved": "日志没能保存",
+        "DeskMind Hands did not answer.": "DeskMind Hands 没有响应。",
         "Opens a GitHub issue for you to check and submit. Nothing is sent from DeskMind.":
             "会打开一个 GitHub issue 页面，由你检查后提交；DeskMind 不会发送任何内容。",
         "This run hit an error. Run it again; if it keeps happening, report it on GitHub.":

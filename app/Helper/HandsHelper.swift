@@ -137,6 +137,10 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         // "Clear all" in Recent: the list, and with it what the runs left on disk.
         guard let n = Runner.clearRunData() else { return ["ok": false, "error": "a task is running"] }
         return ["ok": true, "removed": n]
+    case "save_log":
+        // "Save Full Log…" after a failed run: the run's folder and the model servers' logs, zipped where the user chose.
+        return Runner.saveLog(to: req["path"] as? String ?? "", details: req["details"] as? String ?? "",
+                              diagnostics: req["diagnostics"] as? String ?? "")
     case "capture_test":
         return captureTest()
     case "playground":
