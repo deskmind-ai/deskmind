@@ -8,7 +8,9 @@ enum RunErrorText {
         let r = raw.lowercased()
         // The apps file (~/.config/deskmind/apps.yaml, written by hand) is wrong: hands refuses it at start, so every
         // run fails the same way until it is fixed. What is wrong comes after the file's path.
-        if let line = raw.components(separatedBy: "\n").first(where: { $0.hasPrefix("ValueError: ") && $0.contains("apps") }) {
+        if let line = raw.components(separatedBy: "\n").first(where: {
+            $0.hasPrefix("ValueError: ") && ($0.contains("apps.yaml") || $0.contains("the apps file"))
+        }) {
             let msg = line.dropFirst("ValueError: ".count)
             let what = msg.range(of: ": ").map { String(msg[$0.upperBound...]) } ?? String(msg)
             return L("Your apps file (~/.config/deskmind/apps.yaml) has a problem: %@. Fix it or move it away, then run it again.",
