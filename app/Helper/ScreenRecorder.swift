@@ -9,7 +9,9 @@
 //
 // One picture at a time, not a capture stream: a running SCStream slowed the models down by about a fifth (the live
 // view's measurement, site docs "Why one picture at a time"), and a recorded run's decisions with it. The recorder
-// takes a one-shot screenshot `fps` times a second and writes it with AVAssetWriter at the time it was taken.
+// takes a one-shot screenshot ten times a second and writes it with AVAssetWriter at the time it was taken. A
+// full-resolution one-shot takes about 80 ms, so this tops out near 12 a second: "Smooth Recordings" (record_start's
+// "smooth") keeps the stream at 30 a second, for footage where motion matters, at the cost of slower decisions.
 //
 // A recording is a folder: master.mov (native resolution, HEVC), delivery.mp4 (1920 wide, H.264, for sharing),
 // steps.json (every step's times relative to the first frame, where it acted and what the planner weighed) and
@@ -23,7 +25,7 @@ import AppKit
 import AVFoundation
 import ScreenCaptureKit
 
-final class ScreenRecorder: NSObject {
+final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegate {
     private static let lock = NSLock()
     private static var active: ScreenRecorder?
     static let mainAppBundle = "ai.deskmind.app"
@@ -32,12 +34,20 @@ final class ScreenRecorder: NSObject {
 
     /// Pictures a second. The screen changes when the task acts, a few times a step; the cursor glides between.
     static let fps = 10.0
+    static let smoothFPS = 30.0
+    /// "Smooth Recordings": a capture stream at 30 fps instead of one-shot screenshots.
+    private let smooth: Bool
+    private var stream: SCStream?
+    private var output: SCRecordingOutput?
+    private let finished = DispatchSemaphore(value: 0)
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     /// What the next picture is taken of, changed by watchApps while the capture loop reads it.
     private let filterLock = NSLock()
     private var filterNow: SCContentFilter?
+    /// Cleared, under filterLock, before the movie is finished: a picture still on its way is dropped, not appended.
+    private var accepting = true
     private var configNow: SCStreamConfiguration?
     private let loopDone = DispatchSemaphore(value: 0)
     private let folder: URL
@@ -60,9 +70,9 @@ final class ScreenRecorder: NSObject {
     var master: URL { folder.appendingPathComponent("master.mov") }
     var delivery: URL { folder.appendingPathComponent("delivery.mp4") }
 
-    private init(folder: URL, bundles: Set<String>, includeMain: Bool, wholeScreen: Bool, goal: String) {
+    private init(folder: URL, bundles: Set<String>, includeMain: Bool, wholeScreen: Bool, smooth: Bool, goal: String) {
         self.folder = folder; self.bundles = bundles; self.includeMain = includeMain
-        self.wholeScreen = wholeScreen; self.goal = goal
+        self.wholeScreen = wholeScreen; self.smooth = smooth; self.goal = goal
     }
 
     static func start(_ req: [String: Any]) -> [String: Any] {
@@ -86,7 +96,8 @@ final class ScreenRecorder: NSObject {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let rec = ScreenRecorder(folder: folder, bundles: Set(req["bundles"] as? [String] ?? []),
                                  includeMain: req["include_main"] as? Bool ?? false,
-                                 wholeScreen: req["whole_screen"] as? Bool ?? false, goal: req["goal"] as? String ?? "")
+                                 wholeScreen: req["whole_screen"] as? Bool ?? false,
+                                 smooth: req["smooth"] as? Bool ?? false, goal: req["goal"] as? String ?? "")
         rec.requestedDisplay = (req["display"] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
         rec.preflight = Self.preflight(bundles: rec.bundles)
         if let error = rec.begin() { return ["ok": false, "error": error] }
@@ -151,6 +162,7 @@ final class ScreenRecorder: NSObject {
             scale: Double(filter.pointPixelScale), maxLong: nil)
         size = (w, h)
         let cfg = Self.config(width: w, height: h)
+        if smooth { return beginStream(filter, cfg) }
         guard let writer = try? AVAssetWriter(outputURL: master, fileType: .mov) else { return "cannot write \(master.path)" }
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: w, AVVideoHeightKey: h])
@@ -170,6 +182,33 @@ final class ScreenRecorder: NSObject {
         watchApps()   // also for the whole screen: DeskMind's window comes into it while a question is asked
         return nil
     }
+
+    /// The stream, for "Smooth Recordings": ScreenCaptureKit writes the movie itself.
+    private func beginStream(_ filter: SCContentFilter, _ cfg: SCStreamConfiguration) -> String? {
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(Self.smoothFPS))
+        let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+        let oc = SCRecordingOutputConfiguration()
+        oc.outputURL = master
+        oc.outputFileType = .mov
+        oc.videoCodecType = .hevc
+        let out = SCRecordingOutput(configuration: oc, delegate: self)
+        do { try s.addRecordingOutput(out) } catch { return error.localizedDescription }
+        let started = DispatchSemaphore(value: 0)
+        var failure: String?
+        s.startCapture { err in failure = err?.localizedDescription; started.signal() }
+        guard started.wait(timeout: .now() + 10) == .success else { return "capture did not start" }
+        if let failure { return failure }
+        stream = s; output = out
+        if t0 == nil { t0 = Date().timeIntervalSince1970 }   // until the output says when its first frame was
+        watchApps()
+        return nil
+    }
+
+    // The system stopped the stream (the display went away): what was written stays, handed over at stop.
+    func stream(_ stream: SCStream, didStopWithError error: any Error) { finished.signal() }
+    func recordingOutputDidStartRecording(_ recordingOutput: SCRecordingOutput) { t0 = Date().timeIntervalSince1970 }
+    func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) { finished.signal() }
+    func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: any Error) { finished.signal() }
 
     /// Always the master's size: a picture of another shape (the task moved to another display) is fitted inside it.
     private static func config(width: Int, height: Int) -> SCStreamConfiguration {
@@ -205,7 +244,11 @@ final class ScreenRecorder: NSObject {
                 guard watching, let filter, let cfg, let t0, let input, let adaptor,
                       let picture = Self.grab(filter, cfg) else { continue }
                 let at = CMTime(seconds: Date().timeIntervalSince1970 - t0, preferredTimescale: 600)
-                if at > last && input.isReadyForMoreMediaData && adaptor.append(picture, withPresentationTime: at) { last = at }
+                filterLock.lock()
+                if accepting && at > last && input.isReadyForMoreMediaData && adaptor.append(picture, withPresentationTime: at) {
+                    last = at
+                }
+                filterLock.unlock()
             }
             loopDone.signal()
         }
@@ -219,7 +262,7 @@ final class ScreenRecorder: NSObject {
             var asking = Runner.asking
             while let self, self.watching {
                 Thread.sleep(forTimeInterval: 0.5)
-                guard self.watching, self.writer != nil, var display = self.display,
+                guard self.watching, self.writer != nil || self.stream != nil, var display = self.display,
                       let content = Self.content() else { continue }
                 var moved = false
                 let areas = Dictionary(uniqueKeysWithValues: content.displays.map {
@@ -235,6 +278,7 @@ final class ScreenRecorder: NSObject {
                 if moved || pids != self.included || Runner.asking != asking {
                     self.included = pids; asking = Runner.asking
                     self.filterLock.lock(); self.filterNow = filter; self.filterLock.unlock()
+                    self.stream?.updateContentFilter(filter) { _ in }
                 }
             }
         }
@@ -271,9 +315,20 @@ final class ScreenRecorder: NSObject {
 
     private func end() {
         watching = false
+        if let s = stream {
+            stream = nil
+            let stopped = DispatchSemaphore(value: 0)
+            s.stopCapture { _ in stopped.signal() }
+            _ = stopped.wait(timeout: .now() + 10)
+            // The file is complete once the recording output says so; a stream stopped before any frame never does.
+            _ = finished.wait(timeout: .now() + 10)
+            output = nil
+            return
+        }
         guard let writer else { return }
         self.writer = nil
         _ = loopDone.wait(timeout: .now() + 5)
+        filterLock.lock(); accepting = false; filterLock.unlock()
         input?.markAsFinished()
         let done = DispatchSemaphore(value: 0)
         writer.finishWriting { done.signal() }
@@ -335,9 +390,9 @@ final class ScreenRecorder: NSObject {
                    "deskmind_window": includeMain],
             // CGDisplayIsMain 0 and not built in: a virtual display a run was put on.
             "displays": displaysUsed.map { ["id": $0, "main": CGDisplayIsMain($0) != 0, "builtin": CGDisplayIsBuiltin($0) != 0] },
-            "master": ["file": "master.mov", "width": size.0, "height": size.1, "fps": Self.fps, "codec": "hevc",
-                       "capture": "one-shot screenshots"],
-            "delivery": delivered ? ["file": "delivery.mp4", "max": "1920x1080", "fps": Self.fps, "codec": "h264"]
+            "master": ["file": "master.mov", "width": size.0, "height": size.1, "fps": smooth ? Self.smoothFPS : Self.fps,
+                       "codec": "hevc", "capture": smooth ? "stream" : "one-shot screenshots"],
+            "delivery": delivered ? ["file": "delivery.mp4", "max": "1920x1080", "fps": smooth ? Self.smoothFPS : Self.fps, "codec": "h264"]
                 : NSNull(),
             "preflight": preflight,
         ]
