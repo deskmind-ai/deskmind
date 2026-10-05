@@ -59,4 +59,20 @@ enum AppMention {
         }
         return nil
     }
+
+    /// The apps an instruction names that are not on this Mac, by the names `known` gives them (bundle id → shown name
+    /// and the names people use), in the order named. First run, 10-05: a goal named NetEase Cloud Music on a Mac
+    /// without it, and nothing said so before the run -- with a folder attached it became a file task in Finder.
+    /// Named as an app is (next to a verb or an app marker, or a long Chinese name), never as an alias: saying an app
+    /// is missing stops the run, so a file named like one ("wechat-export.txt") must not.
+    static func notInstalled(in goal: String, known: [String: (shown: String, names: [String])],
+                             installed: Set<String>) -> [String] {
+        let g = goal.lowercased()
+        var hits: [(String.Index, String)] = []
+        for (bundle, app) in known where !installed.contains(bundle) {
+            let at = app.names.compactMap { range(of: $0.lowercased(), isAlias: false, in: g, original: goal.count == g.count ? goal : nil)?.lowerBound }.min()
+            if let at { hits.append((at, app.shown)) }
+        }
+        return hits.sorted { $0.0 < $1.0 }.map(\.1)
+    }
 }

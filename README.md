@@ -113,7 +113,7 @@ Inference runs locally by default. The models download once, from Hugging Face o
 ## Contribute
 
 - Questions and design discussion: [Discussions](https://github.com/deskmind-ai/deskmind/discussions).
-- Cross-component problems, reproduction reports and project direction: [issues here](https://github.com/deskmind-ai/deskmind/issues). App bugs go here too; a bug isolated to Eyes, Brain, Hands or Bench goes to that repository.
+- Cross-component problems, reproduction reports and project direction: [issues here](https://github.com/deskmind-ai/deskmind/issues), for every component (labelled `area: …`). Pull requests go to the repository that holds the code.
 - How to help, and what a good report contains: [Contributing](https://deskmind.dev/docs/project/contributing/). A reproduction that disagrees with our numbers is welcome.
 - Security problems: not in public; see [SECURITY.md](https://github.com/deskmind-ai/.github/blob/main/SECURITY.md).
 

@@ -169,4 +169,15 @@ enum AppScope {
     }
 
     static func isInstalled(_ bundleID: String) -> Bool { installed.contains { $0.bundleID == bundleID } }
+
+    /// Apps an instruction names that this Mac does not have (the well-known ones, whose names are known without the
+    /// app: `aliases`), in the app's language: said before the run, which could otherwise only wander.
+    static func notInstalled(_ goal: String, lang: ResolvedLang) -> [String] {
+        var known: [String: (shown: String, names: [String])] = [:]
+        for (bundle, names) in aliases {
+            let shown = shownAs[bundle].map { lang == .zhHans ? $0.1 : $0.0 } ?? names[0]
+            known[bundle] = (shown, names + (shownAs[bundle].map { [$0.0, $0.1] } ?? []))
+        }
+        return AppMention.notInstalled(in: goal, known: known, installed: Set(installed.map(\.bundleID)))
+    }
 }

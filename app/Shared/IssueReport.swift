@@ -10,6 +10,8 @@ import Foundation
 
 enum IssueReport {
     static let repo = "https://github.com/deskmind-ai/deskmind"
+    /// Where wrong guesses are collected ("Ambiguous tasks: does it ask or guess?").
+    static let ambiguousIssue = "https://github.com/deskmind-ai/deskmind/issues/10"
 
     /// Why the user is reporting. The title says it, so it reads the same whoever files it (labels in a new-issue
     /// URL apply only for people with triage rights).
@@ -40,12 +42,15 @@ enum IssueReport {
     static let maxURL = 7000
 
     /// `steps`: each step's operation (hands' describe up to the first space: "click", "type_text"), nothing more.
+    /// `diagnostics`: the folded section of numbers and kinds (Diagnostics.markdown), kept whole -- the instruction
+    /// is what is shortened when the URL runs long.
     static func url(kind: Kind, goal: String, outcome: String, steps: [String], appVersion: String,
-                    macOS: String) -> URL? {
+                    macOS: String, diagnostics: String = "") -> URL? {
         let title = "\(kind.titlePrefix): \(oneLine(goal, max: 80))"
         var goalText = goal
         while true {
             let body = self.body(kind: kind, goal: goalText, outcome: outcome, steps: steps, appVersion: appVersion, macOS: macOS)
+                + (diagnostics.isEmpty ? "" : "\n" + diagnostics)
             var c = URLComponents(string: repo + "/issues/new")!
             c.queryItems = [URLQueryItem(name: "title", value: title), URLQueryItem(name: "body", value: body)]
             guard let u = c.url else { return nil }
@@ -70,7 +75,7 @@ enum IssueReport {
         b += "**What happened**\n\n\(outcome.isEmpty ? "(no result)" : outcome)\n\n"
         switch kind {
         case .guessed: b += "**What it should have asked**\n\n(Which choice was ambiguous, and what you would have answered.)\n\n"
-            b += "More examples of tasks that should ask: \(repo)/issues?q=is%3Aissue+ambiguous\n\n"
+            b += "More examples of tasks that should ask, and what they did: \(ambiguousIssue)\n\n"
         case .wrong: b += "**What I expected**\n\n(The result you wanted.)\n\n"
         case .stuck, .error: break
         }

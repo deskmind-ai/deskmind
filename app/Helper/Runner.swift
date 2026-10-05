@@ -454,7 +454,11 @@ enum Runner {
             // The user's own instruction. File work only inside the attached folder, if any (hands also refuses a
             // home or system root); apps only the ones the instruction named and the user confirmed.
             args = ["-m", "deskmind_hands.cli", "do", goal]
-            if let folder = spec.folder { args += ["--in", folder] }
+            if let folder = spec.folder {
+                args += ["--in", folder]
+                // A person's own folder: a rename waits for their approval, like a deletion (FolderPolicy).
+                if FolderPolicy.confirmRenames(folder: folder, sample: playground.path) { args += ["--confirm-renames"] }
+            }
             args += ["--app", spec.apps.first?.bundle ?? "com.apple.finder"]
             if !spec.apps.isEmpty { args += ["--apps", spec.apps.map { "\($0.name)=\($0.bundle)" }.joined(separator: ",")] }
             if spec.foregroundOK { args += ["--foreground-ok"] }
@@ -517,6 +521,9 @@ enum Runner {
         // file written and not saved, rows the goal asks for not all written, a window it says to close still open.
         // G18b said DONE on D1en with parts.csv still open 5 times of 5 (10-01); with the check it closed it 3 of 3.
         env["HANDS_DONE_CHECK"] = "1"
+        // A decision on a large window takes longer on a smaller Mac than the 60 s hands allows by default; past that the
+        // step fails as if the model were not there (first run, 10-05).
+        env["HANDS_PLANNER_TIMEOUT"] = "120"
         p.environment = env
         // stdout is read line by line for HANDS_ASK questions (a pipe, drained continuously, so it never fills) and
         // kept in a file for the details; stdin stays open for the answers.
@@ -660,6 +667,10 @@ enum Runner {
                             "decision": e["decision"] ?? "", "target": e["target_label"] ?? "",
                             "latency": e["latency_s"] ?? 0,
                         ])
+                    } else if t == "request_failed" {
+                        // The request the model refused or never answered, as its questions' kinds and sizes (no
+                        // screen text): for the report's diagnostics.
+                        listening = listening && emit(["event": "request_failed", "questions": e["questions"] ?? [:]])
                     } else if t == "summary" {
                         let grade = e["grade"] as? [String: Any] ?? [:]
                         let strict = grade["strict"] as? Bool ?? false
