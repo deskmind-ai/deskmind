@@ -1,0 +1,17 @@
+name: community
+
+# Seconds-fast labels, welcomes and /claim for contributors; the logic is shared across deskmind-ai in
+# deskmind-ai/.github/.github/workflows/community.yml.
+
+on:
+  issues: {types: [opened]}
+  issue_comment: {types: [created]}
+  pull_request_target: {types: [opened]}
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  community:
+    uses: deskmind-ai/.github/.github/workflows/community.yml@main
