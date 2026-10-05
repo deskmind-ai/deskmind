@@ -229,6 +229,7 @@ enum L10n {
         "Wrong result": "结果不对",
         "It got stuck": "卡住了",
         "Report on GitHub": "在 GitHub 上反馈",
+        "Your apps file (~/.config/deskmind/apps.yaml) has a problem: %@. Fix it or move it away, then run it again.": "你的应用配置文件（~/.config/deskmind/apps.yaml）有问题：%@。改正它或先把它移走，再跑一次。",
         "Save Full Log…": "保存完整日志…",
         "Saves the run's steps, screenshots and logs as a .zip on this Mac, for you to look through and attach if you want.": "把这次运行的步骤、截图和日志存成 .zip 放在这台 Mac 上，你可以先检查，再决定要不要附上。",
         "The log could not be saved": "日志没能保存",

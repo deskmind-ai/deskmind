@@ -6,6 +6,14 @@ import Foundation
 enum RunErrorText {
     static func friendly(_ raw: String, lang: ResolvedLang) -> String {
         let r = raw.lowercased()
+        // The apps file (~/.config/deskmind/apps.yaml, written by hand) is wrong: hands refuses it at start, so every
+        // run fails the same way until it is fixed. What is wrong comes after the file's path.
+        if let line = raw.components(separatedBy: "\n").first(where: { $0.hasPrefix("ValueError: ") && $0.contains("apps") }) {
+            let msg = line.dropFirst("ValueError: ".count)
+            let what = msg.range(of: ": ").map { String(msg[$0.upperBound...]) } ?? String(msg)
+            return L("Your apps file (~/.config/deskmind/apps.yaml) has a problem: %@. Fix it or move it away, then run it again.",
+                     what, lang: lang)
+        }
         if r.contains("screen recording") || r.contains("tcc") || r.contains("accessibility") && r.contains("not") {
             return L("The helper seems to have lost its permissions. Check “Accessibility” and “Screen Recording” on the home screen, then run it again.",
                      lang: lang)
