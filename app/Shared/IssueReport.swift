@@ -10,6 +10,8 @@ import Foundation
 
 enum IssueReport {
     static let repo = "https://github.com/deskmind-ai/deskmind"
+    /// Where wrong guesses are collected ("Ambiguous tasks: does it ask or guess?").
+    static let ambiguousIssue = "https://github.com/deskmind-ai/deskmind/issues/10"
 
     /// Why the user is reporting. The title says it, so it reads the same whoever files it (labels in a new-issue
     /// URL apply only for people with triage rights).
@@ -73,7 +75,7 @@ enum IssueReport {
         b += "**What happened**\n\n\(outcome.isEmpty ? "(no result)" : outcome)\n\n"
         switch kind {
         case .guessed: b += "**What it should have asked**\n\n(Which choice was ambiguous, and what you would have answered.)\n\n"
-            b += "More examples of tasks that should ask: \(repo)/issues?q=is%3Aissue+ambiguous\n\n"
+            b += "More examples of tasks that should ask, and what they did: \(ambiguousIssue)\n\n"
         case .wrong: b += "**What I expected**\n\n(The result you wanted.)\n\n"
         case .stuck, .error: break
         }

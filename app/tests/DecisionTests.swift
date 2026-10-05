@@ -514,7 +514,7 @@ enum DecisionTests {
         check(body.hasPrefix("> Check this text before submitting; remove anything personal."), "the reminder, visible")
         check(body.contains("> Add Lisa Wong's order to ledger.csv\n> then save"), "the instruction, quoted line by line")
         check(body.contains("**Steps**: 4 (type_text ×2, double_click, save)"), "steps as a count and kinds only: \(body)")
-        check(body.contains("What it should have asked") && body.contains("issues?q=is%3Aissue+ambiguous"), "the guessed prompt and the ambiguous issues")
+        check(body.contains("What it should have asked") && body.contains("deskmind/issues/10"), "the guessed prompt links the ambiguous-tasks issue")
         check(body.contains("DeskMind 0.4.0 · macOS Version 27.2"), "versions")
         check(!IssueReport.body(kind: .stuck, goal: "g", outcome: "", steps: [], appVersion: "1", macOS: "2").contains("Steps"),
               "no steps: no Steps line")
