@@ -229,6 +229,7 @@ enum L10n {
         "Wrong result": "结果不对",
         "It got stuck": "卡住了",
         "Report on GitHub": "在 GitHub 上反馈",
+        "Smooth Recordings (30 fps, Slows Tasks About 10%)": "流畅录制（每秒 30 帧，任务约慢 10%）",
         "Save Full Log…": "保存完整日志…",
         "Saves the run's steps, screenshots and logs as a .zip on this Mac, for you to look through and attach if you want.": "把这次运行的步骤、截图和日志存成 .zip 放在这台 Mac 上，你可以先检查，再决定要不要附上。",
         "The log could not be saved": "日志没能保存",
