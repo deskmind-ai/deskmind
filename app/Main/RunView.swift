@@ -3,6 +3,7 @@
 // deskmind-hands) and a few real sandbox tasks. The user's own instructions run in GoalRunView, from the home screen.
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RunStep: Identifiable {
     let id = UUID()
@@ -603,6 +604,9 @@ struct RunFailure: View {
                 }
                 .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.ink).underline()
                 .help(L("Opens a GitHub issue for you to check and submit. Nothing is sent from DeskMind.", lang: lang))
+                Button(L("Save Full Log…", lang: lang)) { saveLog() }
+                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Brand.sage).underline()
+                    .help(L("Saves the run's steps, screenshots and logs as a .zip on this Mac, for you to look through and attach if you want.", lang: lang))
                 if !run.rawError.isEmpty && run.rawError != run.summary {
                     DisclosureGroup(L("Details", lang: lang)) {
                         ScrollView { Text(run.rawError).font(.system(size: 10).monospaced()).textSelection(.enabled)
@@ -612,6 +616,30 @@ struct RunFailure: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 28)
+        }
+    }
+
+    /// The helper zips it (it knows the run's folder); the file is shown in Finder once it is there.
+    private func saveLog() {
+        let panel = NSSavePanel()
+        let stamp = DateFormatter()
+        stamp.dateFormat = "yyyy-MM-dd HHmm"
+        panel.nameFieldStringValue = "DeskMind log \(stamp.string(from: Date())).zip"
+        panel.allowedContentTypes = [.zip]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let req: [String: Any] = ["op": "save_log", "path": url.path, "details": run.rawError, "diagnostics": run.diagnostics()]
+        DispatchQueue.global().async {
+            let res = DeskMindIPC.request(req, timeout: 120)
+            DispatchQueue.main.async {
+                if res?["ok"] as? Bool == true {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                } else {
+                    let alert = NSAlert()
+                    alert.messageText = L("The log could not be saved", lang: lang)
+                    alert.informativeText = res?["error"] as? String ?? L("DeskMind Hands did not answer.", lang: lang)
+                    alert.runModal()
+                }
+            }
         }
     }
 }

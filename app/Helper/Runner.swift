@@ -205,6 +205,57 @@ enum Runner {
     /// verdicts. Not while a run is going (its folder is in use). Recordings in Movies › DeskMind are the user's
     /// files and stay; routing.jsonl holds no screen content (who answered each step, and why) and stays for the
     /// developer tools. Returns how many run folders were removed, or nil when a run is going.
+    /// The full log of the last run, for the user to keep or attach to a report themselves: the run's folder (its
+    /// trace and the screenshot of every step), the model servers' logs, the error as the app showed it and the
+    /// diagnostics a report carries, zipped at `path`. Unlike a report, nothing is taken out, so the README in it says
+    /// so. Nothing is sent anywhere.
+    static func saveLog(to path: String, details: String, diagnostics: String) -> [String: Any] {
+        guard path.hasSuffix(".zip") else { return ["ok": false, "error": "not a .zip path"] }
+        let fm = FileManager.default
+        let stage = fm.temporaryDirectory.appendingPathComponent("DeskMind log \(UUID().uuidString.prefix(8))")
+        let root = stage.appendingPathComponent("DeskMind log")
+        defer { try? fm.removeItem(at: stage) }
+        do {
+            try fm.createDirectory(at: root, withIntermediateDirectories: true)
+            if let run = lastRunDir, fm.fileExists(atPath: run.path) {
+                try fm.copyItem(at: run, to: root.appendingPathComponent("run"))
+            }
+            for name in ["brain.log", "eyes.log"] {
+                let log = DeskMindIPC.supportDir.appendingPathComponent(name)
+                if fm.fileExists(atPath: log.path) { try fm.copyItem(at: log, to: root.appendingPathComponent(name)) }
+            }
+            if !details.isEmpty { try details.write(to: root.appendingPathComponent("error.txt"), atomically: true, encoding: .utf8) }
+            if !diagnostics.isEmpty {
+                try diagnostics.write(to: root.appendingPathComponent("diagnostics.md"), atomically: true, encoding: .utf8)
+            }
+            let readme = """
+                DeskMind log
+                run/          the run: trace.jsonl (every step, what the model was asked and answered) and obs/ (a
+                              screenshot of the task's window at every step)
+                brain.log     the local planner server
+                eyes.log      the local grounding server
+                error.txt     the error, as the app showed it
+                diagnostics.md  what a GitHub report from the app carries
+
+                This holds what was on your screen and in your files during the run: window contents, file and folder
+                names, your account name in paths. Look through it before you share it. Nothing here was sent anywhere.
+
+                运行日志。run/ 里有每一步的记录和任务窗口的截图，可能包含你屏幕上的内容、文件名和账户名。分享之前请先检查。
+                这些文件没有被发送到任何地方。
+                """
+            try readme.write(to: root.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
+            try? fm.removeItem(atPath: path)
+            let zip = Process()
+            zip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            zip.arguments = ["-c", "-k", "--norsrc", "--noextattr", "--noqtn", "--keepParent", root.path, path]
+            try zip.run(); zip.waitUntilExit()
+            guard zip.terminationStatus == 0 else { return ["ok": false, "error": "zip failed (\(zip.terminationStatus))"] }
+            return ["ok": true, "path": path, "run": lastRunDir != nil]
+        } catch {
+            return ["ok": false, "error": error.localizedDescription]
+        }
+    }
+
     static func clearRunData() -> Int? {
         if busy { return nil }
         let fm = FileManager.default
