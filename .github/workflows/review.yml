@@ -1,0 +1,16 @@
+name: review
+
+# Merges into main need the `reviewed` label; the logic is shared across deskmind-ai in
+# deskmind-ai/.github/.github/workflows/review-gate.yml.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    uses: deskmind-ai/.github/.github/workflows/review-gate.yml@main
