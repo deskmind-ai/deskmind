@@ -20,6 +20,8 @@ final class RunRecorder {
     /// only), and the whole screen instead of the task's apps (off: other apps are left out).
     static let includeMainKey = "record.includeMainWindow"
     static let wholeScreenKey = "record.wholeScreen"
+    /// 30 fps from a capture stream, for footage where motion matters; it slows decisions (ScreenRecorder).
+    static let smoothKey = "record.smooth"
 
     /// Where a run's recording goes: ~/Movies/DeskMind/<date time> <start of the instruction>/ (see ScreenRecorder).
     static func folderURL(goal: String) -> URL {
@@ -36,7 +38,8 @@ final class RunRecorder {
         let url = Self.folderURL(goal: goal)
         let body: [String: Any] = ["op": "record_start", "path": url.path, "bundles": bundles, "goal": goal,
                                    "include_main": UserDefaults.standard.bool(forKey: Self.includeMainKey),
-                                   "whole_screen": UserDefaults.standard.bool(forKey: Self.wholeScreenKey)]
+                                   "whole_screen": UserDefaults.standard.bool(forKey: Self.wholeScreenKey),
+                                   "smooth": UserDefaults.standard.bool(forKey: Self.smoothKey)]
         DispatchQueue.global().async {
             let reply = DeskMindIPC.request(body, timeout: 25)
             let ok = reply?["ok"] as? Bool == true
