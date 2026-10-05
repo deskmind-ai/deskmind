@@ -33,10 +33,8 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
     static let wallpaperBundle = "com.apple.WindowManager"
 
     /// Pictures a second. The screen changes when the task acts, a few times a step; the cursor glides between.
-    static let fps = 10.0
-    static let smoothFPS = 30.0
-    /// "Smooth Recordings": a capture stream at 30 fps instead of one-shot screenshots.
-    private let smooth: Bool
+    /// One-shot screenshots at 10 fps, or "Smooth Recordings": a capture stream at 30 (RecordingCapture).
+    private let mode: RecordingCapture.Mode
     private var stream: SCStream?
     private var output: SCRecordingOutput?
     private let finished = DispatchSemaphore(value: 0)
@@ -72,7 +70,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
 
     private init(folder: URL, bundles: Set<String>, includeMain: Bool, wholeScreen: Bool, smooth: Bool, goal: String) {
         self.folder = folder; self.bundles = bundles; self.includeMain = includeMain
-        self.wholeScreen = wholeScreen; self.smooth = smooth; self.goal = goal
+        self.wholeScreen = wholeScreen; self.mode = RecordingCapture.mode(smooth: smooth); self.goal = goal
     }
 
     static func start(_ req: [String: Any]) -> [String: Any] {
@@ -162,7 +160,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
             scale: Double(filter.pointPixelScale), maxLong: nil)
         size = (w, h)
         let cfg = Self.config(width: w, height: h)
-        if smooth { return beginStream(filter, cfg) }
+        if mode.stream { return beginStream(filter, cfg) }
         guard let writer = try? AVAssetWriter(outputURL: master, fileType: .mov) else { return "cannot write \(master.path)" }
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.hevc, AVVideoWidthKey: w, AVVideoHeightKey: h])
@@ -185,7 +183,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
 
     /// The stream, for "Smooth Recordings": ScreenCaptureKit writes the movie itself.
     private func beginStream(_ filter: SCContentFilter, _ cfg: SCStreamConfiguration) -> String? {
-        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(Self.smoothFPS))
+        cfg.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(mode.fps))
         let s = SCStream(filter: filter, configuration: cfg, delegate: self)
         let oc = SCRecordingOutputConfiguration()
         oc.outputURL = master
@@ -235,9 +233,9 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
             var last = CMTime.zero
             var next = Date().timeIntervalSince1970
             while watching {
-                next += 1 / Self.fps
+                next = RecordingCapture.nextDue(after: next, now: Date().timeIntervalSince1970, fps: mode.fps)
                 let wait = next - Date().timeIntervalSince1970
-                if wait > 0 { Thread.sleep(forTimeInterval: wait) } else { next = Date().timeIntervalSince1970 }
+                if wait > 0 { Thread.sleep(forTimeInterval: wait) }
                 filterLock.lock()
                 let filter = filterNow, cfg = configNow
                 filterLock.unlock()
@@ -245,7 +243,9 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
                       let picture = Self.grab(filter, cfg) else { continue }
                 let at = CMTime(seconds: Date().timeIntervalSince1970 - t0, preferredTimescale: 600)
                 filterLock.lock()
-                if accepting && at > last && input.isReadyForMoreMediaData && adaptor.append(picture, withPresentationTime: at) {
+                if RecordingCapture.shouldAppend(at: at.seconds, last: last.seconds, accepting: accepting,
+                                                 ready: input.isReadyForMoreMediaData),
+                   adaptor.append(picture, withPresentationTime: at) {
                     last = at
                 }
                 filterLock.unlock()
@@ -390,9 +390,9 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
                    "deskmind_window": includeMain],
             // CGDisplayIsMain 0 and not built in: a virtual display a run was put on.
             "displays": displaysUsed.map { ["id": $0, "main": CGDisplayIsMain($0) != 0, "builtin": CGDisplayIsBuiltin($0) != 0] },
-            "master": ["file": "master.mov", "width": size.0, "height": size.1, "fps": smooth ? Self.smoothFPS : Self.fps,
-                       "codec": "hevc", "capture": smooth ? "stream" : "one-shot screenshots"],
-            "delivery": delivered ? ["file": "delivery.mp4", "max": "1920x1080", "fps": smooth ? Self.smoothFPS : Self.fps, "codec": "h264"]
+            "master": ["file": "master.mov", "width": size.0, "height": size.1, "fps": mode.fps,
+                       "codec": "hevc", "capture": mode.name],
+            "delivery": delivered ? ["file": "delivery.mp4", "max": "1920x1080", "fps": mode.fps, "codec": "h264"]
                 : NSNull(),
             "preflight": preflight,
         ]
