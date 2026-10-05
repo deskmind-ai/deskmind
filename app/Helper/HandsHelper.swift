@@ -237,9 +237,6 @@ func serve() {
 
 @main
 struct HandsHelper {
-    /// Kept for the life of the process: a dispatch source that is released stops delivering.
-    nonisolated(unsafe) static var sigterm: DispatchSourceSignal?
-
     static func main() {
         if let i = CommandLine.arguments.firstIndex(of: "--probe-ax-to"), i + 1 < CommandLine.arguments.count {
             // Diagnostic: an instance started by LaunchServices reports what TCC grants *it*.
@@ -259,14 +256,8 @@ struct HandsHelper {
         BrainServer.ensure()
         atexit { BrainServer.stop(); EyesServer.stop() }
         // A replaced or terminated helper must take its model servers with it: left running, the next helper would
-        // adopt a server still loaded with the old models. Not in a signal handler: one runs on whatever the thread
-        // was doing, and a SIGTERM that came while AppKit was quitting (inside the Objective-C runtime's lock) made
-        // the handler's first message send abort the helper. A dispatch source runs it later, on a queue of its own.
-        signal(SIGTERM, SIG_IGN)
-        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-        term.setEventHandler { exit(0) }   // exit runs the atexit above
-        term.resume()
-        sigterm = term
+        // adopt a server still loaded with the old models. exit runs the atexit above (Lifecycle).
+        Lifecycle.exitOnSIGTERM()
         app.run()
     }
 }

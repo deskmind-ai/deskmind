@@ -214,6 +214,7 @@ enum DecisionTests {
         notInstalledTests()
         folderPolicyTests()
         diagnosticsTests()
+        recordingCaptureTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -510,6 +511,36 @@ enum DecisionTests {
         check(c?.files == 1 && c?.folders == 1, "folder counted: \(String(describing: c))")
         try? FileManager.default.removeItem(at: dir)
         check(Diagnostics.mac().contains { $0.0 == "memory" }, "the Mac's memory")
+    }
+
+    /// How a run is recorded (Shared/RecordingCapture.swift): which capture, the pacing, which pictures are written.
+    static func recordingCaptureTests() {
+        let def = RecordingCapture.mode(smooth: false), smooth = RecordingCapture.mode(smooth: true)
+        check(def == .init(fps: 10, stream: false) && def.name == "one-shot screenshots", "default: one-shot at 10 fps")
+        check(smooth == .init(fps: 30, stream: true) && smooth.name == "stream", "Smooth Recordings: the stream at 30 fps")
+        // Pacing: one interval on when on time; from now when behind, never a burst to catch up.
+        check(abs(RecordingCapture.nextDue(after: 5.0, now: 5.02, fps: 10) - 5.1) < 1e-9, "on time: the next is 0.1 s on")
+        check(RecordingCapture.nextDue(after: 5.0, now: 5.3, fps: 10) == 5.3, "behind: the next is now, not 5.1")
+        // A loop whose pictures take 80 ms (a full-resolution one-shot): 10 fps holds, 30 is out of reach (about 12).
+        // The first picture is taken at 0 by begin(), before the loop.
+        func pictures(fps: Double, cost: Double, seconds: Double) -> Int {
+            var clock = 0.0, due = 0.0, n = 1
+            while true {
+                due = RecordingCapture.nextDue(after: due, now: clock, fps: fps)
+                clock = max(clock, due) + cost
+                if clock > seconds { return n }
+                n += 1
+            }
+        }
+        check(pictures(fps: 10, cost: 0.08, seconds: 10) == 100, "10 fps at 80 ms a picture: \(pictures(fps: 10, cost: 0.08, seconds: 10)) in 10 s")
+        let fast = pictures(fps: 30, cost: 0.08, seconds: 10)
+        check(fast >= 115 && fast <= 125, "30 fps asked at 80 ms a picture: about 12 a second (\(fast) in 10 s)")
+        // Written only later than the last, while accepting, when the writer is ready.
+        check(RecordingCapture.shouldAppend(at: 0.2, last: 0.1, accepting: true, ready: true), "a later picture is written")
+        check(!RecordingCapture.shouldAppend(at: 0.1, last: 0.1, accepting: true, ready: true), "not one at the same time")
+        check(!RecordingCapture.shouldAppend(at: 0.05, last: 0.1, accepting: true, ready: true), "not an earlier one")
+        check(!RecordingCapture.shouldAppend(at: 0.2, last: 0.1, accepting: false, ready: true), "not after the movie is finishing")
+        check(!RecordingCapture.shouldAppend(at: 0.2, last: 0.1, accepting: true, ready: false), "not while the writer is busy")
     }
 
     static func issueReportTests() {
