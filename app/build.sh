@@ -37,6 +37,7 @@ swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$OUT/d
   Shared/L10n.swift Shared/Decision.swift Shared/Island.swift Shared/AppMention.swift Shared/Routing.swift Shared/FileMention.swift Shared/DownloadSource.swift Shared/LiveView.swift Shared/IssueReport.swift Shared/AppWindow.swift Shared/SetupSteps.swift Shared/ExportName.swift Shared/XiaoFangMotion.swift Shared/AskFlow.swift Shared/ReplayPlan.swift Shared/MarkPath.swift Shared/QuestionGate.swift Shared/RunErrorText.swift Shared/FileExample.swift Shared/SelfTest.swift Shared/FolderPolicy.swift Shared/Diagnostics.swift Shared/RecordingCapture.swift tests/DecisionTests.swift
 "$OUT/decision-tests"
 
+# tests/e2e/helper.sh reads the next line as the helper's source list: keep it one line, after this command.
 swiftc -O -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$HELPER/Contents/MacOS/DeskMindHands" \
   Shared/Protocol.swift Shared/Models.swift Shared/Routing.swift Shared/L10n.swift Shared/Decision.swift Helper/ServerAuth.swift Helper/BrainServer.swift Helper/EyesServer.swift Helper/ScreenRecorder.swift Shared/LiveView.swift Shared/AppWindow.swift Shared/QuestionGate.swift Shared/FolderPolicy.swift Shared/RecordingCapture.swift Helper/Lifecycle.swift Helper/LiveCard.swift Helper/Runner.swift Helper/HandsHelper.swift
 swiftc -O -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$MAIN/Contents/MacOS/DeskMind" \

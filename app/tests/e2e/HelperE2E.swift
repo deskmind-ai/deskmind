@@ -27,11 +27,15 @@ enum HelperE2E {
     static func main() {
         let args = CommandLine.arguments
         if args.count >= 3, args[1] == "term-child" { termChild(pidFile: args[2]) }
-        guard args.count >= 2 else { print("usage: HelperE2E <out dir>"); exit(2) }
+        guard args.count >= 2 else { print("usage: HelperE2E <out dir> [recording|savelog|sigterm ...]"); exit(2) }
         out = URL(fileURLWithPath: args[1])
-        recording()
-        saveLog()
-        sigterm()
+        // Sections to run (default all): sigterm, savelog, recording. Recording goes last: capturing the screen
+        // registers this process with LaunchServices, and every process it starts afterwards (the 120 SIGTERM
+        // children, unzip) would leave a Dock tile for the terminal that macOS never removes.
+        let only = Set(args.dropFirst(2))
+        if only.isEmpty || only.contains("sigterm") { sigterm() }
+        if only.isEmpty || only.contains("savelog") { saveLog() }
+        if only.isEmpty || only.contains("recording") { recording() }
         print(failures == 0 ? "HelperE2E: all passed" : "HelperE2E: \(failures) failed")
         exit(Int32(min(failures, 100)))
     }
@@ -149,11 +153,13 @@ enum HelperE2E {
     /// (method lookups that miss the cache take the runtime's lock), then quits -- the state the 10-04 crash needed: a
     /// SIGTERM handler sending a message while that lock was held aborted the process.
     static func termChild(pidFile: String) -> Never {
-        let app = NSApplication.shared
-        app.setActivationPolicy(.accessory)   // as the helper
+        // The server before AppKit: a process started after this one is registered with LaunchServices leaves a Dock
+        // tile for the terminal that ran the test (hands 66aec7b, hands#7).
         let s = Process()
         s.executableURL = URL(fileURLWithPath: "/bin/sleep"); s.arguments = ["600"]
         try? s.run(); server = s
+        let app = NSApplication.shared
+        app.setActivationPolicy(.accessory)   // as the helper
         atexit { HelperE2E.server?.terminate() }
         Lifecycle.exitOnSIGTERM()
         // Ready: the parent times its SIGTERM from here, so it never lands before the handling is set up.
