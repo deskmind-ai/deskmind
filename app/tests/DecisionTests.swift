@@ -710,7 +710,7 @@ enum DecisionTests {
         let long = String(repeating: "整理目录并把所有截图移到截图文件夹，", count: 200)
         let u = IssueReport.url(kind: .error, goal: long, outcome: "It stopped.", steps: ["click"], appVersion: "0.4.0", macOS: "27.2",
                                 diagnostics: md)
-        let body = u.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "body" }?.value } ?? ""
+        let body = u.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "what-happened" }?.value } ?? ""
         check((u?.absoluteString.count ?? 99999) <= IssueReport.maxURL && body.contains("150 files, 12 folders"),
               "within the URL limit, diagnostics kept (\(u?.absoluteString.count ?? 0))")
         // Counting a folder lists no names.
@@ -727,16 +727,21 @@ enum DecisionTests {
         let u = IssueReport.url(kind: .guessed, goal: "Add Lisa Wong's order to ledger.csv\nthen save", outcome: "It said it finished.",
                                 steps: ["double_click", "type_text", "type_text", "save"], appVersion: "0.4.0", macOS: "Version 27.2")
         let q = URLComponents(url: u!, resolvingAgainstBaseURL: false)!.queryItems ?? []
-        let title = q.first { $0.name == "title" }?.value ?? "", body = q.first { $0.name == "body" }?.value ?? ""
-        check(u!.absoluteString.hasPrefix("https://github.com/deskmind-ai/deskmind/issues/new?"), "the hub's new-issue form")
+        let field = { (name: String) in q.first { $0.name == name }?.value ?? "" }
+        let title = field("title"), happened = field("what-happened")
+        check(u!.absoluteString.hasPrefix("https://github.com/deskmind-ai/deskmind/issues/new?"), "the hub's new-issue page")
+        check(field("template") == "app_problem.yml", "the app problem form, not a blank issue")
         check(title == "Guessed instead of asking: Add Lisa Wong's order to ledger.csv then save", "title: \(title)")
-        check(body.hasPrefix("> Check this text before submitting; remove anything personal."), "the reminder, visible")
-        check(body.contains("> Add Lisa Wong's order to ledger.csv\n> then save"), "the instruction, quoted line by line")
-        check(body.contains("**Steps**: 4 (type_text ×2, double_click, save)"), "steps as a count and kinds only: \(body)")
-        check(body.contains("What it should have asked") && body.contains("deskmind/issues/10"), "the guessed prompt links the ambiguous-tasks issue")
-        check(body.contains("DeskMind 0.4.0 · macOS Version 27.2"), "versions")
-        check(!IssueReport.body(kind: .stuck, goal: "g", outcome: "", steps: [], appVersion: "1", macOS: "2").contains("Steps"),
-              "no steps: no Steps line")
+        check(field("goal") == "Add Lisa Wong's order to ledger.csv\nthen save", "the instruction, as typed")
+        check(happened.hasPrefix("It said it finished."), "how it ended, first")
+        check(happened.contains("**Steps**: 4 (type_text ×2, double_click, save)"), "steps as a count and kinds only: \(happened)")
+        check(happened.contains("What it should have asked") && happened.contains("deskmind/issues/10"), "the guessed prompt links the ambiguous-tasks issue")
+        check(field("version") == "0.4.0" && field("mac") == "macOS Version 27.2", "versions")
+        check(!IssueReport.whatHappened(kind: .stuck, outcome: "", steps: []).contains("Steps"), "no steps: no Steps line")
+        let d = IssueReport.url(kind: .error, goal: "g", outcome: "o", steps: [], appVersion: "1", macOS: "2",
+                                diagnostics: "<details><summary>Diagnostics</summary>\n\nx\n\n</details>\n")
+        let dq = URLComponents(url: d!, resolvingAgainstBaseURL: false)!.queryItems ?? []
+        check(dq.first { $0.name == "what-happened" }?.value?.contains("<details>") == true, "diagnostics go under what happened")
         check(IssueReport.stepSummary([]) == "0" && IssueReport.stepSummary(["", ""]) == "2", "no kinds")
         let long = IssueReport.url(kind: .stuck, goal: String(repeating: "很长的指令 ", count: 2000), outcome: "o", steps: ["click"], appVersion: "1", macOS: "2")
         check(long != nil && long!.absoluteString.count <= IssueReport.maxURL, "a very long instruction is cut to fit: \(long?.absoluteString.count ?? -1)")
