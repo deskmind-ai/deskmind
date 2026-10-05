@@ -373,6 +373,14 @@ enum DecisionTests {
     /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
     /// A failed run in one sentence (Shared/RunErrorText.swift), against real messages.
     static func runErrorTests() {
+        let apps = "errored  0 actions  1s  $0.00\nTraceback (most recent call last):\n  File \"/x/apps.py\", line 90, in <module>\n    APPS = load()\nValueError: /Users/alice/.config/deskmind/apps.yaml: unknown keys: groundings; known keys: grounding, deep_ax, vision, chat, chords"
+        let a = RunErrorText.friendly(apps, lang: .en)
+        check(a.hasPrefix("Your apps file (~/.config/deskmind/apps.yaml) has a problem: unknown keys: groundings; known keys:"),
+              "a bad apps file says what is wrong in it: \(a)")
+        check(!a.contains("alice"), "and not the path with the user's name")
+        let other = RunErrorText.friendly("errored\nValueError: snapshot apps list is empty", lang: .en)
+        check(!other.hasPrefix("Your apps file"), "another ValueError that mentions apps is not the apps file: \(other)")
+        check(RunErrorText.friendly(apps, lang: .zhHans).contains("unknown keys: groundings"), "in Chinese too, with the key")
         let refused = "errored  0 actions  6s  $0.00\nprovider_unavailable: system one endpoint http://127.0.0.1:18850 failed: HTTP Error 400: Bad Request -- choice criteria must be a map with 1..255 options\ntrace runs/do-20261005-022054"
         let en = RunErrorText.friendly(refused, lang: .en)
         check(en.hasPrefix("The local model couldn't handle this step (choice criteria must be a map with 1..255 options)"),
