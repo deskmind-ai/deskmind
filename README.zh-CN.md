@@ -113,7 +113,7 @@ Mac App 的发布版本都在这里：[Releases](https://github.com/deskmind-ai/
 ## 参与贡献
 
 - 提问和设计讨论：[讨论区](https://github.com/deskmind-ai/deskmind/discussions)。
-- 跨组件的问题、复现报告和项目方向：[在这里提 issue](https://github.com/deskmind-ai/deskmind/issues)。App 的 bug 也提在这里；只涉及 Eyes、Brain、Hands 或 Bench 的 bug，提到对应仓库。
+- 跨组件的问题、复现报告和项目方向：[在这里提 issue](https://github.com/deskmind-ai/deskmind/issues)，所有组件的问题都提在这里（用 `area: …` 标签区分）。PR 提到代码所在的仓库。
 - 可以从哪里帮忙、好的报告包含什么：[参与贡献](https://deskmind.dev/zh/docs/project/contributing/)。和我们数字不一致的复现结果同样欢迎。
 - 安全问题请不要公开提交，见 [SECURITY.md](https://github.com/deskmind-ai/.github/blob/main/SECURITY.md)。
 
