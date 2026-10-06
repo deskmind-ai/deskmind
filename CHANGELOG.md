@@ -14,8 +14,9 @@ until this one is released.
 **Fixes**
 - Writing text into a document no longer loops. After the right text was written and saved, a step that "replaced" part
   of it with the whole text nested the document inside itself. That step now counts as a rewrite, and the task
-  finishes. On the benchmark task for this (G04), 3 of 3 runs finish in 4 steps, against 20 steps and 2 of 6 before. The
-  whole diag suite passes 39 of 39 (diag-v27).
+  finishes. On the benchmark task for this (G04), 3 of 3 runs now finish in 4 steps. Before, all 6 runs we have stayed
+  in that loop until the 20-step limit (5 of them happened to stop on the right text). The whole diag suite passes 39 of 39
+  (diag-v27, run on the same runtime as 0.4.1-rc.2).
 - On a French (AZERTY) or Dvorak keyboard, select-all and paste press the right keys. On AZERTY, cmd+A could arrive as
   cmd+Q and quit the app.
 - The background helper no longer crashes when macOS stops it while it is quitting, and it stops its model servers.
