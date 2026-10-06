@@ -3,9 +3,9 @@
 DeskMind for Mac 每个版本改了什么，简要列出。每个版本的完整说明和已知限制见 [Releases](https://github.com/deskmind-ai/deskmind/releases) 页面。模型有变化时会写明。
 [English](CHANGELOG.md)
 
-## 0.4.1（测试中）
+## 0.4.1（2026-10-07）
 
-预发布版 [v0.4.1-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.1)、[v0.4.1-rc.2](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.2) 和 [v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3)，2026-10-06。正式发布前，最新版仍是 0.4.0。
+[发布说明](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1)。与预发布版 [v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3) 用的是同一份代码，rc.3 发布前在一台全新的 Mac 上测试过。
 
 **修复**
 - 往文档里写内容不再死循环。以前在写好并保存正确内容之后，如果某一步把其中一部分「替换」成整段文字，文档就会嵌套进自己。现在这种步骤按整段改写处理，任务随之完成。在专测这个问题的评测任务（G04）上，现在 3 次运行都在 4 步内完成；以前我们记录的 6 次运行都陷在这个循环里，直到用满 20 步（其中 5 次碰巧停在正确内容上）。整套 diag 评测 39 题全部通过（diag-v27，与 0.4.1-rc.2 相同的运行时）。
@@ -25,6 +25,9 @@ DeskMind for Mac 每个版本改了什么，简要列出。每个版本的完整
 - App 默认跟随系统语言，除非你在语言菜单里选过（以前一律默认英文）。
 - `~/.config/deskmind/apps.yaml` 里写错的字段会直接指出来。
 - 模型与 0.4.0 相同。
+
+**已知问题**
+- 在「备忘录」里，DeskMind 暂时还不能在列表里选中某条备忘录，所以针对单条备忘录的任务做不了（[#49](https://github.com/deskmind-ai/deskmind/issues/49)）。
 
 ## 0.4.0（2026-10-05）
 

@@ -4,12 +4,11 @@ What changed in each version of DeskMind for Mac, in short. Every version's full
 on the [Releases](https://github.com/deskmind-ai/deskmind/releases) page. Models are named when they change.
 [中文](CHANGELOG.zh-CN.md)
 
-## 0.4.1 (in testing)
+## 0.4.1 (2026-10-07)
 
-Pre-releases [v0.4.1-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.1),
-[v0.4.1-rc.2](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.2) and
-[v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3), 2026-10-06. 0.4.0 stays the latest version
-until this one is released.
+[Release notes](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1). Built from the same code as
+pre-release [v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3), which was tested on a clean Mac
+before release.
 
 **Fixes**
 - Writing text into a document no longer loops. After the right text was written and saved, a step that "replaced" part
@@ -41,6 +40,10 @@ until this one is released.
 - The app follows your system language unless you've chosen one in the language menu (it used to start in English).
 - A mistake in `~/.config/deskmind/apps.yaml` is reported by name.
 - The models are the same as in 0.4.0.
+
+**Known**
+- In Notes, DeskMind can't yet select a note in the list, so tasks on a single note don't work there
+  ([#49](https://github.com/deskmind-ai/deskmind/issues/49)).
 
 ## 0.4.0 (2026-10-05)
 
