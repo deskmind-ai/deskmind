@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 import unittest
@@ -24,6 +25,19 @@ def _edit(req, edit):
 
 def broken(edit):
     return check_request(_edit(REQ, edit))
+
+
+def sure(question, pick=None):
+    """A well-formed choice answer: all mass on `pick` (default the first option), every option covered."""
+    keys = [k for k, _ in options(question)]
+    pick = keys[0] if pick is None else pick
+    return {"type": "choice", "choice": pick, "probabilities": {k: float(k == pick) for k in keys}, "confidence": 1.0}
+
+
+def reply_of(answers, **extra):
+    """A reply with the fields v1 requires."""
+    return {"id": "r", "model": "m", "usage": {"input_tokens": None, "output_tokens": 0}, "latency_ms": 1.0,
+            "answers": answers, **extra}
 
 
 class Requests(unittest.TestCase):
@@ -159,20 +173,110 @@ class OptionOrder(unittest.TestCase):
         self.assertTrue(any("questions/operation/criteria" in e for e in rep.errors), rep.errors)
 
 
+def state_digest(state) -> str:
+    """As SPEC.md defines it, written out here rather than imported: compact JSON in the order sent, SHA-256."""
+    return "sha256:" + hashlib.sha256(json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+class Identity(unittest.TestCase):
+    """Which step of which run a request is for (deskmind#36 item 4), and that a reply says it back."""
+
+    def with_ids(self, **extra):
+        r = copy.deepcopy(REQ)
+        r.update({"request_id": "r-1", "session_id": "run-1", "step": 3, "observation_id": "obs-0007",
+                  "state_digest": state_digest(r["state"])}, **extra)
+        return r
+
+    def test_a_request_with_its_identity_conforms(self):
+        self.assertTrue(check_request(self.with_ids()).ok, check_request(self.with_ids()).errors)
+
+    def test_the_digest_is_of_the_state_as_sent(self):
+        r = self.with_ids()
+        r["state"]["page"]["title"] = "another window"
+        self.assertIn("state_digest is not the digest of this state (SPEC.md, Request identity)", check_request(r).errors)
+        reordered = self.with_ids()
+        reordered["state"] = dict(reversed(list(reordered["state"].items())))
+        self.assertFalse(check_request(reordered).ok, "the same state in another order is another input")
+
+    def test_bad_identity_fields(self):
+        for bad in ({"step": 0}, {"step": "3"}, {"request_id": ""}, {"state_digest": "md5:abc"}):
+            self.assertFalse(check_request(self.with_ids(**bad)).ok, bad)
+
+    def test_a_reply_echoes_it(self):
+        req = self.with_ids()
+        answers = {q: sure(v) for q, v in req["questions"].items()}
+        echoed = reply_of(answers, request_id="r-1", session_id="run-1", step=3)
+        self.assertTrue(check_reply(echoed, req).ok)
+        self.assertEqual(check_reply(echoed, req).warnings, [])
+        self.assertIn("reply request_id is 'r-2', the request's is 'r-1'",
+                      check_reply({**echoed, "request_id": "r-2"}, req).errors)
+        self.assertIn("the reply does not echo step", check_reply(reply_of(answers), req).warnings,
+                      "a server from before the echo: a warning, not an error")
+
+
 class Replies(unittest.TestCase):
     def test_a_reply_must_answer_every_question_with_an_offered_option(self):
-        answers = {q: {"type": "choice", "choice": next(iter(v["criteria"])),
-                       "probabilities": {next(iter(v["criteria"])): 1.0}}
-                   for q, v in REQ["questions"].items()}
-        self.assertTrue(check_reply({"answers": answers}, REQ).ok)
+        answers = {q: sure(v) for q, v in REQ["questions"].items()}
+        self.assertTrue(check_reply(reply_of(answers), REQ).ok, check_reply(reply_of(answers), REQ).errors)
         bad = copy.deepcopy(answers)
         bad.pop("operation")
         bad["click_target"]["choice"] = "nope"
-        rep = check_reply({"answers": bad}, REQ)
+        rep = check_reply(reply_of(bad), REQ)
         self.assertIn("no answer for question 'operation'", rep.errors)
         self.assertIn("click_target: answered 'nope', which was not offered", rep.errors)
         self.assertIn("click_target: answered 'nope', which was not offered",
-                      check_reply({"answers": bad}, LIST).errors, "the list form's options are read too")
+                      check_reply(reply_of(bad), LIST).errors, "the list form's options are read too")
+
+
+class ReplySemantics(unittest.TestCase):
+    """What a client can rely on in a reply (deskmind#36 item 2)."""
+
+    def setUp(self):
+        self.answers = {q: sure(v) for q, v in REQ["questions"].items()}
+        self.op = REQ["questions"]["operation"]
+        self.keys = [k for k, _ in options(self.op)]
+
+    def errors(self, **op_answer):
+        return check_reply(reply_of({**self.answers, "operation": {**self.answers["operation"], **op_answer}}), REQ).errors
+
+    def test_v1_reply_fields_are_required(self):
+        for field in ("id", "model", "usage", "latency_ms"):
+            r = reply_of(self.answers)
+            r.pop(field)
+            self.assertFalse(check_reply(r, REQ).ok, field)
+
+    def test_probabilities_cover_exactly_the_offered_options(self):
+        partial = {self.keys[0]: 1.0}
+        self.assertTrue(any("cover exactly" in e and "missing" in e for e in self.errors(probabilities=partial)))
+        extra = {**self.answers["operation"]["probabilities"], "NOPE": 0.0}
+        self.assertTrue(any("not offered ['NOPE']" in e for e in self.errors(probabilities=extra)))
+
+    def test_they_sum_to_one(self):
+        op = {"type": "choice", "choice": self.keys[0], "probabilities": {k: 0.5 for k in self.keys}}
+        errors = check_reply(reply_of({**self.answers, "operation": op}), REQ).errors
+        self.assertTrue(any("sum to" in e for e in errors), errors)
+
+    def test_choice_is_the_argmax_and_a_tie_goes_to_the_first_option(self):
+        a, b = self.keys[0], self.keys[1]
+        tie = {k: (0.5 if k in (a, b) else 0.0) for k in self.keys}
+        conf = (len(self.keys) * 0.5 - 1) / (len(self.keys) - 1)
+        self.assertEqual(self.errors(probabilities=tie, choice=a, confidence=conf), [])
+        self.assertTrue(any("argmax" in e for e in self.errors(probabilities=tie, choice=b, confidence=conf)))
+
+    def test_confidence_formula(self):
+        self.assertTrue(any("confidence" in e for e in self.errors(confidence=0.5)))
+
+    def test_an_unscored_answer_says_so_and_is_uniform(self):
+        n = len(self.keys)
+        uniform = {k: 1.0 / n for k in self.keys}
+        self.assertEqual(self.errors(probabilities=uniform, choice=self.keys[0], confidence=0.0, scored=False), [])
+        self.assertTrue(any("scored is false" in e for e in self.errors(scored=False)))
+
+    def test_score_answers(self):
+        req = {"state": {}, "questions": {"anger": {"type": "score", "instructions": "?", "criteria": ["calm", "angry", "furious"]}}}
+        ok = {"type": "score", "score": 1.2, "probabilities": {"0": 0.2, "1": 0.4, "2": 0.4}}
+        self.assertTrue(check_reply(reply_of({"anger": ok}), req).ok, check_reply(reply_of({"anger": ok}), req).errors)
+        self.assertTrue(any("expected level" in e for e in check_reply(reply_of({"anger": {**ok, "score": 2.0}}), req).errors))
 
 
 class Registry(unittest.TestCase):

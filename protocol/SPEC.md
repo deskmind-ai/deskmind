@@ -61,21 +61,53 @@ of 220 (brain#8).
 - A server shows the options in the order sent and never reorders them. A harness keeps the agent profile's order
   rules ([Heads and their options](#heads-and-their-options)); `tools/check.py` checks them, a server does not.
 
+### Request identity
+
+From v1 (deskmind#36 item 4) a request can say which step of which run it is for. Every field is optional; a server
+that does not know them ignores them (Brain does: it drops fields it does not read), so a client sends them to any server.
+
+| Field | Content |
+|---|---|
+| `request_id` | unique per request; a retry of the same request keeps it, so a server or a log can tell a duplicate |
+| `session_id` | one per run of a task |
+| `step` | the harness's step, from 1; requests for the same step share it (hands asks again for an overridden operation's heads) |
+| `observation_id` | the harness's id of the observation the state and the options were built from; opaque to the server |
+| `state_digest` | `"sha256:"` and the hex SHA-256 of `state` as compact JSON in the order sent (`json.dumps(state, ensure_ascii=False, separators=(",", ":"))`, UTF-8) |
+
+- The digest keeps the order on purpose: the order of the state is part of what the model sees, so two states that
+  differ only in order are two inputs. `tools/check.py` recomputes it.
+- The digest is the client's, defined by that serialization. A server that serializes JSON another way may not get the
+  same bytes, so it logs the digest and never rejects a request because it disagrees.
+- A server echoes `request_id`, `session_id` and `step` in its reply, and writes them in its routing log. They are
+  not part of the answer cache key: the cache answers equal state and questions, whatever the request is called.
+- An approval (item 7) names the `observation_id` it was given for.
+
 ### Reply
 
-`{"id", "model", "answers", "usage", "latency_ms", "routing"?, "cached"?}` ([schema](schema/response.schema.json)).
+`{"id", "model", "answers", "usage", "latency_ms", "routing"?, "cached"?, "request_id"?, "session_id"?, "step"?}`
+([schema](schema/response.schema.json)); the last three echo the request's ([Request identity](#request-identity)).
 
+- `id`, `model`, `answers`, `usage` and `latency_ms` are required (v1; Brain has always sent them).
 - `answers` has one entry per question, scored or not. A `choice` answer is `{"type", "choice", "probabilities",
-  "confidence"}`: `choice` is the argmax, `probabilities` covers every option, `confidence` is `(K·p_max − 1)/(K − 1)`.
-  Clients decide from `probabilities` (hands takes its own argmax and ignores `confidence`).
+  "confidence", "scored"?}`, and `tools/check.py` checks each of these (deskmind#36 item 2):
+  - `probabilities` has exactly the offered options as keys, each a finite number from 0 to 1, summing to 1 (±1e-6);
+  - `choice` is the argmax; a tie goes to the first option in the request's order;
+  - `confidence` is `(K·p_max − 1)/(K − 1)` over the K offered options (1.0 when K ≤ 1);
+  - clients decide from `probabilities` (hands takes its own argmax, acts only on offered options, and ignores
+    `confidence`).
+- A `score` answer has `probabilities` over the levels `"0"`…`"K-1"` (same rules), and `score` is the expected level,
+  Σ level · p. A `noul` answer's `noul` is p(true), from 0 to 1 (its options are `false` and `true`).
 - A server running **two-stage** scores `operation` first and then only that operation's heads. Questions it did not
-  score come back **uniform** with confidence 0; they are not answers (G1, G2, G4).
+  score come back **uniform**, confidence 0, and (from brain#10) **`"scored": false`**: a placeholder, not an answer.
+  A client must not act on one; a v0 server sends the uniform placeholder without the flag (G1, G2, G4). An answer
+  marked `scored: false` must be uniform.
 - `routing` appears when two tiers are served: `{"by": "fast"|"strong", "reason", "fast_conf", "confirmed"?}`. The fast
   tier answers; the strong tier re-answers when `fast_conf` (the lowest top probability over `operation` and its heads)
   is under the threshold (0.96 in the app) or the step is risky: `risky_DONE`, `risky_BLOCKED`, `risky_KEY` (a chord
   outside `cmd+s cmd+f cmd+c tab escape`), `risky_undo` (a click on a target whose option text contains 撤销/undo),
   `unverified_last` (DONE right after an unverifiable or no-op effect). `confirmed: true` means both tiers chose the
-  same terminal operation; hands then never overrides it.
+  same terminal operation. hands then does not override it with another operation (the low-confidence override
+  below); its DONE check still runs and can still send a DONE back.
 - A cache hit (identical state and questions) returns the stored reply with a new `id` and `cached: true`, including
   the original `latency_ms` and `routing` (G18). Latency measurements must leave cached replies out.
 
@@ -110,13 +142,13 @@ arguments. [`agent/operations.yaml`](agent/operations.yaml) lists them; this sec
 | `REPLACE_TEXT` | `replace_text_target`, `replace_from`, `type_text_value` | write | sets the field to the edit described below |
 | `SCROLL` | `scroll_target` | navigate | scrolls 3 lines at the element |
 | `SELECT` | `select_target` | write | sets the dropdown to the option |
-| `FOCUS_APP` | `focus_app_target` | focus | brings another app's window forward; offered only with more than one candidate (G12) |
+| `FOCUS_APP` | `focus_app_target` | focus | observes another app instead; offered only with more than one candidate (G12). With the app's background driver (Peekaboo over MCP) nothing is brought forward; the command-line driver activates the app |
 | `KEY` | `key_target` | act | presses the chord in the focused window |
 | `DONE` | — | terminal | ends the task; the harness may send it back (the DONE check) |
 | `BLOCKED` | — | terminal | gives up |
 | `TYPE_FOCUSED` | `type_text_value` | write | types where the keyboard focus is; offered right after `cmd+n`/`cmd+shift+n` (G1) |
 | `ASK` | — | dialogue | asks the user; the question comes from the harness, not from a head |
-| `FOCUS_WINDOW` | `focus_window_target` | focus | switches to another window of the app |
+| `FOCUS_WINDOW` | `focus_window_target` | focus | observes another window of the app; as with `FOCUS_APP`, the background driver does not raise it |
 | `ANSWER` | `answer_value` | terminal | ends the task with the chosen on-screen text as the answer (G3) |
 
 Operations are offered in this order, so their option letters are stable: a request offers a subset, and the ones it
@@ -225,7 +257,7 @@ harness profile (40 elements) and is not part of this corpus.
 |---|---|
 | G1 | `TYPE_FOCUSED`'s `type_text_value` is not among the heads a two-stage server scores for it, so it comes back uniform and hands types candidate 1 whatever the model would have chosen. |
 | G2 | `goal_complete` is not scored under two-stage unless the operation is terminal; it is uniform (p(yes) = 0.5) otherwise. |
-| G3 | `ANSWER` ends the task but is not treated as terminal by the router (never escalated as such). |
+| G3 | `ANSWER` ends the task but is not treated as terminal by the router: it is not escalated for being terminal, as DONE and BLOCKED are, and two tiers agreeing on it is not `confirmed`. It is still escalated on low confidence like any step (`answer_value` counts in `fast_conf`). |
 | G4 | The two-tier merge fills heads from the fast tier only when both tiers chose a terminal operation; otherwise the strong tier's unscored heads are uniform. |
 | G5 | Error bodies differ (401 is a string), and a `ValueError` inside the predictor is a 400, not a 500. |
 | G6 | Defaults and names differ: port 8787 vs 8793, `DESKMIND_BRAIN_TOKEN` vs `SYSTEMONE_API_KEY`, the ignored `model` field with different defaults. |

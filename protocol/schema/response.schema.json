@@ -2,15 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/deskmind-ai/deskmind/protocol/schema/response.schema.json",
   "title": "POST /v1/systemone response",
-  "description": "Protocol v0, as Brain answers (brain src/deskmind_brain/serve.py, types.py, router.py). Error bodies are in the spec, not here.",
+  "description": "As Brain answers (brain src/deskmind_brain/serve.py, types.py, router.py). v1 requires id, model, usage and latency_ms and adds scored:false (deskmind#36 item 2). Error bodies are in the spec, not here.",
   "type": "object",
-  "required": ["answers"],
+  "required": ["id", "model", "answers", "usage", "latency_ms"],
   "properties": {
     "id": { "type": "string" },
     "model": { "type": "string" },
     "answers": {
       "type": "object",
-      "description": "One answer per question in the request, including questions a two-stage server did not score (those come back uniform, confidence 0).",
+      "description": "One answer per question in the request, including questions a two-stage server did not score: those come back uniform, confidence 0, and (v1) scored:false.",
       "additionalProperties": { "$ref": "#/$defs/answer" }
     },
     "usage": {
@@ -22,11 +22,19 @@
     },
     "latency_ms": { "type": "number" },
     "cached": { "const": true, "description": "Present on a cache hit; latency_ms and routing are the original reply's." },
-    "routing": { "$ref": "#/$defs/routing" }
+    "routing": { "$ref": "#/$defs/routing" },
+    "request_id": { "type": "string", "description": "v1: the request's request_id, echoed." },
+    "session_id": { "type": "string", "description": "v1: the request's session_id, echoed." },
+    "step": { "type": "integer", "description": "v1: the request's step, echoed." }
   },
   "$defs": {
+    "unscored": {
+      "const": false,
+      "description": "v1: present, false, on a question the server did not score (two-stage); its probabilities are a uniform placeholder, not an answer."
+    },
     "probabilities": {
       "type": "object",
+      "description": "Every offered option and no other key; 0..1, summing to 1 (±1e-6). tools/check.py checks the parts a schema cannot.",
       "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
     },
     "answer": {
@@ -36,9 +44,10 @@
         {
           "properties": {
             "type": { "const": "choice" },
-            "choice": { "type": "string" },
+            "choice": { "type": "string", "description": "The argmax of probabilities; a tie goes to the first option in the request's order." },
             "probabilities": { "$ref": "#/$defs/probabilities" },
-            "confidence": { "type": "number", "description": "(K * p_max - 1) / (K - 1); 1.0 when K <= 1. Clients read probabilities." }
+            "confidence": { "type": "number", "description": "(K * p_max - 1) / (K - 1); 1.0 when K <= 1. Clients read probabilities." },
+            "scored": { "$ref": "#/$defs/unscored" }
           },
           "required": ["type", "choice", "probabilities"]
         },
@@ -48,7 +57,8 @@
             "score": { "type": "number" },
             "legend": { "type": "object" },
             "probabilities": { "$ref": "#/$defs/probabilities" },
-            "confidence": { "type": "number" }
+            "confidence": { "type": "number" },
+            "scored": { "$ref": "#/$defs/unscored" }
           },
           "required": ["type", "score", "probabilities"]
         },
