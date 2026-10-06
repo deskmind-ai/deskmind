@@ -215,6 +215,7 @@ enum DecisionTests {
         folderPolicyTests()
         diagnosticsTests()
         recordingCaptureTests()
+        helperLocationTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -541,6 +542,60 @@ enum DecisionTests {
         check(!RecordingCapture.shouldAppend(at: 0.05, last: 0.1, accepting: true, ready: true), "not an earlier one")
         check(!RecordingCapture.shouldAppend(at: 0.2, last: 0.1, accepting: false, ready: true), "not after the movie is finishing")
         check(!RecordingCapture.shouldAppend(at: 0.2, last: 0.1, accepting: true, ready: false), "not while the writer is busy")
+    }
+
+    /// Which helper copy runs (Shared/HelperLocation.swift): the nested copy hands over to the installed one.
+    static func helperLocationTests() {
+        let support = "/Users/u/Library/Application Support/DeskMind"
+        let installed = HelperLocation.installedPath(supportDir: support)
+        check(installed == support + "/DeskMind Hands.app", "installed copy path: \(installed)")
+        let nested = "/Applications/DeskMind.app/Contents/Library/LoginItems/DeskMind Hands.app"
+        check(HelperLocation.handOverTarget(bundlePath: nested, installedPath: installed) == installed,
+              "the copy inside DeskMind.app hands over (rc.1: macOS's Quit & Reopen started it)")
+        check(HelperLocation.handOverTarget(bundlePath: installed, installedPath: installed) == nil,
+              "the installed copy keeps running")
+        check(HelperLocation.handOverTarget(bundlePath: installed + "/", installedPath: installed) == nil,
+              "the same path written differently is the same copy")
+        check(HelperLocation.handOverTarget(bundlePath: "/Users/u/build/DeskMind Hands.app", installedPath: installed) == nil,
+              "a standalone build (not inside another app) is left alone")
+        // The installed copy is remade from the shipped one whenever they differ, older or newer.
+        let a = HelperLocation.Stamp(version: "0.4.1", build: "70", runtime: "89be730+f8e4702+ocr", executable: "aa")
+        check(!HelperLocation.needsInstall(shipped: a, installed: a), "the same copy: left as it is")
+        check(HelperLocation.needsInstall(shipped: a, installed: nil), "none installed: install")
+        check(HelperLocation.needsInstall(shipped: a, installed: .init(version: "0.4.0", build: "36", runtime: "11368c6+f8e4702+ocr", executable: "bb")),
+              "an older copy after an update: replace")
+        check(HelperLocation.needsInstall(shipped: a, installed: .init(version: "0.5.0", build: "80", runtime: "x", executable: "cc")),
+              "a newer copy (an older DeskMind.app put back): replace with what this app ships")
+        check(HelperLocation.needsInstall(shipped: a, installed: .init(version: "0.4.1", build: "70", runtime: "89be730+f8e4702+ocr", executable: "dd")),
+              "same version, different executable (a development rebuild): replace")
+        check(!HelperLocation.needsInstall(shipped: nil, installed: a), "nothing shipped to install from: left")
+        // Restart so a Screen Recording grant takes effect: only when a new process sees it and this one doesn't.
+        check(HelperLocation.restartForGrant(live: false, probe: true, taskRunning: false, alreadyScheduled: false),
+              "granted, not yet seen: restart")
+        check(!HelperLocation.restartForGrant(live: true, probe: true, taskRunning: false, alreadyScheduled: false), "already seen")
+        check(!HelperLocation.restartForGrant(live: false, probe: false, taskRunning: false, alreadyScheduled: false), "not granted")
+        check(!HelperLocation.restartForGrant(live: false, probe: true, taskRunning: true, alreadyScheduled: false),
+              "never in the middle of a task")
+        check(!HelperLocation.restartForGrant(live: false, probe: true, taskRunning: false, alreadyScheduled: true), "once")
+        // The app replaces a connected helper that runs from anywhere else.
+        check(HelperLocation.isWrongCopy(runningPath: nested, installedPath: installed), "nested copy connected: wrong")
+        check(!HelperLocation.isWrongCopy(runningPath: installed, installedPath: installed), "installed copy: right")
+        check(!HelperLocation.isWrongCopy(runningPath: nil, installedPath: installed), "an older helper that doesn't say: left")
+        check(!HelperLocation.isWrongCopy(runningPath: "/Users/u/build/DeskMind Hands.app", installedPath: installed),
+              "a development helper started elsewhere is not terminated (review of #32)")
+        // One helper at a time: a second one waits for the first to go, and gives up if it stays (rc.2 e2e: a restart
+        // with the app open left two helpers, the second holding the socket).
+        let lockPath = NSTemporaryDirectory() + "hands-\(getpid()).lock"
+        let first = HelperLock.acquire(lockPath, wait: 0)
+        check((first ?? -1) >= 0, "the first helper takes the lock")
+        check(HelperLock.acquire(lockPath, wait: 0.3) == nil, "a second one, while the first stays: gives up")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { close(first ?? -1) }
+        let successor = HelperLock.acquire(lockPath, wait: 5)
+        check((successor ?? -1) >= 0, "a successor waits for the first to go, then takes it")
+        close(successor ?? -1); unlink(lockPath)
+        check(HelperLock.acquire("/nonexistent-dir/hands.lock", wait: 0) == -1, "no lock file: the helper still runs")
+        // The language follows the system unless the user picked one (0.4.1-rc.1 opened in English on a Chinese Mac).
+        check(AppLanguage(rawValue: AppLanguage.system.rawValue)?.resolved == ResolvedLang.fromSystem(), "system language")
     }
 
     static func issueReportTests() {

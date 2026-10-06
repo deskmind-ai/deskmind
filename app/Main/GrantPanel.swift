@@ -66,22 +66,11 @@ var bundledHelperURL: URL {
 /// Hands had no effect.
 var helperURL: URL { DeskMindIPC.supportDir.appendingPathComponent("DeskMind Hands.app") }
 
-/// Copy the bundled helper out when it is missing or differs from the shipped one. Returns whether it changed.
+/// Copy the bundled helper out when it is missing or differs from the shipped one (HelperInstaller). Returns whether it
+/// changed.
 @discardableResult
 func installHelper() throws -> Bool {
-    let fm = FileManager.default
-    let exe = "Contents/MacOS/DeskMindHands"
-    let shipped = bundledHelperURL.appendingPathComponent(exe)
-    let installed = helperURL.appendingPathComponent(exe)
-    if let a = fm.contents(atPath: shipped.path), let b = fm.contents(atPath: installed.path), a == b,
-       fm.contentsEqual(atPath: bundledHelperURL.appendingPathComponent("Contents/_CodeSignature/CodeResources").path,
-                        andPath: helperURL.appendingPathComponent("Contents/_CodeSignature/CodeResources").path) {
-        return false
-    }
-    try fm.createDirectory(at: DeskMindIPC.supportDir, withIntermediateDirectories: true)
-    if fm.fileExists(atPath: helperURL.path) { try fm.removeItem(at: helperURL) }
-    try fm.copyItem(at: bundledHelperURL, to: helperURL)
-    return true
+    try HelperInstaller.ensureInstalled(shipped: bundledHelperURL.path, installed: helperURL.path)
 }
 
 @MainActor

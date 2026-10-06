@@ -229,6 +229,8 @@ enum L10n {
         "Wrong result": "结果不对",
         "It got stuck": "卡住了",
         "Report on GitHub": "在 GitHub 上反馈",
+        "Restart": "重启",
+        "Restarting the helper from its installed copy": "改用已安装的副本重启助手",
         "Your apps file (~/.config/deskmind/apps.yaml) has a problem: %@. Fix it or move it away, then run it again.": "你的应用配置文件（~/.config/deskmind/apps.yaml）有问题：%@。改正它或先把它移走，再跑一次。",
         "Smooth Recordings (30 fps, Slows Tasks About 10%)": "流畅录制（每秒 30 帧，任务约慢 10%）",
         "Save Full Log…": "保存完整日志…",
@@ -321,8 +323,7 @@ enum L10n {
 
         // MARK: Vision model row (Main/HomeView.swift EyesRow)
         "Vision model": "视觉模型",
-        "For apps without accessibility (NetEase Cloud Music and the like). Download 3.3 GB":
-            "用于没有辅助功能信息的应用（比如网易云音乐）。需下载 3.3 GB",
+        "For apps without accessibility, like NetEase Cloud Music. 3.3 GB": "用于没有辅助功能信息的应用，比如网易云音乐。3.3 GB",
         "For apps without accessibility. Loaded only while a task needs it.": "用于没有辅助功能信息的应用，只在任务需要时载入",
         "Download 3.3 GB": "下载 3.3 GB",
 
