@@ -111,6 +111,15 @@ class OptionOrder(unittest.TestCase):
             {"key": "DONE", "description": "again"})))
         self.assertIn("operation: option 'DONE' appears more than once", rep.errors)
 
+    def test_a_key_that_is_not_a_string_is_a_schema_error_not_a_crash(self):
+        """Review of #38: a list key like ["x"] made the duplicate and order checks raise TypeError."""
+        def odd(r):
+            r["questions"]["operation"]["criteria"][0]["key"] = ["x"]
+            r["questions"]["click_target"]["criteria"].append({"key": {"n": 1}, "description": "x"})
+        rep = check_request(_edit(LIST, odd))
+        self.assertTrue(any(e.startswith("request/questions/operation/criteria") for e in rep.errors), rep.errors)
+        self.assertTrue(any(e.startswith("request/questions/click_target/criteria") for e in rep.errors), rep.errors)
+
     def test_a_list_entry_is_a_key_and_a_description(self):
         rep = check_request(_edit(LIST, lambda r: r["questions"]["operation"]["criteria"][0].pop("description")))
         self.assertTrue(any("questions/operation/criteria" in e for e in rep.errors), rep.errors)

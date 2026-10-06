@@ -83,7 +83,7 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
     questions = req.get("questions") or {}
     for qid, q in questions.items():
         if isinstance(q, dict) and isinstance(q.get("criteria"), list) and q.get("type") == "choice":
-            keys = [k for k, _ in options(q)]
+            keys = [k for k, _ in options(q) if isinstance(k, str)]   # any other key is the schema's error
             r.errors += [f"{qid}: option {k!r} appears more than once" for k in sorted({k for k in keys if keys.count(k) > 1}, key=str)]
     op_q = questions.get(registry["operation_question"])
     if not isinstance(op_q, dict):
@@ -92,7 +92,7 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
     r.errors += _schema_errors(STATE, state, "state")
     ops, heads, formats = registry["operations"], registry["heads"], registry["option_formats"]
 
-    offered = [k for k, _ in options(op_q)]
+    offered = [k for k, _ in options(op_q) if isinstance(k, str)]   # any other key is the schema's error
     for op in offered:
         if op not in ops:
             r.errors.append(f"operation {op!r} is not in the registry")
