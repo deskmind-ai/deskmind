@@ -601,6 +601,18 @@ enum DecisionTests {
         check(HelperLocation.hungAction(silentFor: 300, running: false, quitAskedFor: nil) == .none, "nothing running: the app starts one")
         check(HelperLocation.hungAction(silentFor: 35, running: true, quitAskedFor: 4) == .none, "asked to quit: give it time")
         check(HelperLocation.hungAction(silentFor: 45, running: true, quitAskedFor: 10) == .kill, "still there: kill it")
+        // The clock, poll by poll: a helper that crashed and came back gets its own 30 s (review of #43).
+        var w = HelperLocation.HungWatch()
+        let t0 = Date()
+        var acts: [HelperLocation.HungAction] = []
+        for s in 0..<25 { acts.append(w.step(now: t0 + Double(s), connected: false, running: false)) }   // crashed, none running
+        for s in 25..<54 { acts.append(w.step(now: t0 + Double(s), connected: false, running: true)) }  // a new one, starting
+        check(!acts.contains(.terminate), "a helper starting after a crash is not quit before its own 30 s")
+        check(w.step(now: t0 + 55, connected: false, running: true) == .terminate, "30 s of its own silence: quit")
+        check(w.step(now: t0 + 60, connected: false, running: true) == .none, "asked: wait")
+        check(w.step(now: t0 + 65, connected: false, running: true) == .kill, "still there: kill")
+        check(w.step(now: t0 + 66, connected: false, running: true) == .none, "the next one starts its own clock")
+        check(w.step(now: t0 + 67, connected: true, running: true) == .none && w.silentSince == nil, "answering: no clock")
         // Opening a hung helper again showed "DeskMind Hands is not responding", once per poll (10-06).
         check(!HelperLocation.shouldLaunch(running: true), "a helper is running, silent: not opened again")
         check(HelperLocation.shouldLaunch(running: false), "none running: start one")

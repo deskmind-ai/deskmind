@@ -47,8 +47,8 @@ final class HelperModel: ObservableObject {
     func granted(_ g: Grant) -> Bool { status[g.statusKey] as? Bool == true }
     var helperReady: Bool { connected }
     private var lastLaunch = Date.distantPast
-    /// Since when the helper has not answered, and since when a hung one was asked to quit (HelperLocation.hungAction).
-    private var silentSince: Date?, quitAskedAt: Date?
+    /// How long a running helper has been silent, and whether it was asked to quit (HelperLocation.HungWatch).
+    private var hungWatch = HelperLocation.HungWatch()
     @Published var launching = false
 
     /// Start the helper if it is not answering; it is also how a restart completes (the helper exits, we relaunch).
@@ -130,22 +130,14 @@ final class HelperModel: ObservableObject {
 
     /// A helper that is running but has stopped answering is quit, then killed (HelperLocation.hungAction).
     private func replaceIfHung() {
-        let now = Date()
-        if connected { silentSince = nil; quitAskedAt = nil; return }
-        if silentSince == nil { silentSince = now }
         let helpers = NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands").filter { !$0.isTerminated }
-        if helpers.isEmpty { quitAskedAt = nil; return }
-        switch HelperLocation.hungAction(silentFor: now.timeIntervalSince(silentSince ?? now), running: true,
-                                         quitAskedFor: quitAskedAt.map { now.timeIntervalSince($0) }) {
+        switch hungWatch.step(now: Date(), connected: connected, running: !helpers.isEmpty) {
         case .terminate:
             note(L("The helper stopped answering. Restarting it", lang: ResolvedLang.current))
             helpers.forEach { $0.terminate() }
-            quitAskedAt = now
         case .kill:
             // SIGKILL itself: forceTerminate() returned true and left a stopped helper where it was (10-06, e2e).
             helpers.forEach { kill($0.processIdentifier, SIGKILL) }
-            quitAskedAt = nil
-            silentSince = now      // the fresh helper gets its own time to answer
         case .none:
             break
         }

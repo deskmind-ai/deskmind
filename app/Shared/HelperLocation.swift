@@ -63,6 +63,27 @@ enum HelperLocation {
         return silentFor >= hungAfter ? .terminate : .none
     }
 
+    /// The app's clock for hungAction, poll by poll. Silence is counted from when a helper process is there and not
+    /// answering: with none running (a crash, a restart) the clock stops, so a helper starting afresh gets its full
+    /// 30 s -- counted from the crash, a slow first launch was killed mid-start, over and over (review of #43).
+    struct HungWatch {
+        private(set) var silentSince: Date?, quitAskedAt: Date?
+
+        mutating func step(now: Date, connected: Bool, running: Bool) -> HungAction {
+            guard !connected, running else { silentSince = nil; quitAskedAt = nil; return .none }
+            let since = silentSince ?? now
+            silentSince = since
+            let action = hungAction(silentFor: now.timeIntervalSince(since), running: true,
+                                    quitAskedFor: quitAskedAt.map { now.timeIntervalSince($0) })
+            switch action {
+            case .terminate: quitAskedAt = now
+            case .kill: silentSince = nil; quitAskedAt = nil
+            case .none: break
+            }
+            return action
+        }
+    }
+
     /// The app starts a helper only when none is running; a silent one is replaced by hungAction, not opened again.
     static func shouldLaunch(running: Bool) -> Bool { !running }
 
