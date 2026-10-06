@@ -76,6 +76,8 @@ that does not know them ignores them (Brain does: it drops fields it does not re
 
 - The digest keeps the order on purpose: the order of the state is part of what the model sees, so two states that
   differ only in order are two inputs. `tools/check.py` recomputes it.
+- The digest is the client's, defined by that serialization. A server that serializes JSON another way may not get the
+  same bytes, so it logs the digest and never rejects a request because it disagrees.
 - A server echoes `request_id`, `session_id` and `step` in its reply, and writes them in its routing log. They are
   not part of the answer cache key: the cache answers equal state and questions, whatever the request is called.
 - An approval (item 7) names the `observation_id` it was given for.
