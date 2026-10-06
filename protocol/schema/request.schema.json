@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/deskmind-ai/deskmind/protocol/schema/request.schema.json",
+  "title": "POST /v1/systemone request",
+  "description": "Protocol v0: the transport as Brain serves it (brain src/deskmind_brain/types.py). The agent profile constrains it further: protocol/agent/operations.yaml and agent-state.schema.json.",
+  "type": "object",
+  "required": ["state", "questions"],
+  "properties": {
+    "state": {
+      "description": "What the model looks at. An object is rendered as compact JSON (prompt_format 2 and 3); a string is used as is. Agent requests carry the agent state (agent-state.schema.json)."
+    },
+    "model": {
+      "type": "string",
+      "description": "Accepted and ignored by Brain."
+    },
+    "questions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/question" }
+    }
+  },
+  "$defs": {
+    "question": {
+      "type": "object",
+      "required": ["type", "instructions"],
+      "properties": {
+        "type": { "enum": ["choice", "score", "noul"] },
+        "instructions": { "description": "Any JSON value. Shown with the question. Agent requests use an object with goal and rules." },
+        "criteria": {}
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "choice" } } },
+          "then": {
+            "required": ["criteria"],
+            "properties": {
+              "criteria": {
+                "type": "object",
+                "minProperties": 1,
+                "maxProperties": 255,
+                "description": "Option key -> description. Insertion order is the order the options are shown in (and the letters they get)."
+              }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "type": { "const": "score" } } },
+          "then": {
+            "required": ["criteria"],
+            "properties": { "criteria": { "type": "array", "minItems": 2, "maxItems": 10 } }
+          }
+        }
+      ]
+    }
+  }
+}

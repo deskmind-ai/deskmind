@@ -1,0 +1,169 @@
+# The agent profile of /v1/systemone, protocol v0: the operations a harness may offer, the questions (heads) each one
+# needs, the option format of every head, and what a harness does with the answer. Machine-readable: hands and Brain
+# can load it, and protocol/tools/check.py checks requests against it. SPEC.md explains every field.
+#
+# v0 describes what ships, it does not change it: hands 89be730, brain 4767186, the Mac app 0.4.1. Where the two
+# sides disagree today the entry says so under `gaps` (SPEC.md, "Known gaps"), and v1 fixes it.
+
+profile: deskmind-agent
+version: 0
+describes: { hands: 89be730, brain: 4767186, app: "0.4.1" }
+
+# A request is an agent request when it has a question with this id. Its criteria keys are operation names below,
+# its descriptions the harness's text for them (SPEC.md, "Operation descriptions").
+operation_question: operation
+
+# How an option key and its description look, per head kind.
+option_formats:
+  element:
+    key: '^[1-9][0-9]*$'             # state.elements[].index
+    description: { element: '"[N] <label>"', role: string, current_value: string }
+    refers_to: state.elements.index
+  dropdown_option:
+    key: '^[1-9][0-9]*:[0-9]+$'      # state.elements[].options[].index
+    description: { element: '"[N:k] <label> → <option>"', current_value: string }
+    refers_to: state.elements.options.index
+  value:
+    key: '^[1-9][0-9]*$'             # 1-based position in the harness's candidate list
+    description: { value: string }
+  replace_span:
+    key: '^[1-9][0-9]*$'
+    description: { text: string }
+  chord:
+    key: '^[a-z0-9+]+$'              # lowercase, "+"-joined
+    description: string
+  app:
+    key: '.+'                        # display name or bundle id
+    description: string
+  window:
+    key: '.+'                        # the driver's window id
+    description: string
+  yes_no:
+    key: '^(yes|no)$'
+    description: string
+
+# The heads (question ids) and their option formats and limits.
+heads:
+  click_target:        { format: element, max_options: 40 }
+  open_target:         { format: element, max_options: 40 }
+  rename_target:       { format: element, max_options: 40 }
+  type_text_target:    { format: element, max_options: 40 }
+  append_text_target:  { format: element, max_options: 40 }
+  replace_text_target: { format: element, max_options: 40 }
+  scroll_target:       { format: element, max_options: 40 }
+  select_target:       { format: dropdown_option, max_options: 40 }
+  focus_app_target:    { format: app }                         # uncapped in v0 (gap)
+  focus_window_target: { format: window }                      # uncapped in v0 (gap)
+  key_target:          { format: chord, max_options: 15 }
+  type_text_value:     { format: value, max_options: 24 }
+  replace_from:        { format: replace_span, max_options: 16 }
+  answer_value:        { format: value, max_options: 120 }
+  goal_complete:       { format: yes_no, max_options: 2 }      # only with HANDS_COMPLETION_CHECK > 0
+
+# Operations, in the order a harness offers them (the order sets the option letters the model was trained on).
+#   heads:     the questions this operation uses; a harness that offers the operation sends them
+#   class:     act (reversible UI action), navigate, write (changes the user's content), focus, dialogue, terminal
+#   executes:  what the harness does with the answer
+operations:
+  CLICK:
+    heads: [click_target]
+    class: act
+    executes: click the element
+  OPEN:
+    heads: [open_target]
+    class: act
+    executes: double-click the element
+    offered_on_roles: [row, cell, item, listitem, outline, link, axrow, axcell, folder, document]
+  RENAME:
+    heads: [rename_target, type_text_value]
+    class: write
+    executes: type the value into the row's name field, clear_first, foreground
+    refused_when: the new name is another file's (in the window, or moved by this run)
+    gaps: [G19]           # offered even when there is no value candidate, so type_text_value is absent
+  TYPE_TEXT:
+    heads: [type_text_target, type_text_value]
+    class: write
+    executes: set the field to the value (clear_first)
+    refused_when: the field holds several lines and the value is one line
+    gaps: [G19]           # offered even when there is no value candidate, so type_text_value is absent
+  APPEND_TEXT:
+    heads: [append_text_target, type_text_value]
+    class: write
+    executes: add the value at the end of the field (a newline added when the field ends in one)
+    gaps: [G19]           # offered even when there is no value candidate, so type_text_value is absent
+  REPLACE_TEXT:
+    heads: [replace_text_target, replace_from, type_text_value]
+    class: write
+    offered_on: settable elements whose value has a newline
+    executes: >-
+      set the field to replace_edit(goal, field, from, value): the field with the first occurrence of `from`
+      replaced; a value that already holds the whole field rewrites it (hands#9); a goal's "from X" inside the span
+      replaces only X; a "Label: value" line keeps its label. Pairs are tried by p(from) x p(value).
+    gaps: [G13]
+  SCROLL:
+    heads: [scroll_target]
+    class: navigate
+    executes: scroll 3 lines at the element
+  SELECT:
+    heads: [select_target]
+    class: write
+    executes: set the dropdown to the option's value (recorded in history as kind "fill")
+  FOCUS_APP:
+    heads: [focus_app_target]
+    class: focus
+    offered_when: more than one candidate app
+  KEY:
+    heads: [key_target]
+    class: act
+    executes: press the chord in the focused window
+    chords: [return, cmd+shift+n, cmd+n, cmd+f, cmd+c, option+cmd+v, cmd+v, cmd+z, cmd+down, cmd+up, escape, tab, cmd+s, cmd+a, delete]
+    router_safe_chords: [cmd+s, cmd+f, cmd+c, tab, escape]   # any other chord is escalated (risky_KEY)
+  DONE:
+    heads: []
+    class: terminal
+    executes: "finish the task (the harness may send it back: the DONE check)"
+  BLOCKED:
+    heads: []
+    class: terminal
+    executes: give up
+  TYPE_FOCUSED:
+    heads: [type_text_value]
+    class: write
+    offered_when: the last action was cmd+shift+n or cmd+n
+    executes: type the value where the keyboard focus is, clear_first, foreground
+    gaps: [G1, G19]
+  ASK:
+    heads: []
+    class: dialogue
+    offered_when: dialogue turns are allowed, none was used yet, and the goal is ambiguous (or a text helper is set)
+    executes: ask the user; the question and alternatives come from the harness, not from a head
+  FOCUS_WINDOW:
+    heads: [focus_window_target]
+    class: focus
+    offered_when: at least one other window of the app
+  ANSWER:
+    heads: [answer_value]
+    class: terminal
+    offered_when: the task asks for an answer (answer_field)
+    executes: finish with the chosen text as the answer
+    gaps: [G3]
+
+# Questions that are not an operation's heads.
+extra_questions:
+  goal_complete: { when: "HANDS_COMPLETION_CHECK > 0", gaps: [G2] }
+
+# Request-wide limits (a harness keeps within them; a server may refuse beyond the transport's).
+limits:
+  choice_options: { min: 1, max: 255 }      # transport, HTTP 400 beyond
+  score_levels: { min: 2, max: 10 }         # transport
+  elements: 40
+  dropdown_options_in_state: 40
+
+# What the model was trained on, beyond the request: the prompt is built from the request by the server, and these
+# settings travel with the weights (deskmind.json). A model and a harness agree on v0 only with these.
+prompt:
+  system: "You are a decision function inside a software system. Read the state, then answer the question with exactly one of the allowed labels and nothing else."
+  format: 3                  # compact JSON state, shared instructions before <state>, decorative roles pruned
+  compact_targets: true      # element options shown as "element <key>"
+  round_size: 52             # more options than this are scored as a tournament
+  labels: "A-Z then a-z"     # option letters; levels 0-9; Yes/No

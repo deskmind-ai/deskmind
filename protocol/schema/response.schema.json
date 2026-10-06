@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/deskmind-ai/deskmind/protocol/schema/response.schema.json",
+  "title": "POST /v1/systemone response",
+  "description": "Protocol v0, as Brain answers (brain src/deskmind_brain/serve.py, types.py, router.py). Error bodies are in the spec, not here.",
+  "type": "object",
+  "required": ["answers"],
+  "properties": {
+    "id": { "type": "string" },
+    "model": { "type": "string" },
+    "answers": {
+      "type": "object",
+      "description": "One answer per question in the request, including questions a two-stage server did not score (those come back uniform, confidence 0).",
+      "additionalProperties": { "$ref": "#/$defs/answer" }
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": { "type": ["integer", "null"], "description": "Tokens of json(state)+json(questions), not of the rendered prompt." },
+        "output_tokens": { "const": 0 }
+      }
+    },
+    "latency_ms": { "type": "number" },
+    "cached": { "const": true, "description": "Present on a cache hit; latency_ms and routing are the original reply's." },
+    "routing": { "$ref": "#/$defs/routing" }
+  },
+  "$defs": {
+    "probabilities": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+    },
+    "answer": {
+      "type": "object",
+      "required": ["type"],
+      "oneOf": [
+        {
+          "properties": {
+            "type": { "const": "choice" },
+            "choice": { "type": "string" },
+            "probabilities": { "$ref": "#/$defs/probabilities" },
+            "confidence": { "type": "number", "description": "(K * p_max - 1) / (K - 1); 1.0 when K <= 1. Clients read probabilities." }
+          },
+          "required": ["type", "choice", "probabilities"]
+        },
+        {
+          "properties": {
+            "type": { "const": "score" },
+            "score": { "type": "number" },
+            "legend": { "type": "object" },
+            "probabilities": { "$ref": "#/$defs/probabilities" },
+            "confidence": { "type": "number" }
+          },
+          "required": ["type", "score", "probabilities"]
+        },
+        {
+          "properties": {
+            "type": { "const": "noul" },
+            "noul": { "type": "number", "minimum": 0, "maximum": 1 }
+          },
+          "required": ["type", "noul"]
+        }
+      ]
+    },
+    "routing": {
+      "type": "object",
+      "required": ["by", "reason"],
+      "properties": {
+        "by": { "enum": ["fast", "strong"] },
+        "reason": {
+          "enum": ["fast_ok", "low_conf", "risky_DONE", "risky_BLOCKED", "risky_KEY", "risky_undo", "unverified_last",
+                   "judge_ok", "judge_low_conf", "done_kept_over_undo"]
+        },
+        "fast_conf": { "type": "number" },
+        "confirmed": { "const": true, "description": "Both tiers chose the same terminal operation (DONE, BLOCKED or ASK)." }
+      }
+    }
+  }
+}
