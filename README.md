@@ -11,7 +11,7 @@
 
 Open-source computer use for your Mac. DeskMind reads the screen, works out the next step and acts, all with small models running on your Mac. When a task could mean two things, it asks you instead of guessing.
 
-[中文](README.zh-CN.md) · [Website](https://deskmind.dev) · [Docs](https://deskmind.dev/docs/) · [Download for Mac](https://github.com/deskmind-ai/deskmind/releases/latest) · [Models](https://huggingface.co/deskmind) · [Discussions](https://github.com/deskmind-ai/deskmind/discussions) · [Roadmap](ROADMAP.md)
+[中文](README.zh-CN.md) · [Website](https://deskmind.dev) · [Docs](https://deskmind.dev/docs/) · [Download for Mac](https://github.com/deskmind-ai/deskmind/releases/latest) · [Models](https://huggingface.co/deskmind) · [Discussions](https://github.com/deskmind-ai/deskmind/discussions) · [Roadmap](ROADMAP.md) · [Changelog](CHANGELOG.md)
 
 **[Watch the 56-second demo on deskmind.dev](https://deskmind.dev)**: a real recording with the released model. Two orders match "Lisa Wong", so it asks which one before writing.
 
@@ -80,7 +80,7 @@ Models: [huggingface.co/deskmind](https://huggingface.co/deskmind) (`brain-0.8b`
 | [`.github/workflows/app.yml`](.github/workflows/app.yml) | CI: every app change is built and tested; a version tag is signed, notarized and drafted as a release |
 | [`ROADMAP.md`](ROADMAP.md) | What we are working on next |
 
-Mac app releases are published here: [Releases](https://github.com/deskmind-ai/deskmind/releases).
+Mac app releases are published here: [Releases](https://github.com/deskmind-ai/deskmind/releases); what changed in each one, in short: [CHANGELOG.md](CHANGELOG.md).
 
 ## Results, with the sample size
 
