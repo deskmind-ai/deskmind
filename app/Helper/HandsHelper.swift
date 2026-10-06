@@ -179,7 +179,7 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true].merging(BrainServer.status()) { a, _ in a }
     case "answer":
         // The user's reply to the question the running task asked (a HANDS_ASK line), or their approval.
-        let ok = Runner.answer(reply: req["reply"] as? String ?? "", approve: req["approve"] as? Bool ?? false)
+        let ok = Runner.answer(reply: req["reply"] as? String ?? "", approve: req["approve"] as? Bool ?? false) != nil
         return ["ok": ok] as [String: Any]
     case "stop":
         let running = Runner.current != nil

@@ -59,6 +59,12 @@ struct IslandView: View {
                     Text(L(Island.endWord(ending), lang: lang))
                         .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(.white)
                         .lineLimit(1)
+                } else if model.needsYou {
+                    // The run waits on the user: 小方 in the island, eyes up, its dot breathing fast; the question
+                    // itself is in the live view (or the window).
+                    MiniFace(mood: .up)
+                    Text(L("Needs you", lang: lang)).font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Color(red: 0.95, green: 0.70, blue: 0.63)).lineLimit(1)
                 } else {
                     Circle().fill(dotColor).frame(width: 7, height: 7)
                     // Before the first step, the stage and its seconds: a start takes 20-30 s, and "Starting" alone
@@ -231,6 +237,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard MainWindow.isAside else { return true }
             MainWindow.comeBack(activate: true)
             return false
+        }
+    }
+}
+
+/// 小方's face, small: its frame, two eyes and the orange dot at its foot (the card's title bar has the same in
+/// AppKit, Helper/LiveCard.swift). `up`: looking up at the user, the dot breathing fast.
+struct MiniFace: View {
+    enum Mood { case up, look }
+    var mood: Mood = .look
+    @State private var breathe = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 3.5, style: .continuous).stroke(Brand.paper, lineWidth: 2)
+                .frame(width: 15, height: 13).offset(x: 1, y: 1)
+            ForEach([6.0, 10.5], id: \.self) { x in
+                Circle().fill(Brand.paper).frame(width: mood == .up ? 3 : 2.4, height: mood == .up ? 3 : 2.4)
+                    .offset(x: x - (mood == .up ? 1.5 : 1.2), y: (mood == .up ? 4.6 : 6) - (mood == .up ? 1.5 : 1.2))
+            }
+            Circle().fill(Brand.dot).frame(width: 7, height: 7).offset(x: 13, y: 10)
+                .opacity(breathe ? 0.4 : 1)
+        }
+        .frame(width: 20, height: 17, alignment: .topLeading)
+        .accessibilityHidden(true)
+        .onAppear {
+            guard !reduceMotion else { return }
+            withAnimation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true)) { breathe = true }
         }
     }
 }

@@ -14,6 +14,30 @@ import Foundation
 enum LiveView {
     /// The setting (View menu), on by default: the run request carries it as "live_view".
     static let enabledKey = "liveView.enabled"
+    /// Set once the card's one-time hint (double-click, drag) has been shown.
+    static let hintKey = "liveView.hintSeen"
+
+    /// A window on the display, as far as choosing what the picture leaves out goes.
+    struct Shown: Equatable {
+        let id: Int
+        let pid: Int32?
+        let layer: Int
+        let title: String
+        let frame: CGRect
+    }
+
+    /// The windows the picture of `target` leaves out: every other app's (the card included), and the same app's other
+    /// windows -- another document on top must not show in the card. What belongs to the target stays: windows above
+    /// the normal level (menus, popovers, floating panels) and an untitled window within its frame (a sheet).
+    static func leaveOut(_ windows: [Shown], target: Shown) -> [Int] {
+        windows.filter { w in
+            guard w.id != target.id else { return false }
+            guard w.pid != nil, w.pid == target.pid else { return true }
+            if w.layer > 0 { return false }
+            let sheet = w.title.isEmpty && target.frame.insetBy(dx: -2, dy: -2).contains(w.frame)
+            return !sheet
+        }.map(\.id)
+    }
 
     /// The picture fits in this box, in points: the usual card, and the larger one (expand, or a double click).
     static let maxPicture = CGSize(width: 360, height: 240)
@@ -198,6 +222,46 @@ enum LiveView {
         let x = (min(max(c.x / picture.width, 0), 1) - 0.5) * 2.4
         let y = 0.4 + (1 - min(max(c.y / picture.height, 0), 1)) * 0.8   // a layer counts y up; lower = more down
         return CGPoint(x: (x * 10).rounded() / 10, y: (y * 10).rounded() / 10)
+    }
+
+    // MARK: a question in the card
+
+    /// What kind of question the card shows: options to pick, an approval (yes / no), or one that needs typing (the
+    /// card sends the user to DeskMind's window for it).
+    enum AskKind: Equatable { case choose, approve, free }
+
+    static func askKind(options: [String], approval: Bool) -> AskKind {
+        approval ? .approve : (askOptions(options).isEmpty ? .free : .choose)
+    }
+
+    /// The options as buttons: trimmed, empty and repeated ones dropped, four at most (more go under "Neither").
+    static func askOptions(_ options: [String]) -> [String] {
+        var out: [String] = []
+        for o in options {
+            let t = o.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty && !out.contains(t) { out.append(t) }
+        }
+        return Array(out.prefix(4))
+    }
+
+    /// After a pick, this long to undo it before the answer goes to the run.
+    static let undoSeconds: Double = 3
+    /// The card while it asks: wider, so a question and its options read without cramping.
+    static let askWidth: CGFloat = 420
+    /// The picture above a question: smaller, the question is what matters now.
+    static let askPictureHeight: CGFloat = 112
+
+    /// Why a run didn't finish, from the summary hands writes (its state and failure class), said on the card's
+    /// last picture: the key, for L(); nil when it finished, was stopped, or there is nothing more to say than
+    /// "Didn't finish".
+    static func endingNote(state: String, failure: String) -> String? {
+        switch state {
+        case "completed", "cancelled": nil
+        case "gave_up": "It couldn't find a way to do this"
+        case "budget_exhausted": "It ran out of steps before finishing"
+        case "errored": failure == "no_progress_loop" ? "Got stuck: the same step kept failing" : "It stopped on an error"
+        default: nil
+        }
     }
 
     /// The header's word for a status: the key, for L().

@@ -19,6 +19,15 @@ struct GoalRunView: View {
     @StateObject private var run = RunModel()
     @State private var started = false
     @State private var confirming: GoalRequest?
+    @State private var replaying = false
+    @State private var gifNote = ""
+    /// The finished run's frames, worked out once when it ends (each is a file check).
+    @State private var frames: [ReplayFrame] = []
+    @State private var exporting = false
+
+    private func refreshFrames(_ p: RunModel.Phase) {
+        frames = p == .done || p == .failed ? Replay.frames(run.tasks.flatMap(\.steps)) : []
+    }
     @State private var next = ""
     /// The folder the next instruction runs in: this run's, unless the user takes it off.
     @State private var nextFolder: String??
@@ -109,6 +118,40 @@ struct GoalRunView: View {
             }
 
             if run.phase == .done || run.phase == .failed {
+                // What it did, from its step screenshots: replayed here, or as a GIF to share (no recording needed).
+                if !frames.isEmpty {
+                    HStack(spacing: 10) {
+                        Button { refreshFrames(run.phase); replaying = !frames.isEmpty } label: { Label(L("Replay", lang: lang), systemImage: "play.fill") }
+                            .buttonStyle(InkButtonStyle(prominent: false))
+                        Button(L("Export GIF", lang: lang)) {
+                            // Off the main thread: up to 17 frames to decode and draw.
+                            refreshFrames(run.phase)   // screenshots may have been cleared since the run ended
+                            guard !frames.isEmpty else { return }
+                            exporting = true; gifNote = L("Making the GIF…", lang: lang)
+                            let (title, all, lang) = (goal, frames, lang)
+                            Task.detached {
+                                let url = ReplayGIF.exportGIF(title: title, frames: all, lang: lang)
+                                await MainActor.run {
+                                    exporting = false
+                                    if let url {
+                                        gifNote = L("Saved in Movies › DeskMind", lang: lang)
+                                        NSWorkspace.shared.activateFileViewerSelecting([url])
+                                    } else {
+                                        gifNote = L("Couldn't make the GIF", lang: lang)
+                                    }
+                                }
+                            }
+                        }
+                        .buttonStyle(InkButtonStyle(prominent: false))
+                        .disabled(exporting)
+                        if !gifNote.isEmpty { Text(gifNote).font(.system(size: 11)).foregroundStyle(Brand.sage) }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 28).padding(.bottom, 4)
+                    .sheet(isPresented: $replaying) {
+                        ReplayView(title: goal, frames: frames) { replaying = false }.environment(\.lang, lang)
+                    }
+                }
                 nextPrompt.padding(.horizontal, 28).padding(.top, 4)
             }
 
@@ -144,7 +187,9 @@ struct GoalRunView: View {
             guard !started else { return }
             started = true
             if let request { begin(request) } else if let record { run.show(record) }
+            refreshFrames(run.phase)
         }
+        .onChange(of: run.phase) { _, p in refreshFrames(p) }
         .sheet(item: $confirming) { r in
             ConfirmSheet(request: r, onStart: { record in
                 confirming = nil

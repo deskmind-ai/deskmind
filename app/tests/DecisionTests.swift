@@ -208,6 +208,13 @@ enum DecisionTests {
 
         liveViewTests()
         issueReportTests()
+        setupStepsTests()
+        exportNameTests()
+        xiaoFangMotionTests()
+        askFlowTests()
+        replayPlanTests()
+        markPathTests()
+        questionGateTests()
         runErrorTests()
         fileExampleTests()
         selfTestTests()
@@ -240,6 +247,38 @@ enum DecisionTests {
     /// The live view (Shared/LiveView.swift): which window, the card's size and corner, the cursor, the capture.
     static func liveViewTests() {
         typealias LV = LiveView
+        // What the picture leaves out: other apps, and the same app's other documents; not the target's own sheet or menus.
+        let target = LV.Shown(id: 1, pid: 50, layer: 0, title: "records.txt", frame: CGRect(x: 100, y: 100, width: 600, height: 400))
+        let others: [LV.Shown] = [
+            target,
+            LV.Shown(id: 2, pid: 50, layer: 0, title: "secret.rtf", frame: CGRect(x: 150, y: 150, width: 300, height: 200)),
+            LV.Shown(id: 3, pid: 50, layer: 0, title: "", frame: CGRect(x: 200, y: 128, width: 400, height: 220)),
+            LV.Shown(id: 4, pid: 50, layer: 101, title: "", frame: CGRect(x: 120, y: 90, width: 180, height: 300)),
+            LV.Shown(id: 5, pid: 50, layer: 0, title: "", frame: CGRect(x: 650, y: 150, width: 300, height: 200)),
+            LV.Shown(id: 6, pid: 77, layer: 0, title: "Mail", frame: CGRect(x: 0, y: 0, width: 800, height: 600)),
+            LV.Shown(id: 7, pid: nil, layer: 25, title: "", frame: CGRect(x: 0, y: 0, width: 1728, height: 33)),
+        ]
+        let out = Set(LV.leaveOut(others, target: target))
+        check(!out.contains(1), "never the target itself")
+        check(out.contains(2), "another document of the same app on top: left out")
+        check(!out.contains(3), "its sheet (untitled, within it): kept")
+        check(!out.contains(4), "its menu or popover (above the normal level): kept")
+        check(out.contains(5), "an untitled same-app window reaching outside it: left out")
+        check(out.contains(6) && out.contains(7), "other apps, and windows with no app: left out")
+        // Why a run didn't finish, from hands' summary.
+        check(LV.endingNote(state: "completed", failure: "") == nil, "finished: no reason")
+        check(LV.endingNote(state: "cancelled", failure: "") == nil, "stopped: no reason")
+        check(LV.endingNote(state: "budget_exhausted", failure: "")?.contains("steps") == true, "out of steps")
+        check(LV.endingNote(state: "errored", failure: "no_progress_loop")?.hasPrefix("Got stuck") == true, "stuck")
+        check(LV.endingNote(state: "errored", failure: "crash") == "It stopped on an error", "an error")
+        check(LV.endingNote(state: "gave_up", failure: "") != nil, "gave up")
+        check(LV.endingNote(state: "", failure: "") == nil, "no summary: nothing more than Didn't finish")
+        for k in ["gave_up", "budget_exhausted", "errored"] {
+            if let key = LV.endingNote(state: k, failure: k == "errored" ? "no_progress_loop" : "") {
+                check(L(key, lang: .zhHans) != key, "zh for \(key)")
+            }
+        }
+        check(L("Double-click to enlarge · drag to a corner", lang: .zhHans) != "Double-click to enlarge · drag to a corner", "zh hint")
         // The window hands observes.
         check(LV.activeWindowID([["id": "812", "title": "a"], ["id": "77", "active": true]]) == 77, "the active window, a string id")
         check(LV.activeWindowID([["id": 9, "active": true]]) == 9, "an int id")
@@ -361,6 +400,12 @@ enum DecisionTests {
         check(LV.gaze(cursor: CGPoint(x: 900, y: -50), picture: CGSize(width: 360, height: 240)).x == 1.2, "clamped to the picture")
         check(LV.gaze(cursor: CGPoint(x: 10, y: 10), picture: .zero) == CGPoint(x: 0, y: 0.6), "no picture yet")
 
+        // A question in the card.
+        check(LV.askKind(options: ["a", "b"], approval: false) == .choose, "options: pick one")
+        check(LV.askKind(options: [], approval: true) == .approve && LV.askKind(options: ["x"], approval: true) == .approve, "an approval")
+        check(LV.askKind(options: ["  ", ""], approval: false) == .free, "no usable options: it needs typing")
+        check(LV.askOptions([" 2026-09-05 ", "2026-09-05", "b", "", "c", "d", "e"]) == ["2026-09-05", "b", "c", "d"], "trimmed, deduplicated, four at most")
+
         // Statuses.
         check([LV.Status.done, .failed, .stopped].allSatisfy(\.isEnding), "endings")
         check(![LV.Status.starting, .working, .waitingForUser, .paused, .hidden].contains(where: \.isEnding), "not endings")
@@ -372,6 +417,180 @@ enum DecisionTests {
 
 
     /// A report as a GitHub issue (Shared/IssueReport.swift): what goes in, and that a long run still fits a URL.
+    /// The first setup's three steps (Shared/SetupSteps.swift).
+    static func setupStepsTests() {
+        typealias S = SetupSteps
+        // Step 1: the helper and each required permission.
+        check(S.grants(helperReady: false, required: [false, false]) == (0, 3), "nothing yet: 0/3")
+        check(S.grants(helperReady: true, required: [true, false]) == (2, 3), "helper + one: 2/3")
+        check(S.grants(helperReady: true, required: [true, true]) == (3, 3), "all: 3/3")
+        check(S.grants(helperReady: false, required: [true, true]) == (2, 3), "permissions without the helper: not done")
+        // Step 2 follows the real state; it never says the download runs when it waits for a click.
+        for lang in [ResolvedLang.en, .zhHans] {
+            check(S.download(brain: "ready", transfer: .idle, lang: lang) == L("Ready", lang: lang), "ready (\(lang))")
+            check(S.download(brain: "ready", transfer: .downloading(done: 1, total: 2), lang: lang) == L("Ready", lang: lang),
+                  "ready wins over a stale transfer (\(lang))")
+            let idle = S.download(brain: "missing", transfer: .idle, lang: lang)
+            check(idle == L("about 5.3 GB — press Download", lang: lang), "missing and idle: asks for Download (\(lang)): \(idle)")
+            check(S.download(brain: "missing", transfer: .paused, lang: lang) == L("paused", lang: lang), "paused (\(lang))")
+            check(S.download(brain: "missing", transfer: .failed, lang: lang) == L("didn't finish — try again below", lang: lang), "failed (\(lang))")
+            check(S.download(brain: "missing", transfer: .verifying, lang: lang) == L("checking the files", lang: lang), "verifying (\(lang))")
+            check(S.download(brain: "loading", transfer: .done, lang: lang) == L("loading", lang: lang), "downloaded, loading (\(lang))")
+            check(S.download(brain: "stopped", transfer: .idle, lang: lang).isEmpty, "the helper not up: nothing claimed (\(lang))")
+            let unlocked = S.firstTask(unlocked: true, lang: lang), locked = S.firstTask(unlocked: false, lang: lang)
+            check(unlocked.progress == L("Ready", lang: lang) && locked.progress == L("unlocks when 1 and 2 are done", lang: lang),
+                  "step 3 locked until 1 and 2 (\(lang))")
+            check(unlocked.hint != locked.hint && !unlocked.hint.isEmpty, "step 3's line says what to do (\(lang))")
+        }
+        check(S.download(brain: "missing", transfer: .downloading(done: 1_250_000_000, total: 5_300_000_000), lang: .en) == "1.2 / 5.3 GB"
+              || S.download(brain: "missing", transfer: .downloading(done: 1_250_000_000, total: 5_300_000_000), lang: .en) == "1.3 / 5.3 GB",
+              "downloading: GB so far")
+        // Every key the setup shows has its Chinese.
+        for key in ["Allow DeskMind to work this Mac", "Download the local models", "Try your first task",
+                    "about 5.3 GB — press Download", "paused", "checking the files", "didn't finish — try again below", "loading",
+                    "unlocks when 1 and 2 are done", "Pick one of the examples above, or type your own.",
+                    "The examples above start working as soon as the first two steps are done.",
+                    "Most of the first setup is the model download: start it first, and allow the permissions while it runs.", "Making the GIF…",
+                    "Answer it in the card in the corner of the screen."] {
+            check(L(key, lang: .zhHans) != key, "zh for “\(key)”")
+        }
+    }
+
+    /// Export file names (Shared/ExportName.swift): never over a file already there.
+    static func exportNameTests() {
+        let dir = URL(fileURLWithPath: "/x/DeskMind")
+        check(ExportName.title("a/b:c") == "a b c", "no / or : in the name")
+        check(ExportName.title("Open Music / play: the live\nversion") == "Open Music play the live version", "single spaces, one line")
+        check(ExportName.title(String(repeating: "长", count: 60)).count == 40, "40 characters at most")
+        let free = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: "Open Music", ext: "gif", exists: { _ in false })
+        check(free.lastPathComponent == "10-4-26 14.05 Open Music.gif", "free: \(free.lastPathComponent)")
+        var taken: Set<String> = ["10-4-26 14.05 Open Music.gif"]
+        let second = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: "Open Music", ext: "gif",
+                                       exists: { taken.contains($0.lastPathComponent) })
+        check(second.lastPathComponent == "10-4-26 14.05 Open Music 2.gif", "same minute, same task: “ 2” (\(second.lastPathComponent))")
+        taken.insert(second.lastPathComponent)
+        let third = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: "Open Music", ext: "gif",
+                                      exists: { taken.contains($0.lastPathComponent) })
+        check(third.lastPathComponent == "10-4-26 14.05 Open Music 3.gif", "and “ 3”")
+        check(third.deletingLastPathComponent().path == dir.path, "in the folder asked for")
+        let untitled = ExportName.unique(dir: dir, stamp: "10-4-26 14.05", title: " / ", ext: "gif", exists: { _ in false })
+        check(untitled.lastPathComponent == "10-4-26 14.05.gif", "no title: the stamp alone, no trailing space")
+    }
+
+    /// 小方 listening (Shared/XiaoFangMotion.swift).
+    static func xiaoFangMotionTests() {
+        typealias X = XiaoFangMotion
+        check(X.rise(understood: false, dozing: true) == 46, "dozing: only the head shows")
+        check(X.rise(understood: false, dozing: false) == 18, "typing: head up on the edge")
+        check(X.rise(understood: true, dozing: true) == 0 && X.rise(understood: true, dozing: false) == 0, "understood: standing")
+        check(X.gaze(dozing: true, understood: true, unsure: true, characters: 9) == .zero, "dozing: eyes closed, straight")
+        check(X.gaze(dozing: false, understood: true, unsure: true, characters: 9).height == 7, "understood: down at the line below")
+        check(X.gaze(dozing: false, understood: false, unsure: true, characters: 9).width < 0, "unsure: toward Attach folder")
+        let start = X.gaze(dozing: false, understood: false, unsure: false, characters: 0)
+        let end = X.gaze(dozing: false, understood: false, unsure: false, characters: 200)
+        check(start.width == -5 && end.width == 5 && X.gaze(dozing: false, understood: false, unsure: false, characters: 14).width == 0,
+              "eyes follow the sentence, left to right, then stay")
+        check(X.sway.count == 4 && X.sway.last?.angle == 0 && X.sway.map(\.angle).map(abs).max() == 3, "one ±3° sway, back to upright")
+        check(abs(X.sway.map(\.seconds).reduce(0, +) - 0.64) < 0.001, "the sway takes 640 ms (the design's spec)")
+        check(X.blinkAfter == 1.2 && X.dozeAfter == 8, "blink after 1.2 s, doze after 8 s")
+        check(X.typed(old: "Ope", new: "Open"), "a key: typing")
+        check(X.typed(old: "Open", new: "Ope"), "a delete: typing")
+        check(X.typed(old: "你", new: "你好"), "an input-method word: typing")
+        check(X.typed(old: "", new: "我想打开网易"), "拼音 committing six characters at once: typing")
+        check(X.typed(old: "打开", new: "打开网易云音乐播放"), "seven more: typing")
+        check(!X.typed(old: "", new: "Open NetEase Cloud Music and play it"), "an example put in: not typing (no sway)")
+        check(!X.typed(old: "Open NetEase Cloud Music", new: ""), "cleared after Start: not typing")
+        // The dot: 156, 155 of the 200-wide mark, scaled by the drawn width.
+        let d = X.dot(in: CGRect(x: 100, y: 40, width: 76, height: 82))
+        check(abs(d.x - (100 + 156 * 0.38)) < 0.001 && abs(d.y - (40 + 155 * 0.38)) < 0.001, "the dot's centre: \(d)")
+        // SwiftUI global (the window's, top-left) to window base (bottom-left): only y flips, x stays.
+        let b = X.windowBase(CGPoint(x: 50, y: 132), contentHeight: 300)
+        check(b == CGPoint(x: 50, y: 168), "window base: \(b)")
+    }
+
+    /// What the window and the island do when the run asks and is answered (Shared/AskFlow.swift).
+    static func askFlowTests() {
+        typealias A = AskFlow
+        let card = A.asked(inCard: true, approval: false, appActive: false, userTyping: true)
+        check(card.needsYou == true && !card.comeBack && !card.notify && card.remind, "in the card: needs you, window stays, a reminder later")
+        check(card.say == "Needs you — answer in the card", "the island says where to answer")
+        let away = A.asked(inCard: false, approval: false, appActive: false, userTyping: false)
+        check(away.comeBack && away.activate && away.notify && !away.remind, "in the window, DeskMind behind: it comes back active, a notification")
+        let typing = A.asked(inCard: false, approval: true, appActive: true, userTyping: true)
+        check(typing.comeBack && !typing.activate && typing.notify, "the user typing elsewhere: back, not key (their keys stay theirs)")
+        check(typing.say == "Waiting for your approval in DeskMind", "an approval says so")
+        let front = A.asked(inCard: false, approval: false, appActive: true, userTyping: false)
+        check(front.activate && !front.notify && front.say == "Waiting for your answer in DeskMind", "DeskMind in front: no notification")
+        for (name, fx) in [("answered in the window", A.answeredInWindow), ("answered in the card", A.answeredInCard), ("a step", A.stepped)] {
+            check(fx.needsYou == false && fx.cancelReminder, "\(name): needs-you off, the reminder cancelled")
+        }
+        check(A.answeredInWindow.say == "Got your answer. Carrying on…" && A.answeredInCard.say == "Answered — carrying on", "each answer says so")
+        check(A.typeInWindow.comeBack && A.typeInWindow.activate && A.typeInWindow.needsYou == nil && A.typeInWindow.cancelReminder,
+              "Neither — let me type it: the window, active; still waiting, no reminder to answer in the card")
+        check(A.answerApplies(answered: 3, waiting: 3), "an answer to the question waiting: applies")
+        check(!A.answerApplies(answered: 3, waiting: 4), "a late answer to the previous question: the newer one stays")
+        check(A.answerApplies(answered: nil, waiting: 4) && A.answerApplies(answered: 3, waiting: nil), "no id to compare: applies")
+        check(A.reminderAfter == 20, "the reminder after 20 s")
+        for key in [card.say, away.say, typing.say, front.say, A.answeredInWindow.say, A.answeredInCard.say].compactMap({ $0 }) {
+            check(L(key, lang: .zhHans) != key, "zh for “\(key)”")
+        }
+    }
+
+    /// Which steps a replay and its GIF show (Shared/ReplayPlan.swift).
+    static func replayPlanTests() {
+        let steps = (1...20).map { (n: $0, shot: $0 == 3 ? "" : "/shots/\($0).png", words: "step \($0)") }
+        let gone: Set<String> = ["/shots/5.png"]
+        let frames = ReplayPlan.frames(steps, exists: { !gone.contains($0) })
+        check(frames.count == 18 && !frames.contains { $0.n == 3 || $0.n == 5 }, "no screenshot, or deleted: left out (\(frames.count))")
+        check(frames.map(\.n) == frames.map(\.n).sorted() && frames.first?.words == "step 1", "in order, with their words")
+        let gif = ReplayPlan.gifFrames(frames)
+        check(gif.count == 16 && gif.first?.n == 4 && gif.last?.n == 20, "the GIF: the last 16 steps")
+        check(ReplayPlan.gifFrames(Array(frames.prefix(4))).count == 4, "fewer than 16: all of them")
+        check(ReplayPlan.frames(steps, exists: { _ in false }).isEmpty, "\"Clear all\": nothing to replay (no buttons)")
+        check(ReplayPlan.playFrom(index: 17, count: 18) == 0, "Play at the last step: from the first")
+        check(ReplayPlan.playFrom(index: 5, count: 18) == 5, "Play mid-way: from where it is")
+        check(ReplayPlan.playFrom(index: 0, count: 1) == 0, "one frame")
+    }
+
+    /// The brand mark's path commands (Shared/MarkPath.swift).
+    static func markPathTests() {
+        check(MarkPath.cgPath("M0 0H10V5H0Z").boundingBoxOfPath == CGRect(x: 0, y: 0, width: 10, height: 5), "M, H, V, Z: a 10 × 5 box")
+        let q = MarkPath.cgPath("M0 0Q10 10 20 0").boundingBoxOfPath
+        check(abs(q.width - 20) < 0.01 && abs(q.height - 5) < 0.01, "Q: a quadratic curve peaks halfway (\(q))")
+        let head = MarkPath.cgPath("M45 28H153Q166 28 166 41V127H147V65H53V104H34V41Q34 28 45 28Z").boundingBoxOfPath
+        check(head == CGRect(x: 34, y: 28, width: 132, height: 99), "小方's frame: 34…166 × 28…127 (\(head))")
+        check(MarkPath.cgPath("M1,2 H3").currentPoint == CGPoint(x: 3, y: 2), "commas as separators")
+        check(MarkPath.cgPath("").isEmpty, "empty")
+    }
+
+    /// The order of a run's questions and steps (Shared/QuestionGate.swift).
+    static func questionGateTests() {
+        let gate = QuestionGate()
+        var trace = ["step 1"], read = 0, log: [String] = []
+        func poll() { while read < trace.count { log.append(trace[read]); read += 1 } }
+        gate.cycle(timeout: 0.01, poll: poll, pass: { _ in log.append("ask") })
+        check(log == ["step 1"], "a turn with no question: the steps")
+        // hands flushes step 2, then asks; the question is seen before the trace is read again.
+        trace.append("step 2")
+        gate.asked(["question": "Which order?"])
+        let t0 = Date()
+        gate.cycle(timeout: 2, poll: poll, pass: { q in log.append("ask \(q["question"] as? String ?? "")") })
+        check(log == ["step 1", "step 2", "ask Which order?"], "the step before the question comes first: \(log)")
+        check(Date().timeIntervalSince(t0) < 0.5, "a question wakes the loop at once")
+        // The answer, then step 3: a step after the question (it closes it), and the question is not passed again.
+        trace.append("step 3")
+        gate.cycle(timeout: 0.01, poll: poll, pass: { _ in log.append("ask again") })
+        check(log.last == "step 3" && !log.contains("ask again"), "then the step after it, once")
+        // A question that comes while the trace is being read waits for the next turn, after the steps before it.
+        log = []
+        gate.cycle(timeout: 0.01, poll: { trace.append("step 4"); gate.asked(["question": "Q2"]); poll() },
+                   pass: { _ in log.append("ask Q2 early") })
+        check(log == ["step 4"], "a question during the read: not this turn")
+        // (hands waits on the answer meanwhile, so no later step can be written before the question is shown.)
+        gate.cycle(timeout: 0.5, poll: { poll() }, pass: { q in log.append("ask \(q["question"] as? String ?? "")") })
+        check(log == ["step 4", "ask Q2"], "next turn: read, then the question (\(log))")
+    }
+
     /// A failed run in one sentence (Shared/RunErrorText.swift), against real messages.
     static func runErrorTests() {
         let apps = "errored  0 actions  1s  $0.00\nTraceback (most recent call last):\n  File \"/x/apps.py\", line 90, in <module>\n    APPS = load()\nValueError: /Users/alice/.config/deskmind/apps.yaml: unknown keys: groundings; known keys: grounding, deep_ax, vision, chat, chords"

@@ -29,6 +29,15 @@ struct GoalExample: Identifiable {
         ]
     }
 
+    /// What kind of task it is, on its card (an English key, for L()).
+    var kindLabel: String {
+        switch kind {
+        case .files: "Files"
+        case .app: "Apps read from the screen"
+        case .question: "Answers a question"
+        }
+    }
+
     var symbol: String {
         switch kind {
         case .files: "doc.on.doc"
@@ -61,6 +70,9 @@ struct HomeView: View {
     @State private var folderFiles: [String] = []
     @State private var confirmClear = false
     @State private var hovered: UUID?
+    /// 小方's frame in the window (for the dot's flight), and the dot gone off to work for a moment.
+    @State private var xiaofangFrame: CGRect = .zero
+    @State private var dotAway = false
     @FocusState private var promptFocused: Bool
     @Environment(\.lang) private var lang
 
@@ -79,10 +91,9 @@ struct HomeView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .center, spacing: 14) {
-                XiaoFang(mood: model.requiredDone ? (trimmed.isEmpty ? .rest : .idle) : .notice, size: 56)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(L("What should DeskMind do?", lang: lang))
-                        .font(.system(size: 22, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
+                        .font(.system(size: 26, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
                     Text(model.requiredDone ? L("Everything runs on this Mac, offline.", lang: lang)
                                             : L("Finish the setup below first.", lang: lang))
                         .font(.system(size: 12)).foregroundStyle(Brand.sage)
@@ -91,7 +102,16 @@ struct HomeView: View {
             }
             .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 14)
 
-            prompt.padding(.horizontal, 28)
+            // 小方 listens from behind the top edge of the box (Listening.swift).
+            ZStack(alignment: .topTrailing) {
+                ListeningXiaoFang(text: goal, understood: !apps.isEmpty && model.requiredDone,
+                                  unsure: !filesWithoutFolder.isEmpty && apps.isEmpty, dotAway: dotAway,
+                                  onFrame: { xiaofangFrame = $0 })
+                    .padding(.trailing, 56)
+                    .offset(y: -76)
+                prompt.zIndex(1)
+            }
+            .padding(.horizontal, 28)
             scopeLine.padding(.horizontal, 32).padding(.top, 6)
             if model.requiredDone { examples.padding(.top, 10) }
 
@@ -154,7 +174,7 @@ struct HomeView: View {
                 confirming = nil
                 var r = r
                 r.record = record
-                onRun(r)
+                launch(r)
             }, onCancel: { confirming = nil })
             // Said explicitly: a sheet is its own window, and not every macOS passed the environment down to it.
             .environmentObject(eyes).environmentObject(model).environment(\.lang, lang)
@@ -186,8 +206,8 @@ struct HomeView: View {
             TextField(L("Describe a task in your own words…", lang: lang), text: $goal, axis: .vertical)
                 .lineLimit(3...6)
                 .textFieldStyle(.plain)
-                .font(.system(size: 14, design: .rounded)).foregroundStyle(Brand.ink)
-                .padding(12)
+                .font(.system(size: 16, design: .rounded)).foregroundStyle(Brand.ink)
+                .padding(14)
                 .focused($promptFocused)
                 .onSubmit(start)
             Rectangle().fill(Brand.line).frame(height: 1)
@@ -231,9 +251,10 @@ struct HomeView: View {
             }
             .padding(.horizontal, 10).padding(.vertical, 8)
         }
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Brand.card))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .strokeBorder(dropping ? Brand.dot : Brand.line, lineWidth: dropping ? 2 : 1))
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Brand.card)
+            .shadow(color: Brand.ink.opacity(0.08), radius: 10, y: 3))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(dropping ? Brand.dot : Brand.ink, lineWidth: dropping ? 2 : 1.5))
     }
 
     /// What the instruction will use, or what is missing, in one line under the prompt.
@@ -279,25 +300,29 @@ struct HomeView: View {
         .font(.system(size: 11)).foregroundStyle(Brand.ink)
     }
 
-    /// One per row, so every example is seen: side by side in a sideways scroller, the second was cut off and the
-    /// third off screen, and a mouse wheel does not scroll sideways.
+    /// The examples as three cards, each saying what kind of task it is: every one seen at once, the whole card a
+    /// button.
     @ViewBuilder var examples: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        HStack(alignment: .top, spacing: 8) {
             ForEach(GoalExample.all.filter { $0.kind != .files || label(e: $0) != nil }) { e in
                 Button { use(e) } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: e.symbol).font(.system(size: 10)).foregroundStyle(Brand.sage)
-                        Text(label(e: e) ?? "").font(.system(size: 11)).foregroundStyle(Brand.ink).lineLimit(1).truncationMode(.tail)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(L(e.kindLabel, lang: lang)).font(.system(size: 10.5, weight: .semibold))
+                            .foregroundStyle(e.kind == .question ? Brand.dot : Brand.sage)
+                        Text(label(e: e) ?? "").font(.system(size: 12, design: .rounded)).foregroundStyle(Brand.ink)
+                            .lineLimit(4).multilineTextAlignment(.leading).fixedSize(horizontal: false, vertical: true)
                     }
-                    .padding(.horizontal, 9).padding(.vertical, 4)
-                    .background(Capsule().fill(Brand.card))
-                    .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Brand.card))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Brand.line, lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help(label(e: e) ?? "")
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)   // as tall as the longest card, no taller
         .padding(.horizontal, 28)
     }
 
@@ -351,6 +376,11 @@ struct HomeView: View {
                                 Text(r.date.formatted(.relative(presentation: .named).locale(Locale(identifier: lang == .zhHans ? "zh-Hans" : "en"))))   // the app's language, not the system's
                                     .font(.system(size: 11)).foregroundStyle(Brand.mist)
                             }
+                            // What that run did, one click away (it was only in the context menu).
+                            Button(L("View", lang: lang)) { onOpen(r) }
+                                .buttonStyle(.plain).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.ink)
+                                .padding(.horizontal, 9).padding(.vertical, 3)
+                                .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
                         }
                         .padding(.vertical, 7).contentShape(Rectangle())
                     }
@@ -374,11 +404,25 @@ struct HomeView: View {
 
     // MARK: actions
 
+    /// The run starts: 小方's dot flies into the notch (where the island lights up), then comes back to it.
+    private func launch(_ r: GoalRequest) {
+        if let w = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }), xiaofangFrame != .zero {
+            // 小方's frame is in the window's coordinates, origin top-left (SwiftUI's global space is the window's on
+            // macOS, not the screen's), and includes its rise.
+            let h = w.contentView?.bounds.height ?? w.frame.height
+            let screen = w.convertPoint(toScreen: XiaoFangMotion.windowBase(XiaoFangMotion.dot(in: xiaofangFrame), contentHeight: h))
+            dotAway = true
+            DotFlight.launch(from: screen)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { dotAway = false }
+        }
+        onRun(r)
+    }
+
     private func start() {
         guard canStart else { return }
         let r = GoalRequest(goal: trimmed, folder: folder, apps: apps)
         prewarm(r.displayApps.map(\.bundleID))
-        if ConfirmSheet.canSkip(r) { onRun(r) } else { confirming = r }
+        if ConfirmSheet.canSkip(r) { launch(r) } else { confirming = r }
     }
 
     /// See Runner.prewarm in the helper. Fire and forget: nothing waits on it.
@@ -577,8 +621,27 @@ struct ConfirmSheet: View {
 /// required ones are all in place.
 struct SetupCard: View {
     @EnvironmentObject var model: HelperModel
+    @EnvironmentObject var downloader: ModelDownloader
     @Binding var expanded: Bool
     @Environment(\.lang) private var lang
+
+    /// Step 2 in a few words (SetupSteps.download), from where the download and the model really are.
+    private var downloadProgress: String {
+        let transfer: SetupSteps.Transfer = switch downloader.phase {
+        case .idle: .idle
+        case .downloading: .downloading(done: downloader.bytesDone, total: downloader.bytesTotal)
+        case .verifying: .verifying
+        case .paused: .paused
+        case .failed: .failed
+        case .done: .done
+        }
+        return SetupSteps.download(brain: model.status["brain"] as? String ?? "", transfer: transfer, lang: lang)
+    }
+
+    /// Step 1's count: the helper and the required permissions.
+    private var grants: (done: Int, total: Int) {
+        SetupSteps.grants(helperReady: model.helperReady, required: Grant.allCases.filter(\.required).map { model.granted($0) })
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -597,6 +660,15 @@ struct SetupCard: View {
                 if expanded { Divider().overlay(Brand.line) }
             }
             if expanded || !model.requiredDone {
+                // Three steps, each with one thing to do: the permissions and the download run side by side (the
+                // download does not wait for the permissions), then the first task.
+                if !model.requiredDone {
+                    Text(L("Most of the first setup is the model download: start it first, and allow the permissions while it runs.", lang: lang))
+                        .font(.system(size: 12)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 12).padding(.bottom, 2)
+                }
+                SetupStep(n: 1, title: L("Allow DeskMind to work this Mac", lang: lang),
+                          progress: "\(grants.done)/\(grants.total)", done: grants.done == grants.total)
                 PermissionRow(symbol: "person.badge.clock", title: L("Background helper", lang: lang),
                               subtitle: model.helperReady
                                   ? L("DeskMind Hands is standing by. Restarting it won't close this window.", lang: lang)
@@ -607,10 +679,6 @@ struct SetupCard: View {
                               doneAction: { model.send(["op": "restart"], label: L("Restart helper", lang: lang)) }) {
                     model.register()
                 }
-                Divider().overlay(Brand.line)
-                BrainRow()
-                Divider().overlay(Brand.line)
-                EyesRow()
                 ForEach(Grant.allCases) { g in
                     Divider().overlay(Brand.line)
                     PermissionRow(symbol: g.symbol, title: g.title(lang), subtitle: g.subtitle(lang),
@@ -618,6 +686,17 @@ struct SetupCard: View {
                         .disabled(!model.helperReady)
                         .opacity(model.helperReady ? 1 : 0.45)
                 }
+                SetupStep(n: 2, title: L("Download the local models", lang: lang),
+                          progress: downloadProgress, done: model.status["brain"] as? String == "ready")
+                BrainRow()
+                Divider().overlay(Brand.line)
+                EyesRow()
+                let first = SetupSteps.firstTask(unlocked: model.requiredDone, lang: lang)
+                SetupStep(n: 3, title: L("Try your first task", lang: lang), progress: first.progress,
+                          done: false, active: model.requiredDone)
+                Text(first.hint)
+                    .font(.system(size: 12)).foregroundStyle(model.requiredDone ? Brand.ink : Brand.sage)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 34).padding(.bottom, 12)
             }
         }
         .padding(.horizontal, 18).padding(.vertical, 4)
@@ -725,5 +804,34 @@ struct EyesButton: View {
                 .buttonStyle(InkButtonStyle(prominent: false))
                 .disabled(d.phase == .verifying)
         }
+    }
+}
+
+/// A step of the first setup: its number (a check once done), what it is, how far it has got.
+struct SetupStep: View {
+    let n: Int
+    let title: String
+    let progress: String
+    let done: Bool
+    /// Its turn has come (the first task, once the first two steps are done): the orange ring.
+    var active = false
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                Circle().fill(done ? Brand.ink : Color.clear).frame(width: 22, height: 22)
+                Circle().strokeBorder(active ? Brand.dot : Brand.ink, lineWidth: done ? 0 : 1.5).frame(width: 22, height: 22)
+                if done {
+                    Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Brand.paper)
+                } else {
+                    Text("\(n)").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundStyle(active ? Brand.dot : Brand.ink)
+                }
+            }
+            Text(title).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
+            Spacer()
+            Text(progress).font(.system(size: 11)).foregroundStyle(Brand.sage)
+        }
+        .padding(.top, 14).padding(.bottom, 6)
+        .accessibilityElement(children: .combine)
     }
 }
