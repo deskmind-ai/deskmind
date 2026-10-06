@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/deskmind-ai/deskmind/protocol/schema/agent-state.schema.json",
+  "title": "Agent state (protocol v0)",
+  "description": "The `state` of an agent request, as hands builds it (deskmind_hands/adapters/systemone.py, _state_raw). Key order is part of the prompt the model was trained on. Fields marked with a flag are sent only when that env flag is set; the app (0.4.1) sets none of them except HANDS_DONE_CHECK, which adds sentences to `note`.",
+  "type": "object",
+  "required": [
+    "page",
+    "elements",
+    "recent_actions",
+    "effects_so_far",
+    "modal_dialog_open",
+    "user_answers",
+    "read_in_other_windows",
+    "note"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "page": {
+      "type": "object",
+      "required": [
+        "url",
+        "title",
+        "text"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The focused app's display name, not a URL."
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The window title."
+        },
+        "text": {
+          "type": "string",
+          "description": "Element labels and values in element order, de-duplicated. Soft limit 2500 characters (checked after each piece)."
+        }
+      }
+    },
+    "elements": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "$ref": "#/$defs/element"
+      }
+    },
+    "recent_actions": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "$ref": "#/$defs/recent_action"
+      }
+    },
+    "effects_so_far": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {
+        "type": "string"
+      },
+      "description": "What the run has done that the driver confirmed: \"moved 'a' to 'ws' ✓\", created/renamed/saved/removed."
+    },
+    "modal_dialog_open": {
+      "type": "boolean"
+    },
+    "user_answers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "question",
+          "answer"
+        ],
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "answer": {
+            "type": "string"
+          }
+        }
+      },
+      "description": "Every dialogue entry, including the harness's risk approvals."
+    },
+    "read_in_other_windows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "window",
+          "text"
+        ],
+        "properties": {
+          "window": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 800
+          }
+        }
+      }
+    },
+    "last_effect": {
+      "type": "string",
+      "description": "Flag HANDS_EFFECT_NOTES: the last action's effect. Brain's router escalates a DONE after \"unverifiable\" or \"suspected_noop\"; recorded data also has \"\", \"confirmed\" and \"refused\"."
+    },
+    "environment": {
+      "type": "object",
+      "description": "Flag HANDS_ENV_SECTIONS: {today, attached_folder?}."
+    },
+    "lessons": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "Flag HANDS_LESSONS."
+    },
+    "progress": {
+      "type": "object",
+      "description": "Flag HANDS_PROGRESS: {rows?, documents?}."
+    },
+    "note": {
+      "type": "string",
+      "description": "Space-joined: the modal's text, driver notes, the DONE check's sentences (HANDS_DONE_CHECK), the loop's notice for this step. Often empty."
+    }
+  },
+  "$defs": {
+    "element": {
+      "type": "object",
+      "required": [
+        "index",
+        "id",
+        "role",
+        "label",
+        "operations"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "index": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*$",
+          "description": "\"1\"..\"N\" in ranked order; target heads' option keys refer to it."
+        },
+        "id": {
+          "type": "string",
+          "description": "The driver's id: an AX id, syn:move:<file>, syn:newfolder:name, syn:save, ocr:*, ..."
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The driver's role, raw (folders are sent as \"link\"). Brain's format-3 prompt drops scrollBar, scrollArea, group, image."
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Operations offered on this element (operations.yaml)."
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "index",
+              "label",
+              "value"
+            ],
+            "properties": {
+              "index": {
+                "type": "string",
+                "pattern": "^[1-9][0-9]*:[0-9]+$"
+              },
+              "label": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "A dropdown's options. At most 40 across all elements of a state."
+        },
+        "current_value": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 400
+        },
+        "focused": {
+          "const": true
+        },
+        "new": {
+          "const": true,
+          "description": "Flag HANDS_MARK_NEW."
+        }
+      }
+    },
+    "recent_action": {
+      "type": "object",
+      "required": [
+        "action",
+        "kind"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "description": "The bound element's last-known label, its id, or \"(no target)\"."
+        },
+        "kind": {
+          "type": "string",
+          "description": "click, open, fill, key, scroll, wait, focus_app, done, blocked, ask_user, ..."
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Typed text (untruncated; a REPLACE writes the whole field) or the chord."
+        },
+        "page_changed": {
+          "type": "boolean"
+        },
+        "effect": {
+          "type": "string",
+          "description": "Flag HANDS_EFFECT_NOTES."
+        },
+        "ok": {
+          "const": false
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "screen_now_shows": {
+          "type": "array",
+          "maxItems": 5
+        },
+        "screen_no_longer_shows": {
+          "type": "array",
+          "maxItems": 5
+        }
+      }
+    }
+  }
+}
