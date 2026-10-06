@@ -10,15 +10,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from check import REGISTRY, check_reply, check_request   # noqa: E402
+from check import REGISTRY, check_reply, check_request, options   # noqa: E402
 
 REQ = json.loads((ROOT / "examples" / "agent-request.json").read_text(encoding="utf-8"))
+LIST = json.loads((ROOT / "examples" / "agent-request.list.json").read_text(encoding="utf-8"))
+
+
+def _edit(req, edit):
+    r = copy.deepcopy(req)
+    edit(r)
+    return r
 
 
 def broken(edit):
-    r = copy.deepcopy(REQ)
-    edit(r)
-    return check_request(r)
+    return check_request(_edit(REQ, edit))
 
 
 class Requests(unittest.TestCase):
@@ -65,6 +70,52 @@ class Requests(unittest.TestCase):
         self.assertTrue(any("operations" in e for e in rep.errors), rep.errors)
 
 
+class OptionOrder(unittest.TestCase):
+    """The order of a question's options sets the letters the model answers with (deskmind#36 item 1). brain#8: the
+    same model on re-sorted fixtures fell from 220 to about 130 of 223 valid steps, and v0's checker passed them."""
+
+    def test_the_list_form_is_the_same_request(self):
+        self.assertTrue(check_request(LIST).ok, check_request(LIST).errors)
+        self.assertEqual(list(LIST["questions"]), list(REQ["questions"]))
+        for qid, q in REQ["questions"].items():
+            self.assertEqual(options(LIST["questions"][qid]), options(q), qid)
+
+    def test_sorted_keys_are_caught(self):
+        """What a json.dumps(..., sort_keys=True) on the way does to an object-form request."""
+        rep = check_request(json.loads(json.dumps(REQ, sort_keys=True)))
+        self.assertIn("operation: 'CLICK' is offered after 'BLOCKED'; operations keep the registry's order",
+                      rep.errors)
+        self.assertIn("click_target: option '2' comes after '19'; element options ascend", rep.errors)
+        self.assertTrue(any(e.startswith("type_text_value: options are 1, 10, 11") for e in rep.errors), rep.errors)
+
+    def test_the_same_rules_hold_for_the_list_form(self):
+        def swap(r):
+            ops = r["questions"]["operation"]["criteria"]
+            ops[0], ops[1] = ops[1], ops[0]
+        rep = check_request(_edit(LIST, swap))
+        self.assertIn("operation: 'CLICK' is offered after 'OPEN'; operations keep the registry's order", rep.errors)
+
+    def test_a_subset_of_the_operations_keeps_their_relative_order(self):
+        def fewer(r):
+            for op in ("CLICK", "SCROLL"):
+                r["questions"]["operation"]["criteria"].pop(op)
+                r["questions"].pop(op.lower() + "_target")
+        self.assertTrue(broken(fewer).ok, broken(fewer).errors)
+
+    def test_candidates_are_numbered_from_one_without_gaps(self):
+        rep = broken(lambda r: r["questions"]["type_text_value"]["criteria"].pop("2"))
+        self.assertTrue(any(e.startswith("type_text_value: options are 1, 3,") for e in rep.errors), rep.errors)
+
+    def test_a_key_appears_once_in_the_list_form(self):
+        rep = check_request(_edit(LIST, lambda r: r["questions"]["operation"]["criteria"].append(
+            {"key": "DONE", "description": "again"})))
+        self.assertIn("operation: option 'DONE' appears more than once", rep.errors)
+
+    def test_a_list_entry_is_a_key_and_a_description(self):
+        rep = check_request(_edit(LIST, lambda r: r["questions"]["operation"]["criteria"][0].pop("description")))
+        self.assertTrue(any("questions/operation/criteria" in e for e in rep.errors), rep.errors)
+
+
 class Replies(unittest.TestCase):
     def test_a_reply_must_answer_every_question_with_an_offered_option(self):
         answers = {q: {"type": "choice", "choice": next(iter(v["criteria"])),
@@ -77,6 +128,8 @@ class Replies(unittest.TestCase):
         rep = check_reply({"answers": bad}, REQ)
         self.assertIn("no answer for question 'operation'", rep.errors)
         self.assertIn("click_target: answered 'nope', which was not offered", rep.errors)
+        self.assertIn("click_target: answered 'nope', which was not offered",
+                      check_reply({"answers": bad}, LIST).errors, "the list form's options are read too")
 
 
 class Registry(unittest.TestCase):

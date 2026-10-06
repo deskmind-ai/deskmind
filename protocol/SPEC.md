@@ -24,7 +24,7 @@ gets the model's trained behaviour; a model that serves the agent profile can dr
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/v1/systemone` | Answer a set of questions about one state |
-| `GET` | `/v1/models` | `{"data": [{"id", "object": "model", "routing"?}]}`; `routing` (reason → count) only with two tiers |
+| `GET` | `/v1/models` | `{"data": [{"id", "object": "model", "criteria_forms"?, "routing"?}]}`; `criteria_forms` lists the forms of choice options the server reads (`["object", "list"]` from brain#9); `routing` (reason → count) only with two tiers |
 
 Brain listens on `127.0.0.1:8787` by default; the Mac app runs it on `18850`, hands defaults to `8793` (G6). With
 `DESKMIND_BRAIN_TOKEN` set, every request needs `Authorization: Bearer <token>`; hands sends `SYSTEMONE_API_KEY` as
@@ -39,12 +39,27 @@ that header (the app sets both to one per-install token). Requests are answered 
 
 | `type` | `criteria` | Options |
 |---|---|---|
-| `choice` | object, 1–255 entries: option key → description | the keys, in insertion order (the order sets the option letters the model sees) |
+| `choice` | 1–255 options: a list of `{"key", "description"}` (v1), or an object, key → description (v0) | the keys, in the order given ([Option order](#option-order)) |
 | `score` | list of 2–10 level descriptions | `"0"`…`"K-1"` |
 | `noul` | anything | `false` / `true` |
 
 - `instructions` is required, any JSON value; agent requests send `{"goal", "rules", "operation"?}`.
 - `model` is accepted and ignored.
+
+### Option order
+
+The order of a `choice` question's options is part of the request: it sets the option letters the model answers
+with. The same model on the same steps with its options re-sorted chose a valid action about 130 times in 223 instead
+of 220 (brain#8).
+
+- **v0** sends the options as an object and relies on its key order. JSON does not guarantee key order, and any tool
+  that sorts keys on the way reorders the options without a trace — `'1', '10', '11', '2'`. A fixture builder
+  (brain#8), hands' replay snapshots (hands#13) and Brain's answer cache key (brain#9) all did (G22).
+- **v1** sends a list: `[{"key": "CLICK", "description": "…"}, …]`. Keys are unique non-empty strings; a description
+  is any JSON value, as in v0 (agent heads use objects such as `{"element": "[3] Save"}`). A server that reads the
+  list form says so with `criteria_forms` in `GET /v1/models`; a client sends it only to such a server.
+- A server shows the options in the order sent and never reorders them. A harness keeps the agent profile's order
+  rules ([Heads and their options](#heads-and-their-options)); `tools/check.py` checks them, a server does not.
 
 ### Reply
 
@@ -104,7 +119,8 @@ arguments. [`agent/operations.yaml`](agent/operations.yaml) lists them; this sec
 | `FOCUS_WINDOW` | `focus_window_target` | focus | switches to another window of the app |
 | `ANSWER` | `answer_value` | terminal | ends the task with the chosen on-screen text as the answer (G3) |
 
-Operations are offered in this order, so their option letters are stable. `goal_complete` (yes/no) is an extra question
+Operations are offered in this order, so their option letters are stable: a request offers a subset, and the ones it
+offers keep this relative order. `goal_complete` (yes/no) is an extra question
 some runs add (G2). The `class` column is v0's grouping for risk: `write` and `terminal` steps are the ones a wrong
 answer is costly for.
 
@@ -120,14 +136,14 @@ top on the previous step or is at least 0.5.
 
 ### Heads and their options
 
-| Format | Key | Description | Used by |
-|---|---|---|---|
-| element | `"N"`, an element's `index` in the state | `{"element": "[N] <label>", "role", "current_value"}` | every `*_target` except below |
-| dropdown option | `"N:k"`, an option's index | `{"element": "[N:k] <label> → <option>", "current_value"}` | `select_target` |
-| value | `"1"`…, position in the candidate list | `{"value"}` | `type_text_value`, `answer_value` |
-| replace span | `"1"`… | `{"text"}` | `replace_from` |
-| chord | lowercase, `+`-joined | the chord's description | `key_target` |
-| app / window | name or bundle id / window id | a short description or the title | `focus_app_target` / `focus_window_target` |
+| Format | Key | Description | Order | Used by |
+|---|---|---|---|---|
+| element | `"N"`, an element's `index` in the state | `{"element": "[N] <label>", "role", "current_value"}` | ascending | every `*_target` except below |
+| dropdown option | `"N:k"`, an option's index | `{"element": "[N:k] <label> → <option>", "current_value"}` | ascending by N, then k | `select_target` |
+| value | `"1"`…, position in the candidate list | `{"value"}` | `1`…`N`, no gaps | `type_text_value`, `answer_value` |
+| replace span | `"1"`… | `{"text"}` | `1`…`N`, no gaps | `replace_from` |
+| chord | lowercase, `+`-joined | the chord's description | as sent | `key_target` |
+| app / window | name or bundle id / window id | a short description or the title | as sent | `focus_app_target` / `focus_window_target` |
 
 The harness maps a chosen key back by position or index; a key that was not offered is refused. Limits per head are in
 the registry (40 elements, 40 dropdown options in a state, 24 values, 16 replace spans, 120 answers).
@@ -184,13 +200,18 @@ What a model must match to behave as trained, beyond the request. These settings
 
 ## 4. Conformance
 
-`python protocol/tools/check.py <requests>` checks recorded requests. On 10-06 it was run over 217 real requests:
+`python protocol/tools/check.py <requests>` checks recorded requests. On 10-06 it was run over 440 real requests,
+with the option order rules:
 
 | Corpus | Requests | Conform | Warnings |
 |---|---|---|---|
-| hands `tests/replay` (3 recorded app runs) | 25 | 25 | 0 |
+| hands `tests/replay` (3 recorded app runs, as of hands#13) | 25 | 25 | 0 |
 | brain `fixtures/replay/v1/gym.jsonl.gz` | 150 | 150 | 11 (G19) |
 | brain `fixtures/replay/v1/pairs.jsonl.gz` | 42 | 42 | 0 |
+| brain `fixtures/replay/v2/closedloop.jsonl.gz` (as of brain#8) | 223 | 223 | 33 (G19) |
+
+Before hands#13, hands' snapshots were stored with sorted keys and none of the 25 kept the order the model was shown;
+the checker without the order rules passed them all.
 
 Brain's `large.jsonl.gz` is padded on purpose to 240 options per target head, to stress the server; it is outside the
 harness profile (40 elements) and is not part of this corpus.
@@ -219,6 +240,7 @@ harness profile (40 elements) and is not part of this corpus.
 | G19 | `TYPE_TEXT`, `APPEND_TEXT` and `RENAME` are offered when there is no value candidate; `type_text_value` is then absent and choosing them is refused. |
 | G20 | Nothing in a request or reply says which protocol version it follows. |
 | G21 | A Finder state can carry folder names from outside the task's folder (the path bar, column view's ancestors), which matters when the planner is remote (deskmind#33). |
+| G22 | Option order rested on JSON object key order, which JSON does not guarantee, and nothing checked it: a fixture builder (brain#8), hands' replay snapshots (hands#13) and Brain's answer cache key (brain#9) sorted keys. The order rules are checked now; the list form (v1) closes it. |
 
 ## Towards version 1
 
