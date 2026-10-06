@@ -48,6 +48,45 @@ enum HelperLocation {
         probe && !live && !taskRunning && !alreadyScheduled
     }
 
+    enum HungAction: Equatable { case none, terminate, kill }
+
+    /// A helper whose process is alive but has not answered for a while is hung, and nothing else replaces it: the
+    /// app's own launch only brings the running instance forward, and the Restart button goes over the socket the
+    /// hung helper no longer reads (review of #32). Quit it after `silentFor` seconds of silence, kill it if it is
+    /// still there `killAfter` seconds later; the next poll starts a fresh one. Every request is served on its own
+    /// thread, so a long task does not keep status from answering.
+    static let hungAfter: TimeInterval = 30, killAfter: TimeInterval = 10
+
+    static func hungAction(silentFor: TimeInterval, running: Bool, quitAskedFor: TimeInterval?) -> HungAction {
+        guard running else { return .none }
+        if let asked = quitAskedFor { return asked >= killAfter ? .kill : .none }
+        return silentFor >= hungAfter ? .terminate : .none
+    }
+
+    /// The app's clock for hungAction, poll by poll. Silence is counted from when a helper process is there and not
+    /// answering: with none running (a crash, a restart) the clock stops, so a helper starting afresh gets its full
+    /// 30 s -- counted from the crash, a slow first launch was killed mid-start, over and over (review of #43).
+    struct HungWatch {
+        private(set) var silentSince: Date?, quitAskedAt: Date?
+
+        mutating func step(now: Date, connected: Bool, running: Bool) -> HungAction {
+            guard !connected, running else { silentSince = nil; quitAskedAt = nil; return .none }
+            let since = silentSince ?? now
+            silentSince = since
+            let action = hungAction(silentFor: now.timeIntervalSince(since), running: true,
+                                    quitAskedFor: quitAskedAt.map { now.timeIntervalSince($0) })
+            switch action {
+            case .terminate: quitAskedAt = now
+            case .kill: silentSince = nil; quitAskedAt = nil
+            case .none: break
+            }
+            return action
+        }
+    }
+
+    /// The app starts a helper only when none is running; a silent one is replaced by hungAction, not opened again.
+    static func shouldLaunch(running: Bool) -> Bool { !running }
+
     /// The app's side: a connected helper running nested in an app bundle is the wrong one. Only nested: a helper
     /// started from a development build or a test elsewhere is left alone.
     static func isWrongCopy(runningPath: String?, installedPath: String) -> Bool {

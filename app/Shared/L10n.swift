@@ -232,6 +232,8 @@ enum L10n {
         "It got stuck": "卡住了",
         "Report on GitHub": "在 GitHub 上反馈",
         "Restart": "重启",
+        "The helper stopped answering. Restarting it":
+            "后台助手没有响应，正在重启它",
         "Restarting the helper from its installed copy": "改用已安装的副本重启助手",
         "Your apps file (~/.config/deskmind/apps.yaml) has a problem: %@. Fix it or move it away, then run it again.": "你的应用配置文件（~/.config/deskmind/apps.yaml）有问题：%@。改正它或先把它移走，再跑一次。",
         "Smooth Recordings (30 fps, Slows Tasks About 10%)": "流畅录制（每秒 30 帧，任务约慢 10%）",

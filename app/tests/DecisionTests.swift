@@ -600,6 +600,28 @@ enum DecisionTests {
         check((successor ?? -1) >= 0, "a successor waits for the first to go, then takes it")
         close(successor ?? -1); unlink(lockPath)
         check(HelperLock.acquire("/nonexistent-dir/hands.lock", wait: 0) == -1, "no lock file: the helper still runs")
+        // A helper that is alive but silent is quit after 30 s, killed 10 s later (review of #32: a hung helper held
+        // its socket and nothing replaced it -- the app's launch only brought it forward).
+        check(HelperLocation.hungAction(silentFor: 5, running: true, quitAskedFor: nil) == .none, "a short silence: a restart, a busy moment")
+        check(HelperLocation.hungAction(silentFor: 30, running: true, quitAskedFor: nil) == .terminate, "30 s silent: quit it")
+        check(HelperLocation.hungAction(silentFor: 300, running: false, quitAskedFor: nil) == .none, "nothing running: the app starts one")
+        check(HelperLocation.hungAction(silentFor: 35, running: true, quitAskedFor: 4) == .none, "asked to quit: give it time")
+        check(HelperLocation.hungAction(silentFor: 45, running: true, quitAskedFor: 10) == .kill, "still there: kill it")
+        // The clock, poll by poll: a helper that crashed and came back gets its own 30 s (review of #43).
+        var w = HelperLocation.HungWatch()
+        let t0 = Date()
+        var acts: [HelperLocation.HungAction] = []
+        for s in 0..<25 { acts.append(w.step(now: t0 + Double(s), connected: false, running: false)) }   // crashed, none running
+        for s in 25..<54 { acts.append(w.step(now: t0 + Double(s), connected: false, running: true)) }  // a new one, starting
+        check(!acts.contains(.terminate), "a helper starting after a crash is not quit before its own 30 s")
+        check(w.step(now: t0 + 55, connected: false, running: true) == .terminate, "30 s of its own silence: quit")
+        check(w.step(now: t0 + 60, connected: false, running: true) == .none, "asked: wait")
+        check(w.step(now: t0 + 65, connected: false, running: true) == .kill, "still there: kill")
+        check(w.step(now: t0 + 66, connected: false, running: true) == .none, "the next one starts its own clock")
+        check(w.step(now: t0 + 67, connected: true, running: true) == .none && w.silentSince == nil, "answering: no clock")
+        // Opening a hung helper again showed "DeskMind Hands is not responding", once per poll (10-06).
+        check(!HelperLocation.shouldLaunch(running: true), "a helper is running, silent: not opened again")
+        check(HelperLocation.shouldLaunch(running: false), "none running: start one")
         // The language follows the system unless the user picked one (0.4.1-rc.1 opened in English on a Chinese Mac).
         check(AppLanguage(rawValue: AppLanguage.system.rawValue)?.resolved == ResolvedLang.fromSystem(), "system language")
     }

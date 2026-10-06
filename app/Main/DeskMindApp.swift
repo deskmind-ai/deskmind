@@ -47,11 +47,18 @@ final class HelperModel: ObservableObject {
     func granted(_ g: Grant) -> Bool { status[g.statusKey] as? Bool == true }
     var helperReady: Bool { connected }
     private var lastLaunch = Date.distantPast
+    /// How long a running helper has been silent, and whether it was asked to quit (HelperLocation.HungWatch).
+    private var hungWatch = HelperLocation.HungWatch()
     @Published var launching = false
 
     /// Start the helper if it is not answering; it is also how a restart completes (the helper exits, we relaunch).
     func ensureHelper() {
         guard !connected, Date().timeIntervalSince(lastLaunch) > 3 else { return }
+        // A helper process is there and silent -- starting, waiting for its predecessor, or hung. Opening it again
+        // starts nothing, and for a hung one macOS shows "DeskMind Hands is not responding" every time: a stack
+        // of them, one per poll (10-06). replaceIfHung deals with it; a new one is started once it has gone.
+        guard HelperLocation.shouldLaunch(running: NSRunningApplication.runningApplications(
+            withBundleIdentifier: "ai.deskmind.hands").contains { !$0.isTerminated }) else { return }
         lastLaunch = Date()
         launching = true
         do {
@@ -103,6 +110,7 @@ final class HelperModel: ObservableObject {
                     self.note(self.connected ? L("Helper connected (pid %@)", "\(reply?["pid"] ?? "?")", lang: lang)
                                              : L("Helper disconnected. Waiting to reconnect…", lang: lang))
                 }
+                self.replaceIfHung()
                 if !self.connected { self.ensureHelper() }
                 // A helper still running from inside DeskMind.app (started before the hand-over existed, or by
                 // something that bypassed it): its Screen Recording counts as DeskMind's. Replace it with the
@@ -117,6 +125,21 @@ final class HelperModel: ObservableObject {
                     }
                 }
             }
+        }
+    }
+
+    /// A helper that is running but has stopped answering is quit, then killed (HelperLocation.hungAction).
+    private func replaceIfHung() {
+        let helpers = NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands").filter { !$0.isTerminated }
+        switch hungWatch.step(now: Date(), connected: connected, running: !helpers.isEmpty) {
+        case .terminate:
+            note(L("The helper stopped answering. Restarting it", lang: ResolvedLang.current))
+            helpers.forEach { $0.terminate() }
+        case .kill:
+            // SIGKILL itself: forceTerminate() returned true and left a stopped helper where it was (10-06, e2e).
+            helpers.forEach { kill($0.processIdentifier, SIGKILL) }
+        case .none:
+            break
         }
     }
 
