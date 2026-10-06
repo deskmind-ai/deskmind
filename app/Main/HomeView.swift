@@ -93,7 +93,7 @@ struct HomeView: View {
 
             prompt.padding(.horizontal, 28)
             scopeLine.padding(.horizontal, 32).padding(.top, 6)
-            examples.padding(.top, 10)
+            if model.requiredDone { examples.padding(.top, 10) }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -602,7 +602,9 @@ struct SetupCard: View {
                                   ? L("DeskMind Hands is standing by. Restarting it won't close this window.", lang: lang)
                                   : (model.launching ? L("Starting DeskMind Hands…", lang: lang)
                                                      : L("DeskMind Hands isn't running", lang: lang)),
-                              done: model.helperReady, actionTitle: L("Launch", lang: lang)) {
+                              done: model.helperReady, actionTitle: L("Launch", lang: lang),
+                              doneActionTitle: L("Restart", lang: lang),
+                              doneAction: { model.send(["op": "restart"], label: L("Restart helper", lang: lang)) }) {
                     model.register()
                 }
                 Divider().overlay(Brand.line)
@@ -670,7 +672,7 @@ struct EyesProgress: View {
         case .paused: return L("Paused. Progress is saved.", lang: lang)
         case .verifying: return L("Verifying %@…", d.currentFile, lang: lang)
         case .failed(let why): return why
-        default: return L("For apps without accessibility (NetEase Cloud Music and the like). Download 3.3 GB", lang: lang)
+        default: return L("For apps without accessibility, like NetEase Cloud Music. 3.3 GB", lang: lang)
         }
     }
 

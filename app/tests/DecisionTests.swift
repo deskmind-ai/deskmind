@@ -215,6 +215,7 @@ enum DecisionTests {
         folderPolicyTests()
         diagnosticsTests()
         recordingCaptureTests()
+        helperLocationTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -541,6 +542,39 @@ enum DecisionTests {
         check(!RecordingCapture.shouldAppend(at: 0.05, last: 0.1, accepting: true, ready: true), "not an earlier one")
         check(!RecordingCapture.shouldAppend(at: 0.2, last: 0.1, accepting: false, ready: true), "not after the movie is finishing")
         check(!RecordingCapture.shouldAppend(at: 0.2, last: 0.1, accepting: true, ready: false), "not while the writer is busy")
+    }
+
+    /// Which helper copy runs (Shared/HelperLocation.swift): the nested copy hands over to the installed one.
+    static func helperLocationTests() {
+        let support = "/Users/u/Library/Application Support/DeskMind"
+        let installed = HelperLocation.installedPath(supportDir: support)
+        check(installed == support + "/DeskMind Hands.app", "installed copy path: \(installed)")
+        let nested = "/Applications/DeskMind.app/Contents/Library/LoginItems/DeskMind Hands.app"
+        check(HelperLocation.handOverTarget(bundlePath: nested, installedPath: installed, installedExists: true) == installed,
+              "the copy inside DeskMind.app hands over (rc.1: macOS's Quit & Reopen started it)")
+        check(HelperLocation.handOverTarget(bundlePath: nested, installedPath: installed, installedExists: false) == nil,
+              "nothing installed yet: the nested copy keeps running rather than exit into nothing")
+        check(HelperLocation.handOverTarget(bundlePath: installed, installedPath: installed, installedExists: true) == nil,
+              "the installed copy keeps running")
+        check(HelperLocation.handOverTarget(bundlePath: installed + "/", installedPath: installed, installedExists: true) == nil,
+              "the same path written differently is the same copy")
+        check(HelperLocation.handOverTarget(bundlePath: "/Users/u/build/DeskMind Hands.app", installedPath: installed,
+                                            installedExists: true) == nil,
+              "a standalone build (not inside another app) is left alone")
+        // Restart so a Screen Recording grant takes effect: only when a new process sees it and this one doesn't.
+        check(HelperLocation.restartForGrant(live: false, probe: true, taskRunning: false, alreadyScheduled: false),
+              "granted, not yet seen: restart")
+        check(!HelperLocation.restartForGrant(live: true, probe: true, taskRunning: false, alreadyScheduled: false), "already seen")
+        check(!HelperLocation.restartForGrant(live: false, probe: false, taskRunning: false, alreadyScheduled: false), "not granted")
+        check(!HelperLocation.restartForGrant(live: false, probe: true, taskRunning: true, alreadyScheduled: false),
+              "never in the middle of a task")
+        check(!HelperLocation.restartForGrant(live: false, probe: true, taskRunning: false, alreadyScheduled: true), "once")
+        // The app replaces a connected helper that runs from anywhere else.
+        check(HelperLocation.isWrongCopy(runningPath: nested, installedPath: installed), "nested copy connected: wrong")
+        check(!HelperLocation.isWrongCopy(runningPath: installed, installedPath: installed), "installed copy: right")
+        check(!HelperLocation.isWrongCopy(runningPath: nil, installedPath: installed), "an older helper that doesn't say: left")
+        // The language follows the system unless the user picked one (0.4.1-rc.1 opened in English on a Chinese Mac).
+        check(AppLanguage(rawValue: AppLanguage.system.rawValue)?.resolved == ResolvedLang.fromSystem(), "system language")
     }
 
     static func issueReportTests() {

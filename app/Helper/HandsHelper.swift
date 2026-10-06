@@ -82,16 +82,28 @@ func automationGranted() -> Bool? {
     }
 }
 
+/// Set once a restart for a Screen Recording grant is scheduled (see status).
+nonisolated(unsafe) var restartingForGrant = false
+
 func status(probe: Bool) -> [String: Any] {
     let live = CGPreflightScreenCaptureAccess()
+    let probed = !live && probe && probeScreen()
+    // Granted, but this process will not see it until it restarts: restart now, between tasks, rather than leave the
+    // setup saying "not granted" (the app starts the installed copy again within seconds).
+    if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: Runner.current != nil,
+                                      alreadyScheduled: restartingForGrant) {
+        restartingForGrant = true
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { exit(0) }
+    }
     var s: [String: Any] = [
         "ok": true,
         "pid": Int(ProcessInfo.processInfo.processIdentifier),
         "bundle": Bundle.main.bundleIdentifier ?? "?",
+        "path": Bundle.main.bundlePath,
         "uptime_s": Int(Date().timeIntervalSince(started)),
         "accessibility": axTrusted(prompt: false),
         "screen_recording": live,
-        "screen_recording_granted": live || (probe && probeScreen()),
+        "screen_recording_granted": live || probed,
         "brain": BrainServer.status()["state"] ?? "stopped",
         "brain_uptime_s": BrainServer.status()["uptime_s"] ?? 0,
         "brain_hint": BrainServer.status()["hint"] ?? "",
@@ -246,6 +258,18 @@ struct HandsHelper {
         }
         if CommandLine.arguments.contains("--probe-screen") {
             print(CGPreflightScreenCaptureAccess() ? "1" : "0")
+            exit(0)
+        }
+        // Started from inside DeskMind.app (by bundle id, e.g. macOS's "Quit & Reopen" after Screen Recording is turned
+        // on): that copy's permissions count as DeskMind's, so the installed copy is started instead (HelperLocation).
+        let installed = HelperLocation.installedPath(supportDir: DeskMindIPC.supportDir.path)
+        if let target = HelperLocation.handOverTarget(bundlePath: Bundle.main.bundlePath, installedPath: installed,
+                                                      installedExists: FileManager.default.fileExists(atPath: installed)) {
+            let cfg = NSWorkspace.OpenConfiguration()
+            cfg.activates = false
+            let opened = DispatchSemaphore(value: 0)
+            NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: target), configuration: cfg) { _, _ in opened.signal() }
+            _ = opened.wait(timeout: .now() + 10)
             exit(0)
         }
         signal(SIGPIPE, SIG_IGN)   // a client that goes away mid-stream must not take the helper with it

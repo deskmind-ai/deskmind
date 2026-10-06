@@ -104,6 +104,16 @@ final class HelperModel: ObservableObject {
                                              : L("Helper disconnected. Waiting to reconnect…", lang: lang))
                 }
                 if !self.connected { self.ensureHelper() }
+                // A helper still running from inside DeskMind.app (started before the hand-over existed, or by
+                // something that bypassed it): its Screen Recording counts as DeskMind's. Replace it with the
+                // installed copy.
+                if self.connected, HelperLocation.isWrongCopy(runningPath: reply?["path"] as? String,
+                                                              installedPath: helperURL.path) {
+                    self.note(L("Restarting the helper from its installed copy", lang: ResolvedLang.current))
+                    for app in NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands") {
+                        app.terminate()
+                    }
+                }
             }
         }
     }
@@ -154,7 +164,7 @@ extension EnvironmentValues {
 /// ResolvedLang.current (log lines, run messages, the "lang" of every request to the helper) in step with it.
 /// A change re-renders everything under it at once.
 struct LocalizedRoot<Content: View>: View {
-    @AppStorage("language") private var language = AppLanguage.en.rawValue
+    @AppStorage("language") private var language = AppLanguage.system.rawValue
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -168,7 +178,7 @@ struct LocalizedRoot<Content: View>: View {
 /// A compact menu: English, 简体中文, or follow the system. Each language is named in itself; "follow system" is
 /// in the current one.
 struct LanguagePicker: View {
-    @AppStorage("language") private var language = AppLanguage.en.rawValue
+    @AppStorage("language") private var language = AppLanguage.system.rawValue
     @Environment(\.lang) private var lang
 
     func name(_ l: AppLanguage) -> String {
@@ -206,6 +216,8 @@ struct PermissionRow: View {
     var optional = false
     var actionTitle: String? = nil   // "Allow" unless given
     var busy = false                 // something is under way: a spinner, not a button that invites a click
+    var doneActionTitle: String? = nil   // a small action beside "Ready" (the helper's Restart)
+    var doneAction: (() -> Void)? = nil
     let action: () -> Void
     @Environment(\.lang) private var lang
 
@@ -227,12 +239,16 @@ struct PermissionRow: View {
                 }
                 // Two lines when needed: English copy runs longer than Chinese and was cut off mid-sentence.
                 Text(subtitle).font(.system(size: 12)).foregroundStyle(Brand.sage)
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             if busy && !done {
                 ProgressView().controlSize(.small)
             } else if done {
+                if let doneActionTitle, let doneAction {
+                    Button(doneActionTitle, action: doneAction).buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.sage).underline()
+                }
                 HStack(spacing: 6) {
                     Circle().fill(Brand.dot).frame(width: 7, height: 7)
                     Text(L("Ready", lang: lang)).font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
@@ -464,11 +480,11 @@ struct DeskMindApp: App {
     @StateObject private var downloader = ModelDownloader()
     @StateObject private var eyes = EyesDownloader()
     @StateObject private var history = RunHistory.shared
-    @AppStorage("language") private var language = AppLanguage.en.rawValue
+    @AppStorage("language") private var language = AppLanguage.system.rawValue
 
     init() {
         // Before the helper model logs anything or sends its first request.
-        let stored = UserDefaults.standard.string(forKey: "language") ?? AppLanguage.en.rawValue
+        let stored = UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue
         ResolvedLang.current = (AppLanguage(rawValue: stored) ?? .en).resolved
     }
 
