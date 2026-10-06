@@ -96,7 +96,7 @@ that does not know them ignores them (Brain does: it drops fields it does not re
   - clients decide from `probabilities` (hands takes its own argmax, acts only on offered options, and ignores
     `confidence`).
 - A `score` answer has `probabilities` over the levels `"0"`…`"K-1"` (same rules), and `score` is the expected level,
-  Σ level · p. A `noul` answer's `noul` is p(yes), from 0 to 1.
+  Σ level · p. A `noul` answer's `noul` is p(true), from 0 to 1 (its options are `false` and `true`).
 - A server running **two-stage** scores `operation` first and then only that operation's heads. Questions it did not
   score come back **uniform**, confidence 0, and (from brain#10) **`"scored": false`**: a placeholder, not an answer.
   A client must not act on one; a v0 server sends the uniform placeholder without the flag (G1, G2, G4). An answer
