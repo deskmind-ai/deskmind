@@ -87,11 +87,20 @@ that does not know them ignores them (Brain does: it drops fields it does not re
 `{"id", "model", "answers", "usage", "latency_ms", "routing"?, "cached"?, "request_id"?, "session_id"?, "step"?}`
 ([schema](schema/response.schema.json)); the last three echo the request's ([Request identity](#request-identity)).
 
+- `id`, `model`, `answers`, `usage` and `latency_ms` are required (v1; Brain has always sent them).
 - `answers` has one entry per question, scored or not. A `choice` answer is `{"type", "choice", "probabilities",
-  "confidence"}`: `choice` is the argmax, `probabilities` covers every option, `confidence` is `(K·p_max − 1)/(K − 1)`.
-  Clients decide from `probabilities` (hands takes its own argmax and ignores `confidence`).
+  "confidence", "scored"?}`, and `tools/check.py` checks each of these (deskmind#36 item 2):
+  - `probabilities` has exactly the offered options as keys, each a finite number from 0 to 1, summing to 1 (±1e-6);
+  - `choice` is the argmax; a tie goes to the first option in the request's order;
+  - `confidence` is `(K·p_max − 1)/(K − 1)` over the K offered options (1.0 when K ≤ 1);
+  - clients decide from `probabilities` (hands takes its own argmax, acts only on offered options, and ignores
+    `confidence`).
+- A `score` answer has `probabilities` over the levels `"0"`…`"K-1"` (same rules), and `score` is the expected level,
+  Σ level · p. A `noul` answer's `noul` is p(yes), from 0 to 1.
 - A server running **two-stage** scores `operation` first and then only that operation's heads. Questions it did not
-  score come back **uniform** with confidence 0; they are not answers (G1, G2, G4).
+  score come back **uniform**, confidence 0, and (from brain#10) **`"scored": false`**: a placeholder, not an answer.
+  A client must not act on one; a v0 server sends the uniform placeholder without the flag (G1, G2, G4). An answer
+  marked `scored: false` must be uniform.
 - `routing` appears when two tiers are served: `{"by": "fast"|"strong", "reason", "fast_conf", "confirmed"?}`. The fast
   tier answers; the strong tier re-answers when `fast_conf` (the lowest top probability over `operation` and its heads)
   is under the threshold (0.96 in the app) or the step is risky: `risky_DONE`, `risky_BLOCKED`, `risky_KEY` (a chord
