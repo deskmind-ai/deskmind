@@ -594,6 +594,16 @@ enum DecisionTests {
         check((successor ?? -1) >= 0, "a successor waits for the first to go, then takes it")
         close(successor ?? -1); unlink(lockPath)
         check(HelperLock.acquire("/nonexistent-dir/hands.lock", wait: 0) == -1, "no lock file: the helper still runs")
+        // A helper that is alive but silent is quit after 30 s, killed 10 s later (review of #32: a hung helper held
+        // its socket and nothing replaced it -- the app's launch only brought it forward).
+        check(HelperLocation.hungAction(silentFor: 5, running: true, quitAskedFor: nil) == .none, "a short silence: a restart, a busy moment")
+        check(HelperLocation.hungAction(silentFor: 30, running: true, quitAskedFor: nil) == .terminate, "30 s silent: quit it")
+        check(HelperLocation.hungAction(silentFor: 300, running: false, quitAskedFor: nil) == .none, "nothing running: the app starts one")
+        check(HelperLocation.hungAction(silentFor: 35, running: true, quitAskedFor: 4) == .none, "asked to quit: give it time")
+        check(HelperLocation.hungAction(silentFor: 45, running: true, quitAskedFor: 10) == .kill, "still there: kill it")
+        // Opening a hung helper again showed "DeskMind Hands is not responding", once per poll (10-06).
+        check(!HelperLocation.shouldLaunch(running: true), "a helper is running, silent: not opened again")
+        check(HelperLocation.shouldLaunch(running: false), "none running: start one")
         // The language follows the system unless the user picked one (0.4.1-rc.1 opened in English on a Chinese Mac).
         check(AppLanguage(rawValue: AppLanguage.system.rawValue)?.resolved == ResolvedLang.fromSystem(), "system language")
     }

@@ -48,6 +48,24 @@ enum HelperLocation {
         probe && !live && !taskRunning && !alreadyScheduled
     }
 
+    enum HungAction: Equatable { case none, terminate, kill }
+
+    /// A helper whose process is alive but has not answered for a while is hung, and nothing else replaces it: the
+    /// app's own launch only brings the running instance forward, and the Restart button goes over the socket the
+    /// hung helper no longer reads (review of #32). Quit it after `silentFor` seconds of silence, kill it if it is
+    /// still there `killAfter` seconds later; the next poll starts a fresh one. Every request is served on its own
+    /// thread, so a long task does not keep status from answering.
+    static let hungAfter: TimeInterval = 30, killAfter: TimeInterval = 10
+
+    static func hungAction(silentFor: TimeInterval, running: Bool, quitAskedFor: TimeInterval?) -> HungAction {
+        guard running else { return .none }
+        if let asked = quitAskedFor { return asked >= killAfter ? .kill : .none }
+        return silentFor >= hungAfter ? .terminate : .none
+    }
+
+    /// The app starts a helper only when none is running; a silent one is replaced by hungAction, not opened again.
+    static func shouldLaunch(running: Bool) -> Bool { !running }
+
     /// The app's side: a connected helper running nested in an app bundle is the wrong one. Only nested: a helper
     /// started from a development build or a test elsewhere is left alone.
     static func isWrongCopy(runningPath: String?, installedPath: String) -> Bool {
