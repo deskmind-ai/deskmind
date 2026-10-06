@@ -38,8 +38,8 @@ latest version until this one is released.
 - When a task gives an answer, the DeskMind window comes back with it.
 
 **Fixes**
-- Organising a large or nested folder ("整理目录" on Downloads) works. The model is shown a bounded part at a time and
-  gets up to 2 minutes a step.
+- Organising a large or nested folder ("整理目录" on Downloads) no longer fails at once. The model is shown a bounded
+  part at a time and gets up to 2 minutes a step.
 - A rename in your own folder waits for your approval, as deleting and sending do.
 - Keys typed in another app no longer go into a question's answer.
 - An app the task needs is opened, or its window brought back, before the task starts.
