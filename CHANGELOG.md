@@ -6,8 +6,9 @@ on the [Releases](https://github.com/deskmind-ai/deskmind/releases) page. Models
 
 ## 0.4.1 (in testing)
 
-Pre-releases [v0.4.1-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.1) and
-[v0.4.1-rc.2](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.2), 2026-10-06. 0.4.0 stays the latest version
+Pre-releases [v0.4.1-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.1),
+[v0.4.1-rc.2](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.2) and
+[v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3), 2026-10-06. 0.4.0 stays the latest version
 until this one is released.
 
 **Fixes**
@@ -22,6 +23,12 @@ until this one is released.
   copy of the helper whose permission didn't count; the right copy now always runs, and restarts itself once the
   permission is granted.
 - The whole setup fits on screen, and the background helper's row has a Restart button.
+- An approval covers one step. When DeskMind asks before a step that may not be undoable (deleting, sending, paying,
+  publishing, sharing), your yes covers that step and the confirmation it opens. Before, it could also cover another step
+  of the same kind a step or two later in the same app: approving one deletion could let a second, different item be
+  deleted without asking.
+- DeskMind acts only on the options it offered the model. Every answer is checked against them; an answer outside them
+  stops the run with the reason, instead of being turned into one of the options.
 
 **New**
 - **Save Full Log…** after a failed run: a .zip kept on your Mac, for you to check before you share it.
