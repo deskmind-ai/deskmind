@@ -165,6 +165,8 @@ enum L10n {
             "助手的权限好像失效了：回到首页检查「辅助功能」「屏幕录制」，然后再跑一次。",
         "Couldn't see the window this time (it happens when the Mac is busy). Wait a moment and run it again.":
             "这次没能读到窗口的画面（机器太忙时会这样）。稍等一下再跑一次。",
+        "The local model's answer wasn't one of the options it was given, so nothing was done. Please report it on GitHub so it can be fixed.":
+            "本地模型的回答不在给它的选项里，所以这一步没有执行。请到 GitHub 报告，方便我们修复。",
         "The local model couldn't handle this step. Please report it on GitHub so it can be fixed.":
             "本地模型处理不了这一步。请到 GitHub 报告，方便我们修复。",
         "The local model couldn't handle this step (%@). Please report it on GitHub so it can be fixed.":
@@ -229,6 +231,10 @@ enum L10n {
         "Wrong result": "结果不对",
         "It got stuck": "卡住了",
         "Report on GitHub": "在 GitHub 上反馈",
+        "Restart": "重启",
+        "The helper stopped answering. Restarting it":
+            "后台助手没有响应，正在重启它",
+        "Restarting the helper from its installed copy": "改用已安装的副本重启助手",
         "Your apps file (~/.config/deskmind/apps.yaml) has a problem: %@. Fix it or move it away, then run it again.": "你的应用配置文件（~/.config/deskmind/apps.yaml）有问题：%@。改正它或先把它移走，再跑一次。",
         "Smooth Recordings (30 fps, Slows Tasks About 10%)": "流畅录制（每秒 30 帧，任务约慢 10%）",
         "Save Full Log…": "保存完整日志…",
@@ -370,8 +376,7 @@ enum L10n {
 
         // MARK: Vision model row (Main/HomeView.swift EyesRow)
         "Vision model": "视觉模型",
-        "For apps without accessibility (NetEase Cloud Music and the like). Download 3.3 GB":
-            "用于没有辅助功能信息的应用（比如网易云音乐）。需下载 3.3 GB",
+        "For apps without accessibility, like NetEase Cloud Music. 3.3 GB": "用于没有辅助功能信息的应用，比如网易云音乐。3.3 GB",
         "For apps without accessibility. Loaded only while a task needs it.": "用于没有辅助功能信息的应用，只在任务需要时载入",
         "Download 3.3 GB": "下载 3.3 GB",
 

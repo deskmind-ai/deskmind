@@ -1,0 +1,24 @@
+name: protocol
+
+# The protocol's schemas, registry and checker (protocol/): their tests, and the bundled example checked.
+on:
+  push:
+    branches: [main]
+    paths: ["protocol/**", ".github/workflows/protocol.yml"]
+  pull_request:
+    paths: ["protocol/**", ".github/workflows/protocol.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with: { python-version: "3.12" }
+      - run: pip install jsonschema pyyaml
+      - run: python -m unittest discover -s protocol/tests -v
+      - run: python protocol/tools/check.py protocol/examples/agent-request.json protocol/examples/agent-request.list.json

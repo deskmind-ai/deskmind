@@ -47,11 +47,18 @@ final class HelperModel: ObservableObject {
     func granted(_ g: Grant) -> Bool { status[g.statusKey] as? Bool == true }
     var helperReady: Bool { connected }
     private var lastLaunch = Date.distantPast
+    /// How long a running helper has been silent, and whether it was asked to quit (HelperLocation.HungWatch).
+    private var hungWatch = HelperLocation.HungWatch()
     @Published var launching = false
 
     /// Start the helper if it is not answering; it is also how a restart completes (the helper exits, we relaunch).
     func ensureHelper() {
         guard !connected, Date().timeIntervalSince(lastLaunch) > 3 else { return }
+        // A helper process is there and silent -- starting, waiting for its predecessor, or hung. Opening it again
+        // starts nothing, and for a hung one macOS shows "DeskMind Hands is not responding" every time: a stack
+        // of them, one per poll (10-06). replaceIfHung deals with it; a new one is started once it has gone.
+        guard HelperLocation.shouldLaunch(running: NSRunningApplication.runningApplications(
+            withBundleIdentifier: "ai.deskmind.hands").contains { !$0.isTerminated }) else { return }
         lastLaunch = Date()
         launching = true
         do {
@@ -103,8 +110,36 @@ final class HelperModel: ObservableObject {
                     self.note(self.connected ? L("Helper connected (pid %@)", "\(reply?["pid"] ?? "?")", lang: lang)
                                              : L("Helper disconnected. Waiting to reconnect…", lang: lang))
                 }
+                self.replaceIfHung()
                 if !self.connected { self.ensureHelper() }
+                // A helper still running from inside DeskMind.app (started before the hand-over existed, or by
+                // something that bypassed it): its Screen Recording counts as DeskMind's. Replace it with the
+                // installed copy.
+                if self.connected, HelperLocation.isWrongCopy(runningPath: reply?["path"] as? String,
+                                                              installedPath: helperURL.path) {
+                    self.note(L("Restarting the helper from its installed copy", lang: ResolvedLang.current))
+                    // Only the nested copy: the installed one may already be starting, and stays.
+                    for app in NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands")
+                    where HelperLocation.isWrongCopy(runningPath: app.bundleURL?.path, installedPath: helperURL.path) {
+                        app.terminate()
+                    }
+                }
             }
+        }
+    }
+
+    /// A helper that is running but has stopped answering is quit, then killed (HelperLocation.hungAction).
+    private func replaceIfHung() {
+        let helpers = NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands").filter { !$0.isTerminated }
+        switch hungWatch.step(now: Date(), connected: connected, running: !helpers.isEmpty) {
+        case .terminate:
+            note(L("The helper stopped answering. Restarting it", lang: ResolvedLang.current))
+            helpers.forEach { $0.terminate() }
+        case .kill:
+            // SIGKILL itself: forceTerminate() returned true and left a stopped helper where it was (10-06, e2e).
+            helpers.forEach { kill($0.processIdentifier, SIGKILL) }
+        case .none:
+            break
         }
     }
 
@@ -154,7 +189,7 @@ extension EnvironmentValues {
 /// ResolvedLang.current (log lines, run messages, the "lang" of every request to the helper) in step with it.
 /// A change re-renders everything under it at once.
 struct LocalizedRoot<Content: View>: View {
-    @AppStorage("language") private var language = AppLanguage.en.rawValue
+    @AppStorage("language") private var language = AppLanguage.system.rawValue
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -168,7 +203,7 @@ struct LocalizedRoot<Content: View>: View {
 /// A compact menu: English, 简体中文, or follow the system. Each language is named in itself; "follow system" is
 /// in the current one.
 struct LanguagePicker: View {
-    @AppStorage("language") private var language = AppLanguage.en.rawValue
+    @AppStorage("language") private var language = AppLanguage.system.rawValue
     @Environment(\.lang) private var lang
 
     func name(_ l: AppLanguage) -> String {
@@ -206,6 +241,8 @@ struct PermissionRow: View {
     var optional = false
     var actionTitle: String? = nil   // "Allow" unless given
     var busy = false                 // something is under way: a spinner, not a button that invites a click
+    var doneActionTitle: String? = nil   // a small action beside "Ready" (the helper's Restart)
+    var doneAction: (() -> Void)? = nil
     let action: () -> Void
     @Environment(\.lang) private var lang
 
@@ -227,12 +264,16 @@ struct PermissionRow: View {
                 }
                 // Two lines when needed: English copy runs longer than Chinese and was cut off mid-sentence.
                 Text(subtitle).font(.system(size: 12)).foregroundStyle(Brand.sage)
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(3).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             if busy && !done {
                 ProgressView().controlSize(.small)
             } else if done {
+                if let doneActionTitle, let doneAction {
+                    Button(doneActionTitle, action: doneAction).buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.sage).underline()
+                }
                 HStack(spacing: 6) {
                     Circle().fill(Brand.dot).frame(width: 7, height: 7)
                     Text(L("Ready", lang: lang)).font(.system(size: 12, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
@@ -464,11 +505,11 @@ struct DeskMindApp: App {
     @StateObject private var downloader = ModelDownloader()
     @StateObject private var eyes = EyesDownloader()
     @StateObject private var history = RunHistory.shared
-    @AppStorage("language") private var language = AppLanguage.en.rawValue
+    @AppStorage("language") private var language = AppLanguage.system.rawValue
 
     init() {
         // Before the helper model logs anything or sends its first request.
-        let stored = UserDefaults.standard.string(forKey: "language") ?? AppLanguage.en.rawValue
+        let stored = UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue
         ResolvedLang.current = (AppLanguage(rawValue: stored) ?? .en).resolved
     }
 
