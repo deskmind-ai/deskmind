@@ -24,6 +24,12 @@ enum RunErrorText {
             return L("Couldn't see the window this time (it happens when the Mac is busy). Wait a moment and run it again.",
                      lang: lang)
         }
+        // The local model answered, about options it was not offered (hands acts only on offered ones, hands#14): not a
+        // timeout, and nothing was done. What was wrong comes after "asked: ".
+        if r.contains("answered outside what it was asked") {
+            return L("The local model's answer wasn't one of the options it was given, so nothing was done. Please report it on GitHub so it can be fixed.",
+                     lang: lang)
+        }
         // The local model answered, and refused the step (HTTP 4xx): not a timeout, and running it again will not help.
         // What it said comes after " -- " (hands keeps the server's message).
         if r.contains("provider_unavailable"), r.range(of: #"http error 4\d\d"#, options: .regularExpression) != nil {
