@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 import unittest
@@ -157,6 +158,48 @@ class OptionOrder(unittest.TestCase):
     def test_a_list_entry_is_a_key_and_a_description(self):
         rep = check_request(_edit(LIST, lambda r: r["questions"]["operation"]["criteria"][0].pop("description")))
         self.assertTrue(any("questions/operation/criteria" in e for e in rep.errors), rep.errors)
+
+
+def state_digest(state) -> str:
+    """As SPEC.md defines it, written out here rather than imported: compact JSON in the order sent, SHA-256."""
+    return "sha256:" + hashlib.sha256(json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+class Identity(unittest.TestCase):
+    """Which step of which run a request is for (deskmind#36 item 4), and that a reply says it back."""
+
+    def with_ids(self, **extra):
+        r = copy.deepcopy(REQ)
+        r.update({"request_id": "r-1", "session_id": "run-1", "step": 3, "observation_id": "obs-0007",
+                  "state_digest": state_digest(r["state"])}, **extra)
+        return r
+
+    def test_a_request_with_its_identity_conforms(self):
+        self.assertTrue(check_request(self.with_ids()).ok, check_request(self.with_ids()).errors)
+
+    def test_the_digest_is_of_the_state_as_sent(self):
+        r = self.with_ids()
+        r["state"]["page"]["title"] = "another window"
+        self.assertIn("state_digest is not the digest of this state (SPEC.md, Request identity)", check_request(r).errors)
+        reordered = self.with_ids()
+        reordered["state"] = dict(reversed(list(reordered["state"].items())))
+        self.assertFalse(check_request(reordered).ok, "the same state in another order is another input")
+
+    def test_bad_identity_fields(self):
+        for bad in ({"step": 0}, {"step": "3"}, {"request_id": ""}, {"state_digest": "md5:abc"}):
+            self.assertFalse(check_request(self.with_ids(**bad)).ok, bad)
+
+    def test_a_reply_echoes_it(self):
+        req = self.with_ids()
+        answers = {q: {"type": "choice", "choice": options(v)[0][0], "probabilities": {options(v)[0][0]: 1.0}}
+                   for q, v in req["questions"].items()}
+        echoed = {"answers": answers, "request_id": "r-1", "session_id": "run-1", "step": 3}
+        self.assertTrue(check_reply(echoed, req).ok)
+        self.assertEqual(check_reply(echoed, req).warnings, [])
+        self.assertIn("reply request_id is 'r-2', the request's is 'r-1'",
+                      check_reply({**echoed, "request_id": "r-2"}, req).errors)
+        self.assertIn("the reply does not echo step", check_reply({"answers": answers}, req).warnings,
+                      "a server from before the echo: a warning, not an error")
 
 
 class Replies(unittest.TestCase):

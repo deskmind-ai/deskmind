@@ -22,7 +22,10 @@
     },
     "latency_ms": { "type": "number" },
     "cached": { "const": true, "description": "Present on a cache hit; latency_ms and routing are the original reply's." },
-    "routing": { "$ref": "#/$defs/routing" }
+    "routing": { "$ref": "#/$defs/routing" },
+    "request_id": { "type": "string", "description": "v1: the request's request_id, echoed." },
+    "session_id": { "type": "string", "description": "v1: the request's session_id, echoed." },
+    "step": { "type": "integer", "description": "v1: the request's step, echoed." }
   },
   "$defs": {
     "probabilities": {

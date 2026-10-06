@@ -61,9 +61,29 @@ of 220 (brain#8).
 - A server shows the options in the order sent and never reorders them. A harness keeps the agent profile's order
   rules ([Heads and their options](#heads-and-their-options)); `tools/check.py` checks them, a server does not.
 
+### Request identity
+
+From v1 (deskmind#36 item 4) a request can say which step of which run it is for. Every field is optional; a server
+that does not know them ignores them (Brain does: it drops fields it does not read), so a client sends them to any server.
+
+| Field | Content |
+|---|---|
+| `request_id` | unique per request; a retry of the same request keeps it, so a server or a log can tell a duplicate |
+| `session_id` | one per run of a task |
+| `step` | the harness's step, from 1; requests for the same step share it (hands asks again for an overridden operation's heads) |
+| `observation_id` | the harness's id of the observation the state and the options were built from; opaque to the server |
+| `state_digest` | `"sha256:"` and the hex SHA-256 of `state` as compact JSON in the order sent (`json.dumps(state, ensure_ascii=False, separators=(",", ":"))`, UTF-8) |
+
+- The digest keeps the order on purpose: the order of the state is part of what the model sees, so two states that
+  differ only in order are two inputs. `tools/check.py` recomputes it.
+- A server echoes `request_id`, `session_id` and `step` in its reply, and writes them in its routing log. They are
+  not part of the answer cache key: the cache answers equal state and questions, whatever the request is called.
+- An approval (item 7) names the `observation_id` it was given for.
+
 ### Reply
 
-`{"id", "model", "answers", "usage", "latency_ms", "routing"?, "cached"?}` ([schema](schema/response.schema.json)).
+`{"id", "model", "answers", "usage", "latency_ms", "routing"?, "cached"?, "request_id"?, "session_id"?, "step"?}`
+([schema](schema/response.schema.json)); the last three echo the request's ([Request identity](#request-identity)).
 
 - `answers` has one entry per question, scored or not. A `choice` answer is `{"type", "choice", "probabilities",
   "confidence"}`: `choice` is the argmax, `probabilities` covers every option, `confidence` is `(K·p_max − 1)/(K − 1)`.

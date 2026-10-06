@@ -13,6 +13,15 @@
       "type": "string",
       "description": "Accepted and ignored by Brain."
     },
+    "request_id": { "type": "string", "minLength": 1, "description": "v1: unique per request; a retry keeps it." },
+    "session_id": { "type": "string", "minLength": 1, "description": "v1: one per run of a task." },
+    "step": { "type": "integer", "minimum": 1, "description": "v1: the harness's step; requests for one step share it." },
+    "observation_id": { "type": "string", "minLength": 1, "description": "v1: the observation the state and options were built from; opaque to the server." },
+    "state_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "v1: SHA-256 of state as compact JSON in the order sent (SPEC.md, Request identity)."
+    },
     "questions": {
       "type": "object",
       "minProperties": 1,
