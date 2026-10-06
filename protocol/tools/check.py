@@ -107,13 +107,15 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
             r.errors.append(f"operation: {b!r} is offered after {a!r}; operations keep the registry's order")
             break
     known = {registry["operation_question"], *heads}
+    not_choices = False
     for qid, q in questions.items():
         if qid not in known:
             r.errors.append(f"question {qid!r} is neither the operation nor a known head")
         elif q.get("type") != "choice":
             r.errors.append(f"{qid}: an agent request asks it as a choice, not a {q.get('type')}")
-    if any(e.endswith(", not a noul") or e.endswith(", not a score") for e in r.errors):
-        return r
+            not_choices = True
+    if not_choices:
+        return r          # the rest reads options, which only a choice has
     for op in offered:
         for h in (ops.get(op) or {}).get("heads", []):
             if h not in questions:
