@@ -395,6 +395,12 @@ enum DecisionTests {
         check(RunErrorText.friendly("provider_unavailable: ... failed: <urlopen error [Errno 61] Connection refused>", lang: .en)
                 .contains("didn't answer in time"), "connection refused: not ready")
         check(RunErrorText.friendly(refused, lang: .zhHans).hasPrefix("本地模型处理不了这一步（choice criteria"), "zh")
+        // hands#14: an answer about an option that was not offered ends the run as provider_unavailable; it is not an outage.
+        let offMenu = "errored  2 actions  9s  $0.00\nprovider_unavailable: system one endpoint http://127.0.0.1:18850 answered outside what it was asked: type_text_value: a probability for '0', which was not offered\ntrace runs/do-20261006-221500"
+        let om = RunErrorText.friendly(offMenu, lang: .en)
+        check(om.hasPrefix("The local model's answer wasn't one of the options it was given"), "an off-menu answer says so: \(om)")
+        check(!om.contains("in time"), "and is not called a timeout")
+        check(RunErrorText.friendly(offMenu, lang: .zhHans).hasPrefix("本地模型的回答不在给它的选项里"), "zh: \(RunErrorText.friendly(offMenu, lang: .zhHans))")
         check(RunErrorText.friendly("see failed: capture failed", lang: .en).hasPrefix("Couldn't see the window"), "capture")
         check(RunErrorText.friendly("something else", lang: .en).hasPrefix("This run hit an error"), "anything else")
     }
