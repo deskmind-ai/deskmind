@@ -11,7 +11,7 @@
 
 DeskMind 得心是全栈开源的 Computer Use Agent。DeskMind 会看屏幕、想下一步、动手操作，靠的全是跑在你 Mac 上的小模型。任务有两种理解时，它先问你一句，不瞎猜。
 
-[English](README.md) · [官网](https://deskmind.dev/zh/) · [文档](https://deskmind.dev/zh/docs/) · [下载 Mac App](https://github.com/deskmind-ai/deskmind/releases/latest) · [模型](https://huggingface.co/deskmind) · [讨论区](https://github.com/deskmind-ai/deskmind/discussions) · [路线图](ROADMAP.md)
+[English](README.md) · [官网](https://deskmind.dev/zh/) · [文档](https://deskmind.dev/zh/docs/) · [下载 Mac App](https://github.com/deskmind-ai/deskmind/releases/latest) · [模型](https://huggingface.co/deskmind) · [讨论区](https://github.com/deskmind-ai/deskmind/discussions) · [路线图](ROADMAP.md) · [更新日志](CHANGELOG.zh-CN.md)
 
 **[在 deskmind.dev 观看 56 秒演示](https://deskmind.dev/zh/)**：发布版模型的真实录屏。两笔订单都叫 Lisa Wong，所以它先问用哪一笔，再写入。
 
@@ -80,7 +80,7 @@ curl -s localhost:8793/v1/systemone -H 'Content-Type: application/json' -d @exam
 | [`.github/workflows/app.yml`](.github/workflows/app.yml) | CI：App 的每次改动都会构建和测试；打版本标签时签名、公证并生成发布草稿 |
 | [`ROADMAP.md`](ROADMAP.md) | 接下来在做什么 |
 
-Mac App 的发布版本都在这里：[Releases](https://github.com/deskmind-ai/deskmind/releases)。
+Mac App 的发布版本都在这里：[Releases](https://github.com/deskmind-ai/deskmind/releases)；每个版本改了什么，简要列在 [更新日志](CHANGELOG.zh-CN.md)。
 
 ## 成绩，附样本量
 
