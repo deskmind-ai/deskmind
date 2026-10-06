@@ -6,8 +6,9 @@ on the [Releases](https://github.com/deskmind-ai/deskmind/releases) page. Models
 
 ## 0.4.1 (in testing)
 
-Pre-release [v0.4.1-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.1), 2026-10-06. 0.4.0 stays the
-latest version until this one is released.
+Pre-releases [v0.4.1-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.1) and
+[v0.4.1-rc.2](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.2), 2026-10-06. 0.4.0 stays the latest version
+until this one is released.
 
 **Fixes**
 - Writing text into a document no longer loops. After the right text was written and saved, a step that "replaced" part
@@ -17,6 +18,10 @@ latest version until this one is released.
 - On a French (AZERTY) or Dvorak keyboard, select-all and paste press the right keys. On AZERTY, cmd+A could arrive as
   cmd+Q and quit the app.
 - The background helper no longer crashes when macOS stops it while it is quitting, and it stops its model servers.
+- Screen Recording is recognised as soon as you turn it on during the first setup. macOS's "Quit & Reopen" had started a
+  copy of the helper whose permission didn't count; the right copy now always runs, and restarts itself once the
+  permission is granted.
+- The whole setup fits on screen, and the background helper's row has a Restart button.
 
 **New**
 - **Save Full Log…** after a failed run: a .zip kept on your Mac, for you to check before you share it.
@@ -25,6 +30,7 @@ latest version until this one is released.
   by about 3% (about 10% with the 30 fps stream).
 
 **Changes**
+- The app follows your system language unless you've chosen one in the language menu (it used to start in English).
 - A mistake in `~/.config/deskmind/apps.yaml` is reported by name.
 - The models are the same as in 0.4.0.
 
