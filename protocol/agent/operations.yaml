@@ -76,6 +76,8 @@ heads:
 # request offers a subset; the operations it offers keep this relative order.
 #   heads:     the questions this operation uses; a harness that offers the operation sends them
 #   class:     act (reversible UI action), navigate, write (changes the user's content), focus, dialogue, terminal
+#   gaps:      the known gaps (SPEC.md) this operation runs into
+#   may_lack:  a head v0 may leave out, and the gap that says so; any other missing head is an error
 #   executes:  what the harness does with the answer
 operations:
   CLICK:
@@ -93,17 +95,20 @@ operations:
     executes: type the value into the row's name field, clear_first, foreground
     refused_when: the new name is another file's (in the window, or moved by this run)
     gaps: [G19]           # offered even when there is no value candidate, so type_text_value is absent
+    may_lack: { type_text_value: G19 }
   TYPE_TEXT:
     heads: [type_text_target, type_text_value]
     class: write
     executes: set the field to the value (clear_first)
     refused_when: the field holds several lines and the value is one line
     gaps: [G19]           # offered even when there is no value candidate, so type_text_value is absent
+    may_lack: { type_text_value: G19 }
   APPEND_TEXT:
     heads: [append_text_target, type_text_value]
     class: write
     executes: add the value at the end of the field (a newline added when the field ends in one)
     gaps: [G19]           # offered even when there is no value candidate, so type_text_value is absent
+    may_lack: { type_text_value: G19 }
   REPLACE_TEXT:
     heads: [replace_text_target, replace_from, type_text_value]
     class: write
@@ -113,6 +118,7 @@ operations:
       replaced; a value that already holds the whole field rewrites it (hands#9); a goal's "from X" inside the span
       replaces only X; a "Label: value" line keeps its label. Pairs are tried by p(from) x p(value).
     gaps: [G13]
+    may_lack: { replace_from: G13 }   # no span found
   SCROLL:
     heads: [scroll_target]
     class: navigate
@@ -145,6 +151,7 @@ operations:
     offered_when: the last action was cmd+shift+n or cmd+n
     executes: type the value where the keyboard focus is, clear_first, foreground
     gaps: [G1, G19]
+    may_lack: { type_text_value: G19 }
   ASK:
     heads: []
     class: dialogue

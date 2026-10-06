@@ -80,6 +80,8 @@ def _order_errors(qid: str, keys: list[str], order: str, fmt_name: str) -> list[
 def check_request(req: dict, registry: dict = REGISTRY) -> Report:
     r = Report()
     r.errors += _schema_errors(REQUEST, req, "request")
+    if r.errors:
+        return r          # the rest reads the request's structure, which the schema has just said is not there
     questions = req.get("questions") or {}
     for qid, q in questions.items():
         if isinstance(q, dict) and isinstance(q.get("criteria"), list) and q.get("type") == "choice":
@@ -90,6 +92,8 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
         return r                                    # not an agent request: the transport is all there is to check
     state = req.get("state")
     r.errors += _schema_errors(STATE, state, "state")
+    if r.errors:
+        return r
     ops, heads, formats = registry["operations"], registry["heads"], registry["option_formats"]
 
     offered = [k for k, _ in options(op_q) if isinstance(k, str)]   # any other key is the schema's error
@@ -103,15 +107,21 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
             r.errors.append(f"operation: {b!r} is offered after {a!r}; operations keep the registry's order")
             break
     known = {registry["operation_question"], *heads}
-    for qid in questions:
+    not_choices = False
+    for qid, q in questions.items():
         if qid not in known:
             r.errors.append(f"question {qid!r} is neither the operation nor a known head")
+        elif q.get("type") != "choice":
+            r.errors.append(f"{qid}: an agent request asks it as a choice, not a {q.get('type')}")
+            not_choices = True
+    if not_choices:
+        return r          # the rest reads options, which only a choice has
     for op in offered:
         for h in (ops.get(op) or {}).get("heads", []):
             if h not in questions:
-                gaps = (ops.get(op) or {}).get("gaps", [])
-                (r.warnings if gaps else r.errors).append(
-                    f"{op} is offered without its head {h!r}" + (f" (known gap {', '.join(gaps)})" if gaps else ""))
+                gap = ((ops.get(op) or {}).get("may_lack") or {}).get(h)
+                (r.warnings if gap else r.errors).append(
+                    f"{op} is offered without its head {h!r}" + (f" (known gap {gap})" if gap else ""))
 
     elements = state.get("elements", []) if isinstance(state, dict) else []
     indexes = {e.get("index") for e in elements if isinstance(e, dict)}
@@ -150,7 +160,7 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
 
 def check_reply(reply: dict, req: dict | None = None) -> Report:
     r = Report(errors=_schema_errors(REPLY, reply, "reply"))
-    if req is not None:
+    if req is not None and not r.errors and isinstance(req.get("questions") if isinstance(req, dict) else None, dict):
         missing = set(req.get("questions") or {}) - set(reply.get("answers") or {})
         r.errors += [f"no answer for question {q!r}" for q in sorted(missing)]
         for qid, a in (reply.get("answers") or {}).items():
@@ -182,7 +192,10 @@ def main(argv: list[str] | None = None) -> int:
     for f in args.files:
         items = [json.loads(f.read_text())] if args.reply else load_requests(f)
         for i, item in enumerate(items):
-            rep = check_reply(item) if args.reply else check_request(item)
+            try:
+                rep = check_reply(item) if args.reply else check_request(item)
+            except Exception as exc:   # a record the checker cannot read is an error, and the rest are still checked
+                rep = Report(errors=[f"unreadable: {type(exc).__name__}: {exc}"])
             total += 1
             bad += not rep.ok
             warned += bool(rep.warnings)
