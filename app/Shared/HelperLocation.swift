@@ -15,23 +15,43 @@ enum HelperLocation {
         (supportDir as NSString).appendingPathComponent(appName)
     }
 
-    /// The installed copy to hand over to and exit, when this one runs from inside another app's bundle and the
-    /// installed copy is there; nil to keep running (already the installed copy, or nothing to hand over to).
-    static func handOverTarget(bundlePath: String, installedPath: String, installedExists: Bool) -> String? {
-        let mine = (bundlePath as NSString).standardizingPath, installed = (installedPath as NSString).standardizingPath
-        guard mine != installed, mine.contains(".app/Contents/"), installedExists else { return nil }
-        return installed
+    /// Whether a helper at `path` runs from inside another app's bundle (DeskMind.app's Contents/Library/LoginItems):
+    /// the copy whose permissions count as DeskMind's.
+    static func isNested(_ path: String, installedPath: String) -> Bool {
+        let p = (path as NSString).standardizingPath
+        return p != (installedPath as NSString).standardizingPath && p.contains(".app/Contents/")
+    }
+
+    /// The installed copy to hand over to and exit, when this one is nested; nil to keep running. The nested copy
+    /// first installs itself there when the installed copy is missing or differs (an update the app has not copied
+    /// out yet), so the hand-over always starts the version that shipped with this DeskMind.app.
+    static func handOverTarget(bundlePath: String, installedPath: String) -> String? {
+        isNested(bundlePath, installedPath: installedPath) ? (installedPath as NSString).standardizingPath : nil
+    }
+
+    /// What tells two copies of the helper apart (HelperInstaller.stamp).
+    struct Stamp: Equatable {
+        let version: String, build: String, runtime: String, executable: String
+    }
+
+    /// Whether the installed copy must be (re)made from the shipped one: missing, or different in any way -- an older
+    /// copy after an update, or a newer one left by a later DeskMind.app that was replaced by an older one.
+    static func needsInstall(shipped: Stamp?, installed: Stamp?) -> Bool {
+        guard let shipped else { return false }   // nothing to install from
+        return installed != shipped
     }
 
     /// Whether to restart so a Screen Recording grant takes effect: a new process sees it (the probe) and this one
-    /// does not, and no task is running. Once per process.
+    /// does not, and no task is running. Once per process. The helper starts its own successor before it exits
+    /// (HelperInstaller.launch), so this does not depend on the app being open.
     static func restartForGrant(live: Bool, probe: Bool, taskRunning: Bool, alreadyScheduled: Bool) -> Bool {
         probe && !live && !taskRunning && !alreadyScheduled
     }
 
-    /// The app's side: a connected helper running from anywhere but the installed copy is the wrong one.
+    /// The app's side: a connected helper running nested in an app bundle is the wrong one. Only nested: a helper
+    /// started from a development build or a test elsewhere is left alone.
     static func isWrongCopy(runningPath: String?, installedPath: String) -> Bool {
         guard let runningPath, !runningPath.isEmpty else { return false }   // an older helper that doesn't say
-        return (runningPath as NSString).standardizingPath != (installedPath as NSString).standardizingPath
+        return isNested(runningPath, installedPath: installedPath)
     }
 }

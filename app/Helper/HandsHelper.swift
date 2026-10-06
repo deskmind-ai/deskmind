@@ -82,6 +82,13 @@ func automationGranted() -> Bool? {
     }
 }
 
+/// Exit and come back: the same copy is started again a moment after this process has gone, whether or not the app is
+/// open (the LaunchAgent with KeepAlive that used to do this is no longer registered).
+func restartSelf() {
+    HelperInstaller.launch(Bundle.main.bundlePath, after: 1.0)
+    DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { exit(0) }
+}
+
 /// Set once a restart for a Screen Recording grant is scheduled (see status).
 nonisolated(unsafe) var restartingForGrant = false
 
@@ -93,7 +100,7 @@ func status(probe: Bool) -> [String: Any] {
     if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: Runner.current != nil,
                                       alreadyScheduled: restartingForGrant) {
         restartingForGrant = true
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { exit(0) }
+        restartSelf()
     }
     var s: [String: Any] = [
         "ok": true,
@@ -179,8 +186,8 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         Runner.requestStop()
         return ["ok": true, "stopped": running]
     case "restart":
-        // launchd's KeepAlive starts us again; the main app just reconnects.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { exit(0) }
+        // Our successor is started before we go (HelperInstaller.launch); the main app, if open, just reconnects.
+        restartSelf()
         return ["ok": true, "restarting": true]
     default:
         return ["ok": false, "error": "unknown op"]
@@ -263,13 +270,20 @@ struct HandsHelper {
         // Started from inside DeskMind.app (by bundle id, e.g. macOS's "Quit & Reopen" after Screen Recording is turned
         // on): that copy's permissions count as DeskMind's, so the installed copy is started instead (HelperLocation).
         let installed = HelperLocation.installedPath(supportDir: DeskMindIPC.supportDir.path)
-        if let target = HelperLocation.handOverTarget(bundlePath: Bundle.main.bundlePath, installedPath: installed,
-                                                      installedExists: FileManager.default.fileExists(atPath: installed)) {
-            let cfg = NSWorkspace.OpenConfiguration()
-            cfg.activates = false
-            let opened = DispatchSemaphore(value: 0)
-            NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: target), configuration: cfg) { _, _ in opened.signal() }
-            _ = opened.wait(timeout: .now() + 10)
+        if let target = HelperLocation.handOverTarget(bundlePath: Bundle.main.bundlePath, installedPath: installed) {
+            // The installed copy as this DeskMind.app shipped it (HelperInstaller): an older one still running is let go
+            // when it is replaced, and the installed copy is started unless it is already running.
+            if (try? HelperInstaller.ensureInstalled(shipped: Bundle.main.bundlePath, installed: target)) == true {
+                for app in NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands")
+                where app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+                    app.terminate()
+                }
+            }
+            let running = NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands").contains {
+                $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated
+                    && ($0.bundleURL?.standardizedFileURL.path ?? "") == URL(fileURLWithPath: target).standardizedFileURL.path
+            }
+            if !running { HelperInstaller.launch(target, after: 0.5) }
             exit(0)
         }
         signal(SIGPIPE, SIG_IGN)   // a client that goes away mid-stream must not take the helper with it

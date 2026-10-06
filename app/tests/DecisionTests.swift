@@ -550,17 +550,25 @@ enum DecisionTests {
         let installed = HelperLocation.installedPath(supportDir: support)
         check(installed == support + "/DeskMind Hands.app", "installed copy path: \(installed)")
         let nested = "/Applications/DeskMind.app/Contents/Library/LoginItems/DeskMind Hands.app"
-        check(HelperLocation.handOverTarget(bundlePath: nested, installedPath: installed, installedExists: true) == installed,
+        check(HelperLocation.handOverTarget(bundlePath: nested, installedPath: installed) == installed,
               "the copy inside DeskMind.app hands over (rc.1: macOS's Quit & Reopen started it)")
-        check(HelperLocation.handOverTarget(bundlePath: nested, installedPath: installed, installedExists: false) == nil,
-              "nothing installed yet: the nested copy keeps running rather than exit into nothing")
-        check(HelperLocation.handOverTarget(bundlePath: installed, installedPath: installed, installedExists: true) == nil,
+        check(HelperLocation.handOverTarget(bundlePath: installed, installedPath: installed) == nil,
               "the installed copy keeps running")
-        check(HelperLocation.handOverTarget(bundlePath: installed + "/", installedPath: installed, installedExists: true) == nil,
+        check(HelperLocation.handOverTarget(bundlePath: installed + "/", installedPath: installed) == nil,
               "the same path written differently is the same copy")
-        check(HelperLocation.handOverTarget(bundlePath: "/Users/u/build/DeskMind Hands.app", installedPath: installed,
-                                            installedExists: true) == nil,
+        check(HelperLocation.handOverTarget(bundlePath: "/Users/u/build/DeskMind Hands.app", installedPath: installed) == nil,
               "a standalone build (not inside another app) is left alone")
+        // The installed copy is remade from the shipped one whenever they differ, older or newer.
+        let a = HelperLocation.Stamp(version: "0.4.1", build: "70", runtime: "89be730+f8e4702+ocr", executable: "aa")
+        check(!HelperLocation.needsInstall(shipped: a, installed: a), "the same copy: left as it is")
+        check(HelperLocation.needsInstall(shipped: a, installed: nil), "none installed: install")
+        check(HelperLocation.needsInstall(shipped: a, installed: .init(version: "0.4.0", build: "36", runtime: "11368c6+f8e4702+ocr", executable: "bb")),
+              "an older copy after an update: replace")
+        check(HelperLocation.needsInstall(shipped: a, installed: .init(version: "0.5.0", build: "80", runtime: "x", executable: "cc")),
+              "a newer copy (an older DeskMind.app put back): replace with what this app ships")
+        check(HelperLocation.needsInstall(shipped: a, installed: .init(version: "0.4.1", build: "70", runtime: "89be730+f8e4702+ocr", executable: "dd")),
+              "same version, different executable (a development rebuild): replace")
+        check(!HelperLocation.needsInstall(shipped: nil, installed: a), "nothing shipped to install from: left")
         // Restart so a Screen Recording grant takes effect: only when a new process sees it and this one doesn't.
         check(HelperLocation.restartForGrant(live: false, probe: true, taskRunning: false, alreadyScheduled: false),
               "granted, not yet seen: restart")
@@ -573,6 +581,8 @@ enum DecisionTests {
         check(HelperLocation.isWrongCopy(runningPath: nested, installedPath: installed), "nested copy connected: wrong")
         check(!HelperLocation.isWrongCopy(runningPath: installed, installedPath: installed), "installed copy: right")
         check(!HelperLocation.isWrongCopy(runningPath: nil, installedPath: installed), "an older helper that doesn't say: left")
+        check(!HelperLocation.isWrongCopy(runningPath: "/Users/u/build/DeskMind Hands.app", installedPath: installed),
+              "a development helper started elsewhere is not terminated (review of #32)")
         // The language follows the system unless the user picked one (0.4.1-rc.1 opened in English on a Chinese Mac).
         check(AppLanguage(rawValue: AppLanguage.system.rawValue)?.resolved == ResolvedLang.fromSystem(), "system language")
     }
