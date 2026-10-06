@@ -5,7 +5,7 @@ DeskMind for Mac 每个版本改了什么，简要列出。每个版本的完整
 
 ## 0.4.1（2026-10-07）
 
-[发布说明](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1)。与预发布版 [v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3) 是同一个构建，发布前在一台全新的 Mac 上测试过。
+[发布说明](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1)。与预发布版 [v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3) 用的是同一份代码，rc.3 发布前在一台全新的 Mac 上测试过。
 
 **修复**
 - 往文档里写内容不再死循环。以前在写好并保存正确内容之后，如果某一步把其中一部分「替换」成整段文字，文档就会嵌套进自己。现在这种步骤按整段改写处理，任务随之完成。在专测这个问题的评测任务（G04）上，现在 3 次运行都在 4 步内完成；以前我们记录的 6 次运行都陷在这个循环里，直到用满 20 步（其中 5 次碰巧停在正确内容上）。整套 diag 评测 39 题全部通过（diag-v27，与 0.4.1-rc.2 相同的运行时）。

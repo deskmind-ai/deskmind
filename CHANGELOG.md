@@ -6,7 +6,7 @@ on the [Releases](https://github.com/deskmind-ai/deskmind/releases) page. Models
 
 ## 0.4.1 (2026-10-07)
 
-[Release notes](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1). The same build as
+[Release notes](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1). Built from the same code as
 pre-release [v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3), which was tested on a clean Mac
 before release.
 
