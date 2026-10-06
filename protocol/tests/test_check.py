@@ -70,6 +70,40 @@ class Requests(unittest.TestCase):
         self.assertTrue(any("operations" in e for e in rep.errors), rep.errors)
 
 
+class Hardening(unittest.TestCase):
+    """From an outside review of v0 (10-06): what the checker crashed on, and what it let through."""
+
+    def test_any_json_is_a_report_not_a_crash(self):
+        for req in ([], 3, "x", None, {"state": {}, "questions": [1]}, {"state": {}, "questions": {"q": 3}},
+                    {"state": [], "questions": {"operation": {"type": "choice", "instructions": {}, "criteria": {"CLICK": "c"}}}}):
+            self.assertFalse(check_request(req).ok, repr(req))
+        for reply in ([], {"answers": {"operation": 3}}, {"answers": []}):
+            self.assertFalse(check_reply(reply, REQ).ok, repr(reply))
+
+    def test_agent_questions_are_choices(self):
+        rep = broken(lambda r: r["questions"].update({"operation": {"type": "noul", "instructions": {}}}))
+        self.assertIn("operation: an agent request asks it as a choice, not a noul", rep.errors)
+        rep = broken(lambda r: r["questions"].update({"click_target": {"type": "score", "instructions": {},
+                                                                        "criteria": ["a", "b"]}}))
+        self.assertIn("click_target: an agent request asks it as a choice, not a score", rep.errors)
+
+    def test_a_gap_excuses_only_the_head_it_is_about(self):
+        rep = broken(lambda r: r["questions"]["operation"]["criteria"].update({"ANSWER": "answer"}))
+        self.assertIn("ANSWER is offered without its head 'answer_value'", rep.errors, "G3 is about routing, not heads")
+        rep = broken(lambda r: r["questions"].pop("type_text_target"))
+        self.assertIn("TYPE_TEXT is offered without its head 'type_text_target'", rep.errors,
+                      "G19 is about the value head only")
+        rep = broken(lambda r: r["questions"].pop("type_text_value"))
+        self.assertTrue(rep.ok, rep.errors)
+        self.assertIn("TYPE_TEXT is offered without its head 'type_text_value' (known gap G19)", rep.warnings)
+
+    def test_the_registry_says_which_head_a_gap_excuses(self):
+        for op, spec in REGISTRY["operations"].items():
+            for head, gap in (spec.get("may_lack") or {}).items():
+                self.assertIn(head, spec["heads"], op)
+                self.assertIn(gap, spec.get("gaps", []), op)
+
+
 class OptionOrder(unittest.TestCase):
     """The order of a question's options sets the letters the model answers with (deskmind#36 item 1). brain#8: the
     same model on re-sorted fixtures fell from 220 to about 130 of 223 valid steps, and v0's checker passed them."""

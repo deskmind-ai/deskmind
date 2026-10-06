@@ -200,7 +200,10 @@ What a model must match to behave as trained, beyond the request. These settings
 
 ## 4. Conformance
 
-`python protocol/tools/check.py <requests>` checks recorded requests. On 10-06 it was run over 440 real requests,
+`python protocol/tools/check.py <requests>` checks recorded requests. A request or reply that fails its schema is
+reported as such and not read further, so any JSON gives a report rather than a crash. An agent request asks the
+operation and every head as a `choice`. An offered operation needs all its heads; the only exceptions are the heads
+the registry's `may_lack` names, each with the gap that excuses it (G13, G19), and they are warnings. On 10-06 it was run over 440 real requests,
 with the option order rules:
 
 | Corpus | Requests | Conform | Warnings |
