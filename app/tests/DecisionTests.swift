@@ -400,6 +400,8 @@ enum DecisionTests {
         let f = RunErrorText.friendly(failed, lang: .en)
         check(f.hasPrefix("The local model couldn't handle this step (ValueError: no options left after the cap)"), "a 500 says the model failed on the step: \(f)")
         check(!f.contains("in time"), "a 500 is not called a timeout")
+        let gateway = "provider_unavailable: system one endpoint http://127.0.0.1:18850 failed: HTTP Error 503: Service Unavailable"
+        check(RunErrorText.friendly(gateway, lang: .en).contains("didn't answer in time"), "a 503 is the server not being there")
         // hands#14: an answer about an option that was not offered ends the run as provider_unavailable; it is not an outage.
         let offMenu = "errored  2 actions  9s  $0.00\nprovider_unavailable: system one endpoint http://127.0.0.1:18850 answered outside what it was asked: type_text_value: a probability for '0', which was not offered\ntrace runs/do-20261006-221500"
         let om = RunErrorText.friendly(offMenu, lang: .en)

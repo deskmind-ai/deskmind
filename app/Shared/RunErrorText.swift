@@ -30,10 +30,10 @@ enum RunErrorText {
             return L("The local model's answer wasn't one of the options it was given, so nothing was done. Please report it on GitHub so it can be fixed.",
                      lang: lang)
         }
-        // The local model answered, and refused the step (HTTP 4xx) or failed on it (5xx: Brain reports a failure while
-        // answering as a 500 internal_error since brain#12, not a 400): not a timeout, and running it again will not
-        // help. What it said comes after " -- " (hands keeps the server's message).
-        if r.contains("provider_unavailable"), r.range(of: #"http error [45]\d\d"#, options: .regularExpression) != nil {
+        // The local model answered, and refused the step (HTTP 4xx) or failed on it (500: Brain reports a failure while
+        // answering as internal_error since brain#12, not a 400): not a timeout, and running it again will not help.
+        // 502-504 are a proxy or a server that is not there, and stay below. What it said comes after " -- ".
+        if r.contains("provider_unavailable"), r.range(of: #"http error (4\d\d|500)"#, options: .regularExpression) != nil {
             let said = raw.components(separatedBy: " -- ").dropFirst().joined(separator: " -- ")
                 .components(separatedBy: "\n").first?.trimmingCharacters(in: .whitespaces) ?? ""
             return said.isEmpty
