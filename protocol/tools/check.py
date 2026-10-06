@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import re
 import sys
@@ -50,6 +51,14 @@ def _schema_errors(validator, value, where: str) -> list[str]:
             for e in sorted(validator.iter_errors(value), key=lambda e: list(map(str, e.absolute_path)))]
 
 
+IDENTITY = ("request_id", "session_id", "step")   # what a server echoes (SPEC.md, Request identity)
+
+
+def state_digest(state) -> str:
+    """A request's state_digest: SHA-256 of the state as compact JSON in the order sent."""
+    return "sha256:" + hashlib.sha256(json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
 def options(question) -> list[tuple]:
     """A choice question's options in the order they are shown: (key, description) pairs. v1 sends a list of
     {"key", "description"}; v0 an object, whose key order is the order."""
@@ -82,6 +91,8 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
     r.errors += _schema_errors(REQUEST, req, "request")
     if r.errors:
         return r          # the rest reads the request's structure, which the schema has just said is not there
+    if "state_digest" in req and req["state_digest"] != state_digest(req.get("state")):
+        r.errors.append("state_digest is not the digest of this state (SPEC.md, Request identity)")
     questions = req.get("questions") or {}
     for qid, q in questions.items():
         if isinstance(q, dict) and isinstance(q.get("criteria"), list) and q.get("type") == "choice":
@@ -161,6 +172,11 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
 def check_reply(reply: dict, req: dict | None = None) -> Report:
     r = Report(errors=_schema_errors(REPLY, reply, "reply"))
     if req is not None and not r.errors and isinstance(req.get("questions") if isinstance(req, dict) else None, dict):
+        for k in IDENTITY:
+            if k in req and k in reply and reply[k] != req[k]:
+                r.errors.append(f"reply {k} is {reply[k]!r}, the request's is {req[k]!r}")
+            elif k in req and k not in reply:
+                r.warnings.append(f"the reply does not echo {k}")
         missing = set(req.get("questions") or {}) - set(reply.get("answers") or {})
         r.errors += [f"no answer for question {q!r}" for q in sorted(missing)]
         for qid, a in (reply.get("answers") or {}).items():
