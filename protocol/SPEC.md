@@ -97,7 +97,8 @@ that does not know them ignores them (Brain does: it drops fields it does not re
   is under the threshold (0.96 in the app) or the step is risky: `risky_DONE`, `risky_BLOCKED`, `risky_KEY` (a chord
   outside `cmd+s cmd+f cmd+c tab escape`), `risky_undo` (a click on a target whose option text contains 撤销/undo),
   `unverified_last` (DONE right after an unverifiable or no-op effect). `confirmed: true` means both tiers chose the
-  same terminal operation; hands then never overrides it.
+  same terminal operation. hands then does not override it with another operation (the low-confidence override
+  below); its DONE check still runs and can still send a DONE back.
 - A cache hit (identical state and questions) returns the stored reply with a new `id` and `cached: true`, including
   the original `latency_ms` and `routing` (G18). Latency measurements must leave cached replies out.
 
@@ -132,13 +133,13 @@ arguments. [`agent/operations.yaml`](agent/operations.yaml) lists them; this sec
 | `REPLACE_TEXT` | `replace_text_target`, `replace_from`, `type_text_value` | write | sets the field to the edit described below |
 | `SCROLL` | `scroll_target` | navigate | scrolls 3 lines at the element |
 | `SELECT` | `select_target` | write | sets the dropdown to the option |
-| `FOCUS_APP` | `focus_app_target` | focus | brings another app's window forward; offered only with more than one candidate (G12) |
+| `FOCUS_APP` | `focus_app_target` | focus | observes another app instead; offered only with more than one candidate (G12). With the app's background driver (Peekaboo over MCP) nothing is brought forward; the command-line driver activates the app |
 | `KEY` | `key_target` | act | presses the chord in the focused window |
 | `DONE` | — | terminal | ends the task; the harness may send it back (the DONE check) |
 | `BLOCKED` | — | terminal | gives up |
 | `TYPE_FOCUSED` | `type_text_value` | write | types where the keyboard focus is; offered right after `cmd+n`/`cmd+shift+n` (G1) |
 | `ASK` | — | dialogue | asks the user; the question comes from the harness, not from a head |
-| `FOCUS_WINDOW` | `focus_window_target` | focus | switches to another window of the app |
+| `FOCUS_WINDOW` | `focus_window_target` | focus | observes another window of the app; as with `FOCUS_APP`, the background driver does not raise it |
 | `ANSWER` | `answer_value` | terminal | ends the task with the chosen on-screen text as the answer (G3) |
 
 Operations are offered in this order, so their option letters are stable: a request offers a subset, and the ones it
@@ -247,7 +248,7 @@ harness profile (40 elements) and is not part of this corpus.
 |---|---|
 | G1 | `TYPE_FOCUSED`'s `type_text_value` is not among the heads a two-stage server scores for it, so it comes back uniform and hands types candidate 1 whatever the model would have chosen. |
 | G2 | `goal_complete` is not scored under two-stage unless the operation is terminal; it is uniform (p(yes) = 0.5) otherwise. |
-| G3 | `ANSWER` ends the task but is not treated as terminal by the router (never escalated as such). |
+| G3 | `ANSWER` ends the task but is not treated as terminal by the router: it is not escalated for being terminal, as DONE and BLOCKED are, and two tiers agreeing on it is not `confirmed`. It is still escalated on low confidence like any step (`answer_value` counts in `fast_conf`). |
 | G4 | The two-tier merge fills heads from the fast tier only when both tiers chose a terminal operation; otherwise the strong tier's unscored heads are uniform. |
 | G5 | Error bodies differ (401 is a string), and a `ValueError` inside the predictor is a 400, not a 500. |
 | G6 | Defaults and names differ: port 8787 vs 8793, `DESKMIND_BRAIN_TOKEN` vs `SYSTEMONE_API_KEY`, the ignored `model` field with different defaults. |
