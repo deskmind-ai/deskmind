@@ -110,7 +110,9 @@ final class HelperModel: ObservableObject {
                 if self.connected, HelperLocation.isWrongCopy(runningPath: reply?["path"] as? String,
                                                               installedPath: helperURL.path) {
                     self.note(L("Restarting the helper from its installed copy", lang: ResolvedLang.current))
-                    for app in NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands") {
+                    // Only the nested copy: the installed one may already be starting, and stays.
+                    for app in NSRunningApplication.runningApplications(withBundleIdentifier: "ai.deskmind.hands")
+                    where HelperLocation.isWrongCopy(runningPath: app.bundleURL?.path, installedPath: helperURL.path) {
                         app.terminate()
                     }
                 }

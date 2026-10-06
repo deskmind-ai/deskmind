@@ -286,6 +286,10 @@ struct HandsHelper {
             if !running { HelperInstaller.launch(target, after: 0.5) }
             exit(0)
         }
+        // One helper at a time (HelperLock): wait for one that is going, leave one that stays.
+        try? FileManager.default.createDirectory(at: DeskMindIPC.supportDir, withIntermediateDirectories: true)
+        guard HelperLock.acquire(DeskMindIPC.supportDir.appendingPathComponent(HelperLock.fileName).path, wait: 15) != nil
+        else { exit(0) }
         signal(SIGPIPE, SIG_IGN)   // a client that goes away mid-stream must not take the helper with it
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)   // no Dock icon, no menu bar

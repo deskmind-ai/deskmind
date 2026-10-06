@@ -583,6 +583,17 @@ enum DecisionTests {
         check(!HelperLocation.isWrongCopy(runningPath: nil, installedPath: installed), "an older helper that doesn't say: left")
         check(!HelperLocation.isWrongCopy(runningPath: "/Users/u/build/DeskMind Hands.app", installedPath: installed),
               "a development helper started elsewhere is not terminated (review of #32)")
+        // One helper at a time: a second one waits for the first to go, and gives up if it stays (rc.2 e2e: a restart
+        // with the app open left two helpers, the second holding the socket).
+        let lockPath = NSTemporaryDirectory() + "hands-\(getpid()).lock"
+        let first = HelperLock.acquire(lockPath, wait: 0)
+        check((first ?? -1) >= 0, "the first helper takes the lock")
+        check(HelperLock.acquire(lockPath, wait: 0.3) == nil, "a second one, while the first stays: gives up")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { close(first ?? -1) }
+        let successor = HelperLock.acquire(lockPath, wait: 5)
+        check((successor ?? -1) >= 0, "a successor waits for the first to go, then takes it")
+        close(successor ?? -1); unlink(lockPath)
+        check(HelperLock.acquire("/nonexistent-dir/hands.lock", wait: 0) == -1, "no lock file: the helper still runs")
         // The language follows the system unless the user picked one (0.4.1-rc.1 opened in English on a Chinese Mac).
         check(AppLanguage(rawValue: AppLanguage.system.rawValue)?.resolved == ResolvedLang.fromSystem(), "system language")
     }

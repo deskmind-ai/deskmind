@@ -55,3 +55,25 @@ enum HelperLocation {
         return isNested(runningPath, installedPath: installedPath)
     }
 }
+
+/// One helper at a time. Several launchers can start one at once -- a helper restarting itself, the app noticing it
+/// gone, the nested copy handing over -- and a second helper would take the socket from the first (serve() unlinks
+/// it). Each holds an flock on a file next to the socket for as long as it lives (released when it exits, however it
+/// exits; not inherited by its children). A starting helper waits for the holder to go -- the successor of a restart
+/// or an update -- and gives up after `wait` seconds: another helper is running, so this one is not needed.
+enum HelperLock {
+    static let fileName = "hands.lock"
+
+    /// The descriptor holding the lock; nil when another process kept it for `wait` seconds; -1 when there is no lock
+    /// file to hold (the helper goes on without one rather than not run).
+    static func acquire(_ path: String, wait: Double) -> Int32? {
+        let fd = open(path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return -1 }
+        let deadline = Date().addingTimeInterval(wait)
+        while true {
+            if flock(fd, LOCK_EX | LOCK_NB) == 0 { return fd }
+            if Date() >= deadline { close(fd); return nil }
+            usleep(100_000)
+        }
+    }
+}
