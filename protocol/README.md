@@ -10,7 +10,7 @@ program can load to keep to it.
 | [`schema/agent-state.schema.json`](schema/agent-state.schema.json) | the `state` of an agent request |
 | [`agent/operations.yaml`](agent/operations.yaml) | the operations, their heads (questions), option formats, limits and what the harness does with each |
 | [`tools/check.py`](tools/check.py) | checks requests or replies against all of the above |
-| [`examples/`](examples/) | a real agent request |
+| [`examples/`](examples/) | a real agent request, in both forms of its options (v0 object, v1 list) |
 
 Version 0 describes what ships (hands 89be730, brain 4767186, the Mac app 0.4.1) and changes nothing.
 
@@ -23,7 +23,8 @@ pip install jsonschema pyyaml
 python protocol/tools/check.py ../hands/tests/replay/*/expected.json ../brain/fixtures/replay/v1/gym.jsonl.gz
 ```
 
-In code, `check_request(request)` and `check_reply(reply, request)` return errors and warnings. A harness can run them
+In code, `check_request(request)` and `check_reply(reply, request)` return errors and warnings; `options(question)`
+reads a choice question's options in order, in either form. A harness can run them
 on what it sends in its tests; a server on what it receives; a model's training pipeline on its data.
 
 ## Changing it

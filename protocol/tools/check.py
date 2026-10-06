@@ -5,7 +5,8 @@ agent state schema and the operations registry (protocol/agent/operations.yaml).
     python protocol/tools/check.py --reply reply.json
 
 Exit status 1 when any request has an error. Warnings name the known gaps (SPEC.md) a request runs into.
-A harness or a server can import `check_request` / `check_reply` to check what it sends or receives.
+A harness or a server can import `check_request` / `check_reply` to check what it sends or receives, and `options`
+to read a choice question's options in order, whichever form (v0 object, v1 list) they come in.
 Needs PyYAML and jsonschema.
 """
 from __future__ import annotations
@@ -49,10 +50,41 @@ def _schema_errors(validator, value, where: str) -> list[str]:
             for e in sorted(validator.iter_errors(value), key=lambda e: list(map(str, e.absolute_path)))]
 
 
+def options(question) -> list[tuple]:
+    """A choice question's options in the order they are shown: (key, description) pairs. v1 sends a list of
+    {"key", "description"}; v0 an object, whose key order is the order."""
+    crit = question.get("criteria") if isinstance(question, dict) else None
+    if isinstance(crit, dict):
+        return list(crit.items())
+    if isinstance(crit, list):
+        return [(o.get("key"), o.get("description")) for o in crit if isinstance(o, dict)]
+    return []
+
+
+def _number(key: str) -> tuple:
+    return tuple(int(part) for part in key.split(":"))
+
+
+def _order_errors(qid: str, keys: list[str], order: str, fmt_name: str) -> list[str]:
+    """The option order a head's format asks for (operations.yaml, option_formats.*.order)."""
+    if order == "one_to_n" and keys != [str(i) for i in range(1, len(keys) + 1)]:
+        return [f"{qid}: options are {', '.join(keys[:6])}{', …' if len(keys) > 6 else ''}, not 1..{len(keys)} in order"]
+    if order == "ascending":
+        nums = [_number(k) for k in keys]
+        for (a, na), (b, nb) in zip(zip(keys, nums), zip(keys[1:], nums[1:])):
+            if nb <= na:
+                return [f"{qid}: option {b!r} comes after {a!r}; {fmt_name} options ascend"]
+    return []
+
+
 def check_request(req: dict, registry: dict = REGISTRY) -> Report:
     r = Report()
     r.errors += _schema_errors(REQUEST, req, "request")
     questions = req.get("questions") or {}
+    for qid, q in questions.items():
+        if isinstance(q, dict) and isinstance(q.get("criteria"), list) and q.get("type") == "choice":
+            keys = [k for k, _ in options(q) if isinstance(k, str)]   # any other key is the schema's error
+            r.errors += [f"{qid}: option {k!r} appears more than once" for k in sorted({k for k in keys if keys.count(k) > 1}, key=str)]
     op_q = questions.get(registry["operation_question"])
     if not isinstance(op_q, dict):
         return r                                    # not an agent request: the transport is all there is to check
@@ -60,10 +92,16 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
     r.errors += _schema_errors(STATE, state, "state")
     ops, heads, formats = registry["operations"], registry["heads"], registry["option_formats"]
 
-    offered = list((op_q.get("criteria") or {}).keys())
+    offered = [k for k, _ in options(op_q) if isinstance(k, str)]   # any other key is the schema's error
     for op in offered:
         if op not in ops:
             r.errors.append(f"operation {op!r} is not in the registry")
+    rank = {op: i for i, op in enumerate(ops)}
+    known_ops = [op for op in offered if op in rank]
+    for a, b in zip(known_ops, known_ops[1:]):
+        if rank[b] < rank[a]:
+            r.errors.append(f"operation: {b!r} is offered after {a!r}; operations keep the registry's order")
+            break
     known = {registry["operation_question"], *heads}
     for qid in questions:
         if qid not in known:
@@ -82,13 +120,16 @@ def check_request(req: dict, registry: dict = REGISTRY) -> Report:
         spec = heads.get(qid)
         if not spec or not isinstance(q, dict):
             continue
-        crit = q.get("criteria") or {}
+        keys = [k for k, _ in options(q)]
         fmt = formats[spec["format"]]
         cap = spec.get("max_options")
-        if cap and isinstance(crit, dict) and len(crit) > cap:
-            r.errors.append(f"{qid}: {len(crit)} options, more than its {cap}")
-        for key in crit if isinstance(crit, dict) else []:
-            if not re.fullmatch(fmt["key"], key):
+        if cap and len(keys) > cap:
+            r.errors.append(f"{qid}: {len(keys)} options, more than its {cap}")
+        well_formed = all(isinstance(k, str) and re.fullmatch(fmt["key"], k) for k in keys)
+        if well_formed:
+            r.errors += _order_errors(qid, keys, fmt.get("order", "as_sent"), spec["format"])
+        for key in keys:
+            if not isinstance(key, str) or not re.fullmatch(fmt["key"], key):
                 r.errors.append(f"{qid}: option key {key!r} is not a {spec['format']} key")
             elif fmt.get("refers_to") == "state.elements.index" and key not in indexes:
                 r.errors.append(f"{qid}: option {key!r} names no element in the state")
@@ -113,8 +154,8 @@ def check_reply(reply: dict, req: dict | None = None) -> Report:
         missing = set(req.get("questions") or {}) - set(reply.get("answers") or {})
         r.errors += [f"no answer for question {q!r}" for q in sorted(missing)]
         for qid, a in (reply.get("answers") or {}).items():
-            crit = ((req.get("questions") or {}).get(qid) or {}).get("criteria")
-            if a.get("type") == "choice" and isinstance(crit, dict) and a.get("choice") not in crit:
+            offered = [k for k, _ in options((req.get("questions") or {}).get(qid))]
+            if a.get("type") == "choice" and offered and a.get("choice") not in offered:
                 r.errors.append(f"{qid}: answered {a.get('choice')!r}, which was not offered")
     return r
 

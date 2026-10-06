@@ -35,10 +35,24 @@
             "required": ["criteria"],
             "properties": {
               "criteria": {
-                "type": "object",
-                "minProperties": 1,
-                "maxProperties": 255,
-                "description": "Option key -> description. Insertion order is the order the options are shown in (and the letters they get)."
+                "description": "The options, in the order they are shown in (the order sets the letters they get). v1: a list of {key, description}, keys unique. v0: an object, option key -> description, whose key order is the order; JSON does not guarantee it, so a client sends the list form to a server that declares it (criteria_forms in GET /v1/models).",
+                "oneOf": [
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 255,
+                    "items": {
+                      "type": "object",
+                      "required": ["key", "description"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "key": { "type": "string", "minLength": 1 },
+                        "description": {}
+                      }
+                    }
+                  },
+                  { "type": "object", "minProperties": 1, "maxProperties": 255 }
+                ]
               }
             }
           }

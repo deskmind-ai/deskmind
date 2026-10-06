@@ -21,4 +21,4 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install jsonschema pyyaml
       - run: python -m unittest discover -s protocol/tests -v
-      - run: python protocol/tools/check.py protocol/examples/agent-request.json
+      - run: python protocol/tools/check.py protocol/examples/agent-request.json protocol/examples/agent-request.list.json

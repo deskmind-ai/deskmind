@@ -13,34 +13,46 @@ describes: { hands: 89be730, brain: 4767186, app: "0.4.1" }
 # its descriptions the harness's text for them (SPEC.md, "Operation descriptions").
 operation_question: operation
 
-# How an option key and its description look, per head kind.
+# How an option key and its description look, per head kind, and the order the options come in. The order sets the
+# option letters the model answers with, so it is part of the request (SPEC.md, "Option order"):
+#   ascending: by number (element index; for a dropdown option, the element's index, then the option's)
+#   one_to_n:  "1", "2", ... "N", no gaps (a 1-based position in the harness's candidate list)
+#   as_sent:   the harness's own order; nothing to check beyond keeping it (the list form does)
 option_formats:
   element:
     key: '^[1-9][0-9]*$'             # state.elements[].index
     description: { element: '"[N] <label>"', role: string, current_value: string }
     refers_to: state.elements.index
+    order: ascending
   dropdown_option:
     key: '^[1-9][0-9]*:[0-9]+$'      # state.elements[].options[].index
     description: { element: '"[N:k] <label> → <option>"', current_value: string }
     refers_to: state.elements.options.index
+    order: ascending
   value:
     key: '^[1-9][0-9]*$'             # 1-based position in the harness's candidate list
     description: { value: string }
+    order: one_to_n
   replace_span:
     key: '^[1-9][0-9]*$'
     description: { text: string }
+    order: one_to_n
   chord:
     key: '^[a-z0-9+]+$'              # lowercase, "+"-joined
     description: string
+    order: as_sent
   app:
     key: '.+'                        # display name or bundle id
     description: string
+    order: as_sent
   window:
     key: '.+'                        # the driver's window id
     description: string
+    order: as_sent
   yes_no:
     key: '^(yes|no)$'
     description: string
+    order: as_sent
 
 # The heads (question ids) and their option formats and limits.
 heads:
@@ -60,7 +72,8 @@ heads:
   answer_value:        { format: value, max_options: 120 }
   goal_complete:       { format: yes_no, max_options: 2 }      # only with HANDS_COMPLETION_CHECK > 0
 
-# Operations, in the order a harness offers them (the order sets the option letters the model was trained on).
+# Operations, in the order a harness offers them (the order sets the option letters the model was trained on). A
+# request offers a subset; the operations it offers keep this relative order.
 #   heads:     the questions this operation uses; a harness that offers the operation sends them
 #   class:     act (reversible UI action), navigate, write (changes the user's content), focus, dialogue, terminal
 #   executes:  what the harness does with the answer
