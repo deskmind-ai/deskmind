@@ -24,7 +24,7 @@ gets the model's trained behaviour; a model that serves the agent profile can dr
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/v1/systemone` | Answer a set of questions about one state |
-| `GET` | `/v1/models` | `{"data": [{"id", "object": "model", "criteria_forms"?, "routing"?}]}`; `criteria_forms` lists the forms of choice options the server reads (`["object", "list"]` from brain#9); `routing` (reason → count) only with two tiers |
+| `GET` | `/v1/models` | `{"data": [{"id", "object": "model", "criteria_forms"?, "routing"?, "floors"?}]}`; `criteria_forms` lists the forms of choice options the server reads (`["object", "list"]` from brain#9); `routing` (reason → count) only with two tiers; `floors` (on `next`, brain#19): recommended act-or-not floors calibrated for these weights, e.g. `{"consequential": 0.9, "value": 0.5}` -- the weakest of p(operation) and its heads a client should require before a consequential action, and the least p of a write's value head. Clients decide whether to act; they use these when present and their own defaults otherwise (deskmind#63) |
 
 Brain listens on `127.0.0.1:8787` by default; the Mac app runs it on `18850`, hands defaults to `8793` (G6). With
 `DESKMIND_BRAIN_TOKEN` set, every request needs `Authorization: Bearer <token>`; hands sends `SYSTEMONE_API_KEY` as
