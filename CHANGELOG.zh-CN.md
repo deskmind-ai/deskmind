@@ -3,6 +3,13 @@
 DeskMind for Mac 每个版本改了什么，简要列出。每个版本的完整说明和已知限制见 [Releases](https://github.com/deskmind-ai/deskmind/releases) 页面。模型有变化时会写明。
 [English](CHANGELOG.md)
 
+## 0.4.2（2026-10-16）
+
+[发布说明](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.2)。与预发布版 [v0.4.2-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.2-rc.1) 用的是同一份代码，rc.1 在 macOS 27 上测试过，报告问题的用户也确认已经修好。
+
+**修复**
+- Finder 窗口是图标视图时，也能移动文件了。以前「新建一个『报销』文件夹，把 报销单.csv 移进去」这类任务会建好文件夹就结束，文件还留在原处（#67）。列表视图下的行为不变。
+
 ## 0.4.1（2026-10-07）
 
 [发布说明](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1)。与预发布版 [v0.4.1-rc.3](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1-rc.3) 用的是同一份代码，rc.3 发布前在一台全新的 Mac 上测试过。
