@@ -4,6 +4,16 @@ What changed in each version of DeskMind for Mac, in short. Every version's full
 on the [Releases](https://github.com/deskmind-ai/deskmind/releases) page. Models are named when they change.
 [中文](CHANGELOG.zh-CN.md)
 
+## 0.4.2 (2026-10-16)
+
+[Release notes](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.2). Built from the same code as pre-release
+[v0.4.2-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.2-rc.1), which was tested on macOS 27 and confirmed by the
+person who reported the problem.
+
+**Fixes**
+- Moving files works when the Finder window is in icon view. Before, a task like "make a folder called Receipts and move
+  receipts.csv into it" created the folder and finished with the file left where it was (#67). List view works as before.
+
 ## 0.4.1 (2026-10-07)
 
 [Release notes](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.1). Built from the same code as
