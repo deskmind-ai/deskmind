@@ -3,6 +3,18 @@
 DeskMind for Mac 每个版本改了什么，简要列出。每个版本的完整说明和已知限制见 [Releases](https://github.com/deskmind-ai/deskmind/releases) 页面。模型有变化时会写明。
 [English](CHANGELOG.md)
 
+## 0.4.3（2026-10-17）
+
+[发布说明](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.3)。与预发布版 [v0.4.3-rc.4](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.3-rc.4) 用的是同一份代码，rc.4 在两台 Mac 上用装好的 App 测试过。
+
+**修复**
+- 在 Safari 里搜索网页能用了（#73）。以前「打开 Safari，搜索……」可能把字打进网页自带的搜索框然后报告完成，「在智能搜索栏里搜索」则会被拦下。
+- DeskMind 在自己的 Safari 窗口里做事，不碰你的窗口。第一次使用时，macOS 会问是否允许 DeskMind Hands 控制 Safari。
+- 说「完成」要有依据：报告完成前会检查 Safari 里的网页；一个窗口都看不到时，只有确实做过事才报告完成。
+- 应用不在最前面也能看到；锁屏时任务会停下，不再报告完成。
+
+**已知问题：** 浏览器任务目前只支持 Safari。
+
 ## 0.4.2（2026-10-16）
 
 [发布说明](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.2)。与预发布版 [v0.4.2-rc.1](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.2-rc.1) 用的是同一份代码，rc.1 在 macOS 27 上测试过，报告问题的用户也确认已经修好。
