@@ -4,6 +4,23 @@ What changed in each version of DeskMind for Mac, in short. Every version's full
 on the [Releases](https://github.com/deskmind-ai/deskmind/releases) page. Models are named when they change.
 [中文](CHANGELOG.zh-CN.md)
 
+## 0.4.3 (2026-10-17)
+
+[Release notes](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.3). Built from the same code as pre-release
+[v0.4.3-rc.4](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.3-rc.4), which was tested with the installed app on two
+Macs.
+
+**Fixes**
+- Searching the web from Safari works (#73). "Open Safari and search for…" could type into the open page's own search box and
+  report done, and "search in the smart search field" was refused.
+- DeskMind works in a Safari window of its own and leaves your windows alone. The first time, macOS asks whether
+  DeskMind Hands may control Safari.
+- "Done" needs something to show for it: the page in Safari is checked before a task is reported done, and a task that
+  sees no window at all is reported done only if something was actually done.
+- An app that isn't in front is still seen, and a locked screen stops the task instead of reporting done.
+
+**Known:** browser tasks work in Safari only for now.
+
 ## 0.4.2 (2026-10-16)
 
 [Release notes](https://github.com/deskmind-ai/deskmind/releases/tag/v0.4.2). Built from the same code as pre-release
