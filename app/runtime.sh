@@ -23,7 +23,7 @@ NODE_CACHE=../build/cache/node-$NODE_VERSION
 # The uv-managed python-build-standalone install itself -- never a venv (an active VIRTUAL_ENV made `uv python
 # find` return one, whose lib/ is a stub and whose python is a symlink to somewhere else).
 if [ "$HARNESS_ONLY" != 1 ]; then
-  PY_SRC="${PY_SRC:-$(ls -d "$(uv python dir)"/cpython-3.12.*-macos-aarch64-none 2>/dev/null | tail -1)}"
+  PY_SRC="${PY_SRC:-$(ls -d "$(uv python dir)"/cpython-3.12.*-macos-aarch64-none 2>/dev/null | sort -V | tail -1)}"   # by version: 3.12.11 after 3.12.8
   if [ ! -x "$PY_SRC/bin/python3.12" ] || [ -f "$PY_SRC/pyvenv.cfg" ] || [ ! -f "$PY_SRC/lib/python3.12/os.py" ]; then
     echo "runtime: $PY_SRC is not a standalone CPython 3.12 (set PY_SRC)" >&2; exit 1
   fi
