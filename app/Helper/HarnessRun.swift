@@ -36,13 +36,14 @@ enum HarnessRun {
 
     /// `harness.mjs model-check --config X` with the keys from models.env: {ok, model, ms} or {ok: false, error}.
     /// The harness strips anything key-like from a service's error; nothing here logs the environment.
-    static func modelCheck(config: String) -> [String: Any] {
+    static func modelCheck(config: String, extra: [String: String] = [:]) -> [String: Any] {
         guard available else { return ["ok": false, "error": "this build has no harness runtime"] }
         let p = Process()
         p.executableURL = node
         p.arguments = [bundle.path, "model-check", "--config", config]
         var env: [String: String] = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
         for (k, v) in modelEnv() { env[k] = v }
+        for (k, v) in extra where k.range(of: "^[A-Z][A-Z0-9_]*$", options: .regularExpression) != nil { env[k] = v }   // the sheet's unsaved values
         p.environment = env
         let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return ["ok": false, "error": "launch: \(error.localizedDescription)"] }

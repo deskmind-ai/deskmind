@@ -311,7 +311,8 @@ struct BrainRow: View {
         default: break
         }
         return switch state {
-        case "ready": L("DeskMind Brain is running on this Mac. Nothing leaves it.", lang: lang)
+        case "ready": model.cloudEngine ? L("DeskMind Brain is running on this Mac and judges first; the cloud model sees what the task looks at.", lang: lang)
+                                        : L("DeskMind Brain is running on this Mac. Nothing leaves it.", lang: lang)
         case "loading": L("Loading the model into memory… %d s so far (usually about 30 s)",
                           model.status["brain_uptime_s"] as? Int ?? 0, lang: lang)
         case "missing": L("Needs a model download: 0.8B + 4B, about 5.3 GB", lang: lang)

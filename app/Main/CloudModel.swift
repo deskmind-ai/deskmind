@@ -78,7 +78,7 @@ struct CloudModelRow: View {
     var body: some View {
         let cloud = model.cloudEngine, p = CloudModelSettings.provider, ok = model.cloudConfigured
         PermissionRow(symbol: "cloud", title: L("Cloud model", lang: lang),
-                      subtitle: cloud ? (ok ? L("%@ thinks for your tasks. The key stays on this Mac.", p.title, lang: lang)
+                      subtitle: cloud ? (ok ? L("%@ thinks for your tasks; what it looks at is sent to it.", p.title, lang: lang)
                                             : L("Add the API key for %@.", p.title, lang: lang))
                                       : L("Off. The local model thinks; turn it on to use DeepSeek, OpenRouter or another service.", lang: lang),
                       done: cloud && ok, optional: !cloud, actionTitle: L("Set up…", lang: lang),
@@ -124,7 +124,7 @@ struct CloudModelSheet: View {
                             .lineLimit(3).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text(L("The key is written to models.env in Application Support, readable by you only, and sent to the service with each request. Nothing else leaves this Mac.", lang: lang))
+                Text(L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -146,13 +146,15 @@ struct CloudModelSheet: View {
         result = nil
     }
 
-    /// Save what is typed first (the helper reads models.env), then ask the helper to reach the model once.
+    /// Ask the helper to reach the model once with what is typed — sent for this check only, nothing written:
+    /// Cancel after a test leaves the saved settings as they were.
     private func test() {
-        do { try persist() } catch { result = error.localizedDescription; resultOK = false; return }
         testing = true; result = nil
         let config = CloudModelSettings.config(for: provider, model: modelID)
+        var env = [provider.keyEnv: key]
+        if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = modelID }
         Task.detached {
-            let reply = DeskMindIPC.request(["op": "model_check", "config": config, "lang": ResolvedLang.current.rawValue], timeout: 60)
+            let reply = DeskMindIPC.request(["op": "model_check", "config": config, "env": env, "lang": ResolvedLang.current.rawValue], timeout: 60)
             await MainActor.run {
                 testing = false
                 if reply?["ok"] as? Bool == true {
