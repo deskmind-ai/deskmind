@@ -683,6 +683,9 @@ enum DecisionTests {
         check(ask.first?["approval"] as? Bool == true && ask.first?["options"] as? [String] == ["可以，就这样做", "先别做了"]
               && ask.first?["ask_id"] as? String == "ask_1" && (ask.first?["card"] as? [String: Any])?["kind"] as? String == "plan", "ask: \(ask)")
         check(HarnessEvents.translate(["kind": "waiting", "ask_id": "ask_1"], state: &st, title: title, hasFolder: true, pid: 42).isEmpty, "waiting after an ask says nothing")
+        // the executor pausing for the user (no ask_id) is the app's own waiting / resumed
+        check(HarnessEvents.translate(["kind": "waiting"], state: &st, title: title, hasFolder: true, pid: 42).first?["event"] as? String == "waiting", "executor pause → waiting")
+        check(HarnessEvents.translate(["kind": "resumed"], state: &st, title: title, hasFolder: true, pid: 42).first?["event"] as? String == "resumed", "executor resume → resumed")
         // the user's answer: approve → the approve option; a typed option text → its index; other words → text; nothing → cancel
         check((HarnessEvents.answerLine(reply: "", approve: true, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 0] as NSDictionary, "approve → option 0")
         check((HarnessEvents.answerLine(reply: "先别做了", approve: false, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 1] as NSDictionary, "option by text")
