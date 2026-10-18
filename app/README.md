@@ -112,7 +112,7 @@ entitlement alone) and `harness/harness.mjs` (deskmind-ai/harness bundled into o
 `deps.lock`). A run with `engine: "harness"` in its request goes through `HarnessRun` instead of `hands do`: the helper
 starts the harness, which starts hands' execution layer (`deskmind_hands.executor`) itself, and translates the
 harness's events into the socket events the app reads (`Shared/HarnessEvents.swift`). Turn it on with
-`defaults write ai.deskmind.app engine harness` (`engine.config` picks the model configuration, default `yy-luna`);
+`defaults write ai.deskmind.app engine harness` (`engine.config` picks the model configuration, default `ds-flash`, DeepSeek; keys in Application Support/DeskMind/models.env);
 the model services' keys are read from `~/Library/Application Support/DeskMind/models.env` (`YY_URL=…`, `YY_API_KEY=…`,
 `OPENROUTER_API_KEY=…`) until the app has a place for them. `./runtime.sh --harness-only` builds and self-tests this
 stage on its own.
