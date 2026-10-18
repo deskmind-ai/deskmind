@@ -77,8 +77,8 @@ jobs:
         with: { repository: deskmind-ai/brain, path: _deps/brain, ref: "${{ steps.deps.outputs.brain }}" }
       - uses: actions/checkout@v7
         with: { repository: deskmind-ai/eyes, path: _deps/eyes, ref: "${{ steps.deps.outputs.eyes }}" }
-      # harness is a private repository: the job's own token cannot read it, so a DEPS_TOKEN secret (a fine-grained
-      # token with contents:read on deskmind-ai/harness) is used when set; without it this step fails as "not found"
+      # the job's own token reads public repositories only; should a sibling be private again, a DEPS_TOKEN secret
+      # (a fine-grained token with contents:read on it) is used when set
       - uses: actions/checkout@v7
         with: { repository: deskmind-ai/harness, path: _deps/harness, ref: "${{ steps.deps.outputs.harness }}", token: "${{ secrets.DEPS_TOKEN || github.token }}" }
 
