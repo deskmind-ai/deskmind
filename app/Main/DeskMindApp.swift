@@ -88,8 +88,13 @@ final class HelperModel: ObservableObject {
     }
     var permissionsDone: Bool { helperReady && Grant.allCases.filter(\.required).allSatisfy(granted) }
     var brainReady: Bool { status["brain"] as? String == "ready" }
-    /// "Ready" means a real task can run: permissions and the local model both.
-    var requiredDone: Bool { permissionsDone && brainReady }
+    /// The cloud model's settings (Main/CloudModel.swift), read once and after the sheet saves.
+    @Published var cloudEngine = CloudModelSettings.engineIsCloud
+    @Published var cloudConfigured = CloudModelSettings.configured
+    func refreshCloud() { cloudEngine = CloudModelSettings.engineIsCloud; cloudConfigured = CloudModelSettings.configured }
+    /// "Ready" means a real task can run: permissions, and whichever model thinks — the local one downloaded and
+    /// running, or the cloud one with its key.
+    var requiredDone: Bool { permissionsDone && (cloudEngine ? cloudConfigured : brainReady) }
 
     func watchGrant(_ g: Grant?) { watching = g }
 

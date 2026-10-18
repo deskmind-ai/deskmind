@@ -608,6 +608,8 @@ struct SetupCard: View {
                     model.register()
                 }
                 Divider().overlay(Brand.line)
+                CloudModelRow()
+                Divider().overlay(Brand.line)
                 BrainRow()
                 Divider().overlay(Brand.line)
                 EyesRow()

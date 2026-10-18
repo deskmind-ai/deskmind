@@ -177,6 +177,9 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     case "brain_status":
         if req["start"] as? Bool == true { BrainServer.ensure() }
         return ["ok": true].merging(BrainServer.status()) { a, _ in a }
+    case "model_check":
+        // The settings sheet's "Test": one tiny question to the configured cloud model with the keys in models.env.
+        return HarnessRun.modelCheck(config: req["config"] as? String ?? "ds-flash")
     case "answer":
         // The user's reply to the question the running task asked (a HANDS_ASK line), or their approval.
         let ok = Runner.answer(reply: req["reply"] as? String ?? "", approve: req["approve"] as? Bool ?? false)

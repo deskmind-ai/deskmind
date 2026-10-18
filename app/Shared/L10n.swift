@@ -52,6 +52,25 @@ enum L10n {
         "Follow system": "跟随系统",
         "Language": "语言",
 
+        // MARK: Cloud model (Main/CloudModel.swift)
+        "Cloud model": "云端模型",
+        "%@ thinks for your tasks. The key stays on this Mac.": "任务由 %@ 来想，密钥只存在这台 Mac 上",
+        "Add the API key for %@.": "填一下 %@ 的 API 密钥",
+        "Off. The local model thinks; turn it on to use DeepSeek, OpenRouter or another service.": "未开启。由本地模型来想；打开后可以用 DeepSeek、OpenRouter 或别的服务",
+        "Set up…": "设置…",
+        "Change": "更改",
+        "Which model thinks": "由哪个模型来想",
+        "Use a cloud model (the harness engine)": "使用云端模型（harness 引擎）",
+        "Service": "服务",
+        "API key": "API 密钥",
+        "Base URL (…/v1)": "接口地址（…/v1）",
+        "Model id": "模型名",
+        "Test": "测试",
+        "Reached %@ in %d ms": "%@ 已连通，%d 毫秒",
+        "No answer from the helper": "后台助手没有回应",
+        "The key is written to models.env in Application Support, readable by you only, and sent to the service with each request. Nothing else leaves this Mac.":
+            "密钥写在「应用程序支持」里的 models.env（只有你能读），每次请求随同发给该服务；除此之外不会有东西离开这台 Mac",
+
         // MARK: Onboarding (Main/DeskMindApp.swift)
         "Background helper": "后台助手",
         "DeskMind Hands is standing by. Restarting it won't close this window.":
