@@ -164,12 +164,26 @@ enum HarnessRun {
                     let out = HarnessEvents.translate(e, state: &state, title: spec.goal ?? "", hasFolder: spec.folder != nil, pid: pid)
                     lock.unlock()
                     for ev in out {
-                        if ev["event"] as? String == "ask" {
+                        switch ev["event"] as? String {
+                        case "ask":
                             LiveCard.status(.waitingForUser, words: ev["approval"] as? Bool == true
                                             ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
                                             : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
+                        case "waiting" where ev["ask_id"] == nil:   // the executor waits for the user to pause
+                            LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
+                        case "resumed" where ev["ask_id"] == nil:
+                            LiveCard.status(.working)
+                        case "step":
+                            // The card shows the window the step acted in: the executor names it by bundle id and
+                            // CGWindow number (window:<bundle>#<number>), which is what the card captures by.
+                            if let object = ev["object"] as? String, let hash = object.lastIndex(of: "#"), let n = Int(object[object.index(after: hash)...]) {
+                                LiveCard.observed(windows: [["id": n, "active": true]], app: "")
+                            }
+                            let human = ev["human"] as? String ?? ""
+                            LiveCard.stepped(n: ev["n"] as? Int ?? 0, words: human, target: nil,
+                                             click: human.hasPrefix("click") || human.hasPrefix("double-click") || human.hasPrefix("select"))
+                        default: break
                         }
-                        if ev["event"] as? String == "step" { LiveCard.status(.working) }
                         _ = emit(ev)
                     }
                 }
