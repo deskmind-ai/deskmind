@@ -357,6 +357,12 @@ enum Runner {
         var real = false
         var planner = BrainServer.url
         var model = BrainServer.modelName
+        /// Which engine thinks: hands' own decision loop (the default) or the harness (HarnessRun), by the request's
+        /// `engine` -- the main app's developer setting.
+        var engine = "hands"
+        /// The harness's model configuration name and the request's language (card texts follow it).
+        var config = "yy-luna"
+        var lang = "zh"
 
         init(_ req: [String: Any]) {
             set = req["set"] as? String ?? set
@@ -375,6 +381,9 @@ enum Runner {
             real = (req["real"] as? Bool ?? false) || goal != nil
             planner = req["planner"] as? String ?? planner
             model = req["model"] as? String ?? model
+            engine = (req["engine"] as? String) == "harness" ? "harness" : "hands"
+            config = req["config"] as? String ?? config
+            lang = (req["lang"] as? String) == "en" ? "en" : "zh"
         }
 
         /// Apps whose windows hands reads through accessibility, well enough that no run of theirs needs vision.
@@ -432,12 +441,13 @@ enum Runner {
     static func requestStop() {
         if busy { cancelled = true }
         stopRequested = true
-        current?.terminate()
+        if let p = current, HarnessRun.input != nil { HarnessRun.stop(p) } else { current?.terminate() }
     }
 
     /// Hand the user's answer to the question the running `hands do` asked. One JSON line on its stdin, which is
     /// what it blocks on: {"reply": "...", "approve": true}.
     static func answer(reply: String, approve: Bool) -> Bool {
+        if HarnessRun.input != nil { return HarnessRun.answer(reply: reply, approve: approve) }
         answerLock.lock(); defer { answerLock.unlock() }
         guard asking, let h = answers,
               var line = try? JSONSerialization.data(withJSONObject: ["reply": reply, "approve": approve]) else { return false }

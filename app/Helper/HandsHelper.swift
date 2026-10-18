@@ -240,7 +240,9 @@ func serve() {
                     _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
                     return
                 }
-                Runner.run(Runner.Spec(req)) { event in
+                let spec = Runner.Spec(req)
+                let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
+                run(spec) { event in
                     guard var line = try? JSONSerialization.data(withJSONObject: event) else { return true }
                     line.append(0x0A)
                     return line.withUnsafeBytes { write(c, $0.baseAddress, line.count) } == line.count

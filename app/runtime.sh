@@ -5,31 +5,48 @@
 #   hands/   the deskmind-hands source tree (tasks and fixtures included), with a .version stamp, and its OCR helper
 #   site-brain/  DeskMind Brain (the local planner server) and its MLX dependencies
 #   site-eyes/   DeskMind Eyes' grounding server and mlx-vlm, for apps with no accessibility tree
+#   node/        a pinned Node (the harness engine's interpreter), and harness/harness.mjs, the harness bundled into
+#                one file (deskmind-ai/harness `pnpm bundle`); bin/mactools, the harness's Swift helper, prebuilt
 # Rebuilt only when a source changes; build.sh copies it into DeskMind Hands.app and signs every binary in it.
+#
+#   ./runtime.sh --harness-only    the Node + harness stage alone (into the cache; CI's quick check of that stage)
 set -euo pipefail
 cd "$(dirname "$0")"
 CACHE=../build/cache/runtime
+HARNESS_ONLY=0; if [ "${1:-}" = "--harness-only" ]; then HARNESS_ONLY=1; fi
+
+# Node for the harness: one LTS, pinned here with its published checksum (nodejs.org/dist/vX/SHASUMS256.txt).
+# 24 is the active LTS; development and CI use the same major (harness's .node-version).
+NODE_VERSION=v24.22.0
+NODE_SHA256=6a9724d9b50a5f22b4816cded441b5a8d9ddae546191a5e5b7efa5a5e2ee26d5
+NODE_CACHE=../build/cache/node-$NODE_VERSION
 # The uv-managed python-build-standalone install itself -- never a venv (an active VIRTUAL_ENV made `uv python
 # find` return one, whose lib/ is a stub and whose python is a symlink to somewhere else).
-PY_SRC="${PY_SRC:-$(ls -d "$(uv python dir)"/cpython-3.12.*-macos-aarch64-none 2>/dev/null | tail -1)}"
-if [ ! -x "$PY_SRC/bin/python3.12" ] || [ -f "$PY_SRC/pyvenv.cfg" ] || [ ! -f "$PY_SRC/lib/python3.12/os.py" ]; then
-  echo "runtime: $PY_SRC is not a standalone CPython 3.12 (set PY_SRC)" >&2; exit 1
+if [ "$HARNESS_ONLY" != 1 ]; then
+  PY_SRC="${PY_SRC:-$(ls -d "$(uv python dir)"/cpython-3.12.*-macos-aarch64-none 2>/dev/null | tail -1)}"
+  if [ ! -x "$PY_SRC/bin/python3.12" ] || [ -f "$PY_SRC/pyvenv.cfg" ] || [ ! -f "$PY_SRC/lib/python3.12/os.py" ]; then
+    echo "runtime: $PY_SRC is not a standalone CPython 3.12 (set PY_SRC)" >&2; exit 1
+  fi
 fi
-# The source checkouts: set HANDS_REPO, BENCH_REPO, BRAIN_REPO and EYES_REPO, or clone deskmind-ai/hands, bench,
-# brain and eyes next to this repo (../hands, ../bench, ... relative to its root).
+# The source checkouts: set HANDS_REPO, BENCH_REPO, BRAIN_REPO, EYES_REPO and HARNESS_REPO, or clone deskmind-ai/hands,
+# bench, brain, eyes and harness next to this repo (../hands, ../bench, ... relative to its root).
 SIBLINGS="$(cd .. && pwd)/.."
 HANDS_REPO="${HANDS_REPO:-$SIBLINGS/hands}"
 BENCH_REPO="${BENCH_REPO:-$SIBLINGS/bench}"
 BRAIN_REPO="${BRAIN_REPO:-$SIBLINGS/brain}"
 EYES_REPO="${EYES_REPO:-$SIBLINGS/eyes}"
-for v in HANDS_REPO BENCH_REPO BRAIN_REPO EYES_REPO; do
+HARNESS_REPO="${HARNESS_REPO:-$SIBLINGS/harness}"
+REPOS="HANDS_REPO BENCH_REPO BRAIN_REPO EYES_REPO HARNESS_REPO"
+if [ "$HARNESS_ONLY" = 1 ]; then REPOS="HARNESS_REPO"; fi
+for v in $REPOS; do
   git -C "${!v}" rev-parse HEAD >/dev/null 2>&1 \
     || { echo "runtime: $v=${!v} is not a git checkout (set $v, or clone the repo next to this one)" >&2; exit 1; }
 done
 # A release is built from the commits in deps.lock and nothing else, so its sources can be checked out again; a
 # development build only says where it differs.
 eval "$(grep -E '^[A-Z]+=[0-9a-f]{40}$' deps.lock)"
-for name in HANDS BENCH BRAIN EYES; do
+NAMES="HANDS BENCH BRAIN EYES HARNESS"; if [ "$HARNESS_ONLY" = 1 ]; then NAMES="HARNESS"; fi
+for name in $NAMES; do
   repo_var="${name}_REPO"; want="${!name}"; have="$(git -C "${!repo_var}" rev-parse HEAD)"
   if [ "$have" != "$want" ]; then
     if [ "${DIST:-0}" = 1 ]; then
@@ -45,8 +62,45 @@ done
 # The vendored build (tools/vendor_peekaboo.sh, downloaded to ~/.local/share/deskmind/peekaboo-vendor) unless a
 # local checkout's release build is asked for: a checkout's .build can vanish in a disk clean-up.
 PEEKABOO_BIN="${PEEKABOO_BIN:-$HOME/.local/share/deskmind/peekaboo-vendor/peekaboo}"
-# layout2: + libswiftCompatibilitySpan.dylib; layout3: + site-eyes and hands/tools/native/ocr; layout4: + ScreenCaptureKit; layout5: + ApplicationServices; layout6: Brain's MLX stack pinned (brain-constraints.txt); layout7: no build-machine paths; layout8: hands' runtime files only
-stamp="$(git -C "$HANDS_REPO" rev-parse HEAD)-$(git -C "$BENCH_REPO" rev-parse HEAD)-$(basename "$PY_SRC")-$(shasum "$PEEKABOO_BIN" | cut -c1-12)-$(git -C "$BRAIN_REPO" rev-parse HEAD)-$(git -C "$EYES_REPO" rev-parse HEAD)-layout8-$(shasum brain-constraints.txt | cut -c1-8)"
+# The harness engine: Node (downloaded once per version, checksum checked) and the harness bundled into one file
+# from its checkout, plus its prebuilt Swift helper. Into $1 (node/, harness/, bin/mactools).
+harness_runtime() {
+  local into="$1"
+  if [ ! -x "$NODE_CACHE/bin/node" ]; then
+    rm -rf "$NODE_CACHE"; mkdir -p "$NODE_CACHE"
+    local tgz="../build/cache/node-$NODE_VERSION-darwin-arm64.tar.gz"
+    [ -f "$tgz" ] || curl -sfL "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-darwin-arm64.tar.gz" -o "$tgz"
+    echo "$NODE_SHA256  $tgz" | shasum -a 256 -c - >/dev/null || { echo "runtime: node tarball checksum mismatch" >&2; rm -f "$tgz"; exit 1; }
+    tar -xzf "$tgz" -C "$NODE_CACHE" --strip-components=1
+    # the interpreter and its licence only: npm, corepack, headers and docs are not run in the app
+    rm -rf "$NODE_CACHE/lib" "$NODE_CACHE/include" "$NODE_CACHE/share" "$NODE_CACHE/bin/npm" "$NODE_CACHE/bin/npx" "$NODE_CACHE/bin/corepack" "$NODE_CACHE/README.md" "$NODE_CACHE/CHANGELOG.md"
+    "$NODE_CACHE/bin/node" --version | grep -qx "$NODE_VERSION" || { echo "runtime: the downloaded node is not $NODE_VERSION" >&2; exit 1; }
+  fi
+  mkdir -p "$into/node/bin" "$into/harness" "$into/bin"
+  cp "$NODE_CACHE/bin/node" "$into/node/bin/node"
+  cp "$NODE_CACHE/LICENSE" "$into/node/LICENSE"
+  # The bundle: built from the checkout (pnpm, frozen lockfile), with its own Node so the build does not depend on
+  # the machine's. harness.mjs embeds the base skill; nothing else of the checkout ships.
+  local node_bin; node_bin="$(cd "$NODE_CACHE/bin" && pwd)"
+  ( cd "$HARNESS_REPO" && PATH="$node_bin:$PATH" pnpm install --frozen-lockfile --silent && PATH="$node_bin:$PATH" pnpm bundle >/dev/null )
+  cp "$HARNESS_REPO/dist/harness.mjs" "$into/harness/harness.mjs"
+  echo "$(git -C "$HARNESS_REPO" rev-parse --short HEAD)" > "$into/harness/.version"
+  # The Swift helper the file tools use (Vision OCR, reading a PDF): built here, signed with the rest of the runtime,
+  # pointed at with DESKMIND_MACTOOLS so nothing is compiled on the user's Mac.
+  swiftc -O -target arm64-apple-macos15 "$HARNESS_REPO/src/registry/native/mactools.swift" -o "$into/bin/mactools"
+  "$into/node/bin/node" "$into/harness/harness.mjs" --selftest | grep -q '"ok":true' || { echo "runtime: harness selftest failed" >&2; exit 1; }
+}
+
+if [ "$HARNESS_ONLY" = 1 ]; then
+  STAGE=../build/cache/runtime-harness-stage
+  rm -rf "$STAGE"; mkdir -p "$STAGE"
+  harness_runtime "$STAGE"
+  echo "runtime: harness stage ok ($STAGE: node $NODE_VERSION, harness $(cat "$STAGE/harness/.version"))"
+  exit 0
+fi
+
+# layout2: + libswiftCompatibilitySpan.dylib; layout3: + site-eyes and hands/tools/native/ocr; layout4: + ScreenCaptureKit; layout5: + ApplicationServices; layout6: Brain's MLX stack pinned (brain-constraints.txt); layout7: no build-machine paths; layout8: hands' runtime files only; layout9: + node, harness, mactools
+stamp="$(git -C "$HANDS_REPO" rev-parse HEAD)-$(git -C "$BENCH_REPO" rev-parse HEAD)-$(basename "$PY_SRC")-$(shasum "$PEEKABOO_BIN" | cut -c1-12)-$(git -C "$BRAIN_REPO" rev-parse HEAD)-$(git -C "$EYES_REPO" rev-parse HEAD)-layout9-$(shasum brain-constraints.txt | cut -c1-8)-$(git -C "$HARNESS_REPO" rev-parse HEAD)-$NODE_VERSION"
 
 if [ -f "$CACHE/.stamp" ] && [ "$(cat "$CACHE/.stamp")" = "$stamp" ]; then
   echo "runtime: up to date ($CACHE)"; exit 0
@@ -128,6 +182,9 @@ uv pip install --quiet --no-compile --python "$CACHE/python/bin/python3.12" \
   --target "$CACHE/site-eyes" --no-deps "$EYES_REPO"
 uv pip install --quiet --no-compile --python "$CACHE/python/bin/python3.12" \
   --target "$CACHE/site-eyes" "mlx-vlm>=0.7.1" pillow
+
+# The harness engine (see harness_runtime): Node, the bundle, the Swift helper.
+harness_runtime "$CACHE"
 
 # Licence texts of what python-build-standalone links into CPython (OpenSSL, SQLite, zlib, ...): the install-only
 # build above leaves them out, the "full" archive of the same release has them. Kept next to the runtime for

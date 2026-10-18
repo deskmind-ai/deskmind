@@ -104,3 +104,15 @@ What stays on your Mac, and for how long:
 The code is licensed under the [Apache License 2.0](LICENSE); see also [NOTICE](NOTICE). Bundled third-party
 components are listed with their licences in `THIRD_PARTY_NOTICES.txt` inside the app. The DeskMind name, 得心,
 the logo and Xiaofang are not covered by the code licence.
+
+## The harness engine (0.5, behind a developer setting)
+
+`DeskMind Hands.app/Contents/Resources/runtime/` also carries `node/` (a pinned Node 24 LTS, signed with the JIT
+entitlement alone) and `harness/harness.mjs` (deskmind-ai/harness bundled into one file, pinned by `HARNESS=` in
+`deps.lock`). A run with `engine: "harness"` in its request goes through `HarnessRun` instead of `hands do`: the helper
+starts the harness, which starts hands' execution layer (`deskmind_hands.executor`) itself, and translates the
+harness's events into the socket events the app reads (`Shared/HarnessEvents.swift`). Turn it on with
+`defaults write ai.deskmind.app engine harness` (`engine.config` picks the model configuration, default `yy-luna`);
+the model services' keys are read from `~/Library/Application Support/DeskMind/models.env` (`YY_URL=…`, `YY_API_KEY=…`,
+`OPENROUTER_API_KEY=…`) until the app has a place for them. `./runtime.sh --harness-only` builds and self-tests this
+stage on its own.
