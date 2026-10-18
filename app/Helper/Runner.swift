@@ -256,21 +256,35 @@ enum Runner {
         }
     }
 
+    /// The harness engine's run folders (its events and journal per run: the instruction, the cards, the actions'
+    /// arguments) — run data like hands' runs/, cleared and pruned with them. Outside `work`, which prepareWork resets.
+    static var harnessRuns: URL { DeskMindIPC.supportDir.appendingPathComponent("work/harness-runs") }
+
     static func clearRunData() -> Int? {
         if busy { return nil }
         let fm = FileManager.default
-        let runs = work.appendingPathComponent("runs")
-        let dirs = (try? fm.contentsOfDirectory(atPath: runs.path)) ?? []
-        for d in dirs { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
+        var n = 0
+        for runs in [work.appendingPathComponent("runs"), harnessRuns] {
+            let dirs = (try? fm.contentsOfDirectory(atPath: runs.path)) ?? []
+            for d in dirs { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
+            n += dirs.count
+        }
         try? fm.removeItem(at: DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl"))
-        return dirs.count
+        return n
     }
 
-    static func pruneRuns(keep: Int) {
-        let runs = work.appendingPathComponent("runs")
+    static func pruneRuns(keep: Int) { prune(work.appendingPathComponent("runs"), keep: keep) }
+    static func pruneHarnessRuns(keep: Int) { prune(harnessRuns, keep: keep) }
+
+    /// Keep the `keep` most recent run folders, by when they were made (hands names its folders by time, the harness
+    /// by a random id, so names are no order), and remove the rest.
+    private static func prune(_ runs: URL, keep: Int) {
         let fm = FileManager.default
-        let dirs = ((try? fm.contentsOfDirectory(atPath: runs.path)) ?? []).sorted()
-        for d in dirs.dropLast(keep) { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
+        let keys: Set<URLResourceKey> = [.creationDateKey]
+        let dirs = ((try? fm.contentsOfDirectory(at: runs, includingPropertiesForKeys: Array(keys))) ?? [])
+            .map { ($0, (try? $0.resourceValues(forKeys: keys).creationDate) ?? .distantPast) }
+            .sorted { $0.1 < $1.1 }
+        for (url, _) in dirs.dropLast(keep) { try? fm.removeItem(at: url) }
     }
 
     /// One step in words a person reads: "Type “archive” into “New folder name”", not "type_text #syn:... 'archive'".
@@ -357,6 +371,12 @@ enum Runner {
         var real = false
         var planner = BrainServer.url
         var model = BrainServer.modelName
+        /// Which engine thinks: hands' own decision loop (the default) or the harness (HarnessRun), by the request's
+        /// `engine` -- the main app's developer setting.
+        var engine = "hands"
+        /// The harness's model configuration name and the request's language (card texts follow it).
+        var config = "yy-luna"
+        var lang = "zh"
 
         init(_ req: [String: Any]) {
             set = req["set"] as? String ?? set
@@ -375,6 +395,9 @@ enum Runner {
             real = (req["real"] as? Bool ?? false) || goal != nil
             planner = req["planner"] as? String ?? planner
             model = req["model"] as? String ?? model
+            engine = (req["engine"] as? String) == "harness" ? "harness" : "hands"
+            config = req["config"] as? String ?? config
+            lang = (req["lang"] as? String) == "en" ? "en" : "zh"
         }
 
         /// Apps whose windows hands reads through accessibility, well enough that no run of theirs needs vision.
@@ -432,12 +455,13 @@ enum Runner {
     static func requestStop() {
         if busy { cancelled = true }
         stopRequested = true
-        current?.terminate()
+        if let p = current, HarnessRun.input != nil { HarnessRun.stop(p) } else { current?.terminate() }
     }
 
     /// Hand the user's answer to the question the running `hands do` asked. One JSON line on its stdin, which is
     /// what it blocks on: {"reply": "...", "approve": true}.
     static func answer(reply: String, approve: Bool) -> Bool {
+        if HarnessRun.input != nil { return HarnessRun.answer(reply: reply, approve: approve) }
         answerLock.lock(); defer { answerLock.unlock() }
         guard asking, let h = answers,
               var line = try? JSONSerialization.data(withJSONObject: ["reply": reply, "approve": approve]) else { return false }

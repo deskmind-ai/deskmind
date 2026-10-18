@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <!-- V8's JIT: executable memory mapped with MAP_JIT. Nothing else: no unsigned memory, no library validation
+       exceptions, no Apple Events (the harness never scripts apps; hands does, under the helper's own entitlements). -->
+  <key>com.apple.security.cs.allow-jit</key><true/>
+</dict></plist>

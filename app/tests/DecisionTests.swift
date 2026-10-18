@@ -216,6 +216,7 @@ enum DecisionTests {
         diagnosticsTests()
         recordingCaptureTests()
         helperLocationTests()
+        harnessEventsTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -659,4 +660,71 @@ enum DecisionTests {
         for k in IssueReport.Kind.allCases { check(L(k.label, lang: .zhHans) != k.label, "a Chinese label for \(k.label)") }
     }
 
+
+    /// The harness engine's events, as the main app's (Shared/HarnessEvents.swift).
+    static func harnessEventsTests() {
+        var st = HarnessEvents.State()
+        let title = "在文本编辑里新建一个文档"
+        let start = HarnessEvents.translate(["kind": "start", "raw": title, "lang": "zh"], state: &st, title: title, hasFolder: true, pid: 42)
+        check(start.map { $0["event"] as? String } == ["start", "task"] && start[1]["title"] as? String == title, "start → start + task: \(start)")
+        check(HarnessEvents.translate(["kind": "preparing"], state: &st, title: title, hasFolder: true, pid: 42).first?["what"] as? String == "looking", "preparing")
+        let plan = HarnessEvents.translate(["kind": "plan", "steps": [["purpose": "p", "objects": ["window:a#1"], "consequence": "modify_user"]]], state: &st, title: title, hasFolder: true, pid: 42)
+        check(plan.first?["event"] as? String == "plan" && (plan.first?["steps"] as? [[String: Any]])?.count == 1, "plan passes through")
+        let step = HarnessEvents.translate(["kind": "step", "text": #"{"kind":"click","target":"elem_55","window":"com.apple.TextEdit#2153"}"#,
+                                            "consequence": "modify_user", "object": "window:com.apple.TextEdit#2153"], state: &st, title: title, hasFolder: true, pid: 42)
+        check(step.first?["event"] as? String == "step" && step.first?["n"] as? Int == 1 && step.first?["human"] as? String == "click elem_55"
+              && step.first?["app"] as? String == "com.apple.TextEdit" && step.first?["ok"] as? Bool == true, "step: \(step)")
+        let unverified = HarnessEvents.translate(["kind": "step", "text": "x", "status": "unverified"], state: &st, title: title, hasFolder: true, pid: 42)
+        check(unverified.first?["ok"] as? Bool == true && unverified.first?["detail"] as? String == "unverified", "an unverified step is not a failure")
+        // a card: approval kinds are approvals, option texts are the old `options`, the card rides along
+        let card: [String: Any] = ["kind": "plan", "text": "我打算这样做：…可以吗？", "free_text": true, "blocking": true,
+                                   "options": [["kind": "approve", "text": "可以，就这样做"], ["kind": "cancel", "text": "先别做了"]]]
+        let ask = HarnessEvents.translate(["kind": "ask", "ask_id": "ask_1", "card": card], state: &st, title: title, hasFolder: true, pid: 42)
+        check(ask.first?["approval"] as? Bool == true && ask.first?["options"] as? [String] == ["可以，就这样做", "先别做了"]
+              && ask.first?["ask_id"] as? String == "ask_1" && (ask.first?["card"] as? [String: Any])?["kind"] as? String == "plan", "ask: \(ask)")
+        check(HarnessEvents.translate(["kind": "waiting", "ask_id": "ask_1"], state: &st, title: title, hasFolder: true, pid: 42).isEmpty, "waiting after an ask says nothing")
+        // the user's answer: approve → the approve option; a typed option text → its index; other words → text; nothing → cancel
+        check((HarnessEvents.answerLine(reply: "", approve: true, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 0] as NSDictionary, "approve → option 0")
+        check((HarnessEvents.answerLine(reply: "先别做了", approve: false, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 1] as NSDictionary, "option by text")
+        check((HarnessEvents.answerLine(reply: "换个名字", approve: false, state: st) as NSDictionary?) == ["ask_id": "ask_1", "text": "换个名字"] as NSDictionary, "free words")
+        check((HarnessEvents.answerLine(reply: "", approve: false, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 1] as NSDictionary, "nothing → cancel")
+        let question: [String: Any] = ["kind": "missing", "text": "要改名的是哪个文件？", "free_text": true, "blocking": true,
+                                       "options": [["kind": "value", "text": "a.txt"], ["kind": "delegate", "text": "由你决定"], ["kind": "cancel", "text": "先别做了"]]]
+        let q = HarnessEvents.translate(["kind": "ask", "ask_id": "ask_2", "card": question], state: &st, title: title, hasFolder: true, pid: 42)
+        check(q.first?["approval"] as? Bool == false, "a question is not an approval")
+        check(HarnessEvents.answerLine(reply: "", approve: true, state: st) == nil, "approve on a question with no approve option: nothing sent")
+        // a refusal: its own event, and a failed step
+        let refused = HarnessEvents.translate(["kind": "refused", "what": "x", "why": "stale", "by": "executor"], state: &st, title: title, hasFolder: true, pid: 42)
+        check(refused.map { $0["event"] as? String } == ["refused", "step"] && refused[1]["ok"] as? Bool == false, "refused: \(refused)")
+        _ = HarnessEvents.translate(["kind": "answer_given", "text": "14:00"], state: &st, title: title, hasFolder: true, pid: 42)
+        let done = HarnessEvents.translate(["kind": "task_done", "status": "succeeded", "reason": "verified", "summary": "ok", "result_card": NSNull(), "run_id": "run_1"],
+                                           state: &st, title: title, hasFolder: true, pid: 42)
+        check(done.first?["strict"] as? Bool == true && done.first?["state"] as? String == "completed" && done.first?["free"] as? Bool == true
+              && done.first?["answer"] as? String == "14:00" && done.first?["has_folder"] as? Bool == true && done.first?["run_id"] as? String == "run_1", "task_done: \(done)")
+        let fin = HarnessEvents.done(state: st, terminationStatus: 0, stopped: false, stderrTail: "")
+        check(fin["exit"] as? Int == 0 && fin["passed"] as? Int == 1 && fin["answer"] as? String == "14:00", "done: \(fin)")
+        // an unconfirmed end is a result (exit 0), not an error; a crash before task_done is an error with the tail
+        var st2 = HarnessEvents.State()
+        _ = HarnessEvents.translate(["kind": "task_done", "status": "unconfirmed", "reason": "no trace of the send"], state: &st2, title: title, hasFolder: false, pid: 1)
+        let fin2 = HarnessEvents.done(state: st2, terminationStatus: 0, stopped: false, stderrTail: "")
+        check(fin2["exit"] as? Int == 0 && fin2["passed"] as? Int == 0 && st2.finished?["state"] as? String == "unconfirmed", "unconfirmed: \(fin2)")
+        // the file changes the harness reports are forwarded, not emptied
+        var st3 = HarnessEvents.State()
+        let changed = HarnessEvents.translate(["kind": "task_done", "status": "succeeded", "reason": "verified",
+                                               "changes": ["created": ["b.txt"], "modified": ["a.txt"], "deleted": [], "external": ["c.txt"]]], state: &st3, title: title, hasFolder: true, pid: 1)
+        check(changed.first?["created"] as? [String] == ["b.txt"] && changed.first?["modified"] as? [String] == ["a.txt"]
+              && changed.first?["deleted"] as? [String] == [] && changed.first?["external"] as? [String] == ["c.txt"], "changes forwarded: \(changed)")
+        // an environment stop is a failure the user sees the cause of: exit 1, the harness's words as the tail
+        var st4 = HarnessEvents.State()
+        _ = HarnessEvents.translate(["kind": "task_done", "status": "environment", "reason": "cannot read the computer: executor did not start"], state: &st4, title: title, hasFolder: false, pid: 1)
+        let env = HarnessEvents.done(state: st4, terminationStatus: 0, stopped: false, stderrTail: "")
+        check(env["exit"] as? Int == 1 && env["reason"] as? String == "environment" && st4.finished?["state"] as? String == "errored"
+              && env["stderr_tail"] as? String == "cannot read the computer: executor did not start", "environment: \(env)")
+        let crash = HarnessEvents.done(state: HarnessEvents.State(), terminationStatus: 1, stopped: false, stderrTail: "boom")
+        check(crash["exit"] as? Int == 1 && crash["stderr_tail"] as? String == "boom", "crash: \(crash)")
+        let stopped = HarnessEvents.done(state: HarnessEvents.State(), terminationStatus: 15, stopped: true, stderrTail: "")
+        check(stopped["exit"] as? Int == 0 && stopped["reason"] as? String == "", "stopped is not an error")
+        check(HarnessEvents.translate(["kind": "something_new"], state: &st, title: title, hasFolder: true, pid: 42).isEmpty, "unknown kinds are ignored")
+        check(HarnessEvents.humanize("fs.append_line：target=「todo.txt」") == "fs.append_line：target=「todo.txt」", "a described file step is kept")
+    }
 }
