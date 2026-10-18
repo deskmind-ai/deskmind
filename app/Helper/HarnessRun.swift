@@ -57,8 +57,9 @@ enum HarnessRun {
         }
         let fm = FileManager.default
         let runtime = Runner.runtime, work = Runner.work
-        let runs = DeskMindIPC.supportDir.appendingPathComponent("work/harness-runs")
+        let runs = Runner.harnessRuns
         try? fm.createDirectory(at: runs, withIntermediateDirectories: true)
+        Runner.pruneHarnessRuns(keep: 10)
         let python = runtime.appendingPathComponent("python/bin/python3.12").path
         let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
 
@@ -150,10 +151,13 @@ enum HarnessRun {
         _ = emit(HarnessEvents.done(state: state, terminationStatus: p.terminationStatus, stopped: stopped, stderrTail: tail))
     }
 
-    /// Stop: the harness has no stdin command for it (a line without an ask_id would be read as an answer), so the
-    /// process is asked to end, then ended. Its executor refuses every action from the first signal on.
+    /// Stop: the harness reads `{"stop":true}` on its stdin as the stop switch (its executor refuses every action from
+    /// then on and the run ends as stopped); a process that does not end on that is interrupted, then terminated.
     static func stop(_ p: Process) {
-        p.interrupt()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { if p.isRunning { p.terminate() } }
+        lock.lock()
+        if let h = input, var line = try? JSONSerialization.data(withJSONObject: ["stop": true]) { line.append(0x0A); try? h.write(contentsOf: line) }
+        lock.unlock()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) { if p.isRunning { p.interrupt() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 8) { if p.isRunning { p.terminate() } }
     }
 }

@@ -708,6 +708,18 @@ enum DecisionTests {
         _ = HarnessEvents.translate(["kind": "task_done", "status": "unconfirmed", "reason": "no trace of the send"], state: &st2, title: title, hasFolder: false, pid: 1)
         let fin2 = HarnessEvents.done(state: st2, terminationStatus: 0, stopped: false, stderrTail: "")
         check(fin2["exit"] as? Int == 0 && fin2["passed"] as? Int == 0 && st2.finished?["state"] as? String == "unconfirmed", "unconfirmed: \(fin2)")
+        // the file changes the harness reports are forwarded, not emptied
+        var st3 = HarnessEvents.State()
+        let changed = HarnessEvents.translate(["kind": "task_done", "status": "succeeded", "reason": "verified",
+                                               "changes": ["created": ["b.txt"], "modified": ["a.txt"], "deleted": [], "external": ["c.txt"]]], state: &st3, title: title, hasFolder: true, pid: 1)
+        check(changed.first?["created"] as? [String] == ["b.txt"] && changed.first?["modified"] as? [String] == ["a.txt"]
+              && changed.first?["deleted"] as? [String] == [] && changed.first?["external"] as? [String] == ["c.txt"], "changes forwarded: \(changed)")
+        // an environment stop is a failure the user sees the cause of: exit 1, the harness's words as the tail
+        var st4 = HarnessEvents.State()
+        _ = HarnessEvents.translate(["kind": "task_done", "status": "environment", "reason": "cannot read the computer: executor did not start"], state: &st4, title: title, hasFolder: false, pid: 1)
+        let env = HarnessEvents.done(state: st4, terminationStatus: 0, stopped: false, stderrTail: "")
+        check(env["exit"] as? Int == 1 && env["reason"] as? String == "environment" && st4.finished?["state"] as? String == "errored"
+              && env["stderr_tail"] as? String == "cannot read the computer: executor did not start", "environment: \(env)")
         let crash = HarnessEvents.done(state: HarnessEvents.State(), terminationStatus: 1, stopped: false, stderrTail: "boom")
         check(crash["exit"] as? Int == 1 && crash["stderr_tail"] as? String == "boom", "crash: \(crash)")
         let stopped = HarnessEvents.done(state: HarnessEvents.State(), terminationStatus: 15, stopped: true, stderrTail: "")

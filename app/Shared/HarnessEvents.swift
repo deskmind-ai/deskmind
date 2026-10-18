@@ -72,8 +72,9 @@ enum HarnessEvents {
             let done: [String: Any] = ["event": "task_done", "task": "do", "strict": status == "succeeded",
                                        "state": appState(status), "free": true, "reason": reason(status, e["reason"] as? String ?? ""),
                                        "answer": (e["answer"] as? String) ?? state.answer, "has_folder": hasFolder,
-                                       "created": [], "modified": [], "deleted": [],
-                                       "summary": e["summary"] ?? "", "harness_status": status,
+                                       "created": paths(e, "created"), "modified": paths(e, "modified"), "deleted": paths(e, "deleted"),
+                                       "external": paths(e, "external"),
+                                       "summary": e["summary"] ?? "", "harness_status": status, "detail": e["reason"] as? String ?? "",
                                        "result_card": e["result_card"] ?? NSNull(), "run_id": e["run_id"] ?? ""]
             state.finished = done
             return [done]
@@ -82,15 +83,26 @@ enum HarnessEvents {
         }
     }
 
+    /// The file changes the harness reports (its executor's ledger: what the task created, changed, deleted, and what
+    /// other programs changed meanwhile), as the app's lists.
+    static func paths(_ e: [String: Any], _ key: String) -> [String] {
+        ((e["changes"] as? [String: Any])?[key] as? [String]) ?? []
+    }
+
     /// The closing `done` event, from the task_done we sent (or none: the process died first).
     static func done(state: State, terminationStatus: Int32, stopped: Bool, stderrTail: String) -> [String: Any] {
         let finished = state.finished
         let status = stopped ? "cancelled" : finished?["harness_status"] as? String ?? "errored"
-        // Like `hands do`: a run that came to an end on its own is a result, not an error, whatever its status.
+        // Like `hands do`: a run that came to an end on its own is a result, not an error, whatever its status —
+        // except an environment stop (the computer could not be read, the executor did not start): that is a
+        // failure the user has to see the cause of, so it exits non-zero with the harness's words as the tail.
         let ranToAnEnd = finished != nil
-        return ["event": "done", "exit": ranToAnEnd || stopped ? 0 : Int(terminationStatus == 0 ? 1 : terminationStatus),
+        let environment = status == "environment"
+        let exit = stopped ? 0 : environment ? 1 : ranToAnEnd ? 0 : Int(terminationStatus == 0 ? 1 : terminationStatus)
+        let detail = finished?["detail"] as? String ?? ""
+        return ["event": "done", "exit": exit,
                 "reason": finished?["reason"] ?? (stopped ? "" : "harness exited"), "passed": status == "succeeded" ? 1 : 0, "total": 1,
-                "answer": state.answer, "stderr_tail": ranToAnEnd || stopped ? "" : stderrTail]
+                "answer": state.answer, "stderr_tail": stopped ? "" : environment ? (detail.isEmpty ? stderrTail : detail) : ranToAnEnd ? "" : stderrTail]
     }
 
     /// The user's answer, as the harness reads it: an option's index, or their own words.

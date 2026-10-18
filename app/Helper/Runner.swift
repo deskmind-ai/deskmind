@@ -256,18 +256,27 @@ enum Runner {
         }
     }
 
+    /// The harness engine's run folders (its events and journal per run: the instruction, the cards, the actions'
+    /// arguments) — run data like hands' runs/, cleared and pruned with them. Outside `work`, which prepareWork resets.
+    static var harnessRuns: URL { DeskMindIPC.supportDir.appendingPathComponent("work/harness-runs") }
+
     static func clearRunData() -> Int? {
         if busy { return nil }
         let fm = FileManager.default
-        let runs = work.appendingPathComponent("runs")
-        let dirs = (try? fm.contentsOfDirectory(atPath: runs.path)) ?? []
-        for d in dirs { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
+        var n = 0
+        for runs in [work.appendingPathComponent("runs"), harnessRuns] {
+            let dirs = (try? fm.contentsOfDirectory(atPath: runs.path)) ?? []
+            for d in dirs { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
+            n += dirs.count
+        }
         try? fm.removeItem(at: DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl"))
-        return dirs.count
+        return n
     }
 
-    static func pruneRuns(keep: Int) {
-        let runs = work.appendingPathComponent("runs")
+    static func pruneRuns(keep: Int) { prune(work.appendingPathComponent("runs"), keep: keep) }
+    static func pruneHarnessRuns(keep: Int) { prune(harnessRuns, keep: keep) }
+
+    private static func prune(_ runs: URL, keep: Int) {
         let fm = FileManager.default
         let dirs = ((try? fm.contentsOfDirectory(atPath: runs.path)) ?? []).sorted()
         for d in dirs.dropLast(keep) { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
