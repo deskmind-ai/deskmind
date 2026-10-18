@@ -276,10 +276,15 @@ enum Runner {
     static func pruneRuns(keep: Int) { prune(work.appendingPathComponent("runs"), keep: keep) }
     static func pruneHarnessRuns(keep: Int) { prune(harnessRuns, keep: keep) }
 
+    /// Keep the `keep` most recent run folders, by when they were made (hands names its folders by time, the harness
+    /// by a random id, so names are no order), and remove the rest.
     private static func prune(_ runs: URL, keep: Int) {
         let fm = FileManager.default
-        let dirs = ((try? fm.contentsOfDirectory(atPath: runs.path)) ?? []).sorted()
-        for d in dirs.dropLast(keep) { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
+        let keys: Set<URLResourceKey> = [.creationDateKey]
+        let dirs = ((try? fm.contentsOfDirectory(at: runs, includingPropertiesForKeys: Array(keys))) ?? [])
+            .map { ($0, (try? $0.resourceValues(forKeys: keys).creationDate) ?? .distantPast) }
+            .sorted { $0.1 < $1.1 }
+        for (url, _) in dirs.dropLast(keep) { try? fm.removeItem(at: url) }
     }
 
     /// One step in words a person reads: "Type “archive” into “New folder name”", not "type_text #syn:... 'archive'".

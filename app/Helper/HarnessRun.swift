@@ -59,7 +59,6 @@ enum HarnessRun {
         let runtime = Runner.runtime, work = Runner.work
         let runs = Runner.harnessRuns
         try? fm.createDirectory(at: runs, withIntermediateDirectories: true)
-        Runner.pruneHarnessRuns(keep: 10)
         let python = runtime.appendingPathComponent("python/bin/python3.12").path
         let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
 
@@ -148,6 +147,7 @@ enum HarnessRun {
         Runner.current = nil
         LiveCard.finish(stopped ? .stopped : state.finished?["harness_status"] as? String == "succeeded" ? .done : .failed)
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
+        Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept
         _ = emit(HarnessEvents.done(state: state, terminationStatus: p.terminationStatus, stopped: stopped, stderrTail: tail))
     }
 
