@@ -6,7 +6,7 @@ name: app
 # notarized, stapled, and uploaded with its SHA-256 to a draft GitHub Release (an existing release of that tag gets
 # the files replaced). A person reads the draft and publishes it. Releases come from here, not from a laptop.
 #
-# The sibling sources (hands, bench, brain, eyes) are checked out at the commits in app/deps.lock, so a
+# The sibling sources (hands, bench, brain, eyes, harness) are checked out at the commits in app/deps.lock, so a
 # release's runtime can be rebuilt from public commits.
 #
 # Secrets:
@@ -47,6 +47,7 @@ jobs:
       BENCH_REPO: ${{ github.workspace }}/_deps/bench
       BRAIN_REPO: ${{ github.workspace }}/_deps/brain
       EYES_REPO: ${{ github.workspace }}/_deps/eyes
+      HARNESS_REPO: ${{ github.workspace }}/_deps/harness
       PEEKABOO_BIN: ${{ github.workspace }}/_deps/peekaboo/peekaboo
       PEEKABOO_SRC: ${{ github.workspace }}/_deps/peekaboo/src
 
@@ -76,6 +77,8 @@ jobs:
         with: { repository: deskmind-ai/brain, path: _deps/brain, ref: "${{ steps.deps.outputs.brain }}" }
       - uses: actions/checkout@v7
         with: { repository: deskmind-ai/eyes, path: _deps/eyes, ref: "${{ steps.deps.outputs.eyes }}" }
+      - uses: actions/checkout@v7
+        with: { repository: deskmind-ai/harness, path: _deps/harness, ref: "${{ steps.deps.outputs.harness }}" }
 
       - uses: astral-sh/setup-uv@v10.2.0
 

@@ -66,23 +66,26 @@ PEEKABOO_BIN="${PEEKABOO_BIN:-$HOME/.local/share/deskmind/peekaboo-vendor/peekab
 # from its checkout, plus its prebuilt Swift helper. Into $1 (node/, harness/, bin/mactools).
 harness_runtime() {
   local into="$1"
-  if [ ! -x "$NODE_CACHE/bin/node" ]; then
+  if [ ! -x "$NODE_CACHE/bin/node" ] || [ ! -x "$NODE_CACHE/bin/corepack" ]; then
     rm -rf "$NODE_CACHE"; mkdir -p "$NODE_CACHE"
     local tgz="../build/cache/node-$NODE_VERSION-darwin-arm64.tar.gz"
     [ -f "$tgz" ] || curl -sfL "https://nodejs.org/dist/$NODE_VERSION/node-$NODE_VERSION-darwin-arm64.tar.gz" -o "$tgz"
     echo "$NODE_SHA256  $tgz" | shasum -a 256 -c - >/dev/null || { echo "runtime: node tarball checksum mismatch" >&2; rm -f "$tgz"; exit 1; }
     tar -xzf "$tgz" -C "$NODE_CACHE" --strip-components=1
-    # the interpreter and its licence only: npm, corepack, headers and docs are not run in the app
-    rm -rf "$NODE_CACHE/lib" "$NODE_CACHE/include" "$NODE_CACHE/share" "$NODE_CACHE/bin/npm" "$NODE_CACHE/bin/npx" "$NODE_CACHE/bin/corepack" "$NODE_CACHE/README.md" "$NODE_CACHE/CHANGELOG.md"
+    # headers and docs are not needed; npm and corepack stay in the cache (corepack runs pnpm for the bundle below),
+    # but only the interpreter and its licence are copied into the app
+    rm -rf "$NODE_CACHE/include" "$NODE_CACHE/share" "$NODE_CACHE/README.md" "$NODE_CACHE/CHANGELOG.md"
     "$NODE_CACHE/bin/node" --version | grep -qx "$NODE_VERSION" || { echo "runtime: the downloaded node is not $NODE_VERSION" >&2; exit 1; }
   fi
   mkdir -p "$into/node/bin" "$into/harness" "$into/bin"
   cp "$NODE_CACHE/bin/node" "$into/node/bin/node"
   cp "$NODE_CACHE/LICENSE" "$into/node/LICENSE"
-  # The bundle: built from the checkout (pnpm, frozen lockfile), with its own Node so the build does not depend on
-  # the machine's. harness.mjs embeds the base skill; nothing else of the checkout ships.
+  # The bundle: built from the checkout (the pnpm its package.json names, through the downloaded Node's corepack, frozen
+  # lockfile), so the build depends on neither the machine's Node nor its pnpm (a GitHub runner has none).
+  # harness.mjs embeds the base skill; nothing else of the checkout ships.
   local node_bin; node_bin="$(cd "$NODE_CACHE/bin" && pwd)"
-  ( cd "$HARNESS_REPO" && PATH="$node_bin:$PATH" pnpm install --frozen-lockfile --silent && PATH="$node_bin:$PATH" pnpm bundle >/dev/null )
+  ( cd "$HARNESS_REPO" && export PATH="$node_bin:$PATH" COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_HOME="${COREPACK_HOME:-$PWD/../build/cache/corepack}" \
+    && "$node_bin/corepack" pnpm install --frozen-lockfile --silent && "$node_bin/corepack" pnpm bundle >/dev/null )
   cp "$HARNESS_REPO/dist/harness.mjs" "$into/harness/harness.mjs"
   echo "$(git -C "$HARNESS_REPO" rev-parse --short HEAD)" > "$into/harness/.version"
   # The Swift helper the file tools use (Vision OCR, reading a PDF): built here, signed with the rest of the runtime,
