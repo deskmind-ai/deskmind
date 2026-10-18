@@ -375,7 +375,7 @@ enum Runner {
         /// `engine` -- the main app's developer setting.
         var engine = "hands"
         /// The harness's model configuration name and the request's language (card texts follow it).
-        var config = "yy-luna"
+        var config = "ds-flash"
         var lang = "zh"
 
         init(_ req: [String: Any]) {

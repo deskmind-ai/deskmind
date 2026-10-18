@@ -17,7 +17,8 @@ enum HarnessRun {
     static var available: Bool { FileManager.default.isExecutableFile(atPath: node.path) && FileManager.default.fileExists(atPath: bundle.path) }
 
     /// The model services' settings, until the app has a place for keys: KEY=VALUE lines in
-    /// Application Support/DeskMind/models.env (YY_URL, YY_API_KEY, OPENROUTER_API_KEY, ...). Values never logged.
+    /// Application Support/DeskMind/models.env (DEEPSEEK_API_KEY for the default config, OPENROUTER_API_KEY,
+    /// VOLCENGINE_API_KEY, YY_URL + YY_API_KEY for the in-house gateway). Values never logged.
     static func modelEnv() -> [String: String] {
         let url = DeskMindIPC.supportDir.appendingPathComponent("models.env")
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [:] }
