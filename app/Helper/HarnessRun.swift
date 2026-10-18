@@ -81,6 +81,16 @@ enum HarnessRun {
         try? fm.createDirectory(at: runs, withIntermediateDirectories: true)
         let python = runtime.appendingPathComponent("python/bin/python3.12").path
         let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
+        // The vision model, as for `hands do` (Runner.run): when the run may drive an app with no accessibility tree
+        // and the model is downloaded, the Eyes server is up before the first step, and the executor's driver reads
+        // such a window from its pixels (OCR words, grounded controls) — the same observe/perform, another source.
+        var eyes = ""
+        if spec.mayNeedVision && DeskMindModels.eyesDir() != nil {
+            EyesServer.ensure()
+            _ = emit(["event": "preparing", "what": "eyes"])
+            if EyesServer.waitReady(timeout: 90) { eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" " }
+        }
+        defer { if !eyes.isEmpty { EyesServer.touch() } }   // the idle clock starts when the run ends
 
         let p = Process()
         p.executableURL = node
@@ -101,6 +111,10 @@ enum HarnessRun {
                 + "PYTHONPYCACHEPREFIX=\"\(DeskMindIPC.supportDir.appendingPathComponent("pycache").path)\" "
                 + "HANDS_PEEKABOO_TRANSPORT=mcp HANDS_PERMISSIONS_VERIFIED=\(CGPreflightScreenCaptureAccess() ? "1" : "0") "
                 + "HANDS_SPECTATOR_APPS=ai.deskmind.app,ai.deskmind.hands "
+                // the apps the request names may be brought forward for a step (briefly, only while the user is
+                // still; the executor adds any app it opened a window of); a person at their Mac is waited for
+                + "HANDS_FLASH_APPS=\"\(spec.apps.map(\.bundle).joined(separator: ","))\" HANDS_FLASH_WAIT_S=1800 "
+                + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
                 + "\"\(python)\" -m deskmind_hands.executor",
         ]
         for (k, v) in modelEnv() where env[k] == nil { env[k] = v }
