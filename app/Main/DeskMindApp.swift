@@ -88,8 +88,13 @@ final class HelperModel: ObservableObject {
     }
     var permissionsDone: Bool { helperReady && Grant.allCases.filter(\.required).allSatisfy(granted) }
     var brainReady: Bool { status["brain"] as? String == "ready" }
-    /// "Ready" means a real task can run: permissions and the local model both.
-    var requiredDone: Bool { permissionsDone && brainReady }
+    /// The cloud model's settings (Main/CloudModel.swift), read once and after the sheet saves.
+    @Published var cloudEngine = CloudModelSettings.engineIsCloud
+    @Published var cloudConfigured = CloudModelSettings.configured
+    func refreshCloud() { cloudEngine = CloudModelSettings.engineIsCloud; cloudConfigured = CloudModelSettings.configured }
+    /// "Ready" means a real task can run: permissions, and whichever model thinks — the local one downloaded and
+    /// running, or the cloud one with its key.
+    var requiredDone: Bool { permissionsDone && (cloudEngine ? cloudConfigured : brainReady) }
 
     func watchGrant(_ g: Grant?) { watching = g }
 
@@ -306,7 +311,8 @@ struct BrainRow: View {
         default: break
         }
         return switch state {
-        case "ready": L("DeskMind Brain is running on this Mac. Nothing leaves it.", lang: lang)
+        case "ready": model.cloudEngine ? L("DeskMind Brain is running on this Mac and judges first; the cloud model sees what the task looks at.", lang: lang)
+                                        : L("DeskMind Brain is running on this Mac. Nothing leaves it.", lang: lang)
         case "loading": L("Loading the model into memory… %d s so far (usually about 30 s)",
                           model.status["brain_uptime_s"] as? Int ?? 0, lang: lang)
         case "missing": L("Needs a model download: 0.8B + 4B, about 5.3 GB", lang: lang)

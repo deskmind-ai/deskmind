@@ -83,8 +83,9 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(L("What should DeskMind do?", lang: lang))
                         .font(.system(size: 22, weight: .bold, design: .rounded)).foregroundStyle(Brand.ink)
-                    Text(model.requiredDone ? L("Everything runs on this Mac, offline.", lang: lang)
-                                            : L("Finish the setup below first.", lang: lang))
+                    Text(!model.requiredDone ? L("Finish the setup below first.", lang: lang)
+                         : model.cloudEngine ? L("Tasks go to %@ to think; what it looks at leaves this Mac.", CloudModelSettings.provider.title, lang: lang)
+                                             : L("Everything runs on this Mac, offline.", lang: lang))
                         .font(.system(size: 12)).foregroundStyle(Brand.sage)
                 }
                 Spacer()
@@ -607,6 +608,8 @@ struct SetupCard: View {
                               doneAction: { model.send(["op": "restart"], label: L("Restart helper", lang: lang)) }) {
                     model.register()
                 }
+                Divider().overlay(Brand.line)
+                CloudModelRow()
                 Divider().overlay(Brand.line)
                 BrainRow()
                 Divider().overlay(Brand.line)

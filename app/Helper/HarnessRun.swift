@@ -34,6 +34,25 @@ enum HarnessRun {
         return out
     }
 
+    /// `harness.mjs model-check --config X` with the keys from models.env: {ok, model, ms} or {ok: false, error}.
+    /// The harness strips anything key-like from a service's error; nothing here logs the environment.
+    static func modelCheck(config: String, extra: [String: String] = [:]) -> [String: Any] {
+        guard available else { return ["ok": false, "error": "this build has no harness runtime"] }
+        let p = Process()
+        p.executableURL = node
+        p.arguments = [bundle.path, "model-check", "--config", config]
+        var env: [String: String] = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
+        for (k, v) in modelEnv() { env[k] = v }
+        for (k, v) in extra where k.range(of: "^[A-Z][A-Z0-9_]*$", options: .regularExpression) != nil { env[k] = v }   // the sheet's unsaved values
+        p.environment = env
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return ["ok": false, "error": "launch: \(error.localizedDescription)"] }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let last = String(decoding: data, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
+        return (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] ?? ["ok": false, "error": "no answer from the harness (exit \(p.terminationStatus))"]
+    }
+
     /// The user's answer to the open card: an option's index, or their words. False when nothing is asked.
     static func answer(reply: String, approve: Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -72,6 +91,10 @@ enum HarnessRun {
             "PATH": "\(runtime.appendingPathComponent("bin").path):/usr/bin:/bin",
             "DESKMIND_MACTOOLS": runtime.appendingPathComponent("bin/mactools").path,
             "DESKMIND_BRAIN_URL": BrainServer.url, "DESKMIND_BRAIN_TOKEN": ServerAuth.token,
+            // DeskMind Brain answers the executor's judge questions first (it may approve on its own above the floor,
+            // never refuse alone; the cloud model decides the rest): measured 10-18 on the gym, 70% settled locally,
+            // 0 wrong approvals, 20/20 passed. Off when the server is not up: the cloud model judges alone.
+            "DESKMIND_BRAIN_JUDGE": BrainServer.status()["state"] as? String == "ready" ? "1" : "0",
             // the execution layer: hands' executor on the bundled Python, in the same working copy `hands do` uses
             "DESKMIND_HANDS_DIR": work.path,
             "DESKMIND_HANDS_CMD": "PYTHONPATH=\"\(pythonPath)\" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 "

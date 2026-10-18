@@ -31,7 +31,7 @@ struct GoalRequest: Identifiable {
         if record { b["record"] = true }   // the app's own: the helper ignores it
         // The engine (developer setting, `defaults write ai.deskmind.app engine harness`): hands' own loop unless
         // the harness is chosen; the helper falls back to hands when its build has no harness runtime.
-        b["engine"] = UserDefaults.standard.string(forKey: "engine") ?? "hands"
+        b["engine"] = UserDefaults.standard.string(forKey: "engine") ?? "hands"    // set by the Cloud model sheet, or by hand
         b["config"] = UserDefaults.standard.string(forKey: "engine.config") ?? "ds-flash"   // DeepSeek by default; the yy gateway is in-house
         // The live view (View menu), on unless turned off.
         b["live_view"] = UserDefaults.standard.object(forKey: LiveView.enabledKey) as? Bool ?? true

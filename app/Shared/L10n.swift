@@ -52,6 +52,27 @@ enum L10n {
         "Follow system": "跟随系统",
         "Language": "语言",
 
+        // MARK: Cloud model (Main/CloudModel.swift)
+        "Cloud model": "云端模型",
+        "Add the API key for %@.": "填一下 %@ 的 API 密钥",
+        "Off. The local model thinks; turn it on to use DeepSeek, OpenRouter or another service.": "未开启。由本地模型来想；打开后可以用 DeepSeek、OpenRouter 或别的服务",
+        "Set up…": "设置…",
+        "Change": "更改",
+        "Which model thinks": "由哪个模型来想",
+        "Use a cloud model (the harness engine)": "使用云端模型（harness 引擎）",
+        "Service": "服务",
+        "API key": "API 密钥",
+        "Base URL (…/v1)": "接口地址（…/v1）",
+        "Model id": "模型名",
+        "Test": "测试",
+        "Reached %@ in %d ms": "%@ 已连通，%d 毫秒",
+        "No answer from the helper": "后台助手没有回应",
+        "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.":
+            "用云端模型时，每个任务的原话、它看过的窗口内容、文件夹列表和读过的文件内容都会发给该服务来想——涉及敏感内容的任务请用本地模型。密钥存在「应用程序支持」的 models.env 里，只有你能读",
+        "Tasks go to %@ to think; what it looks at leaves this Mac.": "任务由 %@ 来想，它看到的内容会离开这台 Mac",
+        "%@ thinks for your tasks; what it looks at is sent to it.": "任务由 %@ 来想，它看到的内容会发给它",
+        "DeskMind Brain is running on this Mac and judges first; the cloud model sees what the task looks at.": "DeskMind Brain 已在本机运行，先由它核对；云端模型会看到任务看过的内容",
+
         // MARK: Onboarding (Main/DeskMindApp.swift)
         "Background helper": "后台助手",
         "DeskMind Hands is standing by. Restarting it won't close this window.":
