@@ -105,6 +105,12 @@ enum HarnessRun {
             // never refuse alone; the cloud model decides the rest): measured 10-18 on the gym, 70% settled locally,
             // 0 wrong approvals, 20/20 passed. Off when the server is not up: the cloud model judges alone.
             "DESKMIND_BRAIN_JUDGE": BrainServer.status()["state"] as? String == "ready" ? "1" : "0",
+            // The judge's routing table (which question kinds Brain is asked) learns across runs from sampled shadow
+            // comparisons with the cloud judge (one in ten settled answers): docs/localization-2026-10-19.md
+            "DESKMIND_JUDGE_STATS": DeskMindIPC.supportDir.appendingPathComponent("judge-stats.json").path,
+            "DESKMIND_JUDGE_SHADOW": "0.1",
+            // the cloud judge is asked alongside Brain and abandoned when Brain settles: a refusing Brain costs no time
+            "DESKMIND_JUDGE_RACE": "1",
             // the execution layer: hands' executor on the bundled Python, in the same working copy `hands do` uses
             "DESKMIND_HANDS_DIR": work.path,
             "DESKMIND_HANDS_CMD": "PYTHONPATH=\"\(pythonPath)\" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 "
