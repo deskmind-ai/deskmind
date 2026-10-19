@@ -51,9 +51,11 @@ enum HarnessEvents {
             return [["event": "ask", "question": card["text"] as? String ?? "", "approval": approvalKinds.contains(kind),
                      "options": options.compactMap { $0["text"] as? String }, "card": card, "ask_id": e["ask_id"] ?? ""]]
         case "waiting", "resumed":
-            // After an ask the harness says it waits for the answer; the app's "waiting" means the user is busy at the
-            // Mac, which is not this. Nothing to say.
-            return []
+            // With an ask_id: the harness waits for the answer to a card, which the ask already shows — nothing to say.
+            // Without one: the executor pauses while the user uses the Mac, and resumes — which is exactly what the
+            // app's own "waiting" / "resumed" mean (the hands engine's HANDS_WAIT / HANDS_RESUME).
+            if e["ask_id"] != nil { return [] }
+            return [["event": e["kind"] as? String ?? "waiting", "reason": "user_active"]]
         case "consent":
             return [["event": "consent", "object": e["object"] ?? "", "consequence": e["consequence"] ?? "",
                      "scope": e["scope"] ?? "", "picked": e["picked"] ?? NSNull()]]
