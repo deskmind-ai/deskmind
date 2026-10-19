@@ -1,7 +1,7 @@
 # The source commits a release's runtime is built from. CI checks out exactly these; a local DIST=1 build refuses
 # sibling checkouts at any other commit. Update with app/tools/pin_deps.sh after the siblings are pushed.
-HANDS=047735b362f83375a2d213b06a675c3ecf1d66bd
+HANDS=742ae31ee85fc3766cdc74bdc201bd7eff9bccf9
 BENCH=f8e47025f753305d2a00cf25b81a15af210319c0
 BRAIN=9b5fe735a95a9f03bce78089ac083e95c5640972
 EYES=86f680eb475c293cb4cb479ee28cd75fcbf4a57b
-HARNESS=9e10e580cabdcd5b7171caedc601d63fb721d5ea
+HARNESS=cfadbf4471772b12597e2ccd8c8cd5c12fc9d346
