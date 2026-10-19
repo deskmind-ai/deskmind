@@ -132,6 +132,13 @@ if [ "$STATUS" != "Accepted" ]; then
   xcrun notarytool log "$ID" "${AUTH[@]}" >&2 || true
   echo "release: notarization $STATUS" >&2; exit 1
 fi
-xcrun stapler staple "$DMG"
+# Stapling fetches the ticket from Apple (CloudKit): a dropped connection there (error 68, v0.5.0-rc.6's first
+# build) or a ticket not visible yet right after acceptance (error 65) is one-off, so it is tried again a few times
+# instead of throwing a notarized build away.
+for try in 1 2 3 4 5; do
+  if xcrun stapler staple "$DMG"; then break; fi
+  if [ "$try" = 5 ]; then echo "release: stapling failed $try times" >&2; exit 1; fi
+  echo "release: stapling failed (try $try of 5), again in 30 s" >&2; sleep 30
+done
 spctl --assess --type open --context context:primary-signature -v "$DMG"
 echo "release: $DMG (notarized, stapled)"
