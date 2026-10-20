@@ -156,7 +156,9 @@ final class RunModel: ObservableObject {
         pickingRecording = true
         // Only the apps the run works in are recorded (a folder task: Finder and TextEdit), besides DeskMind's own.
         let named = (req["apps"] as? [[String: Any]] ?? []).compactMap { $0["bundle"] as? String }
-        let bundles = named.isEmpty ? ["com.apple.finder", "com.apple.TextEdit"] : named
+        // The new engine names no apps before the run: the recorder starts with none and takes in each app the task
+        // comes to work in (ScreenRecorder.addApp); a folder task of the old engine records Finder and TextEdit.
+        let bundles = named.isEmpty && req["engine"] as? String != "harness" ? ["com.apple.finder", "com.apple.TextEdit"] : named
         RunRecorder.shared.begin(goal: goal ?? "", bundles: bundles) { [weak self] ok in
             guard let self else { return }
             self.pickingRecording = false

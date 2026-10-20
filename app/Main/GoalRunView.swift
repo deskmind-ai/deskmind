@@ -29,7 +29,7 @@ struct GoalRunView: View {
     private var apps: [ResolvedApp] {
         if let request { return request.displayApps }
         let a = (record?.apps ?? []).map(\.resolved)
-        return a.isEmpty ? [AppScope.finder] : a
+        return a.isEmpty && !GoalRequest.harnessEngine ? [AppScope.finder] : a
     }
 
     var mood: Brand.Mood {
@@ -172,8 +172,9 @@ struct GoalRunView: View {
 
     private var nextTrimmed: String { next.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var carriedFolder: String? { nextFolder ?? folder }
-    private var nextApps: [ResolvedApp] { AppScope.resolve(nextTrimmed) }
-    private var nextNeedsApp: Bool { !nextTrimmed.isEmpty && nextApps.isEmpty && carriedFolder == nil }
+    /// The old engine only: under the new one the runtime decides which apps to use (owner, 10-20).
+    private var nextApps: [ResolvedApp] { GoalRequest.harnessEngine ? [] : AppScope.resolve(nextTrimmed) }
+    private var nextNeedsApp: Bool { !GoalRequest.harnessEngine && !nextTrimmed.isEmpty && nextApps.isEmpty && carriedFolder == nil }
     private var canStartNext: Bool { !nextTrimmed.isEmpty && !nextNeedsApp && model.requiredDone }
 
     /// After a run: the next instruction, in the same folder unless it is taken off, without going back home first.
