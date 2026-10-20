@@ -65,15 +65,18 @@ struct HomeView: View {
     @Environment(\.lang) private var lang
 
     private var trimmed: String { goal.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var apps: [ResolvedApp] { AppScope.resolve(trimmed) }
-    /// Nothing named and no folder: there is nothing to work in yet.
-    private var needsApp: Bool { !trimmed.isEmpty && apps.isEmpty && folder == nil }
+    private var harness: Bool { GoalRequest.harnessEngine }
+    /// The apps the instruction names (the old engine only: under the new one the runtime decides).
+    private var apps: [ResolvedApp] { harness ? [] : AppScope.resolve(trimmed) }
+    /// Nothing named and no folder: there is nothing to work in yet (the old engine only).
+    private var needsApp: Bool { !harness && !trimmed.isEmpty && apps.isEmpty && folder == nil }
     /// Files the instruction names with no folder attached: said before the run, with the way to attach one. Not a
     /// block -- the files may already be open in their app.
     private var filesWithoutFolder: [String] { folder == nil ? FileMention.named(in: trimmed) : [] }
     private var canStart: Bool { !trimmed.isEmpty && !needsApp && missingApps.isEmpty && model.requiredDone }
     /// Apps the instruction names that this Mac does not have: said here, before anything runs.
-    private var missingApps: [String] { AppScope.notInstalled(trimmed, lang: lang) }
+    /// Under the new engine the runtime says so itself, when it cannot open an app (open_window).
+    private var missingApps: [String] { harness ? [] : AppScope.notInstalled(trimmed, lang: lang) }
     private var isSample: Bool { folder != nil && folder == samplePath }
 
     var body: some View {
@@ -260,6 +263,11 @@ struct HomeView: View {
                 Image(systemName: "questionmark.circle.fill").foregroundStyle(Brand.dot)
                 Text(L("Which app should it use? Name it in the instruction, or attach a folder.", lang: lang))
                     .fixedSize(horizontal: false, vertical: true)
+            } else if !trimmed.isEmpty && harness {
+                Text(L("DeskMind picks the apps it needs", lang: lang)).foregroundStyle(Brand.sage)
+                Text(folder == nil ? L("· no files will be changed", lang: lang) : L("· files only in the attached folder", lang: lang))
+                    .foregroundStyle(Brand.sage)
+                Spacer(minLength: 0)
             } else if !trimmed.isEmpty {
                 let shown = apps.isEmpty ? [AppScope.finder] : apps
                 Text(L("Uses", lang: lang)).foregroundStyle(Brand.sage)
@@ -465,11 +473,15 @@ struct ConfirmSheet: View {
     static func rememberKey(_ bundle: String, folder: Bool) -> String { "\(bundle)|\(folder ? "folder" : "none")" }
     static var remembered: Set<String> { Set(UserDefaults.standard.stringArray(forKey: key) ?? []) }
 
+    /// What "don't ask again" is remembered for: each app the task uses, or, under the new engine (no apps known
+    /// before the run), the engine itself.
+    static func rememberIDs(_ r: GoalRequest) -> [String] { r.harness ? ["harness"] : r.displayApps.map(\.bundleID) }
+
     static func canSkip(_ r: GoalRequest) -> Bool {
         // Never skipped when it would hide that the vision model is missing for a task that may need it.
         if r.mayNeedVision && DeskMindModels.eyesDir() == nil { return false }
         let have = remembered
-        return r.displayApps.allSatisfy { have.contains(rememberKey($0.bundleID, folder: r.folder != nil)) }
+        return rememberIDs(r).allSatisfy { have.contains(rememberKey($0, folder: r.folder != nil)) }
     }
 
     var body: some View {
@@ -480,6 +492,17 @@ struct ConfirmSheet: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 Text(L("Apps it will use", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(Brand.sage)
+                if request.harness {
+                    HStack(spacing: 10) {
+                        Text(L("DeskMind picks the apps it needs, and asks before it changes anything of yours.", lang: lang))
+                            .font(.system(size: 13, design: .rounded)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+                        Spacer()
+                        Toggle(L("Don't ask again", lang: lang), isOn: Binding(
+                            get: { remember.contains("harness") },
+                            set: { on in if on { remember.insert("harness") } else { remember.remove("harness") } }))
+                            .toggleStyle(.checkbox).font(.system(size: 11)).foregroundStyle(Brand.sage)
+                    }
+                }
                 ForEach(request.displayApps, id: \.bundleID) { a in
                     HStack(spacing: 10) {
                         Image(nsImage: a.icon).resizable().frame(width: 28, height: 28)
@@ -528,9 +551,9 @@ struct ConfirmSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button(L("Start", lang: lang)) {
                     var have = Self.remembered
-                    for a in request.displayApps {
-                        let k = Self.rememberKey(a.bundleID, folder: request.folder != nil)
-                        if remember.contains(a.bundleID) { have.insert(k) } else { have.remove(k) }
+                    for id in Self.rememberIDs(request) {
+                        let k = Self.rememberKey(id, folder: request.folder != nil)
+                        if remember.contains(id) { have.insert(k) } else { have.remove(k) }
                     }
                     UserDefaults.standard.set(Array(have).sorted(), forKey: Self.key)
                     onStart(record)
@@ -543,7 +566,7 @@ struct ConfirmSheet: View {
         .background(Brand.paper)
         .onAppear {
             let have = Self.remembered
-            remember = Set(request.displayApps.map(\.bundleID)
+            remember = Set(Self.rememberIDs(request)
                 .filter { have.contains(Self.rememberKey($0, folder: request.folder != nil)) })
         }
     }

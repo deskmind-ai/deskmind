@@ -84,11 +84,15 @@ enum HarnessRun {
         // The vision model, as for `hands do` (Runner.run): when the run may drive an app with no accessibility tree
         // and the model is downloaded, the Eyes server is up before the first step, and the executor's driver reads
         // such a window from its pixels (OCR words, grounded controls) — the same observe/perform, another source.
+        // Which apps a task uses is not known before the run any more (the app reads no app names out of the
+        // instruction, owner 10-20): whenever the vision model is downloaded, its server is started as the run
+        // starts, without waiting -- it is up in about five seconds, before the first window that needs it is read
+        // (an app opened, a plan approved), and the run does not wait on it. A pixel read in the first seconds finds
+        // no grounder yet and sees the window's words only (hands' grounder answers nothing until it is up).
         var eyes = ""
-        if spec.mayNeedVision && DeskMindModels.eyesDir() != nil {
+        if DeskMindModels.eyesDir() != nil {
             EyesServer.ensure()
-            _ = emit(["event": "preparing", "what": "eyes"])
-            if EyesServer.waitReady(timeout: 90) { eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" " }
+            eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" "
         }
         defer { if !eyes.isEmpty { EyesServer.touch() } }   // the idle clock starts when the run ends
 

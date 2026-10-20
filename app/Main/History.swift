@@ -16,11 +16,18 @@ struct GoalRequest: Identifiable {
     /// Record this run (the confirmation sheet's "Record this run"; its last setting when the sheet is skipped).
     var record = UserDefaults.standard.bool(forKey: "record.default")
 
-    /// What the confirmation sheet and the run screen show: the named apps, or Finder for a folder task.
-    var displayApps: [ResolvedApp] { apps.isEmpty ? [AppScope.finder] : apps }
+    /// The new engine (the harness): which apps a task uses is the runtime's to decide, from the user's words and the
+    /// computer as it is -- the app reads no app names out of the instruction (owner, 10-20: no patterns, no lists).
+    static var harnessEngine: Bool { UserDefaults.standard.string(forKey: "engine") == "harness" }
+    var harness: Bool { Self.harnessEngine }
+
+    /// What the confirmation sheet and the run screen show: the named apps, or Finder for a folder task; nothing
+    /// under the new engine, where the runtime picks the apps.
+    var displayApps: [ResolvedApp] { harness ? [] : (apps.isEmpty ? [AppScope.finder] : apps) }
 
     /// Whether the vision model may be needed: an app beyond Finder and TextEdit (the helper decides the same way).
-    var mayNeedVision: Bool { apps.contains { !["com.apple.finder", "com.apple.TextEdit"].contains($0.bundleID) } }
+    /// Not known before the run under the new engine: the helper starts the vision model whenever it is downloaded.
+    var mayNeedVision: Bool { !harness && apps.contains { !["com.apple.finder", "com.apple.TextEdit"].contains($0.bundleID) } }
 
     /// The helper's "run" request. The apps go by what the instruction calls them; a folder task that names none
     /// sends no list, and hands starts in Finder with its usual file-task apps.

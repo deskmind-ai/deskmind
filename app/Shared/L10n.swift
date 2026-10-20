@@ -296,6 +296,10 @@ enum L10n {
         "Use %@": "使用 %@",
         "Or type an answer": "或者输入回答",
         "Uses": "将使用",
+        "DeskMind picks the apps it needs": "用哪些应用由 DeskMind 自己决定",
+        "DeskMind picks the apps it needs, and asks before it changes anything of yours.":
+            "用哪些应用由 DeskMind 自己决定；要改动你的东西之前会先问你。",
+        "Don't ask again": "不再询问",
         "· no files will be changed": "· 不会改动任何文件",
         "· files only in the attached folder": "· 只改动附加文件夹里的文件",
         "Recent": "最近的任务",
