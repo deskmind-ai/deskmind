@@ -85,14 +85,14 @@ enum HarnessRun {
         // and the model is downloaded, the Eyes server is up before the first step, and the executor's driver reads
         // such a window from its pixels (OCR words, grounded controls) — the same observe/perform, another source.
         // Which apps a task uses is not known before the run any more (the app reads no app names out of the
-        // instruction, owner 10-20): whenever the vision model is downloaded, its server is started as the run
-        // starts, without waiting -- it is up in about five seconds, before the first window that needs it is read
-        // (an app opened, a plan approved), and the run does not wait on it. A pixel read in the first seconds finds
-        // no grounder yet and sees the window's words only (hands' grounder answers nothing until it is up).
+        // instruction, owner 10-20), so the vision model is started on demand: the executor is told where it would
+        // be and how to ask for it (this helper's socket, op "eyes"), and the first time a window has to be read from
+        // its pixels it asks, and waits the five seconds or so it takes. Loading it for every run cost ~4 GB beside
+        // Brain's on a 16 GB Mac (deskmind #96 review).
         var eyes = ""
         if DeskMindModels.eyesDir() != nil {
-            EyesServer.ensure()
             eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" "
+                + "HANDS_HELPER_SOCKET=\"\(DeskMindIPC.socketPath)\" "
         }
         defer { if !eyes.isEmpty { EyesServer.touch() } }   // the idle clock starts when the run ends
 
@@ -150,7 +150,8 @@ enum HarnessRun {
         if let folder = spec.folder { req["scope"] = folder }
         if var line = try? JSONSerialization.data(withJSONObject: req) { line.append(0x0A); try? inPipe.fileHandleForWriting.write(contentsOf: line) }
         if spec.liveView {
-            LiveCard.start(bundles: spec.apps.isEmpty ? ["com.apple.finder"] : spec.apps.map(\.bundle), goal: spec.goal ?? "", onStop: Runner.requestStop)
+            // the new engine names no apps before the run: the card waits for the first step's window, not Finder
+            LiveCard.start(bundles: spec.apps.map(\.bundle), goal: spec.goal ?? "", onStop: Runner.requestStop)
         }
         defer { LiveCard.finish(nil) }
 
@@ -188,6 +189,9 @@ enum HarnessRun {
                             // CGWindow number (window:<bundle>#<number>), which is what the card captures by.
                             if let object = ev["object"] as? String, let hash = object.lastIndex(of: "#"), let n = Int(object[object.index(after: hash)...]) {
                                 LiveCard.observed(windows: [["id": n, "active": true]], app: "")
+                                // the recording takes in each app the task works in, as it goes (no list before)
+                                let bundle = String(object[..<hash]).replacingOccurrences(of: "window:", with: "")
+                                if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
                             }
                             let human = ev["human"] as? String ?? ""
                             LiveCard.stepped(n: ev["n"] as? Int ?? 0, words: human, target: nil,

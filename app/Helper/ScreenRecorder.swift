@@ -49,7 +49,20 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
     private var configNow: SCStreamConfiguration?
     private let loopDone = DispatchSemaphore(value: 0)
     private let folder: URL
-    private let bundles: Set<String>
+    /// The apps recorded: the request's, and each app the task comes to work in (addApp) -- the new engine names none
+    /// before the run (deskmind #96 review: it fell back to Finder and TextEdit and missed the apps actually used).
+    private var bundlesSet: Set<String>
+    private let bundlesLock = NSLock()
+    private var bundlesChanged = false
+    private var bundles: Set<String> { bundlesLock.lock(); defer { bundlesLock.unlock() }; return bundlesSet }
+
+    static func addApp(_ bundle: String) {
+        lock.lock(); let rec = active; lock.unlock()
+        guard let rec else { return }
+        rec.bundlesLock.lock()
+        if !rec.bundlesSet.contains(bundle) { rec.bundlesSet.insert(bundle); rec.bundlesChanged = true }
+        rec.bundlesLock.unlock()
+    }
     private let includeMain: Bool
     private let wholeScreen: Bool
     /// record_start's "display": record that display (a virtual one a run was put on), not the one found.
@@ -69,7 +82,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
     var delivery: URL { folder.appendingPathComponent("delivery.mp4") }
 
     private init(folder: URL, bundles: Set<String>, includeMain: Bool, wholeScreen: Bool, smooth: Bool, goal: String) {
-        self.folder = folder; self.bundles = bundles; self.includeMain = includeMain
+        self.folder = folder; self.bundlesSet = bundles; self.includeMain = includeMain
         self.wholeScreen = wholeScreen; self.mode = RecordingCapture.mode(smooth: smooth); self.goal = goal
     }
 
@@ -275,7 +288,8 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
                     self.displaysUsed.append(there.displayID)
                 }
                 let (filter, pids) = self.filter(content, display: display)
-                if moved || pids != self.included || Runner.asking != asking {
+                self.bundlesLock.lock(); let grew = self.bundlesChanged; self.bundlesChanged = false; self.bundlesLock.unlock()
+                if moved || grew || pids != self.included || Runner.asking != asking {
                     self.included = pids; asking = Runner.asking
                     self.filterLock.lock(); self.filterNow = filter; self.filterLock.unlock()
                     self.stream?.updateContentFilter(filter) { _ in }

@@ -544,6 +544,10 @@ struct ConfirmSheet: View {
             note("cursorarrow.motionlines",
                  L("Apps that can't be read through accessibility may be brought to the front for a moment. Touching the mouse or keyboard pauses DeskMind.", lang: lang))
             if request.mayNeedVision && DeskMindModels.eyesDir() == nil { eyesNote }
+            // The new engine does not know before the run whether an app will need its pixels read: said, not a block.
+            if request.harness && DeskMindModels.eyesDir() == nil {
+                note("eye.slash", L("Apps that can't be read through accessibility need the vision model, which isn't downloaded. Such a task stops when it reaches one.", lang: lang))
+            }
 
             HStack {
                 Spacer()

@@ -195,6 +195,14 @@ func handle(_ req: [String: Any]) -> [String: Any] {
                 }
             return ["ok": true, "path": dir.path, "files": names]
         } catch { return ["ok": false, "error": error.localizedDescription] }
+    case "eyes":
+        // hands' executor, the first time a window has to be read from its pixels (deskmind_hands.grounding
+        // .ensure_grounder): start the vision model if it is downloaded and wait for it, at most `wait` seconds.
+        guard DeskMindModels.eyesDir() != nil else { return ["ok": false, "ready": false, "error": "the vision model is not downloaded"] }
+        EyesServer.ensure()
+        let ready = EyesServer.waitReady(timeout: min(req["wait"] as? Double ?? 30, 90))
+        if ready { EyesServer.touch() }
+        return ["ok": ready, "ready": ready]
     case "brain_status":
         if req["start"] as? Bool == true { BrainServer.ensure() }
         return ["ok": true].merging(BrainServer.status()) { a, _ in a }

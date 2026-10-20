@@ -19,7 +19,10 @@ struct GoalRequest: Identifiable {
     /// The new engine (the harness): which apps a task uses is the runtime's to decide, from the user's words and the
     /// computer as it is -- the app reads no app names out of the instruction (owner, 10-20: no patterns, no lists).
     static var harnessEngine: Bool { UserDefaults.standard.string(forKey: "engine") == "harness" }
-    var harness: Bool { Self.harnessEngine }
+    /// The engine as it was when the request was made: what the sheet showed and what the run is sent with stay the
+    /// same if the setting changes in between (deskmind #96 review).
+    let engine: String = UserDefaults.standard.string(forKey: "engine") ?? "hands"
+    var harness: Bool { engine == "harness" }
 
     /// What the confirmation sheet and the run screen show: the named apps, or Finder for a folder task; nothing
     /// under the new engine, where the runtime picks the apps.
@@ -38,7 +41,7 @@ struct GoalRequest: Identifiable {
         if record { b["record"] = true }   // the app's own: the helper ignores it
         // The engine (developer setting, `defaults write ai.deskmind.app engine harness`): hands' own loop unless
         // the harness is chosen; the helper falls back to hands when its build has no harness runtime.
-        b["engine"] = UserDefaults.standard.string(forKey: "engine") ?? "hands"    // set by the Cloud model sheet, or by hand
+        b["engine"] = engine    // set by the Cloud model sheet, or by hand; read when the request was made
         b["config"] = UserDefaults.standard.string(forKey: "engine.config") ?? "ds-flash"   // DeepSeek by default; the yy gateway is in-house
         // The live view (View menu), on unless turned off.
         b["live_view"] = UserDefaults.standard.object(forKey: LiveView.enabledKey) as? Bool ?? true

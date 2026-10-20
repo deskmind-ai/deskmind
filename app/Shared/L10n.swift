@@ -300,6 +300,8 @@ enum L10n {
         "DeskMind picks the apps it needs, and asks before it changes anything of yours.":
             "用哪些应用由 DeskMind 自己决定；要改动你的东西之前会先问你。",
         "Don't ask again": "不再询问",
+        "Apps that can't be read through accessibility need the vision model, which isn't downloaded. Such a task stops when it reaches one.":
+            "读不到辅助功能信息的应用需要视觉模型，但它还没下载。任务遇到这种应用时会停下。",
         "· no files will be changed": "· 不会改动任何文件",
         "· files only in the attached folder": "· 只改动附加文件夹里的文件",
         "Recent": "最近的任务",
