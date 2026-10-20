@@ -92,8 +92,29 @@ func restartSelf() {
 /// Set once a restart for a Screen Recording grant is scheduled (see status).
 nonisolated(unsafe) var restartingForGrant = false
 
+/// The permission reads, kept for a few seconds: the app asks for status every second, and each read is a request to
+/// TCC (accessibility, screen recording, Automation of Finder) -- one log line a second for as long as the app was
+/// open (rc.9, 10-20). A probe (a grant panel open, Screen Recording not yet seen) always reads afresh, so a switch
+/// the user just turned on still shows within a second; otherwise a change shows within `PermissionCache.ttl`.
+enum PermissionCache {
+    static let ttl: TimeInterval = 10
+    private static var at = Date.distantPast
+    private static var value: (ax: Bool, screen: Bool, automation: Bool?) = (false, false, nil)
+    private static let lock = NSLock()
+
+    static func read(fresh: Bool) -> (ax: Bool, screen: Bool, automation: Bool?) {
+        lock.lock(); defer { lock.unlock() }
+        if fresh || Date().timeIntervalSince(at) > ttl || !(value.ax && value.screen) {
+            value = (axTrusted(prompt: false), CGPreflightScreenCaptureAccess(), automationGranted())
+            at = Date()
+        }
+        return value
+    }
+}
+
 func status(probe: Bool) -> [String: Any] {
-    let live = CGPreflightScreenCaptureAccess()
+    let perms = PermissionCache.read(fresh: probe)
+    let live = perms.screen
     let probed = !live && probe && probeScreen()
     // Granted, but this process will not see it until it restarts: restart now, between tasks, rather than leave the
     // setup saying "not granted" (the app starts the installed copy again within seconds).
@@ -108,7 +129,7 @@ func status(probe: Bool) -> [String: Any] {
         "bundle": Bundle.main.bundleIdentifier ?? "?",
         "path": Bundle.main.bundlePath,
         "uptime_s": Int(Date().timeIntervalSince(started)),
-        "accessibility": axTrusted(prompt: false),
+        "accessibility": perms.ax,
         "screen_recording": live,
         "screen_recording_granted": live || probed,
         "brain": BrainServer.status()["state"] ?? "stopped",
@@ -117,7 +138,7 @@ func status(probe: Bool) -> [String: Any] {
         "brain_action": BrainServer.status()["action"] ?? "",
         "eyes": EyesServer.status()["state"] ?? "stopped",
     ]
-    if let a = automationGranted() { s["automation"] = a }
+    if let a = perms.automation { s["automation"] = a }
     return s
 }
 
