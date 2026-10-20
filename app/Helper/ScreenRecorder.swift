@@ -54,6 +54,8 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
     private var bundlesSet: Set<String>
     private let bundlesLock = NSLock()
     private var bundlesChanged = false
+    /// Signalled when the app set grew: the watcher re-applies the filter at once.
+    private let wake = DispatchSemaphore(value: 0)
     private var bundles: Set<String> { bundlesLock.lock(); defer { bundlesLock.unlock() }; return bundlesSet }
 
     static func addApp(_ bundle: String) {
@@ -64,18 +66,9 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         if added { rec.bundlesSet.insert(bundle); rec.bundlesChanged = true }
         rec.bundlesLock.unlock()
         // At once, not at the watcher's next turn: the step that named the window is about to act in it (the step
-        // event comes as the action is asked for, before it runs).
-        if added { DispatchQueue.global(qos: .userInitiated).async { rec.refilter() } }
-    }
-
-    /// Apply the content filter for the apps now recorded, on the display recorded.
-    private func refilter() {
-        guard watching, writer != nil || stream != nil, let display, let content = Self.content() else { return }
-        let (filter, pids) = self.filter(content, display: display)
-        _ = pids                                   // `included` stays the watcher's own (it alone reads and writes it)
-        bundlesLock.lock(); bundlesChanged = false; bundlesLock.unlock()
-        filterLock.lock(); filterNow = filter; filterLock.unlock()
-        stream?.updateContentFilter(filter) { _ in }
+        // event comes as the action is asked for, before it runs). The watcher applies it -- it alone touches the
+        // display and the stream (deskmind #96 re-review) -- woken now instead of after its half-second sleep.
+        if added { rec.wake.signal() }
     }
     private let includeMain: Bool
     private let wholeScreen: Bool
@@ -288,7 +281,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         DispatchQueue.global(qos: .utility).async { [weak self] in
             var asking = Runner.asking
             while let self, self.watching {
-                Thread.sleep(forTimeInterval: 0.5)
+                _ = self.wake.wait(timeout: .now() + 0.5)
                 guard self.watching, self.writer != nil || self.stream != nil, var display = self.display,
                       let content = Self.content() else { continue }
                 var moved = false
