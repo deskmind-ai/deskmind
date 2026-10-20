@@ -60,8 +60,22 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         lock.lock(); let rec = active; lock.unlock()
         guard let rec else { return }
         rec.bundlesLock.lock()
-        if !rec.bundlesSet.contains(bundle) { rec.bundlesSet.insert(bundle); rec.bundlesChanged = true }
+        let added = !rec.bundlesSet.contains(bundle)
+        if added { rec.bundlesSet.insert(bundle); rec.bundlesChanged = true }
         rec.bundlesLock.unlock()
+        // At once, not at the watcher's next turn: the step that named the window is about to act in it (the step
+        // event comes as the action is asked for, before it runs).
+        if added { DispatchQueue.global(qos: .userInitiated).async { rec.refilter() } }
+    }
+
+    /// Apply the content filter for the apps now recorded, on the display recorded.
+    private func refilter() {
+        guard watching, writer != nil || stream != nil, let display, let content = Self.content() else { return }
+        let (filter, pids) = self.filter(content, display: display)
+        _ = pids                                   // `included` stays the watcher's own (it alone reads and writes it)
+        bundlesLock.lock(); bundlesChanged = false; bundlesLock.unlock()
+        filterLock.lock(); filterNow = filter; filterLock.unlock()
+        stream?.updateContentFilter(filter) { _ in }
     }
     private let includeMain: Bool
     private let wholeScreen: Bool

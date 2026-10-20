@@ -190,7 +190,7 @@ enum HarnessRun {
                             if let object = ev["object"] as? String, let hash = object.lastIndex(of: "#"), let n = Int(object[object.index(after: hash)...]) {
                                 LiveCard.observed(windows: [["id": n, "active": true]], app: "")
                                 // the recording takes in each app the task works in, as it goes (no list before)
-                                let bundle = String(object[..<hash]).replacingOccurrences(of: "window:", with: "")
+                                let bundle = HarnessEvents.appOf(object)
                                 if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
                             }
                             let human = ev["human"] as? String ?? ""

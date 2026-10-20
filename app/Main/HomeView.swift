@@ -478,8 +478,9 @@ struct ConfirmSheet: View {
     static func rememberIDs(_ r: GoalRequest) -> [String] { r.harness ? ["harness"] : r.displayApps.map(\.bundleID) }
 
     static func canSkip(_ r: GoalRequest) -> Bool {
-        // Never skipped when it would hide that the vision model is missing for a task that may need it.
-        if r.mayNeedVision && DeskMindModels.eyesDir() == nil { return false }
+        // Never skipped when it would hide that the vision model is missing for a task that may need it -- under the
+        // new engine, any task (which apps it uses is not known before the run).
+        if (r.mayNeedVision || r.harness) && DeskMindModels.eyesDir() == nil { return false }
         let have = remembered
         return rememberIDs(r).allSatisfy { have.contains(rememberKey($0, folder: r.folder != nil)) }
     }
