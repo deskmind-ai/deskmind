@@ -14,8 +14,9 @@
 // stays past it ends the watch, and this client watches again from its contiguous cursors (`watch`), so the helper's
 // replay fills it.
 //
-// A session whose process ended (helper.session_exit) is opened again (session.open with its id) on the next send to
-// it or the next watch.
+// A session whose process ended without the app asking (helper.session_exit, or missing from helper.watching's `open`
+// though this client opened it) is opened again (session.open with its id) on the next send to it, and — if this client
+// opened it — on the next watch. A session the app ended (`end`) is not.
 
 import Foundation
 
@@ -131,6 +132,8 @@ final class SessionClient {
     private var states: [String: SessionState] = [:]
     /// What each session was opened with, to open it again the same way after its process ended.
     private var opened: [String: (config: String?, lang: String?)] = [:]
+    /// Sessions the app ended (`end`): their process's exit is expected, and they are not opened again by themselves.
+    private var endedByApp: Set<String> = []
     /// The clock the gap grace is measured by (tests set their own).
     var now: () -> Date = Date.init
     /// Called after a line changed a session's state (on the thread that fed it).
@@ -165,28 +168,47 @@ final class SessionClient {
         if states[id] == nil { states[id] = SessionState(sessionId: id) }
         states[id]?.exited = nil
         opened[id] = (config, lang)
+        endedByApp.remove(id)
         lock.unlock()
         return id
     }
 
-    /// Opens a session again whose process ended (helper.session_exit), as it was opened; true when it is open (or
-    /// never ended).
+    /// Opens a session again whose process ended without the app asking, as it was opened (a session this client did
+    /// not open — one from an earlier launch — with the helper's defaults, which resume its stored settings); true when
+    /// it is open, or did not end. `onlyOpenedHere`: only a session this client opened (a watch does not bring back
+    /// sessions it merely saw).
     @discardableResult
-    func reopenIfExited(_ sessionId: String) -> Bool {
+    func reopenIfExited(_ sessionId: String, onlyOpenedHere: Bool = false) -> Bool {
         lock.lock()
         let exited = states[sessionId]?.exited != nil
         let how = opened[sessionId]
+        let ended = endedByApp.contains(sessionId)
         lock.unlock()
         guard exited else { return true }
+        if ended || (onlyOpenedHere && how == nil) { return false }
         return open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil
     }
 
     func send(_ control: SessionControl, to sessionId: String) -> SendResult {
-        reopenIfExited(sessionId)
         let s = state(sessionId)
         if control.isTyping && !s.composerEnabled { return .refused("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
-        guard let r = transport.request(Request.send(sessionId: sessionId, line: control.line)), r["ok"] as? Bool != false else { return .unavailable }
+        if s.exited != nil {
+            if case .stop = control { return .refused("the session is not running") }   // nothing to stop: not opened for it
+            guard reopenIfExited(sessionId) else { return .unavailable }
+        }
+        var r = transport.request(Request.send(sessionId: sessionId, line: control.line))
+        // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
+        // open it again once, unless the app ended it
+        if r?["code"] as? String == "not_open" {
+            lock.lock()
+            let ended = endedByApp.contains(sessionId), how = opened[sessionId]
+            lock.unlock()
+            if !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil {
+                r = transport.request(Request.send(sessionId: sessionId, line: control.line))
+            }
+        }
+        guard let r, r["ok"] as? Bool != false else { return .unavailable }
         return .sent
     }
 
@@ -194,6 +216,9 @@ final class SessionClient {
     func answer(_ a: CardAnswer, in sessionId: String) -> SendResult { send(.answer(a), to: sessionId) }
 
     func end(_ sessionId: String) -> Bool {
+        lock.lock()
+        endedByApp.insert(sessionId)        // before the request: its exit line may come first
+        lock.unlock()
         guard let r = transport.request(Request.end(sessionId: sessionId)) else { return false }
         return r["ok"] as? Bool != false
     }
@@ -212,26 +237,32 @@ final class SessionClient {
     /// again from the contiguous cursors (the ordering contract above).
     @discardableResult
     func watch() -> Bool {
-        var last: (after: [String: Int], runs: [String: Int])? = nil
+        var lastGaps: Set<String>? = nil
         var stalled = 0
         while true {
-            for id in sessionIds { reopenIfExited(id) }
+            for id in sessionIds { reopenIfExited(id, onlyOpenedHere: true) }
             let c = cursor()
-            stalled = (last.map { $0.after == c.after && $0.runs == c.runs } ?? false) ? stalled + 1 : 0
-            last = c
             let rewatchOnGap = stalled < Self.maxStalledRewatches
-            var gapSince: Date? = nil
+            lock.lock()
+            let openedBefore = Set(opened.keys)    // helper.watching's `open` is checked against these only
+            lock.unlock()
+            // each gap (a stream at its cursor) gets its own grace from when it was first seen
+            var since: [String: Date] = [:]
             var rewatch = false
             let overdue: () -> Bool = { [weak self] in
                 guard let self, rewatchOnGap else { return false }
-                guard self.hasGap else { gapSince = nil; return false }
-                let t = self.now()
-                if gapSince == nil { gapSince = t }
-                return t.timeIntervalSince(gapSince!) >= Self.gapGrace
+                let gaps = self.gaps(), t = self.now()
+                since = since.filter { gaps.contains($0.key) }
+                for g in gaps where since[g] == nil { since[g] = t }
+                return since.values.contains { t.timeIntervalSince($0) >= Self.gapGrace }
             }
             let ok = transport.stream(Request.watch(after: c.after, runs: c.runs), onLine: { [weak self] obj in
                 guard let self else { return false }
-                self.feed(obj)
+                if obj["kind"] as? String == "helper.watching", let open = obj["open"] as? [String] {
+                    self.notRunning(openedBefore.subtracting(open))
+                } else {
+                    self.feed(obj)
+                }
                 if overdue() { rewatch = true; return false }
                 return true
             }, onIdle: {
@@ -240,6 +271,10 @@ final class SessionClient {
             })
             if !ok { return false }
             if !rewatch { return true }
+            // progress counts only on the streams that held lines back: another stream moving is not progress
+            let now = gaps()
+            stalled = now == lastGaps ? stalled + 1 : 0
+            lastGaps = now
         }
     }
 
@@ -247,6 +282,28 @@ final class SessionClient {
     var hasGap: Bool {
         lock.lock(); defer { lock.unlock() }
         return states.values.contains { $0.hasGap }
+    }
+
+    /// The streams holding lines back past a gap, each with its cursor ("session@cursor", "session/run@cursor").
+    private func gaps() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        var g: Set<String> = []
+        for (id, s) in states {
+            if !s.pendingSession.isEmpty { g.insert("\(id)@\(s.lastSeq)") }
+            for r in s.pendingRuns.keys { g.insert("\(id)/\(r)@\(s.task(r)?.lastSeq ?? 0)") }
+        }
+        return g
+    }
+
+    /// Sessions this client opened that the helper does not run (helper.watching): their process ended unheard (the
+    /// idle reaper, a helper restart). They read as exited, and are opened again on the next send or watch.
+    private func notRunning(_ ids: Set<String>) {
+        for id in ids {
+            lock.lock()
+            let skip = endedByApp.contains(id) || states[id]?.exited != nil
+            lock.unlock()
+            if !skip { feed(ProtocolLine(sessionId: id, event: .sessionExit(HelperSessionExit(code: nil)))) }
+        }
     }
 
     /// What the app has, per stream its contiguous cursor: per session the stored seq, per run the executor seq. A run

@@ -456,10 +456,17 @@ enum SessionTests {
         var requests: [[String: Any]] = []
         var replies: [String: [String: Any]] = [:]
         var streamLines: [[String: Any]] = []
+        /// Replies given once each, before `replies`, per op.
+        var queued: [String: [[String: Any]]] = [:]
         func request(_ body: [String: Any]) -> [String: Any]? {
             requests.append(body)
-            return replies[body["op"] as? String ?? ""]
+            let op = body["op"] as? String ?? ""
+            if var q = queued[op], !q.isEmpty { let r = q.removeFirst(); queued[op] = q; return r }
+            return replies[op]
         }
+        /// Each watch's lines from its number (1, 2, …), when set; a guard ends a run-away loop.
+        var gen: ((Int) -> [[String: Any]])? = nil
+        var watches = 0
         /// Each watch takes the next of these, if any; else `streamLines`.
         var nextStreams: [[[String: Any]]] = []
         /// The clock the client reads (SessionClient.now): a quiet stream moves it on by `quiet` before asking onIdle.
@@ -467,7 +474,9 @@ enum SessionTests {
         var quiet: TimeInterval = 5
         func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
             requests.append(body)
-            let lines = nextStreams.isEmpty ? streamLines : nextStreams.removeFirst()
+            watches += 1
+            if watches > 50 { return true }
+            let lines = gen.map { $0(watches) } ?? (nextStreams.isEmpty ? streamLines : nextStreams.removeFirst())
             for l in lines where !onLine(l) { return true }
             clock += quiet
             _ = onIdle()
@@ -704,6 +713,47 @@ enum SessionTests {
         mock.streamLines = []
         client.watch()
         check(mock.requests.map { $0["op"] as? String ?? "" } == ["session.open", "sessions.watch"], "watch opens it again first: \(mock.requests.map { $0["op"] ?? "" })")
+        // a stop to an exited session opens nothing
+        client.feed(exit)
+        mock.requests = []
+        check(client.send(.stop(), to: "s") != .sent && mock.requests.isEmpty, "stop after the exit: nothing to stop, not opened")
+        // the app ended it: its exit (code 0) is expected; neither a watch nor a send brings it back
+        mock.replies[SessionClient.Op.end] = ["ok": true]
+        _ = client.open(sessionId: "s")
+        check(client.end("s"), "end")
+        client.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":0}"#))
+        mock.requests = []
+        client.watch()
+        _ = client.send(.say("x"), to: "s")
+        check(!mock.requests.contains { $0["op"] as? String == "session.open" }, "an ended session is not opened again: \(mock.requests.map { $0["op"] ?? "" })")
+        // a session this client never opened (seen through the watch) is not opened by a watch
+        let seen = SessionClient(transport: mock)
+        seen.feed(L(#"{"seq":1,"session_id":"old","kind":"session.message","msg_id":"m","role":"user","text":"a"}"#))
+        seen.feed(L(#"{"kind":"helper.session_exit","session_id":"old","code":1}"#))
+        mock.requests = []
+        seen.watch()
+        check(mock.requests.map { $0["op"] as? String ?? "" } == ["sessions.watch"], "a watch does not open a session it only saw")
+        // an exit this app never heard: helper.watching does not list a session it opened
+        let unheard = SessionClient(transport: mock)
+        _ = unheard.open(sessionId: "s")
+        unheard.feed(ProtocolLine(seq: 1, runId: "r1", sessionId: "s", event: .ask(AskEvent(askId: "a1", card: CardEvent(kind: "action", text: "?", options: [CardOption(kind: "approve", text: "ok")], freeText: false, blocking: true)))))
+        check(!unheard.state("s").composerEnabled, "a card waits")
+        mock.streamLines = [["kind": "helper.watching", "open": ["other"]]]
+        unheard.watch()
+        check(unheard.state("s").exited != nil && unheard.state("s").composerEnabled, "not in helper.watching's open: exited, its card voided")
+        mock.streamLines = [["kind": "helper.watching", "open": ["s"]]]
+        let listed = SessionClient(transport: mock)
+        _ = listed.open(sessionId: "s")
+        listed.watch()
+        check(listed.state("s").exited == nil, "listed in open: running")
+        mock.streamLines = []
+        // … or the exit line was missed altogether: send gets not_open, opens it again once, sends
+        let fresh = SessionClient(transport: mock)
+        _ = fresh.open(sessionId: "s")
+        mock.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open", "error": "session s is not open"]]]
+        mock.requests = []
+        check(fresh.send(.say("在吗"), to: "s") == .sent, "not_open: opened again and sent")
+        check(mock.requests.map { $0["op"] as? String ?? "" } == ["session.send", "session.open", "session.send"], "send, open, send: \(mock.requests.map { $0["op"] ?? "" })")
     }
 
     static func clientGapTests() {
@@ -748,6 +798,44 @@ enum SessionTests {
             check(mock.requests.filter { $0["op"] as? String == "sessions.watch" }.count == 2 + SessionClient.maxStalledRewatches,
                   "bounded: \(mock.requests.count) watches")
             check(client.hasGap && client.state("ses_t").task(runId)?.lastSeq == 4, "the held lines wait")
+        }
+        let j = { (s: String) in (try! JSONSerialization.jsonObject(with: Data(s.utf8))) as! [String: Any] }
+        // an unfillable gap in one session while another moves on each watch: still bounded (re-review)
+        do {
+            let mock = MockTransport()
+            let client = SessionClient(transport: mock)
+            client.now = { mock.clock }
+            mock.gen = { n in
+                var ls: [[String: Any]] = []
+                if n == 1 {
+                    ls.append(j(#"{"kind":"session.task","msg_id":"m","run_id":"r1","raw":"x","session_id":"s1","seq":1}"#))
+                    ls.append(j(#"{"kind":"step","text":"x","step_id":"a","run_id":"r1","session_id":"s1","seq":5}"#))
+                }
+                ls.append(j("{\"kind\":\"session.message\",\"msg_id\":\"m\(n)\",\"role\":\"user\",\"text\":\"hi\",\"session_id\":\"s2\",\"seq\":\(n)}"))
+                return ls
+            }
+            client.watch()
+            check(mock.watches == 2 + SessionClient.maxStalledRewatches, "progress elsewhere is not progress: \(mock.watches) watches")
+        }
+        // two gaps, the second opening later: each gets its own grace (s1's at 0 s, s2's at 0.8 s; s1's fills at 0.9 s;
+        // at 1.1 s s2's is 0.3 s old: no watch again)
+        do {
+            let mock = MockTransport()
+            let client = SessionClient(transport: mock)
+            client.now = { mock.clock }
+            let times: [TimeInterval] = [0, 0.8, 0.85, 0.9]
+            var k = 0
+            client.onChange = { _, _ in mock.clock = Date(timeIntervalSince1970: times[min(k, times.count - 1)]); k += 1 }
+            mock.quiet = 0.2
+            mock.gen = { n in
+                guard n == 1 else { return [] }
+                return [j(#"{"kind":"session.message","msg_id":"a","role":"user","text":"a","session_id":"s1","seq":3}"#),
+                        j(#"{"kind":"session.message","msg_id":"b","role":"user","text":"b","session_id":"s2","seq":3}"#),
+                        j(#"{"kind":"session.message","msg_id":"c","role":"user","text":"c","session_id":"s1","seq":1}"#),
+                        j(#"{"kind":"session.message","msg_id":"d","role":"user","text":"d","session_id":"s1","seq":2}"#)]
+            }
+            client.watch()
+            check(mock.watches == 1 && client.state("s1").lastSeq == 3 && client.state("s2").hasGap, "a later gap's own grace: \(mock.watches) watches")
         }
     }
 }
