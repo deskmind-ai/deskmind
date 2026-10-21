@@ -217,6 +217,7 @@ enum DecisionTests {
         recordingCaptureTests()
         helperLocationTests()
         harnessEventsTests()
+        harnessProcessTests()
         cardButtonTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
@@ -412,6 +413,10 @@ enum DecisionTests {
         check(RunErrorText.friendly(offMenu, lang: .zhHans).hasPrefix("本地模型的回答不在给它的选项里"), "zh: \(RunErrorText.friendly(offMenu, lang: .zhHans))")
         check(RunErrorText.friendly("see failed: capture failed", lang: .en).hasPrefix("Couldn't see the window"), "capture")
         check(RunErrorText.friendly("something else", lang: .en).hasPrefix("This run hit an error"), "anything else")
+        // a run refused because the last run's process would not end (HarnessRun.stillRunning's words)
+        let alive = "the last task's process has not ended (it may still be undoing), so this task was not started"
+        check(RunErrorText.friendly(alive, lang: .en).hasPrefix("The last task's process hasn't ended yet"), "previous run alive: \(RunErrorText.friendly(alive, lang: .en))")
+        check(RunErrorText.friendly(alive, lang: .zhHans).hasPrefix("上一个任务的进程还没结束"), "zh: previous run alive")
     }
 
     /// The file example names a file the folder really holds (Shared/FileExample.swift).
@@ -860,5 +865,74 @@ enum DecisionTests {
         check(stopped["exit"] as? Int == 0 && stopped["reason"] as? String == "", "stopped is not an error")
         check(HarnessEvents.translate(["kind": "something_new"], state: &st, title: title, hasFolder: true, pid: 42).isEmpty, "unknown kinds are ignored")
         check(HarnessEvents.humanize("fs.append_line：target=「todo.txt」") == "fs.append_line：target=「todo.txt」", "a described file step is kept")
+    }
+
+    /// HarnessProcess.end (Shared/HarnessEvents.swift): a lingering run's process and everything under it are ended for
+    /// certain before the next run starts, or the caller is told they are not (deskmind #103 review, P1).
+    static func harnessProcessTests() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("dm-proc-\(getpid())")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func start(_ script: String, stdin: Pipe? = nil) -> Process {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", script]
+            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+            p.standardInput = stdin ?? FileHandle.nullDevice
+            try? p.run()
+            return p
+        }
+        func pid(_ name: String) -> pid_t {
+            let until = Date().addingTimeInterval(3)
+            while Date() < until {
+                if let s = try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8),
+                   let n = pid_t(s.trimmingCharacters(in: .whitespacesAndNewlines)) { return n }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            return 0
+        }
+        var sent: [Int32] = []
+        let record: (pid_t, Int32) -> Int32 = { p, sig in sent.append(sig); return kill(p, sig) }
+
+        // stdin closed: a process that exits on EOF is gone in the grace period, and no signal is sent
+        let input = Pipe()
+        let cat = start("cat >/dev/null", stdin: input)
+        sent = []
+        check(HarnessProcess.end(cat, close: { try? input.fileHandleForWriting.close() }, grace: 3, term: 1, kill: 1, signal: record)
+              && !cat.isRunning && sent.isEmpty, "a process that exits on stdin closed: ended with no signal (\(sent))")
+
+        // a process that does not read its stdin (an undo still going): SIGTERM ends it
+        let busy = start("exec sleep 30")
+        sent = []
+        check(HarnessProcess.end(busy, close: {}, grace: 0.3, term: 2, kill: 1, signal: record) && !busy.isRunning
+              && sent == [SIGTERM], "a sleeping process: ended by SIGTERM (\(sent))")
+
+        // one that ignores SIGTERM, with a child in its group and one in a group of its own that ignore it too
+        // (node with hands' executor under it): SIGKILL, to all of them, and each is gone when it returns
+        let deaf = start(#"trap "" TERM; sleep 30 & echo $! > \#(dir.path)/a; "#
+                         + #"perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); sleep 30' & echo $! > \#(dir.path)/b; wait"#)
+        let a = pid("a"), b = pid("b")
+        Thread.sleep(forTimeInterval: 0.2)    // perl is in its own group by now
+        check(a > 0 && b > 0 && getpgid(b) == b, "the fake run's children are up (\(a), \(b), group \(getpgid(b)))")
+        sent = []
+        let t0 = Date()
+        let ended = HarnessProcess.end(deaf, close: {}, grace: 0.3, term: 0.5, kill: 2, signal: record)
+        check(ended && !deaf.isRunning && HarnessProcess.member(a) == nil && HarnessProcess.member(b) == nil,
+              "SIGTERM ignored: SIGKILL ends the process and both children")
+        check(sent.contains(SIGKILL) && Date().timeIntervalSince(t0) >= 0.8, "SIGKILL only after the grace and SIGTERM waits (\(sent))")
+
+        // the harness gone already, its child still acting (in its group): found and ended all the same
+        let orphaning = start("sleep 30 & echo $! > \(dir.path)/c; exit 0")
+        let c = pid("c")
+        orphaning.waitUntilExit()
+        check(c > 0 && HarnessProcess.member(c) != nil, "the orphan is up")
+        check(HarnessProcess.end(orphaning, close: {}, grace: 0.3, term: 2, kill: 1) && HarnessProcess.member(c) == nil,
+              "a child left behind by an exited harness is ended too")
+
+        // not confirmed gone (a signal that does nothing): false, so the caller does not start the next run
+        let stuck = start("exec sleep 30")
+        check(!HarnessProcess.end(stuck, close: {}, grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 }) && stuck.isRunning,
+              "a process still up after SIGKILL: not ended, said so")
+        stuck.terminate(); stuck.waitUntilExit()
     }
 }

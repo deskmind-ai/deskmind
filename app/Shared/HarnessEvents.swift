@@ -257,3 +257,69 @@ enum HarnessEvents {
         }
     }
 }
+
+// MARK: - A child process's end, made sure of
+
+/// Ending a run's process for certain, with everything it started: the harness (node) runs hands' executor (Python)
+/// under it, and the executor is what changes files -- a node that exits leaves an executor that may still be acting.
+/// Its members are its process group (Process starts a child in a group of its own, which node's children share) and
+/// its descendants (one that made a group of its own), each known by pid and start time, as pids are reused.
+enum HarnessProcess {
+    struct Member: Hashable { let pid: pid_t; let start: UInt64 }
+
+    /// The process `pid` is now, or nil when there is none or it has exited (a zombie is gone: it can act no more).
+    static func member(_ pid: pid_t) -> Member? {
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size, info.pbi_status != SZOMB else { return nil }
+        return Member(pid: pid, start: info.pbi_start_tvsec &* 1_000_000 &+ info.pbi_start_tvusec)
+    }
+
+    /// The pids `proc_listpids` lists of a kind (PROC_PGRP_ONLY: a group's; PROC_PPID_ONLY: a parent's children).
+    private static func list(_ type: UInt32, _ of: pid_t) -> [pid_t] {
+        let bytes = proc_listpids(type, UInt32(of), nil, 0)
+        guard bytes > 0 else { return [] }
+        var buf = [pid_t](repeating: 0, count: Int(bytes) / MemoryLayout<pid_t>.size + 32)
+        let got = proc_listpids(type, UInt32(of), &buf, Int32(buf.count * MemoryLayout<pid_t>.size))
+        return got > 0 ? buf.prefix(Int(got) / MemoryLayout<pid_t>.size).filter { $0 > 0 } : []
+    }
+
+    /// End `p` (a started Process) and its members: `close` first (the run's stdin closed: it exits by itself), wait
+    /// up to `grace` s; then SIGTERM to every member still up, wait up to `term` s; then SIGKILL, wait up to `kill` s.
+    /// True once `p` and every member are gone; false when one is still up after all that (no next run may start).
+    /// `signal`: kill(2) (a test hands in one that does nothing).
+    static func end(_ p: Process, close: () -> Void, grace: Double, term: Double, kill: Double,
+                    signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
+        let root = p.processIdentifier
+        var members = Set<Member>()
+        // Who is up: the group and the descendants of every member known (one whose parent is gone is still known).
+        func refresh() {
+            var found = list(UInt32(PROC_PGRP_ONLY), root).compactMap(member)
+            var queue = (p.isRunning ? [root] : []) + members.map(\.pid) + found.map(\.pid)
+            var seen = Set<pid_t>()
+            while let pid = queue.popLast() {
+                guard seen.insert(pid).inserted else { continue }
+                for c in list(UInt32(PROC_PPID_ONLY), pid) { if let m = member(c) { found.append(m); queue.append(c) } }
+            }
+            members = Set((members.union(found)).filter { member($0.pid) == $0 && $0.pid != root })
+        }
+        func gone() -> Bool { refresh(); return !p.isRunning && members.isEmpty }
+        func wait(_ seconds: Double) -> Bool {
+            let until = Date().addingTimeInterval(seconds)
+            while !gone() {
+                if Date() >= until { return false }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            return true
+        }
+        refresh()    // before stdin is closed: a child is known even if the harness is gone the moment after
+        close()
+        if wait(grace) { return true }
+        for (sig, seconds) in [(SIGTERM, term), (SIGKILL, kill)] {
+            if p.isRunning { _ = signal(root, sig) }
+            for m in members where member(m.pid) == m { _ = signal(m.pid, sig) }
+            if wait(seconds) { return true }
+        }
+        return false
+    }
+}
