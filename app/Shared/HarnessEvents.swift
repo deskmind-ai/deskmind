@@ -290,6 +290,9 @@ enum HarnessProcess {
     final class Tree {
         let process: Process
         private var members = Set<Member>()
+        /// The harness gone and its group seen empty: never read by that id again (an emptied group cannot come
+        /// back, and its id may then be another process's group).
+        private var groupEnded = false
         private let lock = NSLock()
         init(_ process: Process) { self.process = process }
 
@@ -301,14 +304,19 @@ enum HarnessProcess {
 
         // Who is up: the group and the descendants of every member known (one whose parent is gone is still known).
         // A member gone, or its pid taken by another process, is dropped first: never descended from, never
-        // signalled. The group is read unless another process holds the harness's pid: the kernel gives no process
-        // a pid that is a live group's id, so a group by that id is then another's (the run's own was empty and its
-        // id reused). Under `lock`.
+        // signalled. The group is read until, the harness gone, it is seen empty (`groupEnded`), and not while another
+        // process holds the harness's pid: the kernel gives no process a pid that is a live group's id, so a group by
+        // that id is then another's. A child that leaves the group and whose parent exits between two looks (0.25 s
+        // apart, HarnessRun.record) is not seen: polling's limit. Under `lock`.
         private func look() {
             let p = process, root = p.processIdentifier
             members = members.filter { member($0.pid) == $0 }
-            var found = p.isRunning || member(root) == nil || members.contains(where: { getpgid($0.pid) == root })
-                ? list(UInt32(PROC_PGRP_ONLY), root).compactMap(member) : []
+            var found: [Member] = []
+            if !groupEnded && (p.isRunning || member(root) == nil || members.contains(where: { getpgid($0.pid) == root })) {
+                let group = list(UInt32(PROC_PGRP_ONLY), root)
+                if group.isEmpty && !p.isRunning { groupEnded = true }
+                found = group.compactMap(member)
+            }
             var queue = (p.isRunning ? [root] : []) + members.map(\.pid) + found.map(\.pid)
             var seen = Set<pid_t>()
             while let pid = queue.popLast() {

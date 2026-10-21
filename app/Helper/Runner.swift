@@ -265,16 +265,16 @@ enum Runner {
     /// still lingering for its result card's answer is let go first: it writes into its log and run folder until it
     /// ends, and its undo would have nothing left to read. nil (nothing removed) while a run is going, or when the
     /// lingering one would not end. `support` and `closeLingering`: a test's folder and stand-in.
-    /// Held while 「清除全部」 removes files; a run passes it (busy already set) before it makes any.
+    /// Held while 「清除全部」 ends the last runs and removes files; a run passes it (busy already set) before it starts.
     static let clearing = NSLock()
 
     static func clearRunData(support: URL = DeskMindIPC.supportDir,
                              closeLingering: () -> Bool = { HarnessRun.closeLingering() }) -> Int? {
-        if busy { return nil }
-        guard closeLingering() else { return nil }
-        // a run starting now (busy set) waits on `clearing` before it makes a file; one already started is left alone
+        // `clearing` first: a run that has not passed it yet waits (and is not ended by the close below); one that has
+        // set busy already is left alone. Busy is set before a run passes it, so no run is ended or loses its files.
         clearing.lock(); defer { clearing.unlock() }
         if busy { return nil }
+        guard closeLingering(), !busy else { return nil }
         let fm = FileManager.default
         // the same places under `support`
         let at = { (u: URL) in support.appendingPathComponent(String(u.path.dropFirst(DeskMindIPC.supportDir.path.count))) }
@@ -630,6 +630,7 @@ enum Runner {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
         current = p; Runner.stopRequested = false
+        HarnessRun.record(p)    // what it leaves running (a Peekaboo server) is ended before the next run, as for a harness run
         answerLock.lock(); answers = inPipe.fileHandleForWriting; asking = false; answerLock.unlock()
         _ = emit(["event": "start", "set": set, "real": spec.real, "pid": Int(p.processIdentifier)])
         // The live view, for the user's own instructions: until the run ends, however it ends.
