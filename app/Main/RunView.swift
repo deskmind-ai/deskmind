@@ -67,7 +67,9 @@ struct PendingAsk: Equatable {
 @MainActor
 final class RunModel: ObservableObject {
     enum Phase { case idle, running, done, failed }
-    @Published var phase: Phase = .idle
+    /// While a run is running the window cannot be closed (only minimised): its card questions are answered there,
+    /// and a closed window took this model, and the run's events, with it.
+    @Published var phase: Phase = .idle { didSet { if phase != oldValue { MainWindow.setClosable(phase != .running) } } }
     @Published var tasks: [RunTask] = []
     @Published var summary = ""
     @Published var elapsed: TimeInterval = 0
@@ -117,8 +119,8 @@ final class RunModel: ObservableObject {
     @Published var waitingForUser = false
     /// What the paused step will do once the user stops ("type '张悬 宝贝' into '搜索框'").
     @Published var waitingWhat = ""
-    /// The question the task is waiting on, if any (see AskCard).
-    @Published var ask: PendingAsk?
+    /// The question the task is waiting on, if any (see AskCard). The island offers "Open DeskMind" meanwhile.
+    @Published var ask: PendingAsk? { didSet { if real || ask == nil { RunOverlay.shared.setAsking(ask != nil) } } }
     /// Set while the helper loads something before the run can start ("eyes": the vision model).
     @Published var preparing = ""
     /// What the run is doing before its first step, and since when (see RunStage); nil once steps come.
@@ -290,10 +292,15 @@ final class RunModel: ObservableObject {
     func answer(_ button: HarnessEvents.CardButton) {
         let askID = ask?.askID ?? ""
         ask = nil
-        let lang = ResolvedLang.current
-        if real { RunOverlay.shared.say(L("Got your answer. Carrying on…", lang: lang)) }
         let request = button.request(askID: askID)
-        Task.detached { _ = DeskMindIPC.request(request) }
+        Task { @MainActor [weak self] in
+            // the helper refuses an answer to a card that is no longer open (stale_card): no "got your answer" then --
+            // the question was updated, and the new card comes as its own ask
+            let stale = await Task.detached { DeskMindIPC.request(request)?["code"] as? String == "stale_card" }.value
+            guard let self, self.real, self.ask == nil else { return }   // a newer card says what it needs itself
+            let lang = ResolvedLang.current
+            RunOverlay.shared.say(stale ? L("This question was updated", lang: lang) : L("Got your answer. Carrying on…", lang: lang))
+        }
     }
 
     /// Show a past run as it ended (from the recent runs list): its steps, answer and changes, nothing running.

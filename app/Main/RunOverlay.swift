@@ -38,6 +38,8 @@ final class OverlayModel: ObservableObject {
     @Published var resultOpen = false
     /// Stop was pressed: the run's end is "stopped", not a failure.
     var stoppedByUser = false
+    /// A card waits for the user in DeskMind's window: the island offers "Open DeskMind" (a way in besides the Dock).
+    @Published var asking = false
 }
 
 @MainActor
@@ -217,6 +219,15 @@ final class RunOverlay {
         MainWindow.comeBack()
     }
 
+    /// A card waits in the window (or not any more).
+    func setAsking(_ on: Bool) {
+        guard model.asking != on else { return }
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { model.asking = on }
+    }
+
+    /// "Open DeskMind" while a card waits: the window, restored and in front -- the user asked for it.
+    func openWindow() { MainWindow.comeBack() }
+
     static func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
@@ -260,6 +271,14 @@ struct OverlayView: View {
             Spacer(minLength: 8)
             if model.phase == .running && (model.waiting || model.takenOver) {
                 ScreenShareButtons(model: model, compact: true)
+            }
+            if model.phase == .running && model.asking {
+                Button { RunOverlay.shared.openWindow() } label: {
+                    Text(L("Open DeskMind", lang: lang)).font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .padding(.horizontal, 12).padding(.vertical, 5)
+                        .foregroundStyle(Brand.paper).background(Capsule().fill(Brand.dot))
+                }
+                .buttonStyle(.plain)
             }
             if model.phase == .running {
                 Button(action: onStop) {

@@ -479,6 +479,9 @@ enum Runner {
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
         busy = true; cancelled = false
         defer { busy = false }
+        // a finished harness run still waiting for its result card's answer is let go first (after busy is set, so
+        // no second run starts meanwhile)
+        HarnessRun.closeLingering()
         let set = spec.set
         if spec.real && spec.planner == BrainServer.url && BrainServer.status()["state"] as? String != "ready" {
             BrainServer.ensure()

@@ -172,7 +172,7 @@ enum HarnessRun {
         // Busy until task_done (this function returns then), not until the process exits: it lingers for the result
         // card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
-        closeLingering()
+        closeLingering()    // after busy is set: no second run starts while it is waited for
         guard available else {
             _ = emit(["event": "error", "code": "harness_missing", "error": "this build has no harness runtime"]); return
         }

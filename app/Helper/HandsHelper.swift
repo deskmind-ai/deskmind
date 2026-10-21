@@ -284,8 +284,6 @@ func serve() {
                     _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
                     return
                 }
-                // a finished harness run still waiting for its result card's answer is let go first (stdin closed)
-                HarnessRun.closeLingering()
                 let spec = Runner.Spec(req)
                 let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
                 run(spec) { event in

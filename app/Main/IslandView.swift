@@ -24,7 +24,8 @@ struct IslandView: View {
     @Environment(\.lang) private var lang
 
     private var open: Bool {
-        hover || pinned || model.waiting || model.takenOver || (model.phase != .running && model.resultOpen)
+        hover || pinned || model.waiting || model.takenOver || (model.phase == .running && model.asking)
+            || (model.phase != .running && model.resultOpen)
     }
     private var collapsedWidth: CGFloat { notch.width + 2 * Island.wing }
 
@@ -121,7 +122,9 @@ struct IslandView: View {
                 if model.phase == .running && (model.waiting || model.takenOver) { shareButtons }
                 Spacer()
                 if model.phase == .running {
-                    pill(L("Stop", lang: lang), prominent: true, action: onStop)
+                    // a card waits in the window: the way to it, besides the Dock and the notification
+                    if model.asking { pill(L("Open DeskMind", lang: lang), prominent: true) { RunOverlay.shared.openWindow() } }
+                    pill(L("Stop", lang: lang), prominent: !model.asking, action: onStop)
                 } else {
                     pill(L("Dismiss", lang: lang), action: onDismiss)
                     pill(L("Show Details", lang: lang), prominent: true, action: onDetails)
@@ -165,12 +168,18 @@ struct IslandView: View {
 
 /// DeskMind's own window. A run never moves it (M1 S0: it was sent aside at Start and after an answer, and brought
 /// forward for a question and at the end, taking the user's focus); only the user brings it forward: the island's
-/// "Show Details", the Dock icon.
+/// "Show Details" and "Open DeskMind", the Dock icon, a click on the live card or a notification (those reopen the app).
 @MainActor
 enum MainWindow {
-    /// The app's one document-style window (not a panel: the island, the decision panel).
+    /// The app's one document-style window (not a panel: the island, the decision panel), minimised or not.
     static var window: NSWindow? {
         NSApp.windows.first { !($0 is NSPanel) && $0.canBecomeMain && $0.contentView != nil }
+    }
+
+    /// While a run is running the window cannot be closed (its close button is off; ⌘W beeps), only minimised: card
+    /// questions are answered in it, and closing it ended the run's view and model.
+    static func setClosable(_ on: Bool) {
+        window?.standardWindowButton(.closeButton)?.isEnabled = on
     }
 
     /// A key was pressed in the last `seconds`, in any app (the HID system's own count; no keys are read).
@@ -178,19 +187,23 @@ enum MainWindow {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown) < seconds
     }
 
-    /// In front, as the key window: the user asked for it (the island's "Show Details", the Dock icon).
-    static func comeBack() {
+    /// Restored if minimised, in front, as the key window: only for something the user did (the island's buttons, a
+    /// reopen). False when there is no window.
+    @discardableResult
+    static func comeBack() -> Bool {
+        guard let w = window else { return false }
         NSApp.activate()
-        window?.makeKeyAndOrderFront(nil)
+        if w.isMiniaturized { w.deminiaturize(nil) }
+        w.makeKeyAndOrderFront(nil)
+        return true
     }
 }
 
-/// A click on the Dock icon: macOS brings the open window forward; with none open, SwiftUI opens one.
-///
-/// With no window open, not while a run is running: hands gives the front back to the app that had it after every
-/// step it takes in another app, with `open -b`, and to a running app that is a reopen -- DeskMind's own, since Start
-/// was pressed here. Each step would open a fresh window over the app being worked in. The island is the way in
-/// meanwhile.
+/// A reopen -- a click on the Dock icon, on the live card or on a notification (they open the app again) -- is the
+/// user asking for the window. With a window on screen, macOS brings it forward and nothing more is done (hands
+/// gives the front back with `open -b`, also a reopen, and must not make it the key window over the app being worked
+/// in). With none on screen (minimised): it is restored. With none at all: SwiftUI opens one -- while a run is running
+/// only when a card waits, else each `open -b` would open a fresh window over the app being worked in.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting mid-recording: the helper is told to stop and finish the movie (it does, on its own, after the app is
     /// gone). Left recording, it refused the next run's recording.
@@ -203,10 +216,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MainActor.assumeIsolated {
-            // with a window open, macOS brings it forward itself; nothing more is done here (a reopen by hands'
-            // `open -b` must not make it the key window over the app being worked in)
-            if !flag { return RunModel.shared?.phase != .running }
-            return true
+            if flag { return true }
+            if MainWindow.comeBack() { return false }
+            return RunModel.shared?.phase != .running || RunModel.shared?.ask != nil
         }
     }
 }

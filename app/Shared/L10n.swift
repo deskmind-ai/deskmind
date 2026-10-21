@@ -399,6 +399,8 @@ enum L10n {
         "Waiting for your approval in DeskMind": "在 DeskMind 窗口里等你批准",
         "Got your answer. Carrying on…": "收到回复，继续…",
         "The question was withdrawn. Carrying on…": "这个问题已收回，继续…",
+        "This question was updated": "这个问题已更新",
+        "Open DeskMind": "打开 DeskMind",
         "Asked for your approval": "请你批准",
 
         // MARK: Run overlay and notifications (Main/RunOverlay.swift)
