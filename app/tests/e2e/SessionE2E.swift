@@ -240,6 +240,8 @@ enum SessionE2E {
     /// ignoring SIGTERM, then exits at stdin's end), on each way a session ends (`end`, idle, the helper exiting), and
     /// an op run whose harness exits leaving a child: the helper keeps track of what is left, holds the machine lock
     /// while it is up (a session's task is refused), and its own next run ends it first or is refused.
+    nonisolated(unsafe) static var harnessLock = false
+
     static func leftover(dir: String) {
         let fm = FileManager.default
         let root = URL(fileURLWithPath: dir)
@@ -250,13 +252,19 @@ enum SessionE2E {
         echo '{"kind":"session.start","last_seq":0,"resumed":false}'
         ( trap '' TERM; exec sleep 300 ) </dev/null >/dev/null 2>&1 &
         echo $! > "$EXECUTOR_PID"
+        # as the harness does for a task: the machine lock names the session and its executor
+        if [ -n "$HARNESS_LOCK" ]; then
+          printf '{"pid":%s,"session_id":"ses_lock","run_id":"run_lock","executor_pid":%s}' $$ $! > "$HARNESS_LOCK.$$"
+          ln "$HARNESS_LOCK.$$" "$HARNESS_LOCK"; rm -f "$HARNESS_LOCK.$$"
+        fi
         cat > /dev/null
         exit 0
         """#.write(to: script, atomically: true, encoding: .utf8)
         let pidFile = root.appendingPathComponent("executor.pid")
         SessionHost.setup = .init(node: URL(fileURLWithPath: "/bin/sh"), bundle: script, dir: root, cwd: nil,
                                   logs: root.appendingPathComponent("logs"),
-                                  environment: { ["PATH": "/usr/bin:/bin", "EXECUTOR_PID": pidFile.path] },
+                                  environment: { ["PATH": "/usr/bin:/bin", "EXECUTOR_PID": pidFile.path,
+                                                  "HARNESS_LOCK": harnessLock ? ComputerLock.file.path : ""] },
                                   prepare: {}, idleSeconds: 1)
         SessionHost.setup.ui = .init(start: { _, _, _ in }, show: { _, _ in }, record: { _, _ in }, finish: { _, _ in })
         let me = Int(ProcessInfo.processInfo.processIdentifier)
@@ -294,6 +302,26 @@ enum SessionE2E {
         ActingGuard.drop()
         check(!HarnessRun.acting && ComputerLock.holder() == nil, "then nothing acts, the Mac is free")
 
+        // 1b. as the harness leaves it: the session gone, the lock still naming its executor (a session's task is
+        // refused by the harness's lock itself). The next op run is not refused for it: it ends the executor first
+        // (or is refused previous_run_alive when that does not take), then takes the lock over.
+        harnessLock = true
+        try? fm.createDirectory(at: ComputerLock.file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard let exL = open("ses_lock") else { exit(1) }
+        harnessLock = false
+        check(until { owner()["executor_pid"] as? Int == Int(exL) }, "the stand-in harness holds the lock for its task (\(owner()))")
+        _ = SessionHost.end(sessionID: "ses_lock")
+        check(until { HarnessRun.acting && HarnessRun.owns(exL) }, "session.end, its executor still up: tracked")
+        check(sessionTaskRefused() && !ActingGuard.holding, "a session's task is refused (the harness's lock names the executor)")
+        let stuck = ComputerLock.clearForRun(close: { HarnessRun.closeLingering(grace: 0.1, term: 0.1, kill: 0.1, signal: { _, _ in 0 }) })
+        check(stuck?["code"] as? String == "previous_run_alive" && ComputerLock.alive(exL), "an op run whose kill does not take: previous_run_alive (\(String(describing: stuck)))")
+        check(ComputerLock.clearForRun() == nil && !ComputerLock.alive(exL), "the next op run ends the executor first")
+        if case .taken(let r) = ComputerLock.begin(runID: "run_after") { check(true, "then takes the Mac"); r() } else { check(false, "then takes the Mac (\(owner()))") }
+        // an undo going (this helper's own lock for it) is still refused
+        try? #"{"pid":\#(me),"session_id":"","run_id":"run_u","by":"helper","undo":true}"#.write(to: ComputerLock.file, atomically: true, encoding: .utf8)
+        check(ComputerLock.clearForRun()?["code"] as? String == "computer_busy", "an undo going: computer_busy")
+        try? fm.removeItem(at: ComputerLock.file)
+
         // 2. closed as idle (stdin closed by the reaper), the executor then exits by itself: the lock goes with it
         guard let ex2 = open("ses_idle") else { exit(1) }
         check(until({ ComputerLock.holder() != nil }, 20) && helperHolds() && ComputerLock.alive(ex2), "closed as idle, its executor up: the Mac held")
@@ -304,6 +332,8 @@ enum SessionE2E {
         guard let ex3 = open("ses_exit") else { exit(1) }
         SessionHost.shutdown(wait: 1)
         check(until { !ComputerLock.alive(ex3) }, "the helper exiting ends what its sessions left (SIGTERM ignored: SIGKILL)")
+
+        check(until { ComputerLock.holder() == nil && !ActingGuard.watching }, "and the Mac let go")
 
         // 4. an op run whose harness exits leaving a child up (vice versa): the run's lock is kept for it
         let p = Process()

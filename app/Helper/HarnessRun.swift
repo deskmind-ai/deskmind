@@ -67,6 +67,14 @@ enum HarnessRun {
         }
     }
 
+    /// `pid` is one of the recorded trees' processes (a run's harness, or a process under a run or an ended session).
+    static func owns(_ pid: pid_t) -> Bool {
+        lock.lock(); let all = trees; lock.unlock()
+        return all.contains { t in
+            (t.process.isRunning && t.process.processIdentifier == pid) || t.known.contains { $0.pid == pid }
+        }
+    }
+
     /// Some recorded process may still act on this Mac: a tree not gone, other than the finished run that lingers
     /// for its card and was not answered (it waits, it does not act). The machine lock is held for it (ActingGuard).
     static var acting: Bool {
@@ -245,6 +253,8 @@ enum HarnessRun {
             if expire { NSLog("DeskMind Hands: another computer task started on this Mac; \(l.runID)'s undo has expired") }
         }
         lock.lock(); l.close(); l.releaseUndo(); if lingering === l { lingering = nil }; lock.unlock()
+        // its harness gone, but maybe not what it started (an undo's executor): the Mac stays held while that acts
+        ActingGuard.start()
     }
 
     /// Whether `p` is a finished run's lingering process (the stop path leaves it alone).

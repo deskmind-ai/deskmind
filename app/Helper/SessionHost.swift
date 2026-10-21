@@ -87,6 +87,8 @@ enum SessionHost {
     /// Trees of sessions that exited with processes still up under them (also in HarnessRun.trees): ended when the
     /// helper exits (shutdown).
     nonisolated(unsafe) private static var left: [HarnessProcess.Tree] = []
+    /// The helper is exiting: no session is opened any more.
+    nonisolated(unsafe) private static var shuttingDown = false
 
     final class Session {
         let id: String
@@ -226,6 +228,7 @@ enum SessionHost {
         let until = Date().addingTimeInterval(20)
         while true {
             lock.lock()
+            if shuttingDown { lock.unlock(); return ["ok": false, "code": "busy", "error": "the helper is exiting"] }
             if let s = sessions[id], s.started, !s.closing {
                 if let liveView { s.liveView = liveView }
                 s.lastActive = Date()
@@ -405,8 +408,9 @@ enum SessionHost {
     /// The helper is exiting: every session's stdin is closed (each stops its running task and exits), and each tree
     /// is waited for up to `wait` s, then ended (SIGTERM, SIGKILL): no executor is left acting with nobody tracking it.
     /// (A helper killed outright cannot do this: the harness's lock then holds the executor's pid.)
-    static func shutdown(wait: Double = 15) {
+    static func shutdown(wait: Double = 10) {
         lock.lock()
+        shuttingDown = true
         let all = Array(sessions.values)
         for s in all { s.closing = true }
         let trees = all.map(\.tree) + left
@@ -449,7 +453,7 @@ enum SessionHost {
         if !s.tree.gone {
             NSLog("DeskMind Hands: session \(s.id) exited with \(s.tree.known.count) processes under it still up; holding the Mac for them")
             HarnessRun.adopt(s.tree)
-            lock.lock(); left.removeAll { $0.gone }; left.append(s.tree); lock.unlock()
+            lock.lock(); left.append(s.tree); lock.unlock()
             ActingGuard.start()
         }
         lock.lock()
@@ -627,6 +631,28 @@ enum ComputerLock {
         return o
     }
 
+    /// Before this helper's own run (op run) takes the lock: refused (`computer_busy`) while another's task holds the
+    /// Mac; otherwise what the last runs left (a lingering run; processes still up under a run or an ended session,
+    /// even one whose own harness lock still names it) is ended first, or the run is refused (`previous_run_alive`).
+    /// Nil: go on to `begin`. `close`: HarnessRun.closeLingering (a test hands in one that cannot kill).
+    static func clearForRun(close: () -> Bool = { HarnessRun.closeLingering() }) -> [String: Any]? {
+        if let held = holder(), !ours(held) {
+            NSLog("DeskMind Hands: run refused: the computer lock is held (\(held.prefix(200)))")
+            return ["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]
+        }
+        guard close() else { return HarnessRun.stillRunning }
+        ActingGuard.drop()
+        return nil
+    }
+
+    /// Every live holder of the lock is something this helper ends before its next run: a process of a recorded tree,
+    /// or this helper itself while ActingGuard holds it (not for an undo going: that is refused).
+    private static func ours(_ held: String) -> Bool {
+        let me = ProcessInfo.processInfo.processIdentifier
+        let live = (SessionWire.lockHolders(held) ?? []).filter { $0 > 0 && alive($0) }
+        return !live.isEmpty && live.allSatisfy { $0 == me ? ActingGuard.holding : HarnessRun.owns($0) }
+    }
+
     /// `computer.last` names `runID` (harness setLastTask: a file of our own renamed over it).
     static func setLast(_ runID: String) throws {
         guard let data = SessionWire.lastText(runID: runID, t: Date().timeIntervalSince1970) else { throw CocoaError(.fileWriteUnknown) }
@@ -706,6 +732,8 @@ enum ActingGuard {
 
     /// The lock is this guard's.
     static var holding: Bool { lock.lock(); defer { lock.unlock() }; return release != nil }
+    /// Something the guard watches may act (it looks every `every` s): never blocks on a tree being ended.
+    static var watching: Bool { lock.lock(); defer { lock.unlock() }; return running }
 
     /// One look: hold the lock while something acts (taken once it is free), let it go when nothing does. True while
     /// something acts.
@@ -714,7 +742,7 @@ enum ActingGuard {
         let acting = HarnessRun.acting
         lock.lock(); defer { lock.unlock() }
         if acting {
-            if release == nil, case .taken(let r) = ComputerLock.take(runID: "") { release = r }
+            if release == nil, ComputerLock.holder() == nil, case .taken(let r) = ComputerLock.take(runID: "") { release = r }
             return true
         }
         release?(); release = nil
