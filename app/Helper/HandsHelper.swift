@@ -118,8 +118,9 @@ func status(probe: Bool) -> [String: Any] {
     let probed = !live && probe && probeScreen()
     // Granted, but this process will not see it until it restarts: restart now, between tasks, rather than leave the
     // setup saying "not granted" (the app starts the installed copy again within seconds).
-    if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: Runner.current != nil || SessionHost.taskRunning,
-                                      alreadyScheduled: restartingForGrant) {
+    // a task running, or a finished one whose undo can still be asked for (its process would go with this one)
+    let busy = Runner.current != nil || SessionHost.taskRunning || HarnessRun.undoWaiting
+    if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: busy, alreadyScheduled: restartingForGrant) {
         restartingForGrant = true
         restartSelf()
     }
@@ -289,9 +290,11 @@ func serve() {
                     refuse(["event": "error", "error": "a run is already in progress"]); return
                 }
                 // One computer task at a time on this Mac, whoever starts it: a chat session's task holds the harness's
-                // machine lock (sessions/computer.lock) while it runs, and this run takes it too.
+                // machine lock (sessions/computer.lock) while it runs, and this run takes it too. computer.last then
+                // names this run: every finished task's undo expires, a session's and this helper's own.
+                let runID = "run_" + UUID().uuidString.lowercased().prefix(8)
                 let release: () -> Void
-                switch ComputerLock.take(runID: "") {
+                switch ComputerLock.begin(runID: runID) {
                 case .taken(let r): release = r
                 case .busy(let held):
                     NSLog("DeskMind Hands: run refused: the computer lock is held (\(held.prefix(200)))")
@@ -302,10 +305,12 @@ func serve() {
                     if ComputerLock.holder() != nil {
                         refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
                     }
+                    try? ComputerLock.setLast(runID)
                     release = {}
                 }
                 defer { release() }
-                let spec = Runner.Spec(req)
+                var spec = Runner.Spec(req)
+                spec.runID = runID
                 let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
                 run(spec) { event in
                     guard var line = try? JSONSerialization.data(withJSONObject: event) else { return true }

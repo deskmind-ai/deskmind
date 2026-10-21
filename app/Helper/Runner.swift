@@ -374,6 +374,9 @@ enum Runner {
         /// Which engine thinks: hands' own decision loop (the default) or the harness (HarnessRun), by the request's
         /// `engine` -- the main app's developer setting.
         var engine = "hands"
+        /// The run's id, named by the helper when it takes the machine lock for it (ComputerLock.begin), so that
+        /// computer.last names this run; a harness run takes it as its own.
+        var runID: String? = nil
         /// The harness's model configuration name and the request's language (card texts follow it).
         var config = "ds-flash"
         var lang = "zh"

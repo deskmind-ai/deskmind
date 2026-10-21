@@ -5,6 +5,8 @@
 //
 //   session.open  {session_id?, config?, lang?, driver?, scope?, live_view?} → {ok, session_id, resumed, last_seq, pid}
 //                 starts the session's process (a known id resumes it; none makes a new one), or finds it running
+//                 (`already_open`, with the last stored seq it has sent). `live_view` (default true, as for `op run`;
+//                 false is kept): a task of the session shows the live card
 //   session.send  {session_id, line}     one control line (SessionWire.validate: a JSON object of a known type)
 //   session.end   {session_id}           `end`, then stdin closed: a running task is stopped, the process exits
 //   sessions.list                        `harness.mjs sessions list`, each marked `open` when its process runs here
@@ -13,12 +15,14 @@
 //                 On connect each running session is sent `attach{after_seq}` and replays what is stored after it;
 //                 each named task of it (its folder is under the session's runs/) is replayed after its cursor with
 //                 `attach{run_id}`, and a task still open from its start when not named (its card may wait). Each
-//                 connection gets stored lines in order and once, and a task's lines once (SessionWire.Gate). The
+//                 connection gets, per stream (the session's stored lines; each task's lines), the replay first, then
+//                 the live lines, with contiguous seqs: a live task line that overtakes its replay is held until the
+//                 replay below it has been sent (SessionWire.Gate). The
 //                 first line is {"kind":"helper.watching","open":[…]}; a process that ends says
 //                 {"kind":"helper.session_exit","session_id":…,"code":…}.
 //
 // Tasks of a session drive the live card and the recording as the helper's own runs do (HarnessRun.show), from the
-// executor events the session forwards.
+// executor events the session forwards: only a task that runs in this helper now (SessionWire.Live), never a replay.
 //
 // Lifecycle (owner 10-21): the processes are this helper's children. When the helper exits, their stdin reaches its
 // end and each stops its running task itself (the harness's "app went away"). The main app closing changes nothing:
@@ -43,6 +47,8 @@ enum SessionHost {
         var idleSeconds: Double
         /// The driver a session's tasks run on, unless session.open names one (`sim` in tests).
         var driver = "hands"
+        /// The live card and the recording (`UI.standard`; a recorder in tests).
+        var ui = UI.standard
 
         static func standard() -> Setup {
             Setup(node: HarnessRun.node, bundle: HarnessRun.bundle, dir: DeskMindIPC.supportDir, cwd: Runner.work,
@@ -53,6 +59,21 @@ enum SessionHost {
     }
     nonisolated(unsafe) static var setup = Setup.standard()
 
+    /// What a live task of a session drives on this Mac, by run: its card (when the session shows one), the
+    /// recording's app list, and the card's end.
+    struct UI {
+        var start: (_ run: String, _ goal: String, _ onStop: @escaping () -> Void) -> Void
+        /// An event of the task the card follows (HarnessRun.show).
+        var show: (_ run: String, _ ev: [String: Any]) -> Void
+        /// An event of a live task without the card: the recording only (HarnessRun.record).
+        var record: (_ run: String, _ ev: [String: Any]) -> Void
+        var finish: (_ run: String, _ status: LiveView.Status?) -> Void
+
+        static let standard = UI(start: { _, goal, onStop in LiveCard.start(bundles: [], goal: goal, onStop: onStop) },
+                                 show: { _, ev in HarnessRun.show(ev) }, record: { _, ev in HarnessRun.record(ev) },
+                                 finish: { _, status in LiveCard.finish(status) })
+    }
+
     static let ops: Set<String> = ["session.open", "session.send", "session.end", "sessions.list", "sessions.watch"]
 
     // MARK: state (under `lock`)
@@ -62,6 +83,7 @@ enum SessionHost {
     nonisolated(unsafe) private static var opening: Set<String> = []
     nonisolated(unsafe) private static var watchers: [Watcher] = []
     nonisolated(unsafe) private static var reaping = false
+    nonisolated(unsafe) private static var expiring = false
 
     final class Session {
         let id: String
@@ -73,14 +95,16 @@ enum SessionHost {
         var activity = SessionWire.Activity()
         var lastActive = Date()
         var closing = false
-        var liveView = false
+        /// Show a task's live card (session.open's `live_view`, on unless the app says false, as for `op run`).
+        var liveView = true
+        /// Which lines are new in this process and which tasks are live in it (SessionWire.Live).
+        var live = SessionWire.Live()
         /// session.start came: from then on its lines go to the watching connections (before it, a refusal is the
         /// opener's: busy, bad_config).
         var started = false
         var first: [String: Any]?
         let firstLine = DispatchSemaphore(value: 0)
-        // the reader thread's own: the live card's view of each task
-        var inspect = SessionWire.Gate(after: 0)
+        // the reader thread's own: the live card's view of each live task
         var cards: [String: HarnessEvents.State] = [:]
         var cardRun: String?
 
@@ -139,10 +163,11 @@ enum SessionHost {
         id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil
     }
 
-    /// A task of some session is running (not yet at its session.task_end): the helper does not restart under it.
+    /// A task of some session is running (not yet at its session.task_end), or a finished one's result card still
+    /// offers undo (its executor lingers): the helper does not restart under either.
     static var taskRunning: Bool {
         lock.lock(); defer { lock.unlock() }
-        return sessions.values.contains { !$0.activity.running.isEmpty }
+        return sessions.values.contains { $0.activity.holdsRestart }
     }
 
     // MARK: the socket
@@ -196,7 +221,7 @@ enum SessionHost {
                 s.lastActive = Date()
                 lock.unlock()
                 return ["ok": true, "session_id": id, "resumed": s.first?["resumed"] as? Bool ?? true, "already_open": true,
-                        "pid": Int(s.process.processIdentifier)]
+                        "last_seq": s.live.lastSeq, "pid": Int(s.process.processIdentifier)]
             }
             if sessions[id] == nil && !opening.contains(id) { opening.insert(id); lock.unlock(); break }
             lock.unlock()
@@ -214,7 +239,7 @@ enum SessionHost {
         // session's lock: the harness says busy and exits; tried again until it has gone.
         while true {
             let s: Session
-            do { s = try spawn(id: id, header: header, liveView: liveView ?? false) } catch {
+            do { s = try spawn(id: id, header: header, liveView: liveView ?? true) } catch {
                 return ["ok": false, "error": "launch: \(error.localizedDescription)"]
             }
             _ = s.firstLine.wait(timeout: .now() + 20)
@@ -394,7 +419,7 @@ enum SessionHost {
         if let line { for w in watchers { w.send(line) } }
         lock.unlock()
         s.firstLine.signal()
-        if s.cardRun != nil { LiveCard.finish(.failed); s.cardRun = nil }
+        if let run = s.cardRun { setup.ui.finish(run, .failed); s.cardRun = nil }
     }
 
     private static func lineData(_ e: [String: Any]) -> Data? {
@@ -411,43 +436,76 @@ enum SessionHost {
             // the first line: session.start, or why it could not start (only the opener hears that)
             let first = s.first == nil
             if first { s.first = e }
-            if kind == "session.start" { s.started = true }
+            if kind == "session.start" {
+                s.started = true
+                s.live = SessionWire.Live(lastSeq: (e["last_seq"] as? NSNumber)?.intValue ?? 0)
+            }
             lock.unlock()
             if first { s.firstLine.signal() }
             if kind != "session.start" { return }
             lock.lock()
         }
-        s.activity.note(e)
+        // what the session has going on, and what drives the card: from new lines only, never from a replay
+        var drive = false
+        if kind.hasPrefix("session.") {
+            if s.live.note(e) { s.activity.note(e) }
+        } else if e["run_id"] is String {
+            drive = s.live.show(e)
+        }
         let raw = s.activity.raw[e["run_id"] as? String ?? ""] ?? ""
         let liveView = s.liveView
-        if let line = lineData(e) {
-            for w in watchers {
-                var g = w.gate(s.id)
-                if g.admit(e) { w.send(line) }
-                w.gates[s.id] = g
-            }
+        var hold = false
+        for w in watchers {
+            var g = w.gate(s.id)
+            for o in g.admit(e) { if let line = lineData(o) { w.send(line) } }
+            hold = hold || g.holding
+            w.gates[s.id] = g
         }
+        if hold { scheduleExpiry() }
         lock.unlock()
-        // the live card and the recording, from the task's own events (each once: a replay is not shown again)
-        if !kind.hasPrefix("session."), let run = e["run_id"] as? String, s.inspect.admit(e) {
-            drive(s, run: run, e, raw: raw, liveView: liveView)
+        if drive, let run = e["run_id"] as? String { self.drive(s, run: run, e, raw: raw, liveView: liveView) }
+    }
+
+    /// A watching connection's task lines held for a replay that has not come (SessionWire.Gate.expire): let go, in
+    /// order, once they have waited `Gate.holdLimit`. Under lock.
+    private static func scheduleExpiry() {
+        guard !expiring else { return }
+        expiring = true
+        DispatchQueue.global().asyncAfter(deadline: .now() + SessionWire.Gate.holdLimit + 0.1) {
+            lock.lock()
+            expiring = false
+            var again = false
+            for w in watchers {
+                for (sid, gate) in w.gates where gate.holding {
+                    var g = gate
+                    let out = g.expire()
+                    if !out.isEmpty { NSLog("DeskMind Hands: session \(sid): \(out.count) task lines passed on without their replay") }
+                    for o in out { if let line = lineData(o) { w.send(line) } }
+                    again = again || g.holding
+                    w.gates[sid] = g
+                }
+            }
+            if again { scheduleExpiry() }
+            lock.unlock()
         }
     }
 
+    /// A live task's event (SessionWire.Live.show: started in this process, not ended, not shown before): the card
+    /// follows the first such task while the session shows cards; any other only feeds the recording's app list.
     private static func drive(_ s: Session, run: String, _ e: [String: Any], raw: String, liveView: Bool) {
         let kind = e["kind"] as? String ?? ""
         if kind == "start" && liveView && s.cardRun == nil {
             s.cardRun = run
-            LiveCard.start(bundles: [], goal: raw, onStop: { [weak s] in _ = s?.write(["type": "stop", "run_id": run]) })
+            setup.ui.start(run, raw) { [weak s] in _ = s?.write(["type": "stop", "run_id": run]) }
         }
         var st = s.cards[run] ?? HarnessEvents.State()
         let out = HarnessEvents.translate(e, state: &st, title: raw, hasFolder: false, pid: Int(s.process.processIdentifier))
         s.cards[run] = st
-        if s.cardRun == run { for ev in out { HarnessRun.show(ev) } }
-        else { for ev in out where ev["event"] as? String == "step" { HarnessRun.show(ev) } }   // the recording only
+        if s.cardRun == run { for ev in out { setup.ui.show(run, ev) } }
+        else { for ev in out { setup.ui.record(run, ev) } }
         if kind == "task_done" {
             s.cards[run] = nil
-            if s.cardRun == run { LiveCard.finish(HarnessRun.ending(e["status"] as? String)); s.cardRun = nil }
+            if s.cardRun == run { setup.ui.finish(run, HarnessRun.ending(e["status"] as? String)); s.cardRun = nil }
         }
     }
 
@@ -478,13 +536,16 @@ enum SessionHost {
 }
 
 /// The machine-wide one-task rule (harness sessions/computer.lock): a session takes it for each computer task; the
-/// helper's own runs (`op run`) take it too, so neither starts while the other drives the Mac. The same lock file the
-/// harness makes: content written to a file of our own, then hard-linked to the name (it is never seen empty); a lock
-/// whose holders are all gone is renamed aside and taken over, and put back if it turns out to be a newer one.
+/// helper's own runs (`op run`) take it too, so neither starts while the other drives the Mac, and so does the answer
+/// to a finished run's result card (undo acts on the Mac). The same lock file the harness makes: content written to a
+/// file of our own, then hard-linked to the name (it is never seen empty); a lock whose holders are all gone is renamed
+/// aside and taken over, and put back if it turns out to be a newer one. Beside it `computer.last` names the last task
+/// that started on this Mac (`begin`): undo expires when any new task starts (owner 10-21).
 enum ComputerLock {
     enum Outcome { case taken(() -> Void), busy(String), failed(String) }
 
     static var file: URL { SessionHost.setup.dir.appendingPathComponent("sessions/computer.lock") }
+    static var lastFile: URL { SessionHost.setup.dir.appendingPathComponent("sessions/computer.last") }
 
     static func alive(_ pid: Int32) -> Bool { pid > 0 && (kill(pid, 0) == 0 || errno == EPERM) }
 
@@ -498,13 +559,41 @@ enum ComputerLock {
         return SessionWire.lockHeld(t, alive: alive) ? t : nil
     }
 
-    static func take(runID: String) -> Outcome {
+    /// A new computer task on this Mac: the lock, then `computer.last` names `runID`, so every finished task's undo
+    /// (a session's lingering executor, this helper's lingering run) expires. If the name cannot be written, the lock
+    /// is let go again and nothing starts under it (as the harness does).
+    static func begin(runID: String) -> Outcome {
+        let o = take(runID: runID)
+        guard case .taken(let release) = o else { return o }
+        do { try setLast(runID) } catch { release(); return .failed("computer.last: \(error.localizedDescription)") }
+        return o
+    }
+
+    /// `computer.last` names `runID` (harness setLastTask: a file of our own renamed over it).
+    static func setLast(_ runID: String) throws {
+        guard let data = SessionWire.lastText(runID: runID, t: Date().timeIntervalSince1970) else { throw CocoaError(.fileWriteUnknown) }
+        let path = lastFile.path
+        try FileManager.default.createDirectory(at: lastFile.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let tmp = "\(path).\(ProcessInfo.processInfo.processIdentifier).\(UUID().uuidString.lowercased().prefix(8))"
+        guard FileManager.default.createFile(atPath: tmp, contents: data, attributes: [.posixPermissions: 0o600]) else { throw CocoaError(.fileWriteUnknown) }
+        if rename(tmp, path) != 0 { let e = errno; unlink(tmp); throw POSIXError(POSIXErrorCode(rawValue: e) ?? .EIO) }
+    }
+
+    /// The run `computer.last` names (nil: none yet).
+    static func lastRunID() -> String? { SessionWire.lastRunID(text(lastFile.path)) }
+
+    /// Take the lock for `runID` (`undo`: for the answer to its result card; `executorPID`: a process that acts for it
+    /// and holds the lock as long as it lives, as the harness's executor_pid).
+    static func take(runID: String, undo: Bool = false, executorPID: Int32 = 0) -> Outcome {
         let fm = FileManager.default
         let path = file.path
         do { try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
         catch { return .failed(error.localizedDescription) }
         let pid = ProcessInfo.processInfo.processIdentifier
-        guard let data = try? JSONSerialization.data(withJSONObject: ["pid": Int(pid), "session_id": "", "run_id": runID, "by": "helper"]),
+        var owner: [String: Any] = ["pid": Int(pid), "session_id": "", "run_id": runID, "by": "helper"]
+        if executorPID > 0 { owner["executor_pid"] = Int(executorPID) }
+        if undo { owner["undo"] = true }
+        guard let data = try? JSONSerialization.data(withJSONObject: owner),
               let content = String(data: data, encoding: .utf8) else { return .failed("lock text") }
         let tag = { "\(pid).\(UUID().uuidString.lowercased().prefix(8))" }
         let tmp = "\(path).\(tag())"

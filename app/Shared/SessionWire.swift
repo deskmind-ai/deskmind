@@ -62,53 +62,134 @@ enum SessionWire {
         return (o, nil)
     }
 
-    /// Which of one session's lines a watching connection gets. Stored session events in order and once: with seq
-    /// `after + 1` only, so a live event that overtakes the replay (`attach{after_seq}`, sent when the connection
-    /// starts watching) is dropped here and arrives again, in its place, in the replay — the session writes every
-    /// stored event to disk before it sends it, and replays what is on disk. A task's events once each: by run and seq
-    /// (a task's replay, `attach{run_id}`, may come after its live events). Lines with no seq always.
+    /// Which of one session's lines a watching connection gets, per stream: what was stored is replayed first, then
+    /// the live lines, with contiguous seqs (no repeat, no gap).
+    /// - Stored session events (`session.*` with seq): seq `after + 1` only, so a live event that overtakes the replay
+    ///   (`attach{after_seq}`, sent when the connection starts watching) is dropped here and arrives again, in its
+    ///   place, in the replay — the session writes every stored event to disk before it sends it, and replays what is
+    ///   on disk.
+    /// - A task's events (by run and seq): each run's lines in seq order from the cursor on. A live line that comes
+    ///   before the replay of what is below it (`attach{run_id}` is answered from the run's events.jsonl, which the
+    ///   executor writes before it sends) is held until the replay has filled the gap, then passed on behind it. A gap
+    ///   that is not filled within `holdLimit` (a replay that never came) lets the held lines go, in order (`expire`).
+    /// - Lines with no seq: always, at once.
     struct Gate {
         /// The last stored event passed on.
         var after: Int
-        /// Per run: every seq up to `upTo` passed on, and the ones above it passed on out of order.
-        var runs: [String: (upTo: Int, above: Set<Int>)] = [:]
+        /// Per run: every seq up to this one passed on.
+        var runs: [String: Int] = [:]
+        /// Per run: live lines held for the replay below them (seq → line), and since when.
+        private(set) var held: [String: [Int: [String: Any]]] = [:]
+        private(set) var heldSince: [String: Date] = [:]
+        static let holdLimit: TimeInterval = 10
 
         init(after: Int, runs: [String: Int] = [:]) {
             self.after = max(0, after)
-            for (r, n) in runs { self.runs[r] = (max(0, n), []) }
+            for (r, n) in runs { self.runs[r] = max(0, n) }
         }
 
-        mutating func admit(_ e: [String: Any]) -> Bool {
+        /// Some run's lines wait for their replay.
+        var holding: Bool { !held.isEmpty }
+
+        /// The lines to pass on now, in order, for one line of the session: none (a repeat, or held), the line, or
+        /// the line and the held ones it lets go.
+        mutating func admit(_ e: [String: Any], now: Date = Date()) -> [[String: Any]] {
             let kind = e["kind"] as? String ?? ""
             let seq = (e["seq"] as? NSNumber)?.intValue
             if kind.hasPrefix("session.") {
-                guard let seq else { return true }
-                guard seq == after + 1 else { return false }
+                guard let seq else { return [e] }
+                guard seq == after + 1 else { return [] }
                 after = seq
-                return true
+                return [e]
             }
-            guard let run = e["run_id"] as? String, let seq else { return true }
-            var r = runs[run] ?? (0, [])
-            if seq <= r.upTo || r.above.contains(seq) { return false }
-            r.above.insert(seq)
-            while r.above.remove(r.upTo + 1) != nil { r.upTo += 1 }
-            runs[run] = r
+            guard let run = e["run_id"] as? String, let seq else { return [e] }
+            let upTo = runs[run] ?? 0
+            if seq <= upTo || held[run]?[seq] != nil { return [] }
+            if seq > upTo + 1 {
+                held[run, default: [:]][seq] = e
+                if heldSince[run] == nil { heldSince[run] = now }
+                return []
+            }
+            var out = [e], n = seq
+            while let next = held[run]?.removeValue(forKey: n + 1) { out.append(next); n += 1 }
+            runs[run] = n
+            if held[run]?.isEmpty ?? true { held[run] = nil; heldSince[run] = nil } else if n > seq { heldSince[run] = now }
+            return out
+        }
+
+        /// The held lines of each run whose gap has stayed open for `limit`: passed on in seq order, the cursor moved
+        /// past them (a replay that never came must not hold the task's card back for good).
+        mutating func expire(now: Date = Date(), limit: TimeInterval = holdLimit) -> [[String: Any]] {
+            var out: [[String: Any]] = []
+            for run in heldSince.keys.sorted() where now.timeIntervalSince(heldSince[run]!) >= limit {
+                let lines = held[run] ?? [:]
+                for k in lines.keys.sorted() { out.append(lines[k]!) }
+                runs[run] = max(runs[run] ?? 0, lines.keys.max() ?? 0)
+                held[run] = nil; heldSince[run] = nil
+            }
+            return out
+        }
+    }
+
+    /// Which of a session process's lines are new (not a replay of what it stored before) and which of its tasks run
+    /// in this helper now: only those drive the live card and the recording (a replayed `start` or `step` of a task
+    /// that ended long ago, or under another helper, must not). A stored line is new when its seq is past every one
+    /// seen (the process's `session.start` says where its history ended: `last_seq`); a task is live from its new
+    /// `session.task` until its task_done (or its new `session.task_end` / `session.task_closed`), and each of its
+    /// executor lines is shown once.
+    struct Live {
+        /// The last stored seq seen: what a re-open of the running session reports as `last_seq`.
+        private(set) var lastSeq: Int
+        private(set) var runs: Set<String> = []
+        private var shown: [String: Int] = [:]
+
+        init(lastSeq: Int = 0) { self.lastSeq = max(0, lastSeq) }
+
+        /// A `session.*` line: true when it is new (a stored line past every one seen, or one that is never stored).
+        mutating func note(_ e: [String: Any]) -> Bool {
+            guard let seq = (e["seq"] as? NSNumber)?.intValue else { return true }
+            guard seq > lastSeq else { return false }
+            lastSeq = seq
+            if let run = e["run_id"] as? String {
+                switch e["kind"] as? String {
+                case "session.task": runs.insert(run)
+                case "session.task_end", "session.task_closed": runs.remove(run); shown[run] = nil
+                default: break
+                }
+            }
+            return true
+        }
+
+        /// A task's executor line: true when its task is live here and the line was not shown before (a replay of
+        /// the live task is not shown again). Its task_done ends it.
+        mutating func show(_ e: [String: Any]) -> Bool {
+            guard let run = e["run_id"] as? String, runs.contains(run) else { return false }
+            if let seq = (e["seq"] as? NSNumber)?.intValue {
+                guard seq > shown[run] ?? 0 else { return false }
+                shown[run] = seq
+            }
+            if e["kind"] as? String == "task_done" { runs.remove(run); shown[run] = nil }
             return true
         }
     }
 
-    /// What a session has going on, from its events: tasks running (`session.task` until `session.task_end`), tasks
-    /// whose executor is still there (until `session.task_closed`: its result card can be answered), and words queued
+    /// What a session has going on, from its new events (Live.note): tasks running (`session.task` until
+    /// `session.task_end`), tasks whose executor is still there (until `session.task_closed`: its result card can be
+    /// answered), among them those whose card offers undo (`session.task_end` with `undo: "open"`), and words queued
     /// while a task ran (`session.queue`, kept only in the process). A session with none of these loses nothing when its
     /// process ends: a reply in progress is let finish and stored before the process exits on stdin closed.
     struct Activity {
         var running: Set<String> = []
         var open: Set<String> = []
+        var undo: Set<String> = []
         var queued = false
         /// Each task's request (`raw`), for the live card's first line.
         var raw: [String: String] = [:]
 
         var idle: Bool { running.isEmpty && open.isEmpty && !queued }
+        /// A task runs, or a finished one's undo can still be asked for: the helper does not restart under either
+        /// (its process would go, and the undo with it).
+        var holdsRestart: Bool { !running.isEmpty || !undo.isEmpty }
 
         mutating func note(_ e: [String: Any]) {
             let run = e["run_id"] as? String ?? ""
@@ -119,8 +200,9 @@ enum SessionWire {
                 raw[run] = e["raw"] as? String ?? ""
             case "session.task_end":
                 running.remove(run)
+                if e["undo"] as? String == "open" && open.contains(run) { undo.insert(run) }
             case "session.task_closed":
-                running.remove(run); open.remove(run); raw[run] = nil
+                running.remove(run); open.remove(run); undo.remove(run); raw[run] = nil
             case "session.queue":
                 queued = !((e["items"] as? [Any]) ?? []).isEmpty
             default: break
@@ -140,6 +222,20 @@ enum SessionWire {
         }
         if let n = Int32(t), n > 0 { return [n] }
         return nil
+    }
+
+    /// `computer.last` (harness setLastTask), beside the lock: `{run_id, session_id, t}`, the last computer task that
+    /// started on this Mac, whoever started it. Undo expires when any new task starts (owner 10-21): a finished task's
+    /// result card is answerable only while this still names it.
+    static func lastText(runID: String, sessionID: String = "", t: Double) -> Data? {
+        try? JSONSerialization.data(withJSONObject: ["run_id": runID, "session_id": sessionID, "t": t])
+    }
+
+    /// The run `computer.last` names; nil when there is none (or it is unreadable).
+    static func lastRunID(_ text: String?) -> String? {
+        guard let t = text, let o = (try? JSONSerialization.jsonObject(with: Data(t.utf8))) as? [String: Any],
+              let run = o["run_id"] as? String, !run.isEmpty else { return nil }
+        return run
     }
 
     /// Whether the lock is held: some holder is alive (`alive` asks the system; injected for the tests).

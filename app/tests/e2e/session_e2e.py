@@ -129,6 +129,20 @@ def start_helper(env):
     return p
 
 
+def ui(run=None):
+    """What the live card and the recording were driven with (SessionE2E's recorder), for one run or all."""
+    items = request({"op": "e2e.ui"}).get("ui", [])
+    return [i for i in items if run is None or i.get("run_id") == run]
+
+
+def task_running():
+    return request({"op": "e2e.state"}).get("task_running")
+
+
+def run_seqs(w, run):
+    return [e["seq"] for e in list(w.lines) if e.get("run_id") == run and "seq" in e and not str(e.get("kind", "")).startswith("session.")]
+
+
 def session_lines(sid):
     with open(os.path.join(DIR, "sessions", sid, "session.jsonl")) as f:
         return [json.loads(l) for l in f if l.strip()]
@@ -167,7 +181,8 @@ def run(env, helper):
     sid = o.get("session_id", "")
     check(o.get("ok") is True and sid.startswith("ses_") and o.get("resumed") is False and o.get("last_seq") == 0, f"session.open, new: {o}")
     again = request({"op": "session.open", "session_id": sid})
-    check(again.get("ok") is True and again.get("already_open") is True and again.get("pid") == o.get("pid"), f"session.open, already open: {again}")
+    check(again.get("ok") is True and again.get("already_open") is True and again.get("pid") == o.get("pid") and again.get("last_seq") == 0,
+          f"session.open, already open (with its last_seq): {again}")
     bad = request({"op": "session.open", "session_id": "../x"})
     check(bad.get("ok") is False and bad.get("code") == "bad_request", f"a session id that is no folder name: {bad}")
 
@@ -196,6 +211,7 @@ def run(env, helper):
     task = w1.kinds("session.task", sid)
     check(bool(ask) and bool(task) and ask[0].get("run_id") == task[0].get("run_id"), f"the task's card comes through, with its session: {ask and ask[0].get('card', {}).get('text')}")
     run_id = task[0]["run_id"] if task else ""
+    check(task_running() is True, "a task runs: the helper does not restart under it")
     if ask:
         check(ask[0]["card"]["text"] == "要用哪个颜色？", "the card's question")
         r = send(sid, {"type": "say", "text": "插一句"})
@@ -213,6 +229,12 @@ def run(env, helper):
     runs = [e for e in w1.lines if e.get("run_id") == run_id and not str(e.get("kind", "")).startswith("session.")]
     seqs = [e["seq"] for e in runs]
     check(seqs == list(range(1, len(seqs) + 1)), f"the task's lines once each, in order: {seqs}")
+    # the live card, on by default (as for op run), follows the task: one start, its events, one finish
+    drove = ui(run_id)
+    whats = [d["what"] for d in drove]
+    check(whats[:1] == ["start"] and whats.count("start") == 1 and "show" in whats and whats[-1:] == ["finish"] and whats.count("finish") == 1,
+          f"the live card is shown without live_view (default on): {whats}")
+    check(until(lambda: task_running() is False, 5) is not None, "the task over, no undo offered: nothing holds a restart")
 
     # disconnect; the chat goes on; reconnect with the cursor: no duplicate, no gap, the reply in progress caught up
     n = w1.last_seq(sid)
@@ -257,6 +279,45 @@ def run(env, helper):
     got = [e["seq"] for e in w7.lines if e.get("run_id") == run_id and not str(e.get("kind", "")).startswith("session.")]
     check(got == list(range(4, total + 1)) and w7.stored(sid) == [] and w3.stored(sid) == list(range(1, last + 1)), "an extra replay: nothing twice")
     w7.close()
+    check(len(ui(run_id)) == len(drove), f"replays of a finished task drive neither the card nor the recording ({len(ui(run_id))} vs {len(drove)})")
+
+    # watches that join while a task's lines flow, with only a session cursor: each gets the task's lines replay first,
+    # then live, contiguous from 1 (a live line that comes before the replay below it waits for it)
+    check(send(sid, {"type": "cua", "text": "给笔记换个颜色"}).get("ok") is True, "another task")
+    ask = until(lambda: [a for a in w2.kinds("ask", sid) if a.get("run_id") != run_id], 30)
+    run1 = ask[0]["run_id"] if ask else ""
+    joined = []
+    if ask:
+        send(sid, {"type": "answer", "run_id": run1, "ask_id": ask[0]["ask_id"], "option": 0})
+        t0 = time.time()
+        while time.time() - t0 < 0.4:
+            joined.append(Watch(after={sid: 10 ** 6}))
+            time.sleep(0.003)
+    until(lambda: [e for e in w2.kinds("session.task_closed", sid) if e.get("run_id") == run1], 30)
+    total1 = len(run_seqs(w2, run1))
+    time.sleep(1.0)
+    # a watch that joined once the task was closed gets none of it (a closed task is not replayed past the cursor)
+    full = [w for w in joined if run_seqs(w, run1) == list(range(1, total1 + 1))]
+    bad = [run_seqs(w, run1) for w in joined if run_seqs(w, run1) and w not in full]
+    check(total1 > 0 and len(full) > 0 and not bad, f"{len(full)} of {len(joined)} watches joined mid-task, each got 1..{total1} in order, once ({bad[:2]})")
+    for w in joined:
+        w.close()
+    whats = [d["what"] for d in ui(run1)]
+    check(whats.count("start") == 1 and whats.count("finish") == 1, f"those replays drove the card once: {whats.count('start')} start, {whats.count('finish')} finish")
+    until(lambda: [m for m in w2.kinds("session.message", sid) if m.get("text") == "任务结束了。" and m.get("seq", 0) > last], 20)
+    last = session_lines(sid)[-1]["seq"]
+    until(lambda: w2.last_seq(sid) == last and w3.last_seq(sid) == last, 10)
+    again = request({"op": "session.open", "session_id": sid})
+    check(again.get("already_open") is True and again.get("last_seq") == last, f"open again: last_seq is the last stored ({again.get('last_seq')} vs {last})")
+
+    # op run as it starts (ComputerLock.begin): computer.last names it, whoever started the last task
+    with open(os.path.join(DIR, "sessions", "computer.last")) as f:
+        check(json.load(f).get("run_id") == run1, "a session's task named itself in computer.last")
+    check(request({"op": "e2e.begin", "run_id": "run_oprun1"}).get("ok") is True, "op run begins")
+    with open(os.path.join(DIR, "sessions", "computer.last")) as f:
+        lastf = json.load(f)
+    check(lastf.get("run_id") == "run_oprun1" and lastf.get("session_id") == "" and isinstance(lastf.get("t"), (int, float)),
+          f"op run names itself in computer.last, as the harness writes it: {lastf}")
 
     r = request({"op": "sessions.list"})
     item = [s for s in r.get("sessions", []) if s.get("session_id") == sid]
@@ -290,12 +351,16 @@ def run(env, helper):
     w2.close(); w3.close()
     pid2 = o2["pid"]
     check(until(lambda: not alive(pid2), IDLE + 20) is not None, f"an idle session nobody watches closes after {IDLE} s")
-    o3 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
+    o3 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim", "live_view": False})
     w4 = Watch(after={sid: last})
     send(sid, {"type": "cua", "text": "给笔记换个颜色"})
     ask2 = until(lambda: w4.kinds("ask", sid), 30)
     check(ask2 is not None, "a second task waits on its card")
     run2 = ask2[0]["run_id"] if ask2 else ""
+    whats = [d["what"] for d in ui(run2)]
+    check("start" not in whats and "show" not in whats, f"live_view false: no card, the recording only ({whats})")
+    r = request({"op": "e2e.begin", "run_id": "run_oprun2"})
+    check(r.get("code") == "computer_busy", f"op run while a session's task holds the Mac: computer_busy ({r.get('code')})")
     w4.close()
     time.sleep(IDLE + 6)
     check(alive(o3["pid"]), "the app gone, the task's session stays up (its card waits)")
@@ -322,10 +387,13 @@ def run(env, helper):
     try:
         o4 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
         check(o4.get("ok") is True and o4.get("resumed") is True, "reopened under a new helper")
-        w6 = Watch()
+        w6 = Watch(runs={run_id: 0, run1: 0, run2: 0})
         stored = session_lines(sid)[-1]["seq"]
         until(lambda: w6.last_seq(sid) == stored, 15)
         check(w6.stored(sid) == list(range(1, stored + 1)), f"its whole history, once: 1..{stored}")
+        until(lambda: run_seqs(w6, run_id) and run_seqs(w6, run2), 10)
+        time.sleep(0.5)
+        check(bool(run_seqs(w6, run_id)) and ui() == [], f"its old tasks replayed under the new helper drive neither the card nor the recording ({ui()[:3]})")
         w6.close()
     finally:
         helper2.kill()

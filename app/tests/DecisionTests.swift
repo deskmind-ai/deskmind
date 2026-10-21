@@ -896,37 +896,77 @@ enum DecisionTests {
 
         // the watch: stored lines once and in order; a live line that overtakes the replay waits for it
         let msg = { (n: Int) -> [String: Any] in ["kind": "session.message", "seq": n, "session_id": "s"] }
+        func seqs(_ out: [[String: Any]]) -> [Int] { out.compactMap { ($0["seq"] as? NSNumber)?.intValue } }
         var g = W.Gate(after: 2)
-        check(!g.admit(msg(1)) && !g.admit(msg(2)), "at or before the cursor: dropped")
-        check(!g.admit(msg(5)), "ahead of the replay: dropped (it comes again in the replay)")
-        check(g.admit(msg(3)) && g.admit(msg(4)) && g.admit(msg(5)) && g.after == 5, "the replay, in order")
-        check(!g.admit(msg(4)) && !g.admit(msg(5)), "a second replay: no duplicates")
-        check(g.admit(["kind": "session.delta", "msg_id": "m", "text": "x", "offset": 0]) && g.admit(["kind": "session.start", "last_seq": 5]), "lines without seq: always")
-        check(g.admit(["kind": "helper.session_exit", "session_id": "s"]), "the helper's own lines: always")
-        // a task's lines: once each, in whatever order (its replay may come after its live lines)
+        check(g.admit(msg(1)).isEmpty && g.admit(msg(2)).isEmpty, "at or before the cursor: dropped")
+        check(g.admit(msg(5)).isEmpty, "ahead of the replay: dropped (it comes again in the replay)")
+        check(seqs(g.admit(msg(3)) + g.admit(msg(4)) + g.admit(msg(5))) == [3, 4, 5] && g.after == 5, "the replay, in order")
+        check(g.admit(msg(4)).isEmpty && g.admit(msg(5)).isEmpty, "a second replay: no duplicates")
+        check(g.admit(["kind": "session.delta", "msg_id": "m", "text": "x", "offset": 0]).count == 1
+              && g.admit(["kind": "session.start", "last_seq": 5]).count == 1, "lines without seq: always")
+        check(g.admit(["kind": "helper.session_exit", "session_id": "s"]).count == 1, "the helper's own lines: always")
+        // a task's lines: replay first, then live, contiguous — a live line ahead of the replay waits for it
         let ev = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_1", "seq": n] }
-        check(g.admit(ev(1)) && g.admit(ev(3)) && !g.admit(ev(3)) && g.admit(ev(2)) && !g.admit(ev(1)), "a run: once each")
-        check(g.runs["run_1"]?.upTo == 3 && g.runs["run_1"]?.above.isEmpty == true, "a run's seqs, compacted")
-        check(g.admit(["kind": "step", "run_id": "run_2", "seq": 1]), "another run counts apart")
+        var order: [Int] = []
+        let t0 = Date()
+        for n in [3, 4, 5, 6, 7, 8] { order += seqs(g.admit(ev(n), now: t0)) }   // live, before the replay came
+        check(order.isEmpty && g.holding, "live lines ahead of the replay are held")
+        for n in 1...8 { order += seqs(g.admit(ev(n), now: t0)) }               // the replay: 1..8
+        check(order == Array(1...8) && !g.holding && g.runs["run_1"] == 8, "the replay, then the held live lines behind it: \(order)")
+        check(seqs(g.admit(ev(9))) == [9] && g.admit(ev(9)).isEmpty && g.admit(ev(2)).isEmpty, "then live, once each")
+        check(seqs(g.admit(["kind": "step", "run_id": "run_2", "seq": 1])) == [1], "another run counts apart")
         var named = W.Gate(after: 0, runs: ["run_1": 4])
-        check(!named.admit(ev(4)) && named.admit(ev(5)), "a run's cursor")
-        check(named.admit(["kind": "plan", "run_id": "run_9"]), "a run line without seq: always")
+        check(named.admit(ev(4)).isEmpty && seqs(named.admit(ev(5))) == [5], "a run's cursor")
+        check(named.admit(["kind": "plan", "run_id": "run_9"]).count == 1, "a run line without seq: always")
+        // a gap the replay never fills: the held lines go, in order, after the hold limit (not before)
+        var stuck = W.Gate(after: 0)
+        _ = stuck.admit(ev(4), now: t0); _ = stuck.admit(ev(3), now: t0)
+        check(stuck.expire(now: t0.addingTimeInterval(W.Gate.holdLimit - 1)).isEmpty && stuck.holding, "held within the limit")
+        check(seqs(stuck.expire(now: t0.addingTimeInterval(W.Gate.holdLimit))) == [3, 4] && !stuck.holding, "then let go, in order")
+        check(stuck.admit(ev(2)).isEmpty && seqs(stuck.admit(ev(5))) == [5], "and the cursor moved past them")
+
+        // what drives the live card: only new lines of tasks live in this process, each once — never a replay
+        var live = W.Live(lastSeq: 6)
+        let task = { (n: Int, run: String) -> [String: Any] in ["kind": "session.task", "seq": n, "run_id": run, "raw": "x"] }
+        check(!live.note(task(3, "run_old")) && !live.show(["kind": "start", "run_id": "run_old", "seq": 1]),
+              "a replayed task (stored before this process): not live, its start drives nothing")
+        check(live.note(["kind": "session.queue", "items": [Any]()]), "a line that is never stored: new")
+        check(live.note(task(7, "run_a")) && live.runs == ["run_a"] && live.lastSeq == 7, "a new task: live")
+        check(!live.note(task(7, "run_a")) && !live.note(msg(5)), "its replay: not new")
+        check(live.show(["kind": "start", "run_id": "run_a", "seq": 1]) && live.show(["kind": "step", "run_id": "run_a", "seq": 2]), "its lines drive")
+        check(!live.show(["kind": "start", "run_id": "run_a", "seq": 1]) && !live.show(["kind": "step", "run_id": "run_a", "seq": 2]), "a replay of the live task: not again")
+        check(live.show(["kind": "task_done", "run_id": "run_a", "seq": 3]) && live.runs.isEmpty, "its task_done ends it")
+        check(!live.show(["kind": "result_response", "run_id": "run_a", "seq": 4]) && !live.show(["kind": "start", "run_id": "run_a", "seq": 1]),
+              "after its end: nothing drives (a later replay neither)")
+        check(live.note(task(8, "run_b")) && live.note(["kind": "session.task_end", "seq": 9, "run_id": "run_b"]) && live.runs.isEmpty,
+              "a task_end ends a task too")
 
         // nothing going on: no task running or answerable, nothing queued
         var a = W.Activity()
-        check(a.idle, "a new session is idle")
+        check(a.idle && !a.holdsRestart, "a new session is idle")
         a.note(["kind": "session.task", "run_id": "run_1", "raw": "整理桌面"])
-        check(!a.idle && a.running == ["run_1"] && a.raw["run_1"] == "整理桌面", "a task running")
+        check(!a.idle && a.running == ["run_1"] && a.raw["run_1"] == "整理桌面" && a.holdsRestart, "a task running")
         a.note(["kind": "session.task_end", "run_id": "run_1", "status": "succeeded", "undo": "open"])
         check(!a.idle && a.running.isEmpty && a.open == ["run_1"], "its result card can still be answered")
+        check(a.holdsRestart && a.undo == ["run_1"], "its undo still offered: no restart under it")
         a.note(["kind": "session.task_closed", "run_id": "run_1", "why": "linger"])
-        check(a.idle && a.raw.isEmpty, "closed: idle")
+        check(a.idle && a.raw.isEmpty && !a.holdsRestart, "closed: idle")
+        a.note(["kind": "session.task", "run_id": "run_2", "raw": "x"])
+        a.note(["kind": "session.task_end", "run_id": "run_2", "status": "failed", "undo": "none"])
+        check(!a.holdsRestart && a.open == ["run_2"], "a card without undo does not hold a restart")
+        a.note(["kind": "session.task_closed", "run_id": "run_2", "why": "linger"])
         a.note(["kind": "session.queue", "items": [["id": "q1", "text": "然后呢"]]])
         check(!a.idle, "words queued")
         a.note(["kind": "session.queue", "items": [Any]()])
         check(a.idle, "queue empty")
         a.note(["kind": "session.message", "seq": 9, "role": "user", "text": "hi"])
         check(a.idle, "a message changes nothing")
+
+        // computer.last (harness setLastTask): the last task that started on this Mac
+        let last = W.lastText(runID: "run_9", t: 12.5).map { String(decoding: $0, as: UTF8.self) }
+        check(W.lastRunID(last) == "run_9", "computer.last names its run: \(last ?? "")")
+        check(W.lastRunID(#"{"run_id":"run_x","session_id":"ses_a","t":1}"#) == "run_x", "a session's task, as the harness writes it")
+        check(W.lastRunID(nil) == nil && W.lastRunID("") == nil && W.lastRunID("x") == nil && W.lastRunID(#"{"run_id":""}"#) == nil, "none")
 
         // the machine lock (harness sessions/computer.lock)
         check(W.lockHolders(#"{"pid":12,"session_id":"s","run_id":"r","executor_pid":34}"#) == [12, 34], "pid and executor")

@@ -17,16 +17,21 @@ enum HarnessRun {
     static let lingerSeconds = 600
 
     /// A run past its task_done whose process is still up: its stdin, for the result card's `respond`; and that
-    /// answer's `result_response`, once the harness writes it.
+    /// answer's `result_response`, once the harness writes it. All under `lock`.
     final class Lingering {
         let process: Process
         let input: FileHandle
         var runID = ""
         var response: [String: Any]?
-        private var closed = false
+        /// The card was answered: one answer per card (the harness reads only the first).
+        var responded = false
+        /// The machine lock taken for that answer (undo acts on the Mac), let go at its result_response or the exit.
+        var undoRelease: (() -> Void)?
+        private(set) var closed = false
         init(process: Process, input: FileHandle) { self.process = process; self.input = input }
         /// stdin closed (EOF): the harness stops waiting for a respond and exits. Once; called under `lock`.
         func close() { if !closed { closed = true; try? input.close() } }
+        func releaseUndo() { undoRelease?(); undoRelease = nil }
     }
     nonisolated(unsafe) static var lingering: Lingering?
 
@@ -69,23 +74,57 @@ enum HarnessRun {
         for (f, r) in zip(files, runs) where drop.contains(r) { try? fm.removeItem(at: f) }
     }
 
+    /// A finished run's result card can still be answered (its process lingers): the helper does not restart under it.
+    static var undoWaiting: Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let l = lingering else { return false }
+        return !l.closed && l.process.isRunning
+    }
+
     /// The user's answer to the finished run's result card (op `respond`): `{"type":"respond","option":n}` on the
     /// lingering process's stdin. `wait` seconds (at most 15): wait for its `result_response` and return it.
+    /// Undo acts on the Mac, so the answer holds the machine lock until its result_response (refused with
+    /// `computer_busy` while a session's task holds it), and it is refused with `undo_expired` once another computer
+    /// task has started on this Mac since this run (computer.last names another run; owner 10-21).
     static func respond(runID: String, option: Int, wait: Double = 0) -> [String: Any] {
         lock.lock()
-        guard let l = lingering, l.process.isRunning else {
+        guard let l = lingering, !l.closed, l.process.isRunning else {
             lock.unlock(); return ["ok": false, "error": "no finished run is waiting for an answer"]
         }
         if !runID.isEmpty && runID != l.runID {
             lock.unlock(); return ["ok": false, "error": "the run waiting for an answer is \(l.runID), not \(runID)"]
         }
+        if l.responded {
+            lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
+        }
+        if expired(l) {
+            l.close(); lingering = nil
+            lock.unlock()
+            NSLog("DeskMind Hands: respond refused: another computer task started on this Mac since \(l.runID)")
+            return ["ok": false, "code": "undo_expired", "error": "another computer task started on this Mac; this task's undo has expired"]
+        }
         guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
             lock.unlock(); return ["ok": false, "error": "bad option"]
         }
         line.append(0x0A)
+        switch ComputerLock.take(runID: l.runID, undo: true, executorPID: l.process.processIdentifier) {
+        case .taken(let release): l.undoRelease = release
+        case .busy(let held):
+            lock.unlock()
+            NSLog("DeskMind Hands: respond refused: the computer lock is held (\(held.prefix(200)))")
+            return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
+        case .failed(let why):
+            // the lock cannot be made (the folder): as for a run, only a live holder is a reason to refuse
+            NSLog("DeskMind Hands: computer lock: \(why)")
+            if ComputerLock.holder() != nil {
+                lock.unlock(); return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
+            }
+        }
         do { try l.input.write(contentsOf: line) } catch {
+            l.releaseUndo()
             lock.unlock(); return ["ok": false, "error": "write: \(error.localizedDescription)"]
         }
+        l.responded = true
         lock.unlock()
         let until = Date().addingTimeInterval(min(max(wait, 0), 15))
         while Date() < until {
@@ -94,6 +133,33 @@ enum HarnessRun {
             Thread.sleep(forTimeInterval: 0.1)
         }
         return ["ok": true, "run_id": l.runID]
+    }
+
+    /// Whether another computer task has started on this Mac since `l`'s run (computer.last names another run). Its
+    /// own run wrote its name there when it began (ComputerLock.begin); none at all (a folder that could not be
+    /// written) expires nothing.
+    private static func expired(_ l: Lingering) -> Bool {
+        guard let last = ComputerLock.lastRunID() else { return false }
+        return last != l.runID
+    }
+
+    /// How often a lingering run looks at computer.last (the harness's sessions look every 0.5 s).
+    nonisolated(unsafe) static var lastEvery: TimeInterval = 0.5
+
+    /// While `l` lingers: once another computer task starts on this Mac (a session's task, or a run of this helper),
+    /// its undo has expired, and its process is let go (stdin closed: it exits). An answer already being carried out
+    /// is let finish (it holds the machine lock: nothing else has started). Returns when the process has exited; the
+    /// machine lock taken for an answer goes with it.
+    static func watchLingering(_ l: Lingering) {
+        while l.process.isRunning {
+            Thread.sleep(forTimeInterval: lastEvery)
+            lock.lock()
+            let expire = !l.closed && !l.responded && expired(l)
+            if expire { l.close(); if lingering === l { lingering = nil } }
+            lock.unlock()
+            if expire { NSLog("DeskMind Hands: another computer task started on this Mac; \(l.runID)'s undo has expired") }
+        }
+        lock.lock(); l.close(); l.releaseUndo(); if lingering === l { lingering = nil }; lock.unlock()
     }
 
     /// Whether `p` is a finished run's lingering process (the stop path leaves it alone).
@@ -245,8 +311,9 @@ enum HarnessRun {
         let outPipe = Pipe(), inPipe = Pipe()
         p.standardOutput = outPipe
         p.standardInput = inPipe
-        // the run's id is the helper's, so its logs are named before the process starts (the harness takes it as given)
-        let runID = "run_" + UUID().uuidString.lowercased().prefix(8)
+        // the run's id is the helper's, so its logs are named before the process starts (the harness takes it as given);
+        // the one computer.last names (op run: ComputerLock.begin)
+        let runID = spec.runID ?? "run_" + UUID().uuidString.lowercased().prefix(8)
         try? fm.createDirectory(at: logs, withIntermediateDirectories: true)
         let errURL = logs.appendingPathComponent("\(runID).stderr")
         fm.createFile(atPath: errURL.path, contents: nil)
@@ -266,6 +333,7 @@ enum HarnessRun {
         }
         Runner.current = p   // stopRequested is not cleared here: a stop since the check above stands
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
+        linger.runID = runID
         // set by the reader once task_done is passed on: from then on its lines go to `linger` (result_response), not
         // to this run's connection, and the state is the next run's
         var over = false
@@ -302,7 +370,8 @@ enum HarnessRun {
                     guard let e = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else { continue }
                     lock.lock()
                     if over {
-                        if e["kind"] as? String == "result_response" { linger.response = e }
+                        // the answer is carried out: the Mac is free again
+                        if e["kind"] as? String == "result_response" { linger.response = e; linger.releaseUndo() }
                         lock.unlock(); continue
                     }
                     let out = HarnessEvents.translate(e, state: &state, title: spec.goal ?? "", hasFolder: spec.folder != nil, pid: pid)
@@ -311,7 +380,7 @@ enum HarnessRun {
                         show(ev)
                         _ = emit(ev)
                         if ev["event"] as? String == "task_done" {
-                            lock.lock(); over = true; linger.runID = ev["run_id"] as? String ?? ""; lock.unlock()
+                            lock.lock(); over = true; if let r = ev["run_id"] as? String, !r.isEmpty { linger.runID = r }; lock.unlock()
                         }
                     }
                 }
@@ -328,12 +397,12 @@ enum HarnessRun {
         lock.unlock()
         if lingers {
             // The process waits up to `lingerSeconds` for the result card's answer (op respond), then exits; or sooner,
-            // when the next run closes its stdin. Its log is closed once it is gone.
+            // when the next run closes its stdin, or another computer task starts on this Mac (watchLingering). Its log
+            // is closed once it is gone.
             DispatchQueue.global().async {
-                p.waitUntilExit()
+                watchLingering(linger)
                 _ = reader.wait(timeout: .now() + 3)
                 try? outLog?.close()
-                lock.lock(); linger.close(); if lingering === linger { lingering = nil }; lock.unlock()
             }
         } else {
             _ = reader.wait(timeout: .now() + 3)    // the last lines into the log (at once when they are read already)
@@ -365,17 +434,27 @@ enum HarnessRun {
         case "step":
             // The card shows the window the step acted in: the executor names it by bundle id and
             // CGWindow number (window:<bundle>#<number>), which is what the card captures by.
-            if let object = ev["object"] as? String, let hash = object.lastIndex(of: "#"), let n = Int(object[object.index(after: hash)...]) {
-                LiveCard.observed(windows: [["id": n, "active": true]], app: "")
-                // the recording takes in each app the task works in, as it goes (no list before)
-                let bundle = HarnessEvents.appOf(object)
-                if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
-            }
+            if let n = windowNumber(ev) { LiveCard.observed(windows: [["id": n, "active": true]], app: "") }
+            record(ev)
             let human = ev["human"] as? String ?? ""
             LiveCard.stepped(n: ev["n"] as? Int ?? 0, words: human, target: nil,
                              click: human.hasPrefix("click") || human.hasPrefix("double-click") || human.hasPrefix("select"))
         default: break
         }
+    }
+
+    /// The recording's part of an event: a step in a window takes that window's app into the recording, as it goes (no
+    /// list before). For a live task whose card is not shown (another session's) it is all there is.
+    static func record(_ ev: [String: Any]) {
+        guard ev["event"] as? String == "step", windowNumber(ev) != nil, let object = ev["object"] as? String else { return }
+        let bundle = HarnessEvents.appOf(object)
+        if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
+    }
+
+    /// A step's window (window:<bundle>#<number>): its CGWindow number.
+    private static func windowNumber(_ ev: [String: Any]) -> Int? {
+        guard let object = ev["object"] as? String, let hash = object.lastIndex(of: "#") else { return nil }
+        return Int(object[object.index(after: hash)...])
     }
 
     /// How the live card says a task ended, from its task_done status.
