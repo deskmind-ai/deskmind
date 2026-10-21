@@ -200,10 +200,10 @@ enum MainWindow {
 }
 
 /// A reopen -- a click on the Dock icon, on the live card or on a notification (they open the app again) -- is the
-/// user asking for the window. With a window on screen, macOS brings it forward and nothing more is done (hands
-/// gives the front back with `open -b`, also a reopen, and must not make it the key window over the app being worked
-/// in). With none on screen (minimised): it is restored. With none at all: SwiftUI opens one -- while a run is running
-/// only when a card waits, else each `open -b` would open a fresh window over the app being worked in.
+/// user asking for the window; but hands also gives the front back with `open -b` after a foreground step, which is a
+/// reopen too and cannot be told apart. With a window on screen, macOS brings it forward and nothing more is done.
+/// With none on screen (minimised): restored -- while a run is running, only when a card waits (hands is blocked on
+/// the user then and takes no steps); with none at all, SwiftUI opens one on the same terms.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting mid-recording: the helper is told to stop and finish the movie (it does, on its own, after the app is
     /// gone). Left recording, it refused the next run's recording.
@@ -217,8 +217,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MainActor.assumeIsolated {
             if flag { return true }
+            // While a run is running and no card waits, a reopen is most likely hands giving the front back after a
+            // foreground step (`open -b ai.deskmind.app`, DeskMind still the active app after ⌘M): restoring the
+            // window then would put it over the app being driven, after every step. Nothing is done; the island is
+            // the way in. With a card waiting, hands is blocked on the user and takes no steps: it is the user.
+            if RunModel.shared?.phase == .running && RunModel.shared?.ask == nil { return false }
             if MainWindow.comeBack() { return false }
-            return RunModel.shared?.phase != .running || RunModel.shared?.ask != nil
+            return true
         }
     }
 }

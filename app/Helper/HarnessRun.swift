@@ -168,7 +168,7 @@ enum HarnessRun {
     static func run(_ spec: Runner.Spec, emit unlocked: @escaping ([String: Any]) -> Bool) {
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
-        Runner.busy = true; Runner.cancelled = false
+        Runner.busy = true; Runner.cancelled = false; Runner.stopRequested = false
         // Busy until task_done (this function returns then), not until the process exits: it lingers for the result
         // card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
@@ -246,15 +246,23 @@ enum HarnessRun {
         fm.createFile(atPath: outURL.path, contents: nil)
         let outLog = try? FileHandle(forWritingTo: outURL)
         pruneLogs()    // after this run's files are made, so they count among the ones kept
+        // Stop pressed while the lingering run was waited for (up to 5 s) or the run was being prepared: no process
+        // to stop yet, only `cancelled` -- the run does not start.
+        if Runner.cancelled {
+            Runner.stopRequested = false
+            _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
+        }
         do { try p.run() } catch {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
-        Runner.current = p; Runner.stopRequested = false
+        Runner.current = p   // stopRequested is not cleared here: a stop since the check above stands
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
         // set by the reader once task_done is passed on: from then on its lines go to `linger` (result_response), not
         // to this run's connection, and the state is the next run's
         var over = false
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
+        // a stop between the check above and here found no stdin to write to: it is sent now
+        if Runner.cancelled { Runner.stopRequested = true; stop(p) }
 
         // The request: one JSON line, then stdin stays open for answers.
         var req: [String: Any] = ["run_id": runID, "raw": spec.goal ?? "", "config": spec.config, "lang": spec.lang, "driver": "hands",
