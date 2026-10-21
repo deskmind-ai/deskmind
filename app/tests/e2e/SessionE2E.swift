@@ -278,7 +278,13 @@ enum SessionE2E {
         }
         func executor() -> pid_t { pid_t((try? String(contentsOf: pidFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0 }
         func helperHolds() -> Bool { ComputerLock.holder() != nil && owner()["pid"] as? Int == me }
-        func sessionTaskRefused() -> Bool { if case .busy = ComputerLock.take(runID: "run_session") { return true }; return false }
+        func sessionTaskRefused() -> Bool {
+            switch ComputerLock.take(runID: "run_session") {
+            case .busy: return true
+            case .taken(let r): r(); return false   // not refused: let it go again, so one failure does not cascade
+            default: return false
+            }
+        }
         /// open the fake session, wait for its executor; nil when it did not start
         func open(_ id: String) -> pid_t? {
             try? fm.removeItem(at: pidFile)
@@ -334,6 +340,7 @@ enum SessionE2E {
         check(until { !ComputerLock.alive(ex3) }, "the helper exiting ends what its sessions left (SIGTERM ignored: SIGKILL)")
 
         check(until { ComputerLock.holder() == nil && !ActingGuard.watching }, "and the Mac let go")
+        check(SessionHost.open(["session_id": "ses_late"])["ok"] as? Bool == false, "no session opens once the helper is exiting")
 
         // 4. an op run whose harness exits leaving a child up (vice versa): the run's lock is kept for it
         let p = Process()

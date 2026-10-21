@@ -287,6 +287,10 @@ enum SessionHost {
         p.environment = setup.environment()
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = err ?? FileHandle.nullDevice
+        // not once the helper is exiting (shutdown): a session started after its look would be left untracked
+        lock.lock()
+        guard !shuttingDown else { lock.unlock(); try? err?.close(); throw CocoaError(.userCancelled) }
+        lock.unlock()
         try p.run()
         try? err?.close()
         let s = Session(id: id, process: p, input: inPipe.fileHandleForWriting)
@@ -298,6 +302,11 @@ enum SessionHost {
         // under the lock, so a connection that starts watching meanwhile (sessions.watch) writes its attach after the
         // header: a first line with a type is no header, and the session would refuse to start.
         lock.lock()
+        if shuttingDown {   // shutdown began while it started: it goes at once, with nothing under it yet
+            lock.unlock()
+            s.closeInput(); p.terminate()
+            throw CocoaError(.userCancelled)
+        }
         sessions[id] = s
         _ = s.write(header)
         var after: Int?
@@ -418,10 +427,13 @@ enum SessionHost {
         for s in all { s.closeInput() }
         let until = Date().addingTimeInterval(wait)
         while Date() < until && trees.contains(where: { !$0.gone }) { Thread.sleep(forTimeInterval: 0.1) }
+        // all at once (each at most ~4 s), so several still up do not add up past a successor's wait
+        let ending = DispatchGroup()
         for t in trees where !t.gone {
             NSLog("DeskMind Hands: a session's processes (\(t.process.processIdentifier)) did not end in \(Int(wait)) s; ending them")
-            _ = t.end(close: {}, grace: 0, term: 2, kill: 2)
+            DispatchQueue.global().async(group: ending) { _ = t.end(close: {}, grace: 0, term: 2, kill: 2) }
         }
+        _ = ending.wait(timeout: .now() + 5)
     }
 
     /// Whether `run` is a task of session `sid`: its run folder is in the session's (harness: sessions/<sid>/runs/).
@@ -454,6 +466,11 @@ enum SessionHost {
             NSLog("DeskMind Hands: session \(s.id) exited with \(s.tree.known.count) processes under it still up; holding the Mac for them")
             HarnessRun.adopt(s.tree)
             lock.lock(); left.append(s.tree); lock.unlock()
+            let t = s.tree
+            Thread.detachNewThread {
+                while !t.gone { Thread.sleep(forTimeInterval: 0.5) }
+                lock.lock(); left.removeAll { $0 === t }; lock.unlock()
+            }
             ActingGuard.start()
         }
         lock.lock()
