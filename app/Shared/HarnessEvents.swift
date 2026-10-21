@@ -284,19 +284,28 @@ enum HarnessProcess {
         return got > 0 ? buf.prefix(Int(got) / MemoryLayout<pid_t>.size).filter { $0 > 0 } : []
     }
 
-    /// End `p` (a started Process) and its members: `close` first (the run's stdin closed: it exits by itself), wait
-    /// up to `grace` s; then SIGTERM to every member still up, wait up to `term` s; then SIGKILL, wait up to `kill` s.
-    /// True once `p` and every member are gone; false when one is still up after all that (no next run may start).
-    /// `members`: the ones found so far, kept by the caller for a next attempt after a false (the harness gone by then,
-    /// a survivor in a group of its own is found by nothing else). `signal`: kill(2) (a test hands in one that does nothing).
-    static func end(_ p: Process, members: inout Set<Member>, close: () -> Void, grace: Double, term: Double, kill: Double,
-                    signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
-        let root = p.processIdentifier
+    /// One run's processes -- the harness, its process group, its descendants -- recorded from the moment it starts
+    /// until every one of them is confirmed gone (HarnessRun.trees). Refreshed while they are up, so a child whose
+    /// parent then exits (out of the group, no parent to find it by) is still known.
+    final class Tree {
+        let process: Process
+        private var members = Set<Member>()
+        private let lock = NSLock()
+        init(_ process: Process) { self.process = process }
+
+        var known: Set<Member> { lock.lock(); defer { lock.unlock() }; return members }
+        /// Look again at who is up.
+        func refresh() { lock.lock(); defer { lock.unlock() }; look() }
+        /// The harness and every member gone (looked again first).
+        var gone: Bool { lock.lock(); defer { lock.unlock() }; look(); return !process.isRunning && members.isEmpty }
+
         // Who is up: the group and the descendants of every member known (one whose parent is gone is still known).
-        // A member gone, or its pid taken by another process, is dropped first: never descended from, never signalled.
-        // The group is read unless another process holds the harness's pid: the kernel gives no process a pid that
-        // is a live group's id, so a group by that id is then another's (the run's own was empty and its id reused).
-        func refresh() {
+        // A member gone, or its pid taken by another process, is dropped first: never descended from, never
+        // signalled. The group is read unless another process holds the harness's pid: the kernel gives no process
+        // a pid that is a live group's id, so a group by that id is then another's (the run's own was empty and its
+        // id reused). Under `lock`.
+        private func look() {
+            let p = process, root = p.processIdentifier
             members = members.filter { member($0.pid) == $0 }
             var found = p.isRunning || member(root) == nil || members.contains(where: { getpgid($0.pid) == root })
                 ? list(UInt32(PROC_PGRP_ONLY), root).compactMap(member) : []
@@ -308,23 +317,33 @@ enum HarnessProcess {
             }
             members = members.union(found).filter { $0.pid != root }
         }
-        func gone() -> Bool { refresh(); return !p.isRunning && members.isEmpty }
-        func wait(_ seconds: Double) -> Bool {
-            let until = Date().addingTimeInterval(seconds)
-            while !gone() {
-                if Date() >= until { return false }
-                Thread.sleep(forTimeInterval: 0.05)
+
+        /// End them all: `close` first (the run's stdin closed: it exits by itself), wait up to `grace` s; then SIGTERM
+        /// to every one still up, wait up to `term` s; then SIGKILL, wait up to `kill` s. True once all are gone;
+        /// false when one is still up after all that (no next run may start; the members found are kept for the next
+        /// attempt). `signal`: kill(2) (a test hands in one that does nothing).
+        func end(close: () -> Void, grace: Double, term: Double, kill: Double,
+                 signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            let p = process, root = p.processIdentifier
+            func gone() -> Bool { look(); return !p.isRunning && members.isEmpty }
+            func wait(_ seconds: Double) -> Bool {
+                let until = Date().addingTimeInterval(seconds)
+                while !gone() {
+                    if Date() >= until { return false }
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                return true
             }
-            return true
+            look()    // before stdin is closed: a child is known even if the harness is gone the moment after
+            close()
+            if wait(grace) { return true }
+            for (sig, seconds) in [(SIGTERM, term), (SIGKILL, kill)] {
+                if p.isRunning { _ = signal(root, sig) }
+                for m in members where member(m.pid) == m { _ = signal(m.pid, sig) }
+                if wait(seconds) { return true }
+            }
+            return false
         }
-        refresh()    // before stdin is closed: a child is known even if the harness is gone the moment after
-        close()
-        if wait(grace) { return true }
-        for (sig, seconds) in [(SIGTERM, term), (SIGKILL, kill)] {
-            if p.isRunning { _ = signal(root, sig) }
-            for m in members where member(m.pid) == m { _ = signal(m.pid, sig) }
-            if wait(seconds) { return true }
-        }
-        return false
     }
 }

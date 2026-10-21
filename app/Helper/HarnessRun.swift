@@ -27,38 +27,60 @@ enum HarnessRun {
         var over = false
         /// A respond was written (an undo may be going until its result_response comes).
         var responded = false
-        /// The processes under it found by a close that failed, for the next attempt (HarnessProcess.end).
-        var members = Set<HarnessProcess.Member>()
         private(set) var closed = false
         init(process: Process, input: FileHandle) { self.process = process; self.input = input }
         /// stdin closed (EOF): the harness stops waiting for a respond and exits. Once; called under `lock`.
         func close() { if !closed { closed = true; try? input.close() } }
     }
     nonisolated(unsafe) static var lingering: Lingering?
-    /// One close at a time: a new run and 「清除全部」 may both let the lingering run go, and the second must not find
-    /// nothing to close and go on while the first is still waiting for it to end.
+    /// Every run's processes (the harness and all under it), from the moment it starts until all of them are confirmed
+    /// gone -- whether its harness ended by itself, at task_done, on a stop, at the linger deadline or on a close. A
+    /// harness that exits can leave its executor acting: dropping `lingering` drops nothing here. Under `lock`.
+    nonisolated(unsafe) static var trees: [HarnessProcess.Tree] = []
+    /// One close at a time: a new run and 「清除全部」 may both let the last runs go, and the second must not find
+    /// nothing to close and go on while the first is still waiting for them to end.
     private static let closing = NSLock()
 
-    /// Let the lingering run go, before a new run starts or the run data is cleared, so two harness processes never
-    /// drive the desktop at once (an undo still going in the old one): its stdin is closed, so it exits (it would by
-    /// itself after `lingerSeconds`); waited for up to 3 s (`undoGrace` while an undo it was sent has not answered),
-    /// then SIGTERM, 2 s, then SIGKILL, 2 s -- the harness and every process under it (HarnessProcess.end). False when
-    /// it is still up after that: it stays registered (the next attempt tries again), and the caller must not start a
-    /// run (`stillRunning`) or clear its files.
+    /// Record a run's process the moment it has started, and watch it: looked at every 0.25 s while any of it is up
+    /// (a child is known before its parent can exit), dropped once all of it is gone.
+    static func record(_ p: Process) {
+        let tree = HarnessProcess.Tree(p)
+        tree.refresh()
+        lock.lock(); trees.append(tree); lock.unlock()
+        Thread.detachNewThread {
+            while !tree.gone { Thread.sleep(forTimeInterval: 0.25) }
+            lock.lock(); trees.removeAll { $0 === tree }; lock.unlock()
+        }
+    }
+
+    /// Let the last runs go, before a new run starts or the run data is cleared, so two runs never drive the desktop
+    /// or change files at once (an undo still going in the old one, an executor left behind by a harness that exited):
+    /// every recorded tree still up is ended (HarnessProcess.Tree.end) -- the lingering run's stdin closed first, so
+    /// it exits (it would by itself after `lingerSeconds`); waited for up to 3 s (`undoGrace` while an undo it was
+    /// sent has not answered), then SIGTERM, 2 s, then SIGKILL, 2 s. False when one is still up after that: its tree
+    /// stays recorded (the next attempt tries again), and the caller must not start a run (`stillRunning`) or clear
+    /// its files.
     static func closeLingering(grace: Double = 3, term: Double = 2, kill: Double = 2,
                                signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
         closing.lock(); defer { closing.unlock() }
         lock.lock()
-        let l = lingering
+        let l = lingering, all = trees
         lingering = nil
         lock.unlock()
-        guard let l else { return true }
-        let grace = l.responded && l.response == nil ? max(grace, undoGrace) : grace
-        if HarnessProcess.end(l.process, members: &l.members, close: { lock.lock(); l.close(); lock.unlock() },
-                              grace: grace, term: term, kill: kill, signal: signal) { return true }
-        NSLog("DeskMind Hands: the finished run's process \(l.process.processIdentifier) is still running after SIGKILL")
-        lock.lock(); if lingering == nil { lingering = l }; lock.unlock()
-        return false
+        let closeLingering = { if let l { lock.lock(); l.close(); lock.unlock() } }
+        var ok = true
+        for tree in all {
+            let its = l != nil && l!.process === tree.process
+            let wait = its && l!.responded && l!.response == nil ? max(grace, undoGrace) : grace
+            if tree.end(close: its ? closeLingering : {}, grace: wait, term: term, kill: kill, signal: signal) {
+                lock.lock(); trees.removeAll { $0 === tree }; lock.unlock()
+            } else {
+                ok = false
+                NSLog("DeskMind Hands: a run's process (harness \(tree.process.processIdentifier), \(tree.known.count) under it) is still running after SIGKILL")
+            }
+        }
+        closeLingering()    // its tree gone already: its stdin closed all the same
+        return ok
     }
 
     /// How long an undo already going is waited for before it is cut short (the harness writes its result_response
@@ -297,6 +319,7 @@ enum HarnessRun {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
         Runner.current = p   // stopRequested is not cleared here: a stop since the check above stands
+        record(p)
         // once task_done is passed on (`linger.over`), the run's lines go to `linger` (result_response), not to this
         // run's connection, and the state is the next run's
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)

@@ -123,6 +123,7 @@ enum HelperE2E {
         p.standardInput = input
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
         try? p.run()
+        HarnessRun.record(p)
         return HarnessRun.Lingering(process: p, input: input.fileHandleForWriting)
     }
 
@@ -133,13 +134,13 @@ enum HelperE2E {
         HarnessRun.lingering = deaf
         check(HarnessRun.closeLingering(grace: 0.3, term: 0.3, kill: 2) && !deaf.process.isRunning && HarnessRun.lingering == nil,
               "linger: an old run deaf to stdin closed and SIGTERM is killed before the next run")
-        // ...and when it cannot be confirmed gone, the next run is refused: false, still registered, the error said
+        // ...and when it cannot be confirmed gone, the next run is refused: false, its tree still recorded, the error said
         let stuck = fakeLingering("exec sleep 30")
         HarnessRun.lingering = stuck
         check(!HarnessRun.closeLingering(grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 }) && stuck.process.isRunning
-              && HarnessRun.lingering === stuck && HarnessRun.stillRunning["code"] as? String == "previous_run_alive",
-              "linger: a process not confirmed gone refuses the next run, and stays registered for the next attempt")
-        check(HarnessRun.respond(runID: "", option: 0)["ok"] as? Bool == false, "linger: its closed stdin takes no answer")
+              && HarnessRun.trees.contains { $0.process === stuck.process } && HarnessRun.stillRunning["code"] as? String == "previous_run_alive",
+              "linger: a process not confirmed gone refuses the next run, and stays recorded for the next attempt")
+        check(HarnessRun.respond(runID: "", option: 0)["ok"] as? Bool == false, "linger: it takes no answer any more")
         check(HarnessRun.closeLingering(grace: 0.2, term: 2, kill: 2) && !stuck.process.isRunning, "linger: the next attempt ends it")
 
         // P2: an undo sent the moment task_done reaches the app finds the run (it was registered up to 250 ms later)
@@ -198,6 +199,76 @@ enum HelperE2E {
         let t0 = Date()
         check(HarnessRun.closeLingering(grace: 0.2, term: 0.2, kill: 2, signal: { sent.append($1); return kill($0, $1) })
               && sent.isEmpty && Date().timeIntervalSince(t0) > 3, "linger: an undo going is waited for (\(sent), \(Date().timeIntervalSince(t0)) s)")
+        lingerFullRun()
+    }
+
+    /// The whole HarnessRun.run, with a fake harness (runtime/node/bin/node beside this binary, a shell script) and
+    /// Application Support moved into the output folder: the harness exits by itself right after task_done, leaving
+    /// two children that ignore SIGTERM -- one in its group, one in a group of its own -- writing on. `lingering` is
+    /// gone with the harness; the next run must end both before it starts (deskmind #103 external review, P1).
+    static func lingerFullRun() {
+        let fm = FileManager.default
+        let d = out.appendingPathComponent("fullrun")
+        try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+        let runtime = Runner.runtime
+        guard runtime.path.hasPrefix(out.path) else { check(false, "linger: the fake runtime is beside this binary (\(runtime.path))"); return }
+        DeskMindIPC.supportOverride = out.appendingPathComponent("support-run")
+        defer { DeskMindIPC.supportOverride = nil }
+        let node = runtime.appendingPathComponent("node/bin/node")
+        for dir in [node.deletingLastPathComponent(), runtime.appendingPathComponent("harness"), runtime.appendingPathComponent("hands")] {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        fm.createFile(atPath: runtime.appendingPathComponent("harness/harness.mjs").path, contents: Data())
+        fm.createFile(atPath: runtime.appendingPathComponent("hands/.version").path, contents: Data("e2e".utf8))
+        let done = #"{"kind":"task_done","status":"succeeded","reason":"verified","summary":"ok","result_card":null}"#
+        let script = """
+            #!/bin/sh
+            D='\(d.path)'
+            read req
+            if [ -f "$D/second" ]; then
+              for f in same own; do kill -0 "$(cat "$D/$f.pid")" 2>/dev/null && echo "$f" >> "$D/alive-at-start"; done
+              echo '\(done)'
+              exit 0
+            fi
+            ( trap "" TERM; while :; do echo x >> "$D/same.txt"; sleep 0.1; done ) </dev/null >/dev/null 2>&1 &
+            echo $! > "$D/same.pid"
+            perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); open(F, ">'"$D"'/own.pid"); print F $$; close F; while (1) { open(G, ">>'"$D"'/own.txt"); print G "x\\n"; close G; select(undef, undef, undef, 0.1); }' </dev/null >/dev/null 2>&1 &
+            sleep 0.8
+            echo '\(done)'
+            exit 0
+
+            """
+        fm.createFile(atPath: node.path, contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
+        func run() -> [[String: Any]] {
+            var events: [[String: Any]] = []
+            HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { events.append($0); return true }
+            return events
+        }
+        func pid(_ f: String) -> pid_t { pid_t((try? String(contentsOf: d.appendingPathComponent(f), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0 }
+        func size(_ f: String) -> Int { (try? fm.attributesOfItem(atPath: d.appendingPathComponent(f).path)[.size] as? Int) ?? 0 }
+
+        let first = run()
+        let same = pid("same.pid"), own = pid("own.pid")
+        check(first.contains { $0["event"] as? String == "task_done" } && first.last?["event"] as? String == "done",
+              "linger (full run): the first run ends at task_done: \(first.map { $0["event"] as? String ?? "?" })")
+        Thread.sleep(forTimeInterval: 0.5)
+        let s0 = size("same.txt"), o0 = size("own.txt")
+        Thread.sleep(forTimeInterval: 0.5)
+        check(HarnessRun.lingering == nil && same > 0 && own > 0 && HarnessProcess.member(same) != nil && HarnessProcess.member(own) != nil
+              && getpgid(own) == own && size("same.txt") > s0 && size("own.txt") > o0,
+              "linger (full run): its harness gone, nothing lingering, both children still up and writing")
+
+        fm.createFile(atPath: d.appendingPathComponent("second").path, contents: Data())
+        let second = run()
+        check(!fm.fileExists(atPath: d.appendingPathComponent("alive-at-start").path),
+              "linger (full run): the next run starts only once both children are gone (alive then: \((try? String(contentsOf: d.appendingPathComponent("alive-at-start"), encoding: .utf8)) ?? "none"))")
+        let s1 = size("same.txt"), o1 = size("own.txt")
+        Thread.sleep(forTimeInterval: 0.5)
+        check(HarnessProcess.member(same) == nil && HarnessProcess.member(own) == nil && size("same.txt") == s1 && size("own.txt") == o1,
+              "linger (full run): neither child writes after the next run started")
+        check(!second.contains { $0["event"] as? String == "error" } && second.contains { $0["event"] as? String == "task_done" },
+              "linger (full run): the next run itself ran: \(second.map { $0["event"] as? String ?? "?" })")
+        for p in [same, own] where HarnessProcess.member(p) != nil { kill(p, SIGKILL) }
     }
 
     // MARK: Save Full Log
