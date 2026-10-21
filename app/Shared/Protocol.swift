@@ -6,7 +6,11 @@ enum DeskMindIPC {
     static let helperLabel = "ai.deskmind.hands"
     static let agentPlist = "ai.deskmind.hands.plist"
 
+    /// A test's own folder in place of Application Support/DeskMind (tests/e2e: a run's files never touch the user's).
+    nonisolated(unsafe) static var supportOverride: URL?
+
     static var supportDir: URL {
+        if let o = supportOverride { return o }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("DeskMind", isDirectory: true)
     }

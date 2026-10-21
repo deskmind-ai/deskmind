@@ -6,6 +6,7 @@
 //   SessionE2E serve <socket> <dir> <node> <harness.mjs> <idle seconds>   (LOCAL_URL / LOCAL_API_KEY passed on)
 //   SessionE2E lock <dir>                                                  the machine lock: take, busy, stale
 //   SessionE2E linger <dir>                                                a finished run's undo: lock, expiry
+//   SessionE2E leftover <dir>                                              what an ended session or run leaves up
 //
 // `serve` adds test ops beside the session ops: `e2e.ui` (what the live card and the recording were driven with, by
 // run), `e2e.state` (SessionHost.taskRunning), `e2e.begin {run_id}` (what `op run` does as it starts: the machine lock
@@ -29,6 +30,7 @@ enum SessionE2E {
         let a = CommandLine.arguments
         if a.count == 3, a[1] == "lock" { lock(dir: a[2]) }
         if a.count == 3, a[1] == "linger" { linger(dir: a[2]) }
+        if a.count == 3, a[1] == "leftover" { leftover(dir: a[2]) }
         guard a.count == 7, a[1] == "serve" else {
             print("usage: SessionE2E serve <socket> <dir> <node> <harness.mjs> <idle s> | lock <dir>"); exit(2)
         }
@@ -231,6 +233,98 @@ enum SessionE2E {
         check(!fm.fileExists(atPath: ComputerLock.file.path), "and the lock let go: nothing starts under it")
         try? fm.removeItem(at: ComputerLock.lastFile)
         print(failures == 0 ? "linger: all passed" : "linger: \(failures) failed")
+        exit(Int32(min(failures, 100)))
+    }
+
+    /// A session process that ends while its task's executor is still up (a stand-in: /bin/sh that starts a child
+    /// ignoring SIGTERM, then exits at stdin's end), on each way a session ends (`end`, idle, the helper exiting), and
+    /// an op run whose harness exits leaving a child: the helper keeps track of what is left, holds the machine lock
+    /// while it is up (a session's task is refused), and its own next run ends it first or is refused.
+    static func leftover(dir: String) {
+        let fm = FileManager.default
+        let root = URL(fileURLWithPath: dir)
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let script = root.appendingPathComponent("fake-session.sh")
+        // the session protocol's first line, an "executor" left behind, then wait for stdin's end
+        try? #"""
+        echo '{"kind":"session.start","last_seq":0,"resumed":false}'
+        ( trap '' TERM; exec sleep 300 ) </dev/null >/dev/null 2>&1 &
+        echo $! > "$EXECUTOR_PID"
+        cat > /dev/null
+        exit 0
+        """#.write(to: script, atomically: true, encoding: .utf8)
+        let pidFile = root.appendingPathComponent("executor.pid")
+        SessionHost.setup = .init(node: URL(fileURLWithPath: "/bin/sh"), bundle: script, dir: root, cwd: nil,
+                                  logs: root.appendingPathComponent("logs"),
+                                  environment: { ["PATH": "/usr/bin:/bin", "EXECUTOR_PID": pidFile.path] },
+                                  prepare: {}, idleSeconds: 1)
+        SessionHost.setup.ui = .init(start: { _, _, _ in }, show: { _, _ in }, record: { _, _ in }, finish: { _, _ in })
+        let me = Int(ProcessInfo.processInfo.processIdentifier)
+        func until(_ f: () -> Bool, _ s: Double = 10) -> Bool {
+            let t = Date().addingTimeInterval(s)
+            while Date() < t { if f() { return true }; Thread.sleep(forTimeInterval: 0.05) }
+            return f()
+        }
+        func owner() -> [String: Any] {
+            (try? JSONSerialization.jsonObject(with: Data(contentsOf: ComputerLock.file))) as? [String: Any] ?? [:]
+        }
+        func executor() -> pid_t { pid_t((try? String(contentsOf: pidFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0 }
+        func helperHolds() -> Bool { ComputerLock.holder() != nil && owner()["pid"] as? Int == me }
+        func sessionTaskRefused() -> Bool { if case .busy = ComputerLock.take(runID: "run_session") { return true }; return false }
+        /// open the fake session, wait for its executor; nil when it did not start
+        func open(_ id: String) -> pid_t? {
+            try? fm.removeItem(at: pidFile)
+            let r = SessionHost.open(["session_id": id])
+            SessionHost.setup.idleSeconds = id == "ses_idle" ? 1 : 300   // only that one is let go as idle
+            guard r["ok"] as? Bool == true, until({ executor() > 0 }) else { check(false, "\(id) opens: \(r)"); return nil }
+            Thread.sleep(forTimeInterval: 0.6)   // the tree has been looked at with the executor in it
+            return executor()
+        }
+
+        // 1. session.end while its executor is up: tracked, the Mac held; the next op run ends it
+        guard let ex1 = open("ses_end") else { exit(1) }
+        check(ComputerLock.holder() == nil, "a session with nothing running holds nothing")
+        _ = SessionHost.end(sessionID: "ses_end")
+        check(until { helperHolds() && HarnessRun.acting }, "session.end, its executor still up: the helper holds the Mac for it (\(owner()))")
+        check(ComputerLock.alive(ex1) && sessionTaskRefused(), "a session's task is refused meanwhile (computer_busy)")
+        check(!HarnessRun.closeLingering(grace: 0.1, term: 0.1, kill: 0.1, signal: { _, _ in 0 }) && ComputerLock.alive(ex1),
+              "an op run whose kill does not take: refused (previous_run_alive), still tracked")
+        check(HarnessRun.acting && helperHolds(), "and the Mac still held")
+        check(HarnessRun.closeLingering(grace: 0.1, term: 0.3, kill: 2) && !ComputerLock.alive(ex1), "the next op run ends it first")
+        ActingGuard.drop()
+        check(!HarnessRun.acting && ComputerLock.holder() == nil, "then nothing acts, the Mac is free")
+
+        // 2. closed as idle (stdin closed by the reaper), the executor then exits by itself: the lock goes with it
+        guard let ex2 = open("ses_idle") else { exit(1) }
+        check(until({ ComputerLock.holder() != nil }, 20) && helperHolds() && ComputerLock.alive(ex2), "closed as idle, its executor up: the Mac held")
+        kill(ex2, SIGKILL)
+        check(until { ComputerLock.holder() == nil && !HarnessRun.acting }, "the executor gone by itself: the lock let go")
+
+        // 3. the helper exiting (SessionHost.shutdown): no executor left behind
+        guard let ex3 = open("ses_exit") else { exit(1) }
+        SessionHost.shutdown(wait: 1)
+        check(until { !ComputerLock.alive(ex3) }, "the helper exiting ends what its sessions left (SIGTERM ignored: SIGKILL)")
+
+        // 4. an op run whose harness exits leaving a child up (vice versa): the run's lock is kept for it
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "( trap '' TERM; exec sleep 300 ) & echo $! > \"\(pidFile.path)\"; sleep 0.6"]
+        try? fm.removeItem(at: pidFile)
+        guard case .taken(let release) = ComputerLock.begin(runID: "run_op") else { check(false, "op run begins"); exit(1) }
+        try? p.run()
+        HarnessRun.record(p)
+        p.waitUntilExit()
+        let ex4 = executor()
+        ActingGuard.start(handing: release)   // the run is over (HandsHelper's defer)
+        check(ComputerLock.alive(ex4) && helperHolds() && owner()["run_id"] as? String == "run_op",
+              "an op run's harness gone, its child up: the run's lock kept (\(owner()))")
+        check(sessionTaskRefused(), "a session's task is refused meanwhile")
+        kill(ex4, SIGKILL)
+        check(until { ComputerLock.holder() == nil && !HarnessRun.acting }, "the child gone: the Mac free")
+        // a run that left nothing: the lock goes at once
+        if case .taken(let r) = ComputerLock.begin(runID: "run_clean") { ActingGuard.start(handing: r) }
+        check(ComputerLock.holder() == nil, "a run that left nothing up lets the Mac go at its end")
+        print(failures == 0 ? "leftover: all passed" : "leftover: \(failures) failed")
         exit(Int32(min(failures, 100)))
     }
 }

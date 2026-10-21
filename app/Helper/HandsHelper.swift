@@ -119,7 +119,7 @@ func status(probe: Bool) -> [String: Any] {
     // Granted, but this process will not see it until it restarts: restart now, between tasks, rather than leave the
     // setup saying "not granted" (the app starts the installed copy again within seconds).
     // a task running, or a finished one whose undo can still be asked for (its process would go with this one)
-    let busy = Runner.current != nil || SessionHost.taskRunning || HarnessRun.undoWaiting
+    let busy = Runner.current != nil || SessionHost.taskRunning || HarnessRun.undoWaiting || HarnessRun.acting
     if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: busy, alreadyScheduled: restartingForGrant) {
         restartingForGrant = true
         restartSelf()
@@ -296,7 +296,15 @@ func serve() {
                 // machine lock (sessions/computer.lock) while it runs, and this run takes it too. computer.last then
                 // names this run: every finished task's undo expires, a session's and this helper's own.
                 let runID = "run_" + UUID().uuidString.lowercased().prefix(8)
-                let release: () -> Void
+                // What the last runs left (a lingering run, processes still up under a run or a session that ended)
+                // is ended before this one starts, or this one is refused; not while another's task holds the Mac.
+                if let held = ComputerLock.holder(), !ActingGuard.holding {
+                    NSLog("DeskMind Hands: run refused: the computer lock is held (\(held.prefix(200)))")
+                    refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
+                }
+                guard HarnessRun.closeLingering() else { refuse(HarnessRun.stillRunning); return }
+                ActingGuard.drop()
+                var release: (() -> Void)?
                 switch ComputerLock.begin(runID: runID) {
                 case .taken(let r): release = r
                 case .busy(let held):
@@ -313,9 +321,10 @@ func serve() {
                         refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
                     }
                     try? ComputerLock.setLast(runID)
-                    release = {}
+                    release = nil
                 }
-                defer { release() }
+                // the lock goes at the run's end, unless something of it is still up (ActingGuard keeps it then)
+                defer { ActingGuard.start(handing: release) }
                 var spec = Runner.Spec(req)
                 spec.runID = runID
                 let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
@@ -375,7 +384,8 @@ struct HandsHelper {
         Thread.detachNewThread { serve() }
         Runner.warmUp()
         BrainServer.ensure()
-        atexit { BrainServer.stop(); EyesServer.stop() }
+        // sessions first: their tasks stop and their executors are seen gone (or ended) before the helper is
+        atexit { SessionHost.shutdown(); BrainServer.stop(); EyesServer.stop() }
         // A replaced or terminated helper must take its model servers with it: left running, the next helper would
         // adopt a server still loaded with the old models. exit runs the atexit above (Lifecycle).
         Lifecycle.exitOnSIGTERM()
