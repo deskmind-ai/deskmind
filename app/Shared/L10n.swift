@@ -311,7 +311,6 @@ enum L10n {
         "Vision": "加载视觉",
         "Looking": "观察屏幕",
         "%ds": "%d 秒",
-        "Keep DeskMind Open While a Task Runs": "运行任务时保持 DeskMind 窗口打开",
         "Show a Live View of the Task": "显示任务窗口的实时画面",
         // The live view (Helper/LiveCard.swift).
         "DeskMind live view": "DeskMind 实时画面",
@@ -399,6 +398,7 @@ enum L10n {
         "Waiting for your answer in DeskMind": "在 DeskMind 窗口里等你回答",
         "Waiting for your approval in DeskMind": "在 DeskMind 窗口里等你批准",
         "Got your answer. Carrying on…": "收到回复，继续…",
+        "The question was withdrawn. Carrying on…": "这个问题已收回，继续…",
         "Asked for your approval": "请你批准",
 
         // MARK: Run overlay and notifications (Main/RunOverlay.swift)

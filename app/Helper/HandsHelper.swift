@@ -216,9 +216,10 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return HarnessRun.modelCheck(config: req["config"] as? String ?? "ds-flash", extra: req["env"] as? [String: String] ?? [:])
     case "answer":
         // The user's reply to the question the running task asked (a HANDS_ASK line), or their approval.
-        // {reply, approve, option?}: `option` is the clicked option button's place among the options shown.
-        let ok = Runner.answer(req)
-        return ["ok": ok] as [String: Any]
+        // {ask_id, reply, approve, option?}: `option` is the clicked option button's place among the options shown;
+        // `ask_id` the card the window showed (a harness run refuses an answer to a card that is no longer open).
+        if HarnessRun.input != nil { return HarnessRun.answer(req) }
+        return ["ok": Runner.answer(req)] as [String: Any]
     case "respond":
         // The answer to a finished harness run's result card (e.g. undo), while its process lingers:
         // {run_id, option, wait?} → {ok, run_id, result?} (result: the harness's result_response, if it came in `wait` s).

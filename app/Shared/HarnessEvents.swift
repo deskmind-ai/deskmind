@@ -1,9 +1,9 @@
 // The harness engine's event stream, translated into the socket events the main app already reads.
 //
 // harness (`harness.mjs app-run`) writes one JSON event per line: start, preparing, plan, step, ask, waiting,
-// resumed, consent, refused, answer_given, task_done (src/protocol/events.ts in deskmind-ai/harness). Each becomes
-// zero or more of the app's events (start/task, preparing, step, ask, task_done, done), plus three new ones the app
-// may ignore until it shows them: plan, consent, refused. The ask event carries the whole card too (`card`), so a
+// resumed, ask_void, consent, refused, answer_given, task_done (src/protocol/events.ts in deskmind-ai/harness). Each becomes
+// zero or more of the app's events (start/task, preparing, step, ask, ask_closed, task_done, done), plus three new
+// ones the app may ignore until it shows them: plan, consent, refused. The ask event carries the whole card too (`card`), so a
 // newer app can show typed options; an older one reads `question`/`options`/`approval` as before.
 //
 // Pure functions over dictionaries, so they are tested without a process (tests/DecisionTests.swift).
@@ -51,11 +51,19 @@ enum HarnessEvents {
             let kind = card["kind"] as? String ?? ""
             return [["event": "ask", "question": card["text"] as? String ?? "", "approval": approvalKinds.contains(kind),
                      "options": options.compactMap { $0["text"] as? String }, "card": card, "ask_id": e["ask_id"] ?? ""]]
+        case "ask_void":
+            // A card let go without an answer (the user changed the request, stopped, the app went away): it leaves
+            // the window, and an answer to it is refused from here on.
+            return closeCard(e, why: e["why"] as? String ?? "void", state: &state)
         case "waiting", "resumed":
-            // With an ask_id: the harness waits for the answer to a card, which the ask already shows — nothing to say.
+            // waiting with an ask_id: the harness waits for the answer to a card, which the ask already shows.
+            // resumed with one: that card is closed (answered, or voided: `voided`), and leaves the window.
             // Without one: the executor pauses while the user uses the Mac, and resumes — which is exactly what the
             // app's own "waiting" / "resumed" mean (the hands engine's HANDS_WAIT / HANDS_RESUME).
-            if e["ask_id"] != nil { return [] }
+            if e["ask_id"] != nil {
+                guard e["kind"] as? String == "resumed" else { return [] }
+                return closeCard(e, why: e["voided"] as? String ?? "answered", state: &state)
+            }
             return [["event": e["kind"] as? String ?? "waiting", "reason": "user_active"]]
         case "consent":
             return [["event": "consent", "object": e["object"] ?? "", "consequence": e["consequence"] ?? "",
@@ -84,6 +92,14 @@ enum HarnessEvents {
         default:
             return []   // kinds a newer harness adds are ignored, as the app ignores events it does not know
         }
+    }
+
+    /// The card `e["ask_id"]` is no longer open: the app's `ask_closed` (the window drops it if it shows that card),
+    /// and the helper answers it no more.
+    static func closeCard(_ e: [String: Any], why: String, state: inout State) -> [[String: Any]] {
+        let id = e["ask_id"] as? String ?? ""
+        if state.askID == id { state.askID = nil; state.askOptions = [] }
+        return [["event": "ask_closed", "ask_id": id, "why": why]]
     }
 
     /// The file changes the harness reports (its executor's ledger: what the task created, changed, deleted, and what
@@ -118,14 +134,18 @@ enum HarnessEvents {
         case approve               // an approval card's Approve
         case deny                  // an approval card's Deny
 
-        /// The main app's `answer` request to the helper for this button.
-        var request: [String: Any] {
+        /// The main app's `answer` request to the helper for this button, on the card `askID` (the one the window
+        /// shows): the helper sends it only if that card is still the open one.
+        func request(askID: String) -> [String: Any] {
+            var r: [String: Any]
             switch self {
-            case .option(let i, let text): return ["op": "answer", "reply": text, "approve": false, "option": i]
-            case .words(let text): return ["op": "answer", "reply": text, "approve": false]
-            case .approve: return ["op": "answer", "reply": "", "approve": true]
-            case .deny: return ["op": "answer", "reply": "", "approve": false]
+            case .option(let i, let text): r = ["op": "answer", "reply": text, "approve": false, "option": i]
+            case .words(let text): r = ["op": "answer", "reply": text, "approve": false]
+            case .approve: r = ["op": "answer", "reply": "", "approve": true]
+            case .deny: r = ["op": "answer", "reply": "", "approve": false]
             }
+            r["ask_id"] = askID
+            return r
         }
 
         /// The helper's reading of an `answer` request: `option` when the app named one (this app); without it, an
@@ -144,30 +164,53 @@ enum HarnessEvents {
         approval ? [.deny, .approve] : options.enumerated().map { CardButton.option($0.offset, $0.element) }
     }
 
-    /// The user's answer, as the harness reads it: an option's index, or their own words. Nil when nothing is asked,
-    /// or when the button has nothing on this card to send (Approve on a card with no approve option).
-    static func answerLine(_ b: CardButton, state: State) -> [String: Any]? {
-        guard let id = state.askID else { return nil }
-        // the options shown are the ones with a text, in the card's order (translate): the n-th shown → its index
-        let shown = state.askOptions.indices.filter { state.askOptions[$0]["text"] is String }
+    /// The options shown are the ones with a text, in the card's order (translate): the n-th shown → its index.
+    static func shownOptions(_ state: State) -> [Int] {
+        state.askOptions.indices.filter { state.askOptions[$0]["text"] is String }
+    }
+
+    /// Why an answer must not be sent to the open card, or nil. `askID` is the card the user answered (the one their
+    /// window showed): a card that is no longer open (voided by a steer, already answered, replaced) is never answered
+    /// for the open one -- Approve on an old plan card must not approve the new plan. An option button must also be
+    /// the open card's option of that place and text.
+    static func refusal(_ b: CardButton, askID: String?, state: State) -> String? {
+        guard let open = state.askID else { return "no card is open" }
+        if let a = askID, a != open { return "stale card: \(a) is not the open card \(open)" }
+        if case .option(let n, let text) = b, !text.isEmpty {
+            let shown = shownOptions(state)
+            let same = shown.indices.contains(n)
+                && (state.askOptions[shown[n]]["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) == text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !same { return "option \(n) of the open card is not \"\(text)\"" }
+        }
+        return nil
+    }
+
+    /// The user's answer, as the harness reads it: an option's index, or their own words. Nil when it is refused
+    /// (`refusal`), or when the button has nothing on this card to send (Approve on a card with no approve option).
+    /// The line names the card only when the request did (`askID`); an answer that names none (an older app) goes
+    /// without, so the harness's own guard applies (after a voided card it answers nothing).
+    static func answerLine(_ b: CardButton, askID: String?, state: State) -> [String: Any]? {
+        guard refusal(b, askID: askID, state: state) == nil, let open = state.askID else { return nil }
+        let line = { (more: [String: Any]) -> [String: Any] in askID == nil ? more : more.merging(["ask_id": open]) { a, _ in a } }
+        let shown = shownOptions(state)
         let kind = { (i: Int) in state.askOptions[i]["kind"] as? String }
         switch b {
         case .option(let n, _):
             guard shown.indices.contains(n) else { return nil }
-            return ["ask_id": id, "option": shown[n]]
+            return line(["option": shown[n]])
         case .approve:
             guard let i = state.askOptions.indices.first(where: { kind($0) == "approve" }) else { return nil }
-            return ["ask_id": id, "option": i]
+            return line(["option": i])
         case .deny:
             // the way out the card offers: cancel, else the first option that is not approve (a result check's undo);
             // a card with nothing but approve is answered with nothing, which the harness reads as no
             if let i = state.askOptions.indices.first(where: { kind($0) == "cancel" })
-                ?? state.askOptions.indices.first(where: { kind($0) != "approve" }) { return ["ask_id": id, "option": i] }
-            return ["ask_id": id]
+                ?? state.askOptions.indices.first(where: { kind($0) != "approve" }) { return line(["option": i]) }
+            return line([:])
         case .words(let w):
             let trimmed = w.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let i = shown.first(where: { state.askOptions[$0]["text"] as? String == trimmed }) { return ["ask_id": id, "option": i] }
-            return trimmed.isEmpty ? nil : ["ask_id": id, "text": trimmed]
+            if let i = shown.first(where: { state.askOptions[$0]["text"] as? String == trimmed }) { return line(["option": i]) }
+            return trimmed.isEmpty ? nil : line(["text": trimmed])
         }
     }
 

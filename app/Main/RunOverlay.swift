@@ -184,8 +184,8 @@ final class RunOverlay {
         model.ending = model.stoppedByUser ? .stopped : (passed ? .done : .failed)
         model.line = summary
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { model.resultOpen = true }
-        // DeskMind is often still the active app with its window aside: the notification is the result's way in then.
-        if !NSApp.isActive || MainWindow.isAside {
+        // DeskMind is not the active app (the task worked in others): the notification is the result's way in then.
+        if !NSApp.isActive {
             let lang = ResolvedLang.current
             Self.notify(title: passed ? L("DeskMind finished the task", lang: lang) : L("DeskMind couldn't finish the task", lang: lang),
                         body: L("%@: %@", model.title, summary, lang: lang))
@@ -214,7 +214,7 @@ final class RunOverlay {
     /// "Show Details": the window, on this run's result, in front; the result leaves the notch.
     func showDetails() {
         dismiss()
-        MainWindow.comeBack(activate: true)
+        MainWindow.comeBack()
     }
 
     static func requestNotificationPermission() {

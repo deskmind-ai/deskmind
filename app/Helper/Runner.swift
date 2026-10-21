@@ -458,11 +458,10 @@ enum Runner {
         if let p = current, HarnessRun.input != nil { HarnessRun.stop(p) } else { current?.terminate() }
     }
 
-    /// Hand the user's answer (the main app's `answer` request) to the question the running task asked. A harness run
-    /// reads which button it was (HarnessEvents.CardButton); `hands do` one JSON line on its stdin, which is what it
-    /// blocks on: {"reply": "...", "approve": true} (an option's text is its reply; it reads `approve` on approvals only).
+    /// Hand the user's answer (the main app's `answer` request) to the question the running `hands do` asked (a harness
+    /// run: HarnessRun.answer). One JSON line on its stdin, which is what it blocks on: {"reply": "...", "approve": true}
+    /// (an option's text is its reply; it reads `approve` on approvals only).
     static func answer(_ req: [String: Any]) -> Bool {
-        if HarnessRun.input != nil { return HarnessRun.answer(HarnessEvents.CardButton(request: req)) }
         let reply = req["reply"] as? String ?? "", approve = req["approve"] as? Bool ?? false
         answerLock.lock(); defer { answerLock.unlock() }
         guard asking, let h = answers,

@@ -30,11 +30,43 @@ enum HarnessRun {
     }
     nonisolated(unsafe) static var lingering: Lingering?
 
-    /// Let the lingering run go: its stdin is closed, so it exits (it would by itself after `lingerSeconds`). Before a
-    /// new run starts, so two harness processes never wait on the user at once.
+    /// Let the lingering run go, before a new run starts, so two harness processes never drive the desktop at once
+    /// (an undo still going in the old one): its stdin is closed, so it exits (it would by itself after
+    /// `lingerSeconds`); waited for up to 3 s, then terminated, and waited for up to 2 s more.
     static func closeLingering() {
-        lock.lock(); defer { lock.unlock() }
-        lingering?.close(); lingering = nil
+        lock.lock()
+        let l = lingering
+        l?.close(); lingering = nil
+        lock.unlock()
+        guard let p = l?.process else { return }
+        if waitForExit(p, seconds: 3) { return }
+        NSLog("DeskMind Hands: the finished run's process did not exit on stdin closed; terminating it")
+        p.terminate()
+        if !waitForExit(p, seconds: 2) { NSLog("DeskMind Hands: the finished run's process is still running") }
+    }
+
+    private static func waitForExit(_ p: Process, seconds: Double) -> Bool {
+        let until = Date().addingTimeInterval(seconds)
+        while p.isRunning && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
+        return !p.isRunning
+    }
+
+    /// Each run's own stdout / stderr copies (`<run_id>.stdout|.stderr`): a lingering process writes on after the
+    /// next run has started, and must not write into that run's files. The last `logsKept` runs' are kept.
+    static var logs: URL { DeskMindIPC.supportDir.appendingPathComponent("work/harness-logs") }
+    static let logsKept = 5
+
+    private static func pruneLogs() {
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.creationDateKey]
+        let files = ((try? fm.contentsOfDirectory(at: logs, includingPropertiesForKeys: Array(keys))) ?? [])
+            .map { ($0, (try? $0.resourceValues(forKeys: keys).creationDate) ?? .distantPast) }
+            .sorted { $0.1 < $1.1 }.map(\.0)
+        let runs = files.map { $0.deletingPathExtension().lastPathComponent }
+        var seen: [String] = []
+        for r in runs where !seen.contains(r) { seen.append(r) }
+        let drop = Set(seen.dropLast(logsKept))
+        for (f, r) in zip(files, runs) where drop.contains(r) { try? fm.removeItem(at: f) }
     }
 
     /// The user's answer to the finished run's result card (op `respond`): `{"type":"respond","option":n}` on the
@@ -111,16 +143,26 @@ enum HarnessRun {
         return (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] ?? ["ok": false, "error": "no answer from the harness (exit \(p.terminationStatus))"]
     }
 
-    /// The user's answer to the open card: the clicked option's index, the approve option, the way out, or their
-    /// words. False when nothing is asked.
-    static func answer(_ button: HarnessEvents.CardButton) -> Bool {
+    /// The user's answer (the main app's `answer` request) to the open card: the clicked option's index, the approve
+    /// option, the way out, or their words. Refused -- `{ok: false, code: "stale_card"}` -- when the request names a
+    /// card that is no longer the open one, or an option that is not the open card's: the window showed an older card
+    /// (voided by a steer, say) while the helper already held the next, and Approve on the old plan must not approve
+    /// the new one. The window has dropped the card it answered either way; the open card comes as its own ask.
+    static func answer(_ req: [String: Any]) -> [String: Any] {
+        let button = HarnessEvents.CardButton(request: req)
+        let askID = req["ask_id"] as? String
         lock.lock(); defer { lock.unlock() }
-        guard let h = input, let line = HarnessEvents.answerLine(button, state: state),
-              var data = try? JSONSerialization.data(withJSONObject: line) else { return false }
+        guard let h = input else { return ["ok": false, "error": "no harness run is going"] }
+        if let why = HarnessEvents.refusal(button, askID: askID, state: state) {
+            NSLog("DeskMind Hands: answer not sent: \(why)")
+            return ["ok": false, "code": "stale_card", "error": why]
+        }
+        guard let line = HarnessEvents.answerLine(button, askID: askID, state: state),
+              var data = try? JSONSerialization.data(withJSONObject: line) else { return ["ok": false, "error": "nothing to send for this button"] }
         data.append(0x0A)
-        do { try h.write(contentsOf: data) } catch { return false }
-        state.askID = nil
-        return true
+        do { try h.write(contentsOf: data) } catch { return ["ok": false, "error": "write: \(error.localizedDescription)"] }
+        state.askID = nil; state.askOptions = []
+        return ["ok": true]
     }
 
     static func run(_ spec: Runner.Spec, emit unlocked: @escaping ([String: Any]) -> Bool) {
@@ -194,12 +236,16 @@ enum HarnessRun {
         let outPipe = Pipe(), inPipe = Pipe()
         p.standardOutput = outPipe
         p.standardInput = inPipe
-        let errURL = DeskMindIPC.supportDir.appendingPathComponent("work/last-run.stderr")
+        // the run's id is the helper's, so its logs are named before the process starts (the harness takes it as given)
+        let runID = "run_" + UUID().uuidString.lowercased().prefix(8)
+        try? fm.createDirectory(at: logs, withIntermediateDirectories: true)
+        let errURL = logs.appendingPathComponent("\(runID).stderr")
         fm.createFile(atPath: errURL.path, contents: nil)
         p.standardError = try? FileHandle(forWritingTo: errURL)
-        let outURL = DeskMindIPC.supportDir.appendingPathComponent("work/last-run.stdout")
+        let outURL = logs.appendingPathComponent("\(runID).stdout")
         fm.createFile(atPath: outURL.path, contents: nil)
         let outLog = try? FileHandle(forWritingTo: outURL)
+        pruneLogs()    // after this run's files are made, so they count among the ones kept
         do { try p.run() } catch {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
@@ -211,7 +257,7 @@ enum HarnessRun {
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
 
         // The request: one JSON line, then stdin stays open for answers.
-        var req: [String: Any] = ["raw": spec.goal ?? "", "config": spec.config, "lang": spec.lang, "driver": "hands",
+        var req: [String: Any] = ["run_id": runID, "raw": spec.goal ?? "", "config": spec.config, "lang": spec.lang, "driver": "hands",
                                   "apps": spec.apps.map(\.bundle)]
         if let folder = spec.folder { req["scope"] = folder }
         if var line = try? JSONSerialization.data(withJSONObject: req) { line.append(0x0A); try? inPipe.fileHandleForWriting.write(contentsOf: line) }
@@ -252,7 +298,7 @@ enum HarnessRun {
                                             : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
                         case "waiting" where ev["ask_id"] == nil:   // the executor waits for the user to pause
                             LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
-                        case "resumed" where ev["ask_id"] == nil:
+                        case "resumed" where ev["ask_id"] == nil, "ask_closed":
                             LiveCard.status(.working)
                         case "step":
                             // The card shows the window the step acted in: the executor names it by bundle id and

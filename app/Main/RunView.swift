@@ -59,6 +59,9 @@ struct PendingAsk: Equatable {
     let approval: Bool
     /// Answers to pick from: the alternatives the question lists (two orders for one customer). Typing stays open.
     var options: [String] = []
+    /// The card's id (the harness engine's ask_id; "" from `hands do`): every answer names it, and the helper sends
+    /// it only while this card is still the open one.
+    var askID = ""
 }
 
 @MainActor
@@ -282,11 +285,14 @@ final class RunModel: ObservableObject {
     /// The button the user used on the waiting card (an option, their words, or a verdict on an approval), written
     /// to the task's stdin by the helper. The card goes away at once; if the helper had nothing waiting, the next step
     /// says what happened.
+    /// A card that is no longer open (voided by a steer, replaced) is refused by the helper: it is gone from the window
+    /// already, and the open card comes as its own ask.
     func answer(_ button: HarnessEvents.CardButton) {
+        let askID = ask?.askID ?? ""
         ask = nil
         let lang = ResolvedLang.current
         if real { RunOverlay.shared.say(L("Got your answer. Carrying on…", lang: lang)) }
-        let request = button.request
+        let request = button.request(askID: askID)
         Task.detached { _ = DeskMindIPC.request(request) }
     }
 
@@ -357,7 +363,7 @@ final class RunModel: ObservableObject {
             waitingForUser = false
         case "ask":
             let q = PendingAsk(question: e["question"] as? String ?? "", approval: e["approval"] as? Bool ?? false,
-                               options: e["options"] as? [String] ?? [])
+                               options: e["options"] as? [String] ?? [], askID: e["ask_id"] as? String ?? "")
             withAnimation(.easeOut(duration: 0.2)) { ask = q }
             // The card is in DeskMind's window, which is not brought forward for it (M1 S0: no focus theft): the island
             // says so, and a notification when DeskMind is not the active app or the user is typing elsewhere.
@@ -370,6 +376,13 @@ final class RunModel: ObservableObject {
             if !NSApp.isActive || typing {
                 RunOverlay.notify(title: q.approval ? L("DeskMind needs your approval", lang: lang)
                                                     : L("DeskMind has a question", lang: lang), body: q.question)
+            }
+        case "ask_closed":
+            // The harness let the card go (the user changed the request, stopped) or took its answer: it leaves the
+            // window, if that is the card shown.
+            if let a = ask, !a.askID.isEmpty, a.askID == e["ask_id"] as? String {
+                withAnimation(.easeOut(duration: 0.2)) { ask = nil }
+                if real && e["why"] as? String == "steer" { RunOverlay.shared.say(L("The question was withdrawn. Carrying on…", lang: ResolvedLang.current)) }
             }
         case "step":
             let id = e["task"] as? String ?? "?"
@@ -729,8 +742,7 @@ struct FreeResult: View {
             if showStar { star.transition(.opacity) }
         }
         .onAppear {
-            // Not while the window is aside: the line was used up by a result nobody saw.
-            if task.strict == true && !starSeen && !MainWindow.isAside { starSeen = true; showStar = true }
+            if task.strict == true && !starSeen { starSeen = true; showStar = true }
         }
     }
 
