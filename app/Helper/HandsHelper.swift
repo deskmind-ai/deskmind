@@ -118,7 +118,7 @@ func status(probe: Bool) -> [String: Any] {
     let probed = !live && probe && probeScreen()
     // Granted, but this process will not see it until it restarts: restart now, between tasks, rather than leave the
     // setup saying "not granted" (the app starts the installed copy again within seconds).
-    if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: Runner.current != nil,
+    if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: Runner.current != nil || SessionHost.taskRunning,
                                       alreadyScheduled: restartingForGrant) {
         restartingForGrant = true
         restartSelf()
@@ -276,14 +276,35 @@ func serve() {
             // The main app's language, sent with every request (status polls included): steps, hints and errors
             // follow a switch within a second. English until the first request says otherwise.
             if let lang = (req["lang"] as? String).flatMap(ResolvedLang.init(rawValue:)) { ResolvedLang.current = lang }
+            // Chat sessions (session.open / send / end, sessions.list / watch): SessionHost.
+            if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {
                 // A run streams: one line per event until it ends, on this connection.
-                guard Runner.current == nil && !Runner.busy else {
-                    var busy = (try? JSONSerialization.data(withJSONObject: ["event": "error", "error": "a run is already in progress"])) ?? Data()
-                    busy.append(0x0A)
-                    _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
-                    return
+                func refuse(_ e: [String: Any]) {
+                    var line = (try? JSONSerialization.data(withJSONObject: e)) ?? Data()
+                    line.append(0x0A)
+                    _ = line.withUnsafeBytes { write(c, $0.baseAddress, line.count) }
                 }
+                guard Runner.current == nil && !Runner.busy else {
+                    refuse(["event": "error", "error": "a run is already in progress"]); return
+                }
+                // One computer task at a time on this Mac, whoever starts it: a chat session's task holds the harness's
+                // machine lock (sessions/computer.lock) while it runs, and this run takes it too.
+                let release: () -> Void
+                switch ComputerLock.take(runID: "") {
+                case .taken(let r): release = r
+                case .busy(let held):
+                    NSLog("DeskMind Hands: run refused: the computer lock is held (\(held.prefix(200)))")
+                    refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
+                case .failed(let why):
+                    // the lock cannot be made (the folder): not a reason to refuse the user's run, but a live holder is
+                    NSLog("DeskMind Hands: computer lock: \(why)")
+                    if ComputerLock.holder() != nil {
+                        refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
+                    }
+                    release = {}
+                }
+                defer { release() }
                 let spec = Runner.Spec(req)
                 let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
                 run(spec) { event in

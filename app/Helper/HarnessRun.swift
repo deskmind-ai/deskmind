@@ -143,6 +143,58 @@ enum HarnessRun {
         return (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] ?? ["ok": false, "error": "no answer from the harness (exit \(p.terminationStatus))"]
     }
 
+    /// The harness's environment, for a run (`app-run`) and for a chat session (`session`, SessionHost), whose
+    /// executors inherit it: the model keys (models.env), Brain as the first judge, the judge's learning files, and the
+    /// execution layer (hands' executor on the bundled Python). `apps`: the apps a request names, which may be brought
+    /// forward for a step (a session names none: its tasks are not known when it starts).
+    static func environment(apps: [String] = []) -> [String: String] {
+        let runtime = Runner.runtime, work = Runner.work
+        let python = runtime.appendingPathComponent("python/bin/python3.12").path
+        let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
+        // The vision model, as for `hands do` (Runner.run): when the run may drive an app with no accessibility tree
+        // and the model is downloaded, the Eyes server is up before the first step, and the executor's driver reads
+        // such a window from its pixels (OCR words, grounded controls) — the same observe/perform, another source.
+        // Which apps a task uses is not known before the run any more (the app reads no app names out of the
+        // instruction, owner 10-20), so the vision model is started on demand: the executor is told where it would
+        // be and how to ask for it (this helper's socket, op "eyes"), and the first time a window has to be read from
+        // its pixels it asks, and waits the five seconds or so it takes. Loading it for every run cost ~4 GB beside
+        // Brain's on a 16 GB Mac (deskmind #96 review).
+        var eyes = ""
+        if DeskMindModels.eyesDir() != nil {
+            eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" "
+                + "HANDS_HELPER_SOCKET=\"\(DeskMindIPC.socketPath)\" "
+        }
+        var env: [String: String] = [
+            "HOME": NSHomeDirectory(),
+            "PATH": "\(runtime.appendingPathComponent("bin").path):/usr/bin:/bin",
+            "DESKMIND_MACTOOLS": runtime.appendingPathComponent("bin/mactools").path,
+            "DESKMIND_BRAIN_URL": BrainServer.url, "DESKMIND_BRAIN_TOKEN": ServerAuth.token,
+            // DeskMind Brain answers the executor's judge questions first (it may approve on its own above the floor,
+            // never refuse alone; the cloud model decides the rest): measured 10-18 on the gym, 70% settled locally,
+            // 0 wrong approvals, 20/20 passed. Off when the server is not up: the cloud model judges alone.
+            "DESKMIND_BRAIN_JUDGE": BrainServer.status()["state"] as? String == "ready" ? "1" : "0",
+            // The judge's routing table (which question kinds Brain is asked) learns across runs from sampled shadow
+            // comparisons with the cloud judge (one in ten settled answers): docs/localization-2026-10-19.md
+            "DESKMIND_JUDGE_STATS": DeskMindIPC.supportDir.appendingPathComponent("judge-stats.json").path,
+            "DESKMIND_JUDGE_SHADOW": "0.1",
+            // the cloud judge is asked alongside Brain and abandoned when Brain settles: a refusing Brain costs no time
+            "DESKMIND_JUDGE_RACE": "1",
+            // the execution layer: hands' executor on the bundled Python, in the same working copy `hands do` uses
+            "DESKMIND_HANDS_DIR": work.path,
+            "DESKMIND_HANDS_CMD": "PYTHONPATH=\"\(pythonPath)\" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 "
+                + "PYTHONPYCACHEPREFIX=\"\(DeskMindIPC.supportDir.appendingPathComponent("pycache").path)\" "
+                + "HANDS_PEEKABOO_TRANSPORT=mcp HANDS_PERMISSIONS_VERIFIED=\(CGPreflightScreenCaptureAccess() ? "1" : "0") "
+                + "HANDS_SPECTATOR_APPS=ai.deskmind.app,ai.deskmind.hands "
+                // the apps the request names may be brought forward for a step (briefly, only while the user is
+                // still; the executor adds any app it opened a window of); a person at their Mac is waited for
+                + "HANDS_FLASH_APPS=\"\(apps.joined(separator: ","))\" HANDS_FLASH_WAIT_S=1800 "
+                + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
+                + "\"\(python)\" -m deskmind_hands.executor",
+        ]
+        for (k, v) in modelEnv() where env[k] == nil { env[k] = v }
+        return env
+    }
+
     /// The user's answer (the main app's `answer` request) to the open card: the clicked option's index, the approve
     /// option, the way out, or their words. Refused -- `{ok: false, code: "stale_card"}` -- when the request names a
     /// card that is no longer the open one, or an option that is not the open card's: the window showed an older card
@@ -180,59 +232,16 @@ enum HarnessRun {
             _ = emit(["event": "error", "error": "prepare: \(error.localizedDescription)"]); return
         }
         let fm = FileManager.default
-        let runtime = Runner.runtime, work = Runner.work
+        let work = Runner.work
         let runs = Runner.harnessRuns
         try? fm.createDirectory(at: runs, withIntermediateDirectories: true)
-        let python = runtime.appendingPathComponent("python/bin/python3.12").path
-        let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
-        // The vision model, as for `hands do` (Runner.run): when the run may drive an app with no accessibility tree
-        // and the model is downloaded, the Eyes server is up before the first step, and the executor's driver reads
-        // such a window from its pixels (OCR words, grounded controls) — the same observe/perform, another source.
-        // Which apps a task uses is not known before the run any more (the app reads no app names out of the
-        // instruction, owner 10-20), so the vision model is started on demand: the executor is told where it would
-        // be and how to ask for it (this helper's socket, op "eyes"), and the first time a window has to be read from
-        // its pixels it asks, and waits the five seconds or so it takes. Loading it for every run cost ~4 GB beside
-        // Brain's on a 16 GB Mac (deskmind #96 review).
-        var eyes = ""
-        if DeskMindModels.eyesDir() != nil {
-            eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" "
-                + "HANDS_HELPER_SOCKET=\"\(DeskMindIPC.socketPath)\" "
-        }
-        defer { if !eyes.isEmpty { EyesServer.touch() } }   // the idle clock starts when the run ends
+        defer { if DeskMindModels.eyesDir() != nil { EyesServer.touch() } }   // the idle clock starts when the run ends
 
         let p = Process()
         p.executableURL = node
         p.arguments = [bundle.path, "app-run", "--runs", runs.path, "--linger", String(lingerSeconds)]
         p.currentDirectoryURL = work
-        var env: [String: String] = [
-            "HOME": NSHomeDirectory(),
-            "PATH": "\(runtime.appendingPathComponent("bin").path):/usr/bin:/bin",
-            "DESKMIND_MACTOOLS": runtime.appendingPathComponent("bin/mactools").path,
-            "DESKMIND_BRAIN_URL": BrainServer.url, "DESKMIND_BRAIN_TOKEN": ServerAuth.token,
-            // DeskMind Brain answers the executor's judge questions first (it may approve on its own above the floor,
-            // never refuse alone; the cloud model decides the rest): measured 10-18 on the gym, 70% settled locally,
-            // 0 wrong approvals, 20/20 passed. Off when the server is not up: the cloud model judges alone.
-            "DESKMIND_BRAIN_JUDGE": BrainServer.status()["state"] as? String == "ready" ? "1" : "0",
-            // The judge's routing table (which question kinds Brain is asked) learns across runs from sampled shadow
-            // comparisons with the cloud judge (one in ten settled answers): docs/localization-2026-10-19.md
-            "DESKMIND_JUDGE_STATS": DeskMindIPC.supportDir.appendingPathComponent("judge-stats.json").path,
-            "DESKMIND_JUDGE_SHADOW": "0.1",
-            // the cloud judge is asked alongside Brain and abandoned when Brain settles: a refusing Brain costs no time
-            "DESKMIND_JUDGE_RACE": "1",
-            // the execution layer: hands' executor on the bundled Python, in the same working copy `hands do` uses
-            "DESKMIND_HANDS_DIR": work.path,
-            "DESKMIND_HANDS_CMD": "PYTHONPATH=\"\(pythonPath)\" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 "
-                + "PYTHONPYCACHEPREFIX=\"\(DeskMindIPC.supportDir.appendingPathComponent("pycache").path)\" "
-                + "HANDS_PEEKABOO_TRANSPORT=mcp HANDS_PERMISSIONS_VERIFIED=\(CGPreflightScreenCaptureAccess() ? "1" : "0") "
-                + "HANDS_SPECTATOR_APPS=ai.deskmind.app,ai.deskmind.hands "
-                // the apps the request names may be brought forward for a step (briefly, only while the user is
-                // still; the executor adds any app it opened a window of); a person at their Mac is waited for
-                + "HANDS_FLASH_APPS=\"\(spec.apps.map(\.bundle).joined(separator: ","))\" HANDS_FLASH_WAIT_S=1800 "
-                + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
-                + "\"\(python)\" -m deskmind_hands.executor",
-        ]
-        for (k, v) in modelEnv() where env[k] == nil { env[k] = v }
-        p.environment = env
+        p.environment = environment(apps: spec.apps.map(\.bundle))
         let outPipe = Pipe(), inPipe = Pipe()
         p.standardOutput = outPipe
         p.standardInput = inPipe
@@ -299,29 +308,7 @@ enum HarnessRun {
                     let out = HarnessEvents.translate(e, state: &state, title: spec.goal ?? "", hasFolder: spec.folder != nil, pid: pid)
                     lock.unlock()
                     for ev in out {
-                        switch ev["event"] as? String {
-                        case "ask":
-                            LiveCard.status(.waitingForUser, words: ev["approval"] as? Bool == true
-                                            ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
-                                            : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
-                        case "waiting" where ev["ask_id"] == nil:   // the executor waits for the user to pause
-                            LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
-                        case "resumed" where ev["ask_id"] == nil, "ask_closed":
-                            LiveCard.status(.working)
-                        case "step":
-                            // The card shows the window the step acted in: the executor names it by bundle id and
-                            // CGWindow number (window:<bundle>#<number>), which is what the card captures by.
-                            if let object = ev["object"] as? String, let hash = object.lastIndex(of: "#"), let n = Int(object[object.index(after: hash)...]) {
-                                LiveCard.observed(windows: [["id": n, "active": true]], app: "")
-                                // the recording takes in each app the task works in, as it goes (no list before)
-                                let bundle = HarnessEvents.appOf(object)
-                                if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
-                            }
-                            let human = ev["human"] as? String ?? ""
-                            LiveCard.stepped(n: ev["n"] as? Int ?? 0, words: human, target: nil,
-                                             click: human.hasPrefix("click") || human.hasPrefix("double-click") || human.hasPrefix("select"))
-                        default: break
-                        }
+                        show(ev)
                         _ = emit(ev)
                         if ev["event"] as? String == "task_done" {
                             lock.lock(); over = true; linger.runID = ev["run_id"] as? String ?? ""; lock.unlock()
@@ -355,11 +342,49 @@ enum HarnessRun {
         let stopped = Runner.stopRequested
         Runner.stopRequested = false
         Runner.current = nil
-        LiveCard.finish(stopped ? .stopped : state.finished?["harness_status"] as? String == "succeeded" ? .done : .failed)
+        LiveCard.finish(stopped ? .stopped : ending(state.finished?["harness_status"] as? String))
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept
         // a lingering process has no exit status yet (reading it would raise); a run that wrote task_done needs none
         _ = emit(HarnessEvents.done(state: state, terminationStatus: lingers ? 0 : p.terminationStatus, stopped: stopped, stderrTail: tail))
+    }
+
+    /// What the live card and the recording make of one of the app's events (HarnessEvents.translate): the run waits
+    /// for the user, pauses while they use the Mac, or takes a step in a window (the card follows that window, the
+    /// recording takes in its app). For a run of this helper's own and for a task of a chat session (SessionHost) alike.
+    static func show(_ ev: [String: Any]) {
+        switch ev["event"] as? String {
+        case "ask":
+            LiveCard.status(.waitingForUser, words: ev["approval"] as? Bool == true
+                            ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
+                            : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
+        case "waiting" where ev["ask_id"] == nil:   // the executor waits for the user to pause
+            LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
+        case "resumed" where ev["ask_id"] == nil, "ask_closed":
+            LiveCard.status(.working)
+        case "step":
+            // The card shows the window the step acted in: the executor names it by bundle id and
+            // CGWindow number (window:<bundle>#<number>), which is what the card captures by.
+            if let object = ev["object"] as? String, let hash = object.lastIndex(of: "#"), let n = Int(object[object.index(after: hash)...]) {
+                LiveCard.observed(windows: [["id": n, "active": true]], app: "")
+                // the recording takes in each app the task works in, as it goes (no list before)
+                let bundle = HarnessEvents.appOf(object)
+                if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
+            }
+            let human = ev["human"] as? String ?? ""
+            LiveCard.stepped(n: ev["n"] as? Int ?? 0, words: human, target: nil,
+                             click: human.hasPrefix("click") || human.hasPrefix("double-click") || human.hasPrefix("select"))
+        default: break
+        }
+    }
+
+    /// How the live card says a task ended, from its task_done status.
+    static func ending(_ status: String?) -> LiveView.Status {
+        switch status {
+        case "succeeded": return .done
+        case "stopped", "cancelled": return .stopped
+        default: return .failed
+        }
     }
 
     /// Stop: the harness reads `{"stop":true}` on its stdin as the stop switch (its executor refuses every action from

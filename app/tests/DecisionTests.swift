@@ -218,6 +218,7 @@ enum DecisionTests {
         helperLocationTests()
         harnessEventsTests()
         cardButtonTests()
+        sessionWireTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -860,5 +861,80 @@ enum DecisionTests {
         check(stopped["exit"] as? Int == 0 && stopped["reason"] as? String == "", "stopped is not an error")
         check(HarnessEvents.translate(["kind": "something_new"], state: &st, title: title, hasFolder: true, pid: 42).isEmpty, "unknown kinds are ignored")
         check(HarnessEvents.humanize("fs.append_line：target=「todo.txt」") == "fs.append_line：target=「todo.txt」", "a described file step is kept")
+    }
+    /// Chat sessions on the helper's socket (Shared/SessionWire.swift): which control lines are passed on, which of a
+    /// session's lines a watching connection gets, when a session has nothing going on, and the machine lock's holders.
+    static func sessionWireTests() {
+        typealias W = SessionWire
+        func ok(_ line: Any?) -> Bool { W.validate(line).line != nil }
+        // a JSON object of a known type, as an object or as its text
+        check(ok(["type": "say", "text": "你好"]) && ok(#"{"type":"say","text":"你好"}"#), "say, object and text")
+        check(ok(["type": "cua", "text": "打开备忘录"]) && ok(["type": "steer", "text": "改成明天", "run_id": "run_1"]), "cua, steer")
+        check(ok(["type": "stop"]) && ok(["type": "stop", "run_id": "run_1"]) && ok(["type": "retry"]) && ok(["type": "end"]), "stop, retry, end")
+        check(ok(["type": "answer", "run_id": "run_1", "ask_id": "ask_1", "option": 0]), "answer by index")
+        check(ok(["type": "answer", "ask_id": "ask_1", "text": "周五"]) && ok(["type": "answer", "ask_id": "ask_1"]), "answer by words, or nothing")
+        check(ok(["type": "respond", "run_id": "run_1", "option": 1]), "respond")
+        check(ok(["type": "queue_edit", "id": "q1", "text": "x"]) && ok(["type": "queue_cancel", "id": "q1"]) && ok(["type": "queue_send_now", "id": "q1"]), "queue")
+        check(ok(["type": "attach", "run_id": "run_1", "after_seq": 3]) && ok(["type": "attach", "after_seq": 0]), "a replay, of a task or the session")
+        // refused, with a reason: what the session would drop without a word
+        for (bad, why) in [(nil, "nothing"), ("not json", "not JSON"), ("[1,2]", "an array"), ("\"say\"", "a string"), (#"{"text":"hi"}"#, "no type"),
+                           (#"{"type":5}"#, "a type that is no string"), (#"{"type":"dance"}"#, "an unknown type"),
+                           (#"{"type":"say"}"#, "say without text"), (#"{"type":"say","text":3}"#, "text not a string"),
+                           (#"{"type":"cua"}"#, "cua without text"), (#"{"type":"queue_edit","id":"q"}"#, "queue_edit without text"),
+                           (#"{"type":"queue_cancel"}"#, "queue_cancel without id"), (#"{"type":"answer","option":0}"#, "answer without ask_id"),
+                           (#"{"type":"answer","ask_id":"a","option":"0"}"#, "an option that is no index"),
+                           (#"{"type":"answer","ask_id":"a","option":1.5}"#, "a fractional option"),
+                           (#"{"type":"answer","ask_id":"a","option":-1}"#, "a negative option"),
+                           (#"{"type":"answer","ask_id":"a","option":true}"#, "a boolean option"),
+                           (#"{"type":"respond"}"#, "respond without option"), (#"{"type":"attach","after_seq":"3"}"#, "an after_seq that is no seq"),
+                           (#"{"type":"stop","run_id":7}"#, "run_id not a string")] as [(Any?, String)] {
+            let v = W.validate(bad)
+            check(v.line == nil && !(v.error ?? "").isEmpty, "refused: \(why) (\(String(describing: bad)))")
+        }
+        check(W.validate(String(repeating: "x", count: W.maxLineBytes + 1)).error == "the line is too long", "too long")
+        check(W.validate(["type": "say", "text": String(repeating: "长", count: W.maxLineBytes / 2)]).error == "the line is too long", "too long, as an object")
+
+        // the watch: stored lines once and in order; a live line that overtakes the replay waits for it
+        let msg = { (n: Int) -> [String: Any] in ["kind": "session.message", "seq": n, "session_id": "s"] }
+        var g = W.Gate(after: 2)
+        check(!g.admit(msg(1)) && !g.admit(msg(2)), "at or before the cursor: dropped")
+        check(!g.admit(msg(5)), "ahead of the replay: dropped (it comes again in the replay)")
+        check(g.admit(msg(3)) && g.admit(msg(4)) && g.admit(msg(5)) && g.after == 5, "the replay, in order")
+        check(!g.admit(msg(4)) && !g.admit(msg(5)), "a second replay: no duplicates")
+        check(g.admit(["kind": "session.delta", "msg_id": "m", "text": "x", "offset": 0]) && g.admit(["kind": "session.start", "last_seq": 5]), "lines without seq: always")
+        check(g.admit(["kind": "helper.session_exit", "session_id": "s"]), "the helper's own lines: always")
+        // a task's lines: once each, in whatever order (its replay may come after its live lines)
+        let ev = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_1", "seq": n] }
+        check(g.admit(ev(1)) && g.admit(ev(3)) && !g.admit(ev(3)) && g.admit(ev(2)) && !g.admit(ev(1)), "a run: once each")
+        check(g.runs["run_1"]?.upTo == 3 && g.runs["run_1"]?.above.isEmpty == true, "a run's seqs, compacted")
+        check(g.admit(["kind": "step", "run_id": "run_2", "seq": 1]), "another run counts apart")
+        var named = W.Gate(after: 0, runs: ["run_1": 4])
+        check(!named.admit(ev(4)) && named.admit(ev(5)), "a run's cursor")
+        check(named.admit(["kind": "plan", "run_id": "run_9"]), "a run line without seq: always")
+
+        // nothing going on: no task running or answerable, nothing queued
+        var a = W.Activity()
+        check(a.idle, "a new session is idle")
+        a.note(["kind": "session.task", "run_id": "run_1", "raw": "整理桌面"])
+        check(!a.idle && a.running == ["run_1"] && a.raw["run_1"] == "整理桌面", "a task running")
+        a.note(["kind": "session.task_end", "run_id": "run_1", "status": "succeeded", "undo": "open"])
+        check(!a.idle && a.running.isEmpty && a.open == ["run_1"], "its result card can still be answered")
+        a.note(["kind": "session.task_closed", "run_id": "run_1", "why": "linger"])
+        check(a.idle && a.raw.isEmpty, "closed: idle")
+        a.note(["kind": "session.queue", "items": [["id": "q1", "text": "然后呢"]]])
+        check(!a.idle, "words queued")
+        a.note(["kind": "session.queue", "items": [Any]()])
+        check(a.idle, "queue empty")
+        a.note(["kind": "session.message", "seq": 9, "role": "user", "text": "hi"])
+        check(a.idle, "a message changes nothing")
+
+        // the machine lock (harness sessions/computer.lock)
+        check(W.lockHolders(#"{"pid":12,"session_id":"s","run_id":"r","executor_pid":34}"#) == [12, 34], "pid and executor")
+        check(W.lockHolders(#"{"pid":12,"session_id":"","run_id":""}"#) == [12] && W.lockHolders("77") == [77], "pid only; an old bare pid")
+        check(W.lockHolders(nil) == nil && W.lockHolders("") == nil && W.lockHolders("{}") == nil && W.lockHolders("x") == nil, "no lock")
+        let lockText = #"{"pid":12,"session_id":"s","run_id":"r","executor_pid":34}"#
+        check(W.lockHeld(lockText, alive: { $0 == 34 }), "held while the executor lives (its session was killed)")
+        check(W.lockHeld(lockText, alive: { $0 == 12 }), "held while the session lives")
+        check(!W.lockHeld(lockText, alive: { _ in false }) && !W.lockHeld(nil, alive: { _ in true }), "stale, or none")
     }
 }
