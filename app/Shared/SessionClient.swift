@@ -4,6 +4,18 @@
 //
 // Helper ops (built in M1 S1, same names): session.open, session.send, session.end, sessions.watch, sessions.list. Their
 // request shapes are all in `SessionClient.Request`, so a change on the helper side is a change in one place.
+//
+// The ordering contract with the helper (sessions.watch, deskmind#105 SessionHost): per stream — a session's stored
+// events, and each run's executor events, each numbered by `seq` contiguously from 1 — the helper sends the replay after
+// the cursor the app named first, then the live lines, contiguous: no seq skipped, none out of order, within a stream
+// (streams interleave freely). The app holds to it without trusting it: the reducer applies only the next seq of each
+// stream, drops what it has, and holds back a line past a gap. A replay to a new watcher has been seen out of order
+// (a run's 3…8 before its 1, 2: deskmind#105 review), so a gap is given `gapGrace` to fill on the same stream; one that
+// stays past it ends the watch, and this client watches again from its contiguous cursors (`watch`), so the helper's
+// replay fills it.
+//
+// A session whose process ended (helper.session_exit) is opened again (session.open with its id) on the next send to
+// it or the next watch.
 
 import Foundation
 
@@ -11,13 +23,16 @@ import Foundation
 /// helper's socket (`HelperSessionTransport`); tests use a mock.
 protocol SessionTransport: AnyObject {
     func request(_ body: [String: Any]) -> [String: Any]?
-    /// Blocks until the helper closes the stream; false when the helper is not listening.
-    func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Void) -> Bool
+    /// Blocks until the helper closes the stream, or `onLine` or `onIdle` returns false (the app ends it); false when
+    /// the helper is not listening. `onIdle` is asked now and then while nothing comes (`SessionClient.idleTick`).
+    func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool
 }
 
 final class HelperSessionTransport: SessionTransport {
     func request(_ body: [String: Any]) -> [String: Any]? { DeskMindIPC.request(body) }
-    func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Void) -> Bool { DeskMindIPC.stream(body, onLine: onLine) }
+    func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
+        DeskMindIPC.streamWhile(body, idle: SessionClient.idleTick, onIdle: onIdle, onLine)
+    }
 }
 
 /// What the user does in a session, as the session's control lines (docs/protocol.md 「会话（第 1 版）」, 控制).
@@ -114,6 +129,10 @@ final class SessionClient {
     private let transport: SessionTransport
     private let lock = NSLock()
     private var states: [String: SessionState] = [:]
+    /// What each session was opened with, to open it again the same way after its process ended.
+    private var opened: [String: (config: String?, lang: String?)] = [:]
+    /// The clock the gap grace is measured by (tests set their own).
+    var now: () -> Date = Date.init
     /// Called after a line changed a session's state (on the thread that fed it).
     var onChange: ((String, SessionState) -> Void)?
 
@@ -144,11 +163,26 @@ final class SessionClient {
               let id = r["session_id"] as? String ?? sessionId else { return nil }
         lock.lock()
         if states[id] == nil { states[id] = SessionState(sessionId: id) }
+        states[id]?.exited = nil
+        opened[id] = (config, lang)
         lock.unlock()
         return id
     }
 
+    /// Opens a session again whose process ended (helper.session_exit), as it was opened; true when it is open (or
+    /// never ended).
+    @discardableResult
+    func reopenIfExited(_ sessionId: String) -> Bool {
+        lock.lock()
+        let exited = states[sessionId]?.exited != nil
+        let how = opened[sessionId]
+        lock.unlock()
+        guard exited else { return true }
+        return open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil
+    }
+
     func send(_ control: SessionControl, to sessionId: String) -> SendResult {
+        reopenIfExited(sessionId)
         let s = state(sessionId)
         if control.isTyping && !s.composerEnabled { return .refused("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
@@ -164,21 +198,68 @@ final class SessionClient {
         return r["ok"] as? Bool != false
     }
 
+    /// Watches again from the same cursors at most this many times in a row when a gap stays (the helper has not the
+    /// missing lines): then the stream is kept, the held lines wait, and the next reconnect asks again.
+    static let maxStalledRewatches = 3
+    /// How long a gap may stay open on the same stream before the client watches again: a replay may come out of order.
+    static let gapGrace: TimeInterval = 1.0
+    /// How often a quiet stream checks whether a gap is overdue.
+    static let idleTick: TimeInterval = 0.25
+
     /// Streams every session's lines until the helper closes the stream (call it off the main thread); false when the
-    /// helper is not listening. Reconnecting is calling it again: it says what the app already has.
+    /// helper is not listening. Reconnecting is calling it again: it says what the app already has, after opening again
+    /// the sessions whose process ended. A gap still open `gapGrace` after it appeared ends the stream, and it watches
+    /// again from the contiguous cursors (the ordering contract above).
     @discardableResult
     func watch() -> Bool {
-        let (after, runs) = cursor()
-        return transport.stream(Request.watch(after: after, runs: runs)) { [weak self] obj in self?.feed(obj) }
+        var last: (after: [String: Int], runs: [String: Int])? = nil
+        var stalled = 0
+        while true {
+            for id in sessionIds { reopenIfExited(id) }
+            let c = cursor()
+            stalled = (last.map { $0.after == c.after && $0.runs == c.runs } ?? false) ? stalled + 1 : 0
+            last = c
+            let rewatchOnGap = stalled < Self.maxStalledRewatches
+            var gapSince: Date? = nil
+            var rewatch = false
+            let overdue: () -> Bool = { [weak self] in
+                guard let self, rewatchOnGap else { return false }
+                guard self.hasGap else { gapSince = nil; return false }
+                let t = self.now()
+                if gapSince == nil { gapSince = t }
+                return t.timeIntervalSince(gapSince!) >= Self.gapGrace
+            }
+            let ok = transport.stream(Request.watch(after: c.after, runs: c.runs), onLine: { [weak self] obj in
+                guard let self else { return false }
+                self.feed(obj)
+                if overdue() { rewatch = true; return false }
+                return true
+            }, onIdle: {
+                if overdue() { rewatch = true; return false }
+                return true
+            })
+            if !ok { return false }
+            if !rewatch { return true }
+        }
     }
 
-    /// What the app has: per session the last stored seq, per run the last executor seq.
+    /// Some session holds lines back past a gap.
+    var hasGap: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return states.values.contains { $0.hasGap }
+    }
+
+    /// What the app has, per stream its contiguous cursor: per session the stored seq, per run the executor seq. A run
+    /// the app knows of with none of its lines applied yet (named by session.task, or only held back) is at 0, so the
+    /// helper replays it from its start.
     func cursor() -> (after: [String: Int], runs: [String: Int]) {
         lock.lock(); defer { lock.unlock() }
         var after: [String: Int] = [:], runs: [String: Int] = [:]
         for (id, s) in states {
             after[id] = s.lastSeq
             for t in s.tasks { runs[t.runId] = t.lastSeq }
+            for r in s.pendingRuns.keys where runs[r] == nil { runs[r] = 0 }
+            for l in s.pendingSession.values { if case .task(let e) = l.event, runs[e.runId] == nil { runs[e.runId] = 0 } }
         }
         return (after, runs)
     }
@@ -186,19 +267,24 @@ final class SessionClient {
     // MARK: feeding
 
     /// One line from the helper. Lines without a session_id are not a session's (the helper's own replies) and are left.
-    func feed(_ obj: [String: Any]) {
-        guard let line = ProtocolLine.parse(object: obj) else { return }
-        feed(line)
+    /// What became of it: `.held` when it came past a gap in its stream.
+    @discardableResult
+    func feed(_ obj: [String: Any]) -> SessionReducer.Applied {
+        guard let line = ProtocolLine.parse(object: obj) else { return .ignored }
+        return feed(line)
     }
 
-    func feed(_ line: ProtocolLine) {
-        guard let id = line.sessionId else { return }
+    @discardableResult
+    func feed(_ line: ProtocolLine) -> SessionReducer.Applied {
+        guard let id = line.sessionId else { return .ignored }
         lock.lock()
         let before = states[id] ?? SessionState(sessionId: id)
-        let after = SessionReducer.reduce(before, line)
+        var after = before
+        let applied = SessionReducer.apply(&after, line)
         states[id] = after
         lock.unlock()
         if after != before { onChange?(id, after) }
+        return applied
     }
 
     /// The user opened this session: its error dot clears.

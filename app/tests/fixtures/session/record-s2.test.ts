@@ -3,7 +3,8 @@
  * (app/tests/SessionTests.swift reads the *.jsonl next to this file). Same rig as harness test/session-tasks.test.ts: a
  * scripted session model, the executor in process on the simulated computer with a scripted runtime and scripted judges.
  *
- * To record again: copy this file into a harness checkout's test/ (recorded on harness 0ab0fd3), then
+ * To record again: copy this file into a harness checkout's test/ (recorded on harness 0ab0fd3; task-locked.jsonl on
+ * ed96440, which writes task_done.cause / session.task_end.cause), then
  *   OUT=<dir> npx vitest run test/record-s2.test.ts
  * and copy <dir>/*.jsonl here, replacing the temporary task folders (`"scope":"/var/folders/…"`) with "/tmp/scope".
  */

@@ -219,10 +219,12 @@ struct SessionTaskEnd: Codable, Equatable {
     @LStr var summary: String = ""
     @LStr var undo: String = "" // open | none
     var reason: String?
+    /// Why it ended, structured; nil for a plain failure or a normal end (and from a harness older than the field).
+    var cause: TaskCause?
     var answer: String?
     var changes: Changes?
     var steers: [String]?
-    enum CodingKeys: String, CodingKey { case runId = "run_id", status, summary, undo, reason, answer, changes, steers }
+    enum CodingKeys: String, CodingKey { case runId = "run_id", status, summary, undo, reason, cause, answer, changes, steers }
 }
 
 struct SessionTaskClosed: Codable, Equatable {
@@ -259,6 +261,12 @@ struct QueueItem: Codable, Equatable {
 
 struct SessionQueue: Codable, Equatable {
     @LList<QueueItem> var items: [QueueItem] = []
+}
+
+/// The helper's word that a session's process ended (SessionHost: {"kind":"helper.session_exit","session_id","code"}).
+/// Not stored, no seq: whatever the process was doing is over, and the session must be opened again to go on.
+struct HelperSessionExit: Codable, Equatable {
+    var code: Int?
 }
 
 // MARK: - Executor events (docs/protocol.md section 2)
@@ -418,22 +426,37 @@ struct Usage: Codable, Equatable {
     enum CodingKeys: String, CodingKey { case calls, tokensIn = "tokens_in", tokensOut = "tokens_out", costUsd = "cost_usd" }
 }
 
+/// Why a task ended, as task_done's and session.task_end's optional `cause` (harness ed96440, docs/protocol.md): the
+/// app reads these, never the reason's words. Absent: a plain failure or a normal end. A value this app does not know
+/// reads as absent (the harness may add some), never as a line that could not be read.
+enum TaskCause: String, Codable, Equatable {
+    case screenLocked = "screen_locked"
+    /// A stop came while an action was with the driver: whether that step took effect is not known.
+    case lastStepUnknown = "last_step_unknown"
+    case userStopped = "user_stopped"
+}
+
+extension KeyedDecodingContainer {
+    /// `cause`: an unknown value, or one of another type, is nil.
+    func decodeIfPresent(_ type: TaskCause.Type, forKey key: Key) throws -> TaskCause? {
+        ((try? decodeIfPresent(String.self, forKey: key)) ?? nil).flatMap(TaskCause.init(rawValue:))
+    }
+}
+
 struct TaskDone: Codable, Equatable {
     @LStr var status: String = ""
     @LStr var reason: String = ""
     @LStr var summary: String = ""
+    /// Why it ended, structured; nil for a plain failure or a normal end (and from a harness older than the field).
+    var cause: TaskCause?
     var resultCard: CardEvent?
     var answer: String?
     var changes: Changes?
     var usage: Usage?
     var usageIncomplete: Bool?
     enum CodingKeys: String, CodingKey {
-        case status, reason, summary, resultCard = "result_card", answer, changes, usage, usageIncomplete = "usage_incomplete"
+        case status, reason, summary, cause, resultCard = "result_card", answer, changes, usage, usageIncomplete = "usage_incomplete"
     }
-    /// The executor's reason when a stop came while an action was with the driver (docs/protocol.md section 3).
-    static let stepInProgressReason = "a step was in progress; its result is unknown"
-    /// The executor's reason when the task could not run because the screen is locked (executor.ts, service.ts).
-    static let lockedReason = "the screen is locked"
 }
 
 struct ResultResponse: Codable, Equatable {
@@ -460,6 +483,8 @@ enum ProtocolEvent: Equatable {
     case steer(SessionSteer)
     case retry(SessionRetry)
     case queue(SessionQueue)
+    // the helper, about a session
+    case sessionExit(HelperSessionExit)
     // the executor, forwarded
     case start(TaskStart)
     case preparing
@@ -497,6 +522,7 @@ enum ProtocolEvent: Equatable {
         case .steer: return "session.steer"
         case .retry: return "session.retry"
         case .queue: return "session.queue"
+        case .sessionExit: return "helper.session_exit"
         case .start: return "start"
         case .preparing: return "preparing"
         case .plan: return "plan"
@@ -521,8 +547,9 @@ enum ProtocolEvent: Equatable {
         }
     }
 
-    /// The session's own events (`session.*`); everything else is an executor's, forwarded.
-    var isSessionEvent: Bool { kind.hasPrefix("session.") }
+    /// The session's own events (`session.*`, and the helper's word that its process ended); everything else is an
+    /// executor's, forwarded.
+    var isSessionEvent: Bool { kind.hasPrefix("session.") || kind == "helper.session_exit" }
 }
 
 extension ProtocolEvent: Codable {
@@ -552,6 +579,7 @@ extension ProtocolEvent: Codable {
         case "session.steer": self = read(ProtocolEvent.steer)
         case "session.retry": self = read(ProtocolEvent.retry)
         case "session.queue": self = read(ProtocolEvent.queue)
+        case "helper.session_exit": self = read(ProtocolEvent.sessionExit)
         case "start": self = read(ProtocolEvent.start)
         case "preparing": self = .preparing
         case "plan": self = read(ProtocolEvent.plan)
@@ -590,6 +618,7 @@ extension ProtocolEvent: Codable {
         case .steer(let v): try v.encode(to: encoder)
         case .retry(let v): try v.encode(to: encoder)
         case .queue(let v): try v.encode(to: encoder)
+        case .sessionExit(let v): try v.encode(to: encoder)
         case .start(let v): try v.encode(to: encoder)
         case .preparing: break
         case .plan(let v): try v.encode(to: encoder)

@@ -2,9 +2,12 @@
 // from session.delta), each computer task by run_id (its steps, the open card, changes, result and undo), the queue,
 // errors, whether the composer takes typing, and the status dot (handoff §1.5).
 //
-// Pure: `SessionReducer.reduce(state, line)` → the next state, nothing else. Replaying lines it already has changes
-// nothing (stored session events are deduplicated by their `seq`, an executor's events by `seq` within their run, and the
-// unstored ones — deltas, the queue, refusals — are idempotent by construction), so a reconnect may simply replay.
+// Pure: `SessionReducer.reduce(state, line)` → the next state, nothing else. Lines with a `seq` belong to a stream — the
+// session's stored events, and each run's executor events — whose seqs are contiguous from 1. Per stream the reducer
+// keeps a contiguous cursor: it applies only seq == cursor + 1 (then whatever it held that now follows), drops seq <=
+// cursor as a replay, and holds seq > cursor + 1 back as a gap (SessionState.hasGap) until the missing lines come; the
+// client then watches again from the cursor (SessionClient.watch). The unstored lines — deltas, the queue, refusals —
+// have no seq and are idempotent by construction. So a reconnect may simply replay, and a late line is never lost.
 
 import Foundation
 
@@ -114,13 +117,33 @@ struct TaskState: Equatable {
     var doneAt: Double? = nil
     var end: SessionTaskEnd? = nil
     var endSeq: Int? = nil          // the session seq of session.task_end
-    var undo: UndoState = .none
+    /// What came of an undo (session.task_undo, or result_response with an undo); nil while none was done.
+    var undoDone: UndoState? = nil
     var resultResponse: ResultResponse? = nil
     var closed: String? = nil       // session.task_closed why
-    /// The last executor seq applied (replays at or below it are skipped).
+    /// The run's contiguous cursor: every executor seq up to it is applied (replays at or below it are skipped).
     var lastSeq = 0
 
-    var running: Bool { done == nil && end == nil }
+    /// Undo, from the facts whichever order they came in: an undo done or the result card answered otherwise; else
+    /// offered by session.task_end's `undo` ("open" / "none") when it came, by the result card's options before; an
+    /// offer whose executor closed (session.task_closed) is expired.
+    var undo: UndoState {
+        if let d = undoDone { return d }
+        let offered: Bool
+        if let u = end?.undo, u == "open" || u == "none" { offered = u == "open" }
+        else { offered = done?.resultCard?.options.contains { $0.kind == "undo" } == true }
+        guard offered else { return .none }
+        if resultResponse != nil { return .declined }
+        if let why = closed { return .expired(why) }
+        return .available
+    }
+    /// Why the task ended, structured: task_done's, else session.task_end's.
+    var cause: TaskCause? { done?.cause ?? end?.cause }
+
+    /// The session's process ended (helper.session_exit) before this task ended: it is not running any more.
+    var cutOff = false
+
+    var running: Bool { done == nil && end == nil && !cutOff }
     var openCard: CardState? { openCardId.flatMap { id in cards.first { $0.askId == id } } }
     /// The task's final status: task_done's, else session.task_end's (`interrupted` when no task_done was ever written).
     var status: String? { done?.status ?? end?.status }
@@ -137,8 +160,11 @@ enum TimelineItem: Equatable {
 struct SessionState: Equatable {
     var sessionId: String? = nil
     var resumed = false
-    /// The last stored session seq applied.
+    /// The session stream's contiguous cursor: every stored session seq up to it is applied.
     var lastSeq = 0
+    /// Lines held back past a gap, by seq: the session stream's, and each run's.
+    var pendingSession: [Int: ProtocolLine] = [:]
+    var pendingRuns: [String: [Int: ProtocolLine]] = [:]
     var messages: [ChatMessage] = []
     var tasks: [TaskState] = []
     var timeline: [TimelineItem] = []
@@ -152,6 +178,9 @@ struct SessionState: Equatable {
     /// The stored seq the user has seen up to (markSeen): problems after it make the error dot.
     var seenSeq = 0
     var lastEventAt: Double? = nil
+    /// The session's process ended (helper.session_exit, its exit code): nothing runs until it is opened again
+    /// (SessionClient re-opens it on the next send or watch); a new session.start clears it.
+    var exited: Int? = nil
 
     func message(_ id: String) -> ChatMessage? { messages.first { $0.id == id } }
     func task(_ runId: String) -> TaskState? { tasks.first { $0.runId == runId } }
@@ -165,6 +194,8 @@ struct SessionState: Equatable {
     var runningTask: TaskState? { tasks.last { $0.running } }
     var streamingMessage: ChatMessage? { messages.last { $0.streaming } }
     var status: SessionStatus { SessionStatus.derive(self) }
+    /// A stream has lines held back past a gap: watch again from the cursors to get the missing ones.
+    var hasGap: Bool { !pendingSession.isEmpty || !pendingRuns.isEmpty }
 
     /// The user opened this session: the error dot clears.
     mutating func markSeen() { seenSeq = lastSeq }
@@ -183,26 +214,57 @@ enum SessionReducer {
         lines.reduce(state, reduce)
     }
 
-    static func apply(_ s: inout SessionState, _ line: ProtocolLine) {
+    /// What became of a line.
+    enum Applied: Equatable {
+        case applied                // in its place (with any held lines that now follow)
+        case duplicate              // its stream already has it
+        case held                   // past a gap: held back until the missing lines come
+        case ignored                // an executor event with no run
+    }
+
+    @discardableResult
+    static func apply(_ s: inout SessionState, _ line: ProtocolLine) -> Applied {
         let ev = line.event
         if ev.isSessionEvent {
-            if let seq = line.seq {
-                if seq <= s.lastSeq { return }          // a replay of a stored event
-                s.lastSeq = seq
-            }
-            if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
-            session(&s, ev, line)
+            guard let seq = line.seq else { applySession(&s, line); return .applied }
+            if seq <= s.lastSeq { return .duplicate }               // a replay of a stored event
+            if seq > s.lastSeq + 1 { s.pendingSession[seq] = line; return .held }
+            applySession(&s, line)
+            while let next = s.pendingSession.removeValue(forKey: s.lastSeq + 1) { applySession(&s, next) }
+            s.pendingSession = s.pendingSession.filter { $0.key > s.lastSeq }
+            return .applied
         } else {
             if case .unknown(let k, _) = ev { s.unknownKinds.insert(k) }
-            guard let runId = line.runId else { return }   // an executor event belongs to a run
-            let i = taskIndex(&s, runId)
-            if let seq = line.seq {
-                if seq <= s.tasks[i].lastSeq { return }
-                s.tasks[i].lastSeq = seq
+            guard let runId = line.runId else { return .ignored }   // an executor event belongs to a run
+            guard let seq = line.seq else { applyExecutor(&s, runId, line); return .applied }
+            let cursor = s.task(runId)?.lastSeq ?? 0
+            if seq <= cursor { return .duplicate }
+            if seq > cursor + 1 { s.pendingRuns[runId, default: [:]][seq] = line; return .held }
+            applyExecutor(&s, runId, line)
+            while let i = s.tasks.firstIndex(where: { $0.runId == runId }),
+                  let next = s.pendingRuns[runId]?.removeValue(forKey: s.tasks[i].lastSeq + 1) {
+                applyExecutor(&s, runId, next)
             }
-            if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
-            executor(&s.tasks[i], ev, line.t)
+            let now = s.task(runId)?.lastSeq ?? 0
+            let rest = (s.pendingRuns[runId] ?? [:]).filter { $0.key > now }
+            s.pendingRuns[runId] = rest.isEmpty ? nil : rest
+            return .applied
         }
+    }
+
+    /// One session line in its place.
+    private static func applySession(_ s: inout SessionState, _ line: ProtocolLine) {
+        if let seq = line.seq { s.lastSeq = seq }
+        if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
+        session(&s, line.event, line)
+    }
+
+    /// One executor line of `runId` in its place.
+    private static func applyExecutor(_ s: inout SessionState, _ runId: String, _ line: ProtocolLine) {
+        let i = taskIndex(&s, runId)
+        if let seq = line.seq { s.tasks[i].lastSeq = seq }
+        if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
+        executor(&s.tasks[i], line.event, line.t)
     }
 
     // MARK: session events
@@ -212,6 +274,19 @@ enum SessionReducer {
         case .sessionStart(let e):
             if let id = line.sessionId { s.sessionId = id }
             s.resumed = e.resumed
+            s.exited = nil
+        case .sessionExit(let e):
+            s.exited = e.code ?? -1
+            // a reply in progress stops where it is; a running task is cut off, its card can no longer be answered
+            dropEmptyStreaming(&s)
+            for i in s.messages.indices where s.messages[i].streaming { s.messages[i].streaming = false }
+            for i in s.tasks.indices where s.tasks[i].running {
+                if let id = s.tasks[i].openCardId { setOutcome(&s.tasks[i], id, .void("session_exit")) }
+                closeOpenParts(&s.tasks[i], cause: nil)
+                s.tasks[i].cutOff = true
+            }
+            // a result card still answerable: its executor went with the process, and undo with it
+            for i in s.tasks.indices where s.tasks[i].closed == nil && s.tasks[i].done != nil { s.tasks[i].closed = "session_exit" }
         case .message(let m):
             if let i = s.messages.firstIndex(where: { $0.id == m.msgId }) {
                 s.messages[i].text = m.text
@@ -255,19 +330,13 @@ enum SessionReducer {
             s.tasks[i].endSeq = line.seq
             if let c = e.changes, s.tasks[i].done == nil { s.tasks[i].changes = c }
             if s.tasks[i].answer == nil { s.tasks[i].answer = e.answer }
-            if s.tasks[i].done == nil { closeOpenParts(&s.tasks[i], reason: e.reason ?? "") }
-            switch (e.undo, s.tasks[i].undo) {
-            case ("open", .none): s.tasks[i].undo = .available
-            case ("none", .available): s.tasks[i].undo = .none
-            default: break
-            }
+            if s.tasks[i].done == nil { closeOpenParts(&s.tasks[i], cause: e.cause) }
         case .taskClosed(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].closed = e.why
-            if s.tasks[i].undo == .available { s.tasks[i].undo = .expired(e.why) }
         case .taskUndo(let e):
             let i = taskIndex(&s, e.runId)
-            s.tasks[i].undo = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
+            s.tasks[i].undoDone = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
         case .steer(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].steersSent.append(e.text)
@@ -377,6 +446,8 @@ enum SessionReducer {
             task.steps[i].shotPending = false
         case .ask(let a):
             task.preparing = false
+            // a card already answered or voided, asked again (a replay without seq): it stays closed
+            if let c = task.cards.first(where: { $0.askId == a.askId }), c.outcome != .open { break }
             if let old = task.openCardId, old != a.askId { setOutcome(&task, old, .void("replaced")) }
             if !task.cards.contains(where: { $0.askId == a.askId }) {
                 task.cards.append(CardState(askId: a.askId, card: a.card, askedAt: t))
@@ -415,13 +486,11 @@ enum SessionReducer {
                 task.changes = merged
             }
             if let a = d.answer { task.answer = a }
-            closeOpenParts(&task, reason: d.reason)
-            if task.undo == .none, d.resultCard?.options.contains(where: { $0.kind == "undo" }) == true { task.undo = .available }
+            closeOpenParts(&task, cause: d.cause)
         case .resultResponse(let r):
             task.resultResponse = r
-            if let undone = r.undone { task.undo = .done(undone: undone, total: r.total ?? undone, refused: r.refused) }
-            else if r.picked == "undo" { task.undo = .done(undone: 0, total: r.total ?? 0, refused: r.refused) }
-            else if task.undo == .available { task.undo = .declined }
+            if let undone = r.undone { task.undoDone = .done(undone: undone, total: r.total ?? undone, refused: r.refused) }
+            else if r.picked == "undo" { task.undoDone = .done(undone: 0, total: r.total ?? 0, refused: r.refused) }
         case .modelCall, .judge, .unknown:
             break
         default:
@@ -436,7 +505,7 @@ enum SessionReducer {
 
     /// The task is over (task_done, or session.task_end without one): an open card can no longer be answered, the user is
     /// no longer waited for, steps with no result are closed — the one with the driver when the stop came is "unknown".
-    private static func closeOpenParts(_ task: inout TaskState, reason: String) {
+    private static func closeOpenParts(_ task: inout TaskState, cause: TaskCause?) {
         if let id = task.openCardId { setOutcome(&task, id, .void("task_done")) }
         task.userActive = false
         task.lookOnly = false
@@ -444,7 +513,7 @@ enum SessionReducer {
         task.preparing = false
         let running = task.steps.indices.filter { task.steps[$0].status == .running }
         for i in running {
-            task.steps[i].status = (reason == TaskDone.stepInProgressReason && i == running.last) ? .unknown : .notFinished
+            task.steps[i].status = (cause == .lastStepUnknown && i == running.last) ? .unknown : .notFinished
         }
     }
 }
@@ -481,7 +550,7 @@ enum SessionStatus: Equatable {
 
     /// The first that holds, in the handoff's order — with one reading of it: a task that is running (the newest) goes
     /// before an earlier task's unseen error, since a session runs one computer task at a time and the running one is
-    /// what the user needs to see.
+    /// what the user needs to see. (Owner confirmed this order, 10-22.)
     static func derive(_ s: SessionState) -> SessionStatus {
         // 1. waiting for you: a card is open
         if let open = s.openCard { return .waitingForYou(cardKind: open.card.card.kind) }
@@ -522,7 +591,7 @@ enum SessionStatus: Equatable {
         var newest: (seq: Int, status: SessionStatus)? = nil
         if let t = s.tasks.last, let st = t.status, problemStatuses.contains(st) {
             let seq = t.endSeq ?? Int.max                   // task_done came, task_end not yet: nothing seen of it
-            let locked = st == "environment" && (t.done?.reason ?? t.end?.reason) == TaskDone.lockedReason
+            let locked = t.cause == .screenLocked             // from the structured cause only, never the reason's words
             newest = (seq, locked ? .locked : .error(st))
         }
         if let e = s.errors.last, e.seq > (newest?.seq ?? 0) { newest = (e.seq, .error(e.error.code)) }

@@ -60,6 +60,13 @@ extension DeskMindIPC {
     /// Returns false when the helper is not listening.
     @discardableResult
     static func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Void) -> Bool {
+        streamWhile(body) { onLine($0); return true }
+    }
+
+    /// The same, until the helper closes the connection or `onLine` returns false (the caller is done with it). With
+    /// `idle`, `onIdle` is asked each time nothing came for that long; false ends the stream too.
+    static func streamWhile(_ body: [String: Any], idle: TimeInterval? = nil, onIdle: (() -> Bool)? = nil,
+                            _ onLine: @escaping ([String: Any]) -> Bool) -> Bool {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }
@@ -79,14 +86,19 @@ extension DeskMindIPC {
         _ = data.withUnsafeBytes { write(fd, $0.baseAddress, data.count) }
         var pending = Data()
         var buf = [UInt8](repeating: 0, count: 8192)
-        while true {
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let wait: Int32 = idle.map { Int32(max(1, $0 * 1000)) } ?? -1
+        reading: while true {
+            let r = poll(&pfd, 1, wait)
+            if r < 0 { if errno == EINTR { continue }; break }
+            if r == 0 { if let onIdle, !onIdle() { break reading }; continue }
             let n = read(fd, &buf, buf.count)
             if n <= 0 { break }
             pending.append(buf, count: n)
             while let nl = pending.firstIndex(of: 0x0A) {
                 let line = pending[pending.startIndex..<nl]
                 pending.removeSubrange(pending.startIndex...nl)
-                if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] { onLine(obj) }
+                if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any], !onLine(obj) { break reading }
             }
         }
         return true

@@ -129,8 +129,11 @@ struct CardModel: Equatable {
 
     // MARK: answers
 
-    /// What a click on `button` sends.
-    func answer(_ button: Button) -> CardAnswer { answer(option: button.index)! }
+    /// What a click on `button` sends; nil when the button is not one of this card's (another card's, or stale).
+    func answer(_ button: Button) -> CardAnswer? {
+        guard buttons.contains(button) else { return nil }
+        return answer(option: button.index)
+    }
 
     /// What picking the card's option `index` sends; nil when the card has no such option.
     func answer(option index: Int) -> CardAnswer? {
@@ -158,8 +161,9 @@ struct CardModel: Equatable {
     var choiceCount: Int { buttons.filter { $0.role != .delegate && $0.role != .cancel }.count }
 
     /// Whether the card can be answered in the float, by its structure alone: a plan, a long list (more picks or more
-    /// outgoing lines than the float holds) and a card that can only be answered in words go to the main window. The
-    /// free-text field itself is never in the float (`freeTextInFloat`); every float card also links to the main window.
+    /// outgoing lines than the float holds) and any card that takes the user's words (free_text) go to the main window,
+    /// the whole card with its options (owner 10-22): the float shows a summary and 「去主窗口回答」 for those. Every
+    /// float card also links to the main window.
     /// The view must still check that the text and the buttons fit unclipped in the float's width (handoff §3.3), which
     /// is a matter of layout, not of the card.
     var answerableInFloat: Bool {
@@ -167,7 +171,7 @@ struct CardModel: Equatable {
         if buttons.isEmpty { return false }
         if choiceCount > Self.floatMaxChoices { return false }
         if (consent?.outgoing.count ?? 0) > Self.floatMaxOutgoing { return false }
-        if allowsFreeText && choiceCount == 0 { return false }   // nothing to pick but the way out: it wants words
+        if allowsFreeText { return false }                       // it takes words: the whole card in the main window (owner 10-22)
         return true
     }
 
