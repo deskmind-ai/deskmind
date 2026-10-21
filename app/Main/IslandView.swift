@@ -163,9 +163,9 @@ struct IslandView: View {
     }
 }
 
-/// DeskMind's own window, out of the way while a run works in other apps' windows, and back when the user asks for
-/// it (the island's "Show Details", the Dock icon) or the run needs them (a question). Off with View ▸ "Keep DeskMind
-/// Open While a Task Runs".
+/// DeskMind's own window, and the way back to it when the user asks (the island's "Show Details", the Dock icon).
+/// A run no longer moves it on its own (M1 S0: it was sent aside at Start and after an answer, and brought forward for
+/// a question and at the end, taking the user's focus); `stepAside` has no caller since.
 @MainActor
 enum MainWindow {
     static let keepOpenKey = "run.keepWindowOpen"
@@ -213,8 +213,7 @@ enum MainWindow {
 ///
 /// Not while a run is running: hands gives the front back to the app that had it after every step it takes in
 /// another app, with `open -b`, and to a running app that is a reopen -- DeskMind's own, since Start was pressed
-/// here. Each step brought the window back over the app being worked in. The island is the way in meanwhile;
-/// questions bring the window back themselves.
+/// here. Each step brought the window back over the app being worked in. The island is the way in meanwhile.
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quitting mid-recording: the helper is told to stop and finish the movie (it does, on its own, after the app is
     /// gone). Left recording, it refused the next run's recording.

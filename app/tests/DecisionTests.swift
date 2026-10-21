@@ -217,6 +217,7 @@ enum DecisionTests {
         recordingCaptureTests()
         helperLocationTests()
         harnessEventsTests()
+        cardButtonTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -661,6 +662,81 @@ enum DecisionTests {
     }
 
 
+    /// deskmind#102: a card's buttons, for every card kind the harness sends and one it does not (yet): each button
+    /// sends what it says -- an option button its own option, Approve the approve option, Deny the way out, words
+    /// words -- through the request the main app sends and the helper reads (HarnessEvents.CardButton).
+    static func cardButtonTests() {
+        let opt = { (kind: String, text: String) -> [String: Any] in ["kind": kind, "text": text] }
+        // the harness's cards (src/executor/service.ts, src/orchestrator/index.ts), and an unknown kind
+        let cards: [(kind: String, options: [[String: Any]], approval: Bool)] = [
+            ("plan", [opt("approve", "可以，就这样做"), opt("cancel", "先别做了")], true),
+            ("action", [opt("approve", "可以"), opt("skip_step", "这一步不要，其余照做"), opt("cancel", "先别做了")], true),
+            ("result_check", [opt("approve", "对"), opt("undo", "不对，撤回刚才做的")], true),
+            ("missing", [opt("value", "a.txt"), opt("value", "b.txt"), opt("delegate", "由你决定"), opt("cancel", "先别做了")], false),
+            ("ambiguity", [opt("reading", "改 a.txt"), opt("reading", "改 b.txt"), opt("delegate", "由你决定"), opt("cancel", "先别做了")], false),
+            ("cannot", [opt("cancel", "好的，先这样")], false),
+            // the issue's case: a question card that carries an approve-kind option (a reconciliation card shown as a question)
+            ("reconcile", [opt("approve", "继续"), opt("cancel", "先停下")], false),
+            ("some_new_kind", [opt("other", "甲"), opt("approve", "乙"), opt("value", "丙")], false),
+        ]
+        for c in cards {
+            var st = HarnessEvents.State()
+            let card: [String: Any] = ["kind": c.kind, "text": "?", "free_text": true, "blocking": true, "options": c.options]
+            let ask = HarnessEvents.translate(["kind": "ask", "ask_id": "ask_\(c.kind)", "card": card], state: &st, title: "t", hasFolder: false, pid: 1)
+            let approval = ask.first?["approval"] as? Bool ?? true
+            check(approval == c.approval, "\(c.kind): approval \(approval)")
+            let texts = ask.first?["options"] as? [String] ?? []
+            let buttons = HarnessEvents.buttons(approval: approval, options: texts)
+            // what reaches the harness for a button: main app request → helper's reading → the control line
+            let line = { (b: HarnessEvents.CardButton) in HarnessEvents.answerLine(HarnessEvents.CardButton(request: b.request), state: st) as NSDictionary? }
+            let id = "ask_\(c.kind)"
+            if c.approval {
+                check(buttons == [.deny, .approve], "\(c.kind): an approval shows Deny and Approve")
+                let approveAt = c.options.firstIndex { $0["kind"] as? String == "approve" }!
+                check(line(.approve) == ["ask_id": id, "option": approveAt] as NSDictionary, "\(c.kind): Approve → the approve option")
+                let way = c.options.firstIndex { $0["kind"] as? String == "cancel" } ?? c.options.firstIndex { $0["kind"] as? String != "approve" }!
+                let deny = line(.deny)
+                check(deny == ["ask_id": id, "option": way] as NSDictionary, "\(c.kind): Deny → \(way), got \(String(describing: deny))")
+                check(deny?["option"] as? Int != approveAt, "\(c.kind): Deny never sends the approve option")
+            } else {
+                check(buttons.count == c.options.count, "\(c.kind): one button per option")
+                for (i, b) in buttons.enumerated() {
+                    check(b == .option(i, c.options[i]["text"] as! String), "\(c.kind): button \(i) is option \(i)")
+                    check(line(b) == ["ask_id": id, "option": i] as NSDictionary, "\(c.kind): button \(i) sends option \(i), got \(String(describing: line(b)))")
+                }
+                check(line(.words("都不是，用 c.txt")) == ["ask_id": id, "text": "都不是，用 c.txt"] as NSDictionary, "\(c.kind): words are words")
+                check(line(.words(c.options[0]["text"] as! String)) == ["ask_id": id, "option": 0] as NSDictionary, "\(c.kind): typed option text → that option")
+            }
+        }
+        // the requests themselves: an option button names its option and is no approval; only Approve approves
+        check(HarnessEvents.CardButton.option(1, "先停下").request["option"] as? Int == 1
+              && HarnessEvents.CardButton.option(1, "先停下").request["approve"] as? Bool == false, "option request")
+        check(HarnessEvents.CardButton.words("x").request["approve"] as? Bool == false, "words are not an approval")
+        check(HarnessEvents.CardButton.approve.request["approve"] as? Bool == true, "Approve approves")
+        // an older app's requests (no `option`): an option's text with approve true is that option, not approval
+        var st = HarnessEvents.State()
+        _ = HarnessEvents.translate(["kind": "ask", "ask_id": "ask_old", "card": ["kind": "reconcile", "text": "?", "options": [opt("approve", "继续"), opt("cancel", "先停下")]]],
+                                    state: &st, title: "t", hasFolder: false, pid: 1)
+        check((HarnessEvents.answerLine(HarnessEvents.CardButton(request: ["reply": "先停下", "approve": true]), state: st) as NSDictionary?)
+              == ["ask_id": "ask_old", "option": 1] as NSDictionary, "old request: the clicked text, not approve")
+        check(HarnessEvents.CardButton(request: ["reply": "", "approve": true]) == .approve, "old Approve")
+        check(HarnessEvents.CardButton(request: ["reply": "", "approve": false]) == .deny, "old Deny")
+        // an option outside the card, or nothing asked: nothing sent
+        check(HarnessEvents.answerLine(.option(5, "?"), state: st) == nil, "an option the card does not have: nothing sent")
+        check(HarnessEvents.answerLine(.option(0, "继续"), state: HarnessEvents.State()) == nil, "no open card: nothing sent")
+        // an option with no text is not shown: the n-th shown option maps to its place in the card
+        var st2 = HarnessEvents.State()
+        let gap = HarnessEvents.translate(["kind": "ask", "ask_id": "ask_gap", "card": ["kind": "missing", "text": "?", "options": [opt("value", "a"), ["kind": "value"], opt("value", "c")]]],
+                                          state: &st2, title: "t", hasFolder: false, pid: 1)
+        check(gap.first?["options"] as? [String] == ["a", "c"], "options shown: those with a text")
+        check((HarnessEvents.answerLine(.option(1, "c"), state: st2) as NSDictionary?) == ["ask_id": "ask_gap", "option": 2] as NSDictionary, "shown 1 → card 2")
+        // a card with nothing but approve: Deny answers with nothing (the harness reads no), never the approve option
+        var st3 = HarnessEvents.State()
+        _ = HarnessEvents.translate(["kind": "ask", "ask_id": "ask_only", "card": ["kind": "action", "text": "?", "options": [opt("approve", "可以")]]],
+                                    state: &st3, title: "t", hasFolder: false, pid: 1)
+        check((HarnessEvents.answerLine(.deny, state: st3) as NSDictionary?) == ["ask_id": "ask_only"] as NSDictionary, "deny with no way out: no option")
+    }
+
     /// The harness engine's events, as the main app's (Shared/HarnessEvents.swift).
     static func harnessEventsTests() {
         var st = HarnessEvents.State()
@@ -686,16 +762,16 @@ enum DecisionTests {
         // the executor pausing for the user (no ask_id) is the app's own waiting / resumed
         check(HarnessEvents.translate(["kind": "waiting"], state: &st, title: title, hasFolder: true, pid: 42).first?["event"] as? String == "waiting", "executor pause → waiting")
         check(HarnessEvents.translate(["kind": "resumed"], state: &st, title: title, hasFolder: true, pid: 42).first?["event"] as? String == "resumed", "executor resume → resumed")
-        // the user's answer: approve → the approve option; a typed option text → its index; other words → text; nothing → cancel
-        check((HarnessEvents.answerLine(reply: "", approve: true, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 0] as NSDictionary, "approve → option 0")
-        check((HarnessEvents.answerLine(reply: "先别做了", approve: false, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 1] as NSDictionary, "option by text")
-        check((HarnessEvents.answerLine(reply: "换个名字", approve: false, state: st) as NSDictionary?) == ["ask_id": "ask_1", "text": "换个名字"] as NSDictionary, "free words")
-        check((HarnessEvents.answerLine(reply: "", approve: false, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 1] as NSDictionary, "nothing → cancel")
+        // the user's answer: Approve → the approve option; Deny → cancel; a typed option text → its index; other words → text
+        check((HarnessEvents.answerLine(.approve, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 0] as NSDictionary, "approve → option 0")
+        check((HarnessEvents.answerLine(.words("先别做了"), state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 1] as NSDictionary, "option by text")
+        check((HarnessEvents.answerLine(.words("换个名字"), state: st) as NSDictionary?) == ["ask_id": "ask_1", "text": "换个名字"] as NSDictionary, "free words")
+        check((HarnessEvents.answerLine(.deny, state: st) as NSDictionary?) == ["ask_id": "ask_1", "option": 1] as NSDictionary, "deny → cancel")
         let question: [String: Any] = ["kind": "missing", "text": "要改名的是哪个文件？", "free_text": true, "blocking": true,
                                        "options": [["kind": "value", "text": "a.txt"], ["kind": "delegate", "text": "由你决定"], ["kind": "cancel", "text": "先别做了"]]]
         let q = HarnessEvents.translate(["kind": "ask", "ask_id": "ask_2", "card": question], state: &st, title: title, hasFolder: true, pid: 42)
         check(q.first?["approval"] as? Bool == false, "a question is not an approval")
-        check(HarnessEvents.answerLine(reply: "", approve: true, state: st) == nil, "approve on a question with no approve option: nothing sent")
+        check(HarnessEvents.answerLine(.approve, state: st) == nil, "approve on a question with no approve option: nothing sent")
         // a refusal: its own event, and a failed step
         let refused = HarnessEvents.translate(["kind": "refused", "what": "x", "why": "stale", "by": "executor"], state: &st, title: title, hasFolder: true, pid: 42)
         check(refused.map { $0["event"] as? String } == ["refused", "step"] && refused[1]["ok"] as? Bool == false, "refused: \(refused)")

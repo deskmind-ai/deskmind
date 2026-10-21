@@ -12,6 +12,64 @@ enum HarnessRun {
     nonisolated(unsafe) static var input: FileHandle?
     private static let lock = NSLock()
 
+    /// How long a finished run's process stays up for the result card's answer (`--linger`): undo needs the executor's
+    /// receipts, which live in that process. The run itself is over at task_done (the helper is free for the next one).
+    static let lingerSeconds = 600
+
+    /// A run past its task_done whose process is still up: its stdin, for the result card's `respond`; and that
+    /// answer's `result_response`, once the harness writes it.
+    final class Lingering {
+        let process: Process
+        let input: FileHandle
+        var runID = ""
+        var response: [String: Any]?
+        private var closed = false
+        init(process: Process, input: FileHandle) { self.process = process; self.input = input }
+        /// stdin closed (EOF): the harness stops waiting for a respond and exits. Once; called under `lock`.
+        func close() { if !closed { closed = true; try? input.close() } }
+    }
+    nonisolated(unsafe) static var lingering: Lingering?
+
+    /// Let the lingering run go: its stdin is closed, so it exits (it would by itself after `lingerSeconds`). Before a
+    /// new run starts, so two harness processes never wait on the user at once.
+    static func closeLingering() {
+        lock.lock(); defer { lock.unlock() }
+        lingering?.close(); lingering = nil
+    }
+
+    /// The user's answer to the finished run's result card (op `respond`): `{"type":"respond","option":n}` on the
+    /// lingering process's stdin. `wait` seconds (at most 15): wait for its `result_response` and return it.
+    static func respond(runID: String, option: Int, wait: Double = 0) -> [String: Any] {
+        lock.lock()
+        guard let l = lingering, l.process.isRunning else {
+            lock.unlock(); return ["ok": false, "error": "no finished run is waiting for an answer"]
+        }
+        if !runID.isEmpty && runID != l.runID {
+            lock.unlock(); return ["ok": false, "error": "the run waiting for an answer is \(l.runID), not \(runID)"]
+        }
+        guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
+            lock.unlock(); return ["ok": false, "error": "bad option"]
+        }
+        line.append(0x0A)
+        do { try l.input.write(contentsOf: line) } catch {
+            lock.unlock(); return ["ok": false, "error": "write: \(error.localizedDescription)"]
+        }
+        lock.unlock()
+        let until = Date().addingTimeInterval(min(max(wait, 0), 15))
+        while Date() < until {
+            lock.lock(); let r = l.response; lock.unlock()
+            if let r { return ["ok": true, "run_id": l.runID, "result": r] }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return ["ok": true, "run_id": l.runID]
+    }
+
+    /// Whether `p` is a finished run's lingering process (the stop path leaves it alone).
+    static func isLingering(_ p: Process) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return lingering?.process === p
+    }
+
     static var node: URL { Runner.runtime.appendingPathComponent("node/bin/node") }
     static var bundle: URL { Runner.runtime.appendingPathComponent("harness/harness.mjs") }
     static var available: Bool { FileManager.default.isExecutableFile(atPath: node.path) && FileManager.default.fileExists(atPath: bundle.path) }
@@ -53,10 +111,11 @@ enum HarnessRun {
         return (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] ?? ["ok": false, "error": "no answer from the harness (exit \(p.terminationStatus))"]
     }
 
-    /// The user's answer to the open card: an option's index, or their words. False when nothing is asked.
-    static func answer(reply: String, approve: Bool) -> Bool {
+    /// The user's answer to the open card: the clicked option's index, the approve option, the way out, or their
+    /// words. False when nothing is asked.
+    static func answer(_ button: HarnessEvents.CardButton) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let h = input, let line = HarnessEvents.answerLine(reply: reply, approve: approve, state: state),
+        guard let h = input, let line = HarnessEvents.answerLine(button, state: state),
               var data = try? JSONSerialization.data(withJSONObject: line) else { return false }
         data.append(0x0A)
         do { try h.write(contentsOf: data) } catch { return false }
@@ -68,7 +127,10 @@ enum HarnessRun {
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
         Runner.busy = true; Runner.cancelled = false
+        // Busy until task_done (this function returns then), not until the process exits: it lingers for the result
+        // card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
+        closeLingering()
         guard available else {
             _ = emit(["event": "error", "code": "harness_missing", "error": "this build has no harness runtime"]); return
         }
@@ -98,7 +160,7 @@ enum HarnessRun {
 
         let p = Process()
         p.executableURL = node
-        p.arguments = [bundle.path, "app-run", "--runs", runs.path]
+        p.arguments = [bundle.path, "app-run", "--runs", runs.path, "--linger", String(lingerSeconds)]
         p.currentDirectoryURL = work
         var env: [String: String] = [
             "HOME": NSHomeDirectory(),
@@ -142,6 +204,10 @@ enum HarnessRun {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
         Runner.current = p; Runner.stopRequested = false
+        let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
+        // set by the reader once task_done is passed on: from then on its lines go to `linger` (result_response), not
+        // to this run's connection, and the state is the next run's
+        var over = false
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
 
         // The request: one JSON line, then stdin stays open for answers.
@@ -172,6 +238,10 @@ enum HarnessRun {
                     pending.removeSubrange(pending.startIndex...nl)
                     guard let e = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else { continue }
                     lock.lock()
+                    if over {
+                        if e["kind"] as? String == "result_response" { linger.response = e }
+                        lock.unlock(); continue
+                    }
                     let out = HarnessEvents.translate(e, state: &state, title: spec.goal ?? "", hasFolder: spec.folder != nil, pid: pid)
                     lock.unlock()
                     for ev in out {
@@ -199,31 +269,56 @@ enum HarnessRun {
                         default: break
                         }
                         _ = emit(ev)
+                        if ev["event"] as? String == "task_done" {
+                            lock.lock(); over = true; linger.runID = ev["run_id"] as? String ?? ""; lock.unlock()
+                        }
                     }
                 }
             }
         }
-        while p.isRunning { Thread.sleep(forTimeInterval: 0.25) }
-        _ = reader.wait(timeout: .now() + 3)
-        try? outLog?.close()
-        lock.lock(); input = nil; lock.unlock()
-        try? inPipe.fileHandleForWriting.close()
+        // The run is over at task_done, or when the process ends without one (then its last lines are read first).
+        let isOver = { lock.lock(); defer { lock.unlock() }; return over }
+        while p.isRunning && !isOver() { Thread.sleep(forTimeInterval: 0.25) }
+        if !isOver() { _ = reader.wait(timeout: .now() + 3) }
+        lock.lock()
+        over = true; input = nil
+        let lingers = p.isRunning
+        if lingers { lingering = linger } else { linger.close() }
+        lock.unlock()
+        if lingers {
+            // The process waits up to `lingerSeconds` for the result card's answer (op respond), then exits; or sooner,
+            // when the next run closes its stdin. Its log is closed once it is gone.
+            DispatchQueue.global().async {
+                p.waitUntilExit()
+                _ = reader.wait(timeout: .now() + 3)
+                try? outLog?.close()
+                lock.lock(); linger.close(); if lingering === linger { lingering = nil }; lock.unlock()
+            }
+        } else {
+            _ = reader.wait(timeout: .now() + 3)    // the last lines into the log (at once when they are read already)
+            try? outLog?.close()
+        }
         let stopped = Runner.stopRequested
         Runner.stopRequested = false
         Runner.current = nil
         LiveCard.finish(stopped ? .stopped : state.finished?["harness_status"] as? String == "succeeded" ? .done : .failed)
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept
-        _ = emit(HarnessEvents.done(state: state, terminationStatus: p.terminationStatus, stopped: stopped, stderrTail: tail))
+        // a lingering process has no exit status yet (reading it would raise); a run that wrote task_done needs none
+        _ = emit(HarnessEvents.done(state: state, terminationStatus: lingers ? 0 : p.terminationStatus, stopped: stopped, stderrTail: tail))
     }
 
     /// Stop: the harness reads `{"stop":true}` on its stdin as the stop switch (its executor refuses every action from
     /// then on and the run ends as stopped); a process that does not end on that is interrupted, then terminated.
+    /// The interrupt starts the harness's own stop: up to 0.8 s for the run to end, then up to 10 s more for an action
+    /// still out at the driver (docs/protocol.md, signals). A second signal cuts that wait short, so the terminate
+    /// comes 12 s after the interrupt (15 s after the stop line; it was 8 s, inside the wait). A run that has written
+    /// task_done and lingers for the result card's answer is left alone.
     static func stop(_ p: Process) {
         lock.lock()
         if let h = input, var line = try? JSONSerialization.data(withJSONObject: ["stop": true]) { line.append(0x0A); try? h.write(contentsOf: line) }
         lock.unlock()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3) { if p.isRunning { p.interrupt() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 8) { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) { if p.isRunning && !isLingering(p) { p.interrupt() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15) { if p.isRunning && !isLingering(p) { p.terminate() } }
     }
 }

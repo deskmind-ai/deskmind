@@ -216,8 +216,14 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return HarnessRun.modelCheck(config: req["config"] as? String ?? "ds-flash", extra: req["env"] as? [String: String] ?? [:])
     case "answer":
         // The user's reply to the question the running task asked (a HANDS_ASK line), or their approval.
-        let ok = Runner.answer(reply: req["reply"] as? String ?? "", approve: req["approve"] as? Bool ?? false)
+        // {reply, approve, option?}: `option` is the clicked option button's place among the options shown.
+        let ok = Runner.answer(req)
         return ["ok": ok] as [String: Any]
+    case "respond":
+        // The answer to a finished harness run's result card (e.g. undo), while its process lingers:
+        // {run_id, option, wait?} → {ok, run_id, result?} (result: the harness's result_response, if it came in `wait` s).
+        guard let option = req["option"] as? Int else { return ["ok": false, "error": "respond needs an option"] }
+        return HarnessRun.respond(runID: req["run_id"] as? String ?? "", option: option, wait: (req["wait"] as? NSNumber)?.doubleValue ?? 0)
     case "stop":
         let running = Runner.current != nil
         Runner.requestStop()
@@ -277,6 +283,8 @@ func serve() {
                     _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
                     return
                 }
+                // a finished harness run still waiting for its result card's answer is let go first (stdin closed)
+                HarnessRun.closeLingering()
                 let spec = Runner.Spec(req)
                 let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
                 run(spec) { event in

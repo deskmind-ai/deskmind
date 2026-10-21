@@ -20,7 +20,8 @@ enum HarnessEvents {
         var finished: [String: Any]? = nil   // the task_done we sent, for `done`
     }
 
-    /// Card kinds that ask for permission rather than information: shown as an approval in the app.
+    /// Card kinds that ask for permission rather than information: shown as an approval in the app (the hand icon,
+    /// Deny / Approve). Styling only: what a button sends is decided by the button (`CardButton`), never by the kind.
     static let approvalKinds: Set<String> = ["plan", "action", "result_check"]
 
     /// One harness event → the app's events, updating `state`. `title` is the instruction (the task's title),
@@ -107,15 +108,67 @@ enum HarnessEvents {
                 "answer": state.answer, "stderr_tail": stopped ? "" : environment ? (detail.isEmpty ? stderrTail : detail) : ranToAnEnd ? "" : stderrTail]
     }
 
-    /// The user's answer, as the harness reads it: an option's index, or their own words.
-    static func answerLine(reply: String, approve: Bool, state: State) -> [String: Any]? {
+    /// What the user did on a card. Each button says itself what it sends: an option button its own option (by its
+    /// place among the options shown), Approve the card's approve option, Deny its way out, the field their words.
+    /// The card's kind only picks which buttons are shown (deskmind#102: every option button used to be sent as
+    /// "approve", so on a question card with an approve-kind option any click was sent as approval).
+    enum CardButton: Hashable {
+        case option(Int, String)   // the n-th option shown, and its text (the old helper and `hands do` read the text)
+        case words(String)
+        case approve               // an approval card's Approve
+        case deny                  // an approval card's Deny
+
+        /// The main app's `answer` request to the helper for this button.
+        var request: [String: Any] {
+            switch self {
+            case .option(let i, let text): return ["op": "answer", "reply": text, "approve": false, "option": i]
+            case .words(let text): return ["op": "answer", "reply": text, "approve": false]
+            case .approve: return ["op": "answer", "reply": "", "approve": true]
+            case .deny: return ["op": "answer", "reply": "", "approve": false]
+            }
+        }
+
+        /// The helper's reading of an `answer` request: `option` when the app named one (this app); without it, an
+        /// older app's reply and verdict — words are words (an option's text is that option), never an approval.
+        init(request req: [String: Any]) {
+            let reply = (req["reply"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if let i = req["option"] as? Int { self = .option(i, reply) }
+            else if !reply.isEmpty { self = .words(reply) }
+            else { self = req["approve"] as? Bool == true ? .approve : .deny }
+        }
+    }
+
+    /// The buttons a card shows: Deny and Approve on an approval card (`approvalKinds`), otherwise one per option and
+    /// the field for words. A kind the app does not know is not an approval: its options are shown and sent as clicked.
+    static func buttons(approval: Bool, options: [String]) -> [CardButton] {
+        approval ? [.deny, .approve] : options.enumerated().map { CardButton.option($0.offset, $0.element) }
+    }
+
+    /// The user's answer, as the harness reads it: an option's index, or their own words. Nil when nothing is asked,
+    /// or when the button has nothing on this card to send (Approve on a card with no approve option).
+    static func answerLine(_ b: CardButton, state: State) -> [String: Any]? {
         guard let id = state.askID else { return nil }
-        let texts = state.askOptions.compactMap { $0["text"] as? String }
-        if approve, let i = state.askOptions.firstIndex(where: { ($0["kind"] as? String) == "approve" }) { return ["ask_id": id, "option": i] }
-        let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let i = texts.firstIndex(of: trimmed) { return ["ask_id": id, "option": i] }
-        if trimmed.isEmpty { return approve ? nil : ["ask_id": id, "option": state.askOptions.firstIndex(where: { ($0["kind"] as? String) == "cancel" }) ?? 0] }
-        return ["ask_id": id, "text": trimmed]
+        // the options shown are the ones with a text, in the card's order (translate): the n-th shown → its index
+        let shown = state.askOptions.indices.filter { state.askOptions[$0]["text"] is String }
+        let kind = { (i: Int) in state.askOptions[i]["kind"] as? String }
+        switch b {
+        case .option(let n, _):
+            guard shown.indices.contains(n) else { return nil }
+            return ["ask_id": id, "option": shown[n]]
+        case .approve:
+            guard let i = state.askOptions.indices.first(where: { kind($0) == "approve" }) else { return nil }
+            return ["ask_id": id, "option": i]
+        case .deny:
+            // the way out the card offers: cancel, else the first option that is not approve (a result check's undo);
+            // a card with nothing but approve is answered with nothing, which the harness reads as no
+            if let i = state.askOptions.indices.first(where: { kind($0) == "cancel" })
+                ?? state.askOptions.indices.first(where: { kind($0) != "approve" }) { return ["ask_id": id, "option": i] }
+            return ["ask_id": id]
+        case .words(let w):
+            let trimmed = w.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let i = shown.first(where: { state.askOptions[$0]["text"] as? String == trimmed }) { return ["ask_id": id, "option": i] }
+            return trimmed.isEmpty ? nil : ["ask_id": id, "text": trimmed]
+        }
     }
 
     /// hands' run states the app knows, for the harness's statuses.
