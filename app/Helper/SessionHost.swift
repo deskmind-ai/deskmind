@@ -362,14 +362,15 @@ enum SessionHost {
         // a session still starting is attached too: its header is on its stdin already (spawn)
         for (id, s) in sessions where !s.closing {
             open.append(id)
-            let g = w.gate(id)
-            w.gates[id] = g
+            var g = w.gate(id)
             attach.append((s, ["type": "attach", "after_seq": g.after]))
             // its tasks the app names, after their cursors; a task still open (running, or its result card answerable)
-            // from its start when not named: its card may be waiting
+            // from its start when not named: its card may be waiting. Their live lines wait for their replay (Gate).
             for run in Set(runs.keys.filter { hasRun(id, $0) }).union(s.activity.open) {
+                g.expect(run)
                 attach.append((s, ["type": "attach", "run_id": run, "after_seq": runs[run] ?? 0]))
             }
+            w.gates[id] = g
         }
         if let line = lineData(["kind": "helper.watching", "open": open.sorted()]) { w.send(line) }
         lock.unlock()
@@ -447,8 +448,12 @@ enum SessionHost {
         }
         // what the session has going on, and what drives the card: from new lines only, never from a replay
         var drive = false
+        var ended: String?
         if kind.hasPrefix("session.") {
-            if s.live.note(e) { s.activity.note(e) }
+            if s.live.note(e) {
+                s.activity.note(e)
+                if kind == "session.task_end" || kind == "session.task_closed" { ended = e["run_id"] as? String }
+            }
         } else if e["run_id"] is String {
             drive = s.live.show(e)
         }
@@ -464,6 +469,15 @@ enum SessionHost {
         if hold { scheduleExpiry() }
         lock.unlock()
         if drive, let run = e["run_id"] as? String { self.drive(s, run: run, e, raw: raw, liveView: liveView) }
+        // a task that ended without its executor's task_done (the executor died, the app went away): its card ends
+        // here, or it would stay up and keep every later task of the session from showing one
+        if let run = ended {
+            s.cards[run] = nil
+            if s.cardRun == run {
+                setup.ui.finish(run, kind == "session.task_end" ? HarnessRun.ending(e["status"] as? String) : .failed)
+                s.cardRun = nil
+            }
+        }
     }
 
     /// A watching connection's task lines held for a replay that has not come (SessionWire.Gate.expire): let go, in
@@ -542,7 +556,11 @@ enum SessionHost {
 /// aside and taken over, and put back if it turns out to be a newer one. Beside it `computer.last` names the last task
 /// that started on this Mac (`begin`): undo expires when any new task starts (owner 10-21).
 enum ComputerLock {
-    enum Outcome { case taken(() -> Void), busy(String), failed(String) }
+    enum Outcome {
+        case taken(() -> Void), busy(String), failed(String)
+        /// begin: the lock was free, but computer.last could not name the task; the lock is let go, nothing starts.
+        case unrecorded(String)
+    }
 
     static var file: URL { SessionHost.setup.dir.appendingPathComponent("sessions/computer.lock") }
     static var lastFile: URL { SessionHost.setup.dir.appendingPathComponent("sessions/computer.last") }
@@ -565,7 +583,7 @@ enum ComputerLock {
     static func begin(runID: String) -> Outcome {
         let o = take(runID: runID)
         guard case .taken(let release) = o else { return o }
-        do { try setLast(runID) } catch { release(); return .failed("computer.last: \(error.localizedDescription)") }
+        do { try setLast(runID) } catch { release(); return .unrecorded("computer.last: \(error.localizedDescription)") }
         return o
     }
 

@@ -68,10 +68,13 @@ enum SessionWire {
     ///   (`attach{after_seq}`, sent when the connection starts watching) is dropped here and arrives again, in its
     ///   place, in the replay — the session writes every stored event to disk before it sends it, and replays what is
     ///   on disk.
-    /// - A task's events (by run and seq): each run's lines in seq order from the cursor on. A live line that comes
-    ///   before the replay of what is below it (`attach{run_id}` is answered from the run's events.jsonl, which the
-    ///   executor writes before it sends) is held until the replay has filled the gap, then passed on behind it. A gap
-    ///   that is not filled within `holdLimit` (a replay that never came) lets the held lines go, in order (`expire`).
+    /// - A task's events (by run and seq): each run's lines in seq order from the cursor on. For a run whose replay
+    ///   this connection asked for (`expect`: its cursor, or a task still open when it started watching), a live line
+    ///   that comes before the replay of what is below it (`attach{run_id}` is answered from the run's events.jsonl,
+    ///   which the executor writes before it sends) is held until the replay has filled the gap, then passed on behind
+    ///   it; a gap not filled within `holdLimit` (a replay that never came) lets the held lines go, in order
+    ///   (`expire`). Any other run (one that started while it watched: from seq 1, in order; or a replay another
+    ///   connection or the app asked for) is passed on at once, each line once.
     /// - Lines with no seq: always, at once.
     struct Gate {
         /// The last stored event passed on.
@@ -81,12 +84,19 @@ enum SessionWire {
         /// Per run: live lines held for the replay below them (seq → line), and since when.
         private(set) var held: [String: [Int: [String: Any]]] = [:]
         private(set) var heldSince: [String: Date] = [:]
+        /// The runs whose replay this connection asked for.
+        private(set) var expected: Set<String> = []
+        /// Per run not expected: seqs above `runs[run]` passed on out of order.
+        private var above: [String: Set<Int>] = [:]
         static let holdLimit: TimeInterval = 10
 
         init(after: Int, runs: [String: Int] = [:]) {
             self.after = max(0, after)
-            for (r, n) in runs { self.runs[r] = max(0, n) }
+            for (r, n) in runs { self.runs[r] = max(0, n); expected.insert(r) }
         }
+
+        /// This connection asked for `run`'s replay: its lines are held in order until the replay has come.
+        mutating func expect(_ run: String) { expected.insert(run) }
 
         /// Some run's lines wait for their replay.
         var holding: Bool { !held.isEmpty }
@@ -104,14 +114,20 @@ enum SessionWire {
             }
             guard let run = e["run_id"] as? String, let seq else { return [e] }
             let upTo = runs[run] ?? 0
-            if seq <= upTo || held[run]?[seq] != nil { return [] }
+            if seq <= upTo || held[run]?[seq] != nil || above[run]?.contains(seq) == true { return [] }
             if seq > upTo + 1 {
+                guard expected.contains(run) else { above[run, default: []].insert(seq); return [e] }
                 held[run, default: [:]][seq] = e
                 if heldSince[run] == nil { heldSince[run] = now }
                 return []
             }
             var out = [e], n = seq
-            while let next = held[run]?.removeValue(forKey: n + 1) { out.append(next); n += 1 }
+            while true {
+                if let next = held[run]?.removeValue(forKey: n + 1) { out.append(next); n += 1 }
+                else if above[run]?.remove(n + 1) != nil { n += 1 }
+                else { break }
+            }
+            if above[run]?.isEmpty == true { above[run] = nil }
             runs[run] = n
             if held[run]?.isEmpty ?? true { held[run] = nil; heldSince[run] = nil } else if n > seq { heldSince[run] = now }
             return out

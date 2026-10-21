@@ -299,6 +299,10 @@ func serve() {
                 case .busy(let held):
                     NSLog("DeskMind Hands: run refused: the computer lock is held (\(held.prefix(200)))")
                     refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
+                case .unrecorded(let why):
+                    // a task that cannot expire the others' undo does not start (as in the harness)
+                    NSLog("DeskMind Hands: run refused: \(why)")
+                    refuse(["event": "error", "error": "this task could not be recorded on this Mac (\(why))"]); return
                 case .failed(let why):
                     // the lock cannot be made (the folder): not a reason to refuse the user's run, but a live holder is
                     NSLog("DeskMind Hands: computer lock: \(why)")

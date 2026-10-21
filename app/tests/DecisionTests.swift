@@ -909,6 +909,7 @@ enum DecisionTests {
         let ev = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_1", "seq": n] }
         var order: [Int] = []
         let t0 = Date()
+        g.expect("run_1")   // the connection asked for its replay (a task open when it started watching)
         for n in [3, 4, 5, 6, 7, 8] { order += seqs(g.admit(ev(n), now: t0)) }   // live, before the replay came
         check(order.isEmpty && g.holding, "live lines ahead of the replay are held")
         for n in 1...8 { order += seqs(g.admit(ev(n), now: t0)) }               // the replay: 1..8
@@ -919,11 +920,19 @@ enum DecisionTests {
         check(named.admit(ev(4)).isEmpty && seqs(named.admit(ev(5))) == [5], "a run's cursor")
         check(named.admit(["kind": "plan", "run_id": "run_9"]).count == 1, "a run line without seq: always")
         // a gap the replay never fills: the held lines go, in order, after the hold limit (not before)
-        var stuck = W.Gate(after: 0)
+        var stuck = W.Gate(after: 0, runs: ["run_1": 0])
         _ = stuck.admit(ev(4), now: t0); _ = stuck.admit(ev(3), now: t0)
         check(stuck.expire(now: t0.addingTimeInterval(W.Gate.holdLimit - 1)).isEmpty && stuck.holding, "held within the limit")
         check(seqs(stuck.expire(now: t0.addingTimeInterval(W.Gate.holdLimit))) == [3, 4] && !stuck.holding, "then let go, in order")
         check(stuck.admit(ev(2)).isEmpty && seqs(stuck.admit(ev(5))) == [5], "and the cursor moved past them")
+        // a run this connection asked no replay of (another's replay, or the app's own): at once, each line once
+        var other = W.Gate(after: 0)
+        other.expect("run_1")
+        let ev2 = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_2", "seq": n] }
+        check(seqs(other.admit(ev2(5))) == [5] && seqs(other.admit(ev2(6))) == [6] && other.admit(ev2(5)).isEmpty && !other.holding,
+              "another connection's replay of a run not asked for: passed on at once, once")
+        check(seqs(other.admit(ev2(1))) == [1] && other.admit(ev2(6)).isEmpty && seqs(other.admit(ev2(2))) == [2], "its other lines still once each")
+        check(other.admit(ev(3)).isEmpty && other.holding, "a run asked for: held")
 
         // what drives the live card: only new lines of tasks live in this process, each once — never a replay
         var live = W.Live(lastSeq: 6)

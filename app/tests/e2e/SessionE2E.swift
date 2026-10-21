@@ -61,7 +61,7 @@ enum SessionE2E {
             switch ComputerLock.begin(runID: req["run_id"] as? String ?? "run_e2e") {
             case .taken(let release): release(); return ["ok": true]
             case .busy(let held): return ["ok": false, "code": "computer_busy", "held": held]
-            case .failed(let why): return ["ok": false, "error": why]
+            case .failed(let why), .unrecorded(let why): return ["ok": false, "error": why]
             }
         default: return nil
         }
@@ -222,7 +222,14 @@ enum SessionE2E {
         if case .taken(let rel) = ComputerLock.begin(runID: "run_next") { rel() }
         check(until { !l3.process.isRunning } && HarnessRun.lingering == nil && !HarnessRun.undoWaiting, "a new task began: the lingering run is let go by itself")
         let late = HarnessRun.respond(runID: "run_three", option: 1)
-        check(late["ok"] as? Bool == false, "its undo is gone: \(late)")
+        check(late["ok"] as? Bool == false && late["code"] as? String == "undo_expired", "its undo is gone, and said so: \(late)")
+        // computer.last cannot be written (here: a folder in its place): the task does not start, and the lock is let go
+        try? fm.removeItem(at: ComputerLock.lastFile)
+        try? fm.createDirectory(at: ComputerLock.lastFile.appendingPathComponent("x"), withIntermediateDirectories: true)
+        if case .unrecorded = ComputerLock.begin(runID: "run_unrecorded") { check(true, "computer.last not written: unrecorded") }
+        else { check(false, "computer.last not written: unrecorded") }
+        check(!fm.fileExists(atPath: ComputerLock.file.path), "and the lock let go: nothing starts under it")
+        try? fm.removeItem(at: ComputerLock.lastFile)
         print(failures == 0 ? "linger: all passed" : "linger: \(failures) failed")
         exit(Int32(min(failures, 100)))
     }

@@ -319,6 +319,32 @@ def run(env, helper):
     check(lastf.get("run_id") == "run_oprun1" and lastf.get("session_id") == "" and isinstance(lastf.get("t"), (int, float)),
           f"op run names itself in computer.last, as the harness writes it: {lastf}")
 
+    # a task whose executor dies before its task_done: its card ends with the session's task_end, and the next task of
+    # the session still gets one
+    send(sid, {"type": "cua", "text": "给笔记换个颜色"})
+    ask = until(lambda: [a for a in w2.kinds("ask", sid) if a.get("run_id") not in (run_id, run1)], 30)
+    runk = ask[0]["run_id"] if ask else ""
+    ex = subprocess.run(["pgrep", "-f", f"executor --linger .* --runs {DIR}/sessions/{sid}/runs"], capture_output=True, text=True).stdout.split()
+    for pid in ex:
+        os.kill(int(pid), signal.SIGKILL)
+    ended = until(lambda: [e for e in w2.kinds("session.task_end", sid) if e.get("run_id") == runk], 15)
+    check(bool(ex) and ended is not None and ended[0].get("status") == "failed", f"the executor killed: the session ends the task ({ex}, {ended and ended[0].get('status')})")
+    whats = [d["what"] for d in ui(runk)]
+    check(whats[:1] == ["start"] and whats[-1:] == ["finish"], f"its card ends without a task_done: {whats}")
+    until(lambda: [e for e in w2.kinds("session.task_closed", sid) if e.get("run_id") == runk], 10)
+    until(lambda: [m for m in w2.kinds("session.message", sid) if m.get("role") == "assistant" and m.get("seq", 0) > ended[0].get("seq", 0)] if ended else True, 20)
+    send(sid, {"type": "cua", "text": "给笔记换个颜色"})
+    ask = until(lambda: [a for a in w2.kinds("ask", sid) if a.get("run_id") not in (run_id, run1, runk)], 30)
+    runn = ask[0]["run_id"] if ask else ""
+    check(bool(runn) and [d["what"] for d in ui(runn)][:1] == ["start"], "the next task of the session gets its card")
+    if ask:
+        send(sid, {"type": "answer", "run_id": runn, "ask_id": ask[0]["ask_id"], "option": 0})
+    until(lambda: [e for e in w2.kinds("session.task_closed", sid) if e.get("run_id") == runn], 30)
+    until(lambda: len([m for m in w2.kinds("session.message", sid) if m.get("text") == "任务结束了。"]) >= 4, 20)
+    time.sleep(0.5)
+    last = session_lines(sid)[-1]["seq"]
+    until(lambda: w2.last_seq(sid) == last and w3.last_seq(sid) == last, 10)
+
     r = request({"op": "sessions.list"})
     item = [s for s in r.get("sessions", []) if s.get("session_id") == sid]
     check(r.get("ok") is True and bool(item) and item[0].get("open") is True and item[0].get("title") == "你好", f"sessions.list: {item}")

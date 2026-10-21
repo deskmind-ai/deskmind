@@ -34,6 +34,9 @@ enum HarnessRun {
         func releaseUndo() { undoRelease?(); undoRelease = nil }
     }
     nonisolated(unsafe) static var lingering: Lingering?
+    /// The last finished run whose undo expired (another task started on this Mac): a late answer to its card is told
+    /// so (`undo_expired`), not just that nothing waits. Under `lock`.
+    nonisolated(unsafe) static var expiredRun: String?
 
     /// Let the lingering run go, before a new run starts, so two harness processes never drive the desktop at once
     /// (an undo still going in the old one): its stdin is closed, so it exits (it would by itself after
@@ -42,6 +45,7 @@ enum HarnessRun {
         lock.lock()
         let l = lingering
         l?.close(); lingering = nil
+        if let l { expiredRun = l.runID }   // a new run: its undo has expired
         lock.unlock()
         guard let p = l?.process else { return }
         if waitForExit(p, seconds: 3) { return }
@@ -89,7 +93,9 @@ enum HarnessRun {
     static func respond(runID: String, option: Int, wait: Double = 0) -> [String: Any] {
         lock.lock()
         guard let l = lingering, !l.closed, l.process.isRunning else {
-            lock.unlock(); return ["ok": false, "error": "no finished run is waiting for an answer"]
+            let expired = expiredRun.map { runID.isEmpty || runID == $0 } ?? false
+            lock.unlock()
+            return expired ? undoExpired : ["ok": false, "error": "no finished run is waiting for an answer"]
         }
         if !runID.isEmpty && runID != l.runID {
             lock.unlock(); return ["ok": false, "error": "the run waiting for an answer is \(l.runID), not \(runID)"]
@@ -98,10 +104,10 @@ enum HarnessRun {
             lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
         }
         if expired(l) {
-            l.close(); lingering = nil
+            l.close(); lingering = nil; expiredRun = l.runID
             lock.unlock()
             NSLog("DeskMind Hands: respond refused: another computer task started on this Mac since \(l.runID)")
-            return ["ok": false, "code": "undo_expired", "error": "another computer task started on this Mac; this task's undo has expired"]
+            return undoExpired
         }
         guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
             lock.unlock(); return ["ok": false, "error": "bad option"]
@@ -113,7 +119,7 @@ enum HarnessRun {
             lock.unlock()
             NSLog("DeskMind Hands: respond refused: the computer lock is held (\(held.prefix(200)))")
             return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
-        case .failed(let why):
+        case .failed(let why), .unrecorded(let why):
             // the lock cannot be made (the folder): as for a run, only a live holder is a reason to refuse
             NSLog("DeskMind Hands: computer lock: \(why)")
             if ComputerLock.holder() != nil {
@@ -135,6 +141,9 @@ enum HarnessRun {
         return ["ok": true, "run_id": l.runID]
     }
 
+    private static let undoExpired: [String: Any] = ["ok": false, "code": "undo_expired",
+                                                      "error": "another computer task started on this Mac; this task's undo has expired"]
+
     /// Whether another computer task has started on this Mac since `l`'s run (computer.last names another run). Its
     /// own run wrote its name there when it began (ComputerLock.begin); none at all (a folder that could not be
     /// written) expires nothing.
@@ -155,7 +164,7 @@ enum HarnessRun {
             Thread.sleep(forTimeInterval: lastEvery)
             lock.lock()
             let expire = !l.closed && !l.responded && expired(l)
-            if expire { l.close(); if lingering === l { lingering = nil } }
+            if expire { l.close(); expiredRun = l.runID; if lingering === l { lingering = nil } }
             lock.unlock()
             if expire { NSLog("DeskMind Hands: another computer task started on this Mac; \(l.runID)'s undo has expired") }
         }
@@ -393,7 +402,7 @@ enum HarnessRun {
         lock.lock()
         over = true; input = nil
         let lingers = p.isRunning
-        if lingers { lingering = linger } else { linger.close() }
+        if lingers { lingering = linger; expiredRun = nil } else { linger.close() }
         lock.unlock()
         if lingers {
             // The process waits up to `lingerSeconds` for the result card's answer (op respond), then exits; or sooner,
