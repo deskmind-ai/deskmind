@@ -287,21 +287,26 @@ enum HarnessProcess {
     /// End `p` (a started Process) and its members: `close` first (the run's stdin closed: it exits by itself), wait
     /// up to `grace` s; then SIGTERM to every member still up, wait up to `term` s; then SIGKILL, wait up to `kill` s.
     /// True once `p` and every member are gone; false when one is still up after all that (no next run may start).
-    /// `signal`: kill(2) (a test hands in one that does nothing).
-    static func end(_ p: Process, close: () -> Void, grace: Double, term: Double, kill: Double,
+    /// `members`: the ones found so far, kept by the caller for a next attempt after a false (the harness gone by then,
+    /// a survivor in a group of its own is found by nothing else). `signal`: kill(2) (a test hands in one that does nothing).
+    static func end(_ p: Process, members: inout Set<Member>, close: () -> Void, grace: Double, term: Double, kill: Double,
                     signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
         let root = p.processIdentifier
-        var members = Set<Member>()
         // Who is up: the group and the descendants of every member known (one whose parent is gone is still known).
+        // A member gone, or its pid taken by another process, is dropped first: never descended from, never signalled.
+        // The group is read unless another process holds the harness's pid: the kernel gives no process a pid that
+        // is a live group's id, so a group by that id is then another's (the run's own was empty and its id reused).
         func refresh() {
-            var found = list(UInt32(PROC_PGRP_ONLY), root).compactMap(member)
+            members = members.filter { member($0.pid) == $0 }
+            var found = p.isRunning || member(root) == nil || members.contains(where: { getpgid($0.pid) == root })
+                ? list(UInt32(PROC_PGRP_ONLY), root).compactMap(member) : []
             var queue = (p.isRunning ? [root] : []) + members.map(\.pid) + found.map(\.pid)
             var seen = Set<pid_t>()
             while let pid = queue.popLast() {
                 guard seen.insert(pid).inserted else { continue }
                 for c in list(UInt32(PROC_PPID_ONLY), pid) { if let m = member(c) { found.append(m); queue.append(c) } }
             }
-            members = Set((members.union(found)).filter { member($0.pid) == $0 && $0.pid != root })
+            members = members.union(found).filter { $0.pid != root }
         }
         func gone() -> Bool { refresh(); return !p.isRunning && members.isEmpty }
         func wait(_ seconds: Double) -> Bool {

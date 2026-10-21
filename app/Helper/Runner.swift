@@ -265,10 +265,16 @@ enum Runner {
     /// still lingering for its result card's answer is let go first: it writes into its log and run folder until it
     /// ends, and its undo would have nothing left to read. nil (nothing removed) while a run is going, or when the
     /// lingering one would not end. `support` and `closeLingering`: a test's folder and stand-in.
+    /// Held while 「清除全部」 removes files; a run passes it (busy already set) before it makes any.
+    static let clearing = NSLock()
+
     static func clearRunData(support: URL = DeskMindIPC.supportDir,
                              closeLingering: () -> Bool = { HarnessRun.closeLingering() }) -> Int? {
         if busy { return nil }
-        guard closeLingering(), !busy else { return nil }
+        guard closeLingering() else { return nil }
+        // a run starting now (busy set) waits on `clearing` before it makes a file; one already started is left alone
+        clearing.lock(); defer { clearing.unlock() }
+        if busy { return nil }
         let fm = FileManager.default
         // the same places under `support`
         let at = { (u: URL) in support.appendingPathComponent(String(u.path.dropFirst(DeskMindIPC.supportDir.path.count))) }
@@ -493,6 +499,7 @@ enum Runner {
         // a finished harness run still waiting for its result card's answer is let go first (after busy is set, so
         // no second run starts meanwhile); a run is not started beside one that would not end
         guard HarnessRun.closeLingering() else { _ = emit(HarnessRun.stillRunning); return }
+        clearing.lock(); clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         let set = spec.set
         if spec.real && spec.planner == BrainServer.url && BrainServer.status()["state"] as? String != "ready" {
             BrainServer.ensure()

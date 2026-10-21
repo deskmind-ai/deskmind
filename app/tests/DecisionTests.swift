@@ -892,31 +892,32 @@ enum DecisionTests {
             return 0
         }
         var sent: [Int32] = []
+        var known = Set<HarnessProcess.Member>()
         let record: (pid_t, Int32) -> Int32 = { p, sig in sent.append(sig); return kill(p, sig) }
 
         // stdin closed: a process that exits on EOF is gone in the grace period, and no signal is sent
         let input = Pipe()
         let cat = start("cat >/dev/null", stdin: input)
         sent = []
-        check(HarnessProcess.end(cat, close: { try? input.fileHandleForWriting.close() }, grace: 3, term: 1, kill: 1, signal: record)
+        check(HarnessProcess.end(cat, members: &known, close: { try? input.fileHandleForWriting.close() }, grace: 3, term: 1, kill: 1, signal: record)
               && !cat.isRunning && sent.isEmpty, "a process that exits on stdin closed: ended with no signal (\(sent))")
 
         // a process that does not read its stdin (an undo still going): SIGTERM ends it
         let busy = start("exec sleep 30")
         sent = []
-        check(HarnessProcess.end(busy, close: {}, grace: 0.3, term: 2, kill: 1, signal: record) && !busy.isRunning
+        check(HarnessProcess.end(busy, members: &known, close: {}, grace: 0.3, term: 2, kill: 1, signal: record) && !busy.isRunning
               && sent == [SIGTERM], "a sleeping process: ended by SIGTERM (\(sent))")
 
         // one that ignores SIGTERM, with a child in its group and one in a group of its own that ignore it too
         // (node with hands' executor under it): SIGKILL, to all of them, and each is gone when it returns
+        // (perl writes its pid once it is in its own group)
         let deaf = start(#"trap "" TERM; sleep 30 & echo $! > \#(dir.path)/a; "#
-                         + #"perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); sleep 30' & echo $! > \#(dir.path)/b; wait"#)
+                         + #"perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); open(F, ">\#(dir.path)/b"); print F $$; close F; sleep 30' & wait"#)
         let a = pid("a"), b = pid("b")
-        Thread.sleep(forTimeInterval: 0.2)    // perl is in its own group by now
         check(a > 0 && b > 0 && getpgid(b) == b, "the fake run's children are up (\(a), \(b), group \(getpgid(b)))")
         sent = []
         let t0 = Date()
-        let ended = HarnessProcess.end(deaf, close: {}, grace: 0.3, term: 0.5, kill: 2, signal: record)
+        let ended = HarnessProcess.end(deaf, members: &known, close: {}, grace: 0.3, term: 0.5, kill: 2, signal: record)
         check(ended && !deaf.isRunning && HarnessProcess.member(a) == nil && HarnessProcess.member(b) == nil,
               "SIGTERM ignored: SIGKILL ends the process and both children")
         check(sent.contains(SIGKILL) && Date().timeIntervalSince(t0) >= 0.8, "SIGKILL only after the grace and SIGTERM waits (\(sent))")
@@ -926,13 +927,30 @@ enum DecisionTests {
         let c = pid("c")
         orphaning.waitUntilExit()
         check(c > 0 && HarnessProcess.member(c) != nil, "the orphan is up")
-        check(HarnessProcess.end(orphaning, close: {}, grace: 0.3, term: 2, kill: 1) && HarnessProcess.member(c) == nil,
+        check(HarnessProcess.end(orphaning, members: &known, close: {}, grace: 0.3, term: 2, kill: 1) && HarnessProcess.member(c) == nil,
               "a child left behind by an exited harness is ended too")
 
         // not confirmed gone (a signal that does nothing): false, so the caller does not start the next run
         let stuck = start("exec sleep 30")
-        check(!HarnessProcess.end(stuck, close: {}, grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 }) && stuck.isRunning,
+        check(!HarnessProcess.end(stuck, members: &known, close: {}, grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 }) && stuck.isRunning,
               "a process still up after SIGKILL: not ended, said so")
         stuck.terminate(); stuck.waitUntilExit()
+
+        // a close that failed, tried again after the harness is gone: a survivor in a group of its own, its parent
+        // gone, is found by nothing but the members the first attempt kept
+        let input2 = Pipe()
+        let leaving = start(#"perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); open(F, ">\#(dir.path)/d"); print F $$; close F; sleep 30' & cat >/dev/null"#, stdin: input2)
+        let d = pid("d")
+        var kept = Set<HarnessProcess.Member>()
+        check(!HarnessProcess.end(leaving, members: &kept, close: {}, grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 })
+              && kept.contains { $0.pid == d }, "a failed close keeps what it found (\(d) in \(kept.map(\.pid)))")
+        try? input2.fileHandleForWriting.close(); leaving.waitUntilExit()
+        check(HarnessProcess.member(d) != nil && getpgid(d) == d, "the survivor is up in its own group, its parent gone")
+        var fresh = Set<HarnessProcess.Member>()
+        check(HarnessProcess.end(leaving, members: &fresh, close: {}, grace: 0.1, term: 0.1, kill: 0.1) && HarnessProcess.member(d) != nil,
+              "(what a retry without them would wrongly call gone)")
+        check(HarnessProcess.end(leaving, members: &kept, close: {}, grace: 0.2, term: 0.5, kill: 2) && HarnessProcess.member(d) == nil,
+              "the retry with them ends the survivor")
+        if HarnessProcess.member(d) != nil { kill(d, SIGKILL) }
     }
 }

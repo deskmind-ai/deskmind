@@ -146,12 +146,15 @@ enum HelperE2E {
         let got = out.appendingPathComponent("respond.txt")
         let fresh = fakeLingering("read line; printf '%s' \"$line\" > '\(got.path)'; sleep 30")
         var answered: [String: Any] = [:]
+        var overWhileSent = true
         HarnessRun.pass(["event": "task_done", "run_id": "run_e2e"], linger: fresh) { ev in
             // the app's side: the result card shows, and Undo is clicked at once
             answered = HarnessRun.respond(runID: ev["run_id"] as? String ?? "", option: 1)
+            overWhileSent = fresh.over
             return true
         }
         check(answered["ok"] as? Bool == true && answered["run_id"] as? String == "run_e2e", "linger: respond right after task_done: \(answered)")
+        check(!overWhileSent && fresh.over, "linger: the run is over (and `done` may follow) only once task_done is sent")
         let until = Date().addingTimeInterval(3)
         while (try? String(contentsOf: got, encoding: .utf8)) == nil && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
         let line = (try? Data(contentsOf: got)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
@@ -182,6 +185,19 @@ enum HelperE2E {
         check(Runner.clearRunData(support: support, closeLingering: { true }) == nil
               && made.allSatisfy { fm.fileExists(atPath: support.appendingPathComponent($0).path) }, "linger: nothing cleared while a run is going")
         Runner.busy = false
+        // a run that started while the lingering one was being closed: its files are left alone
+        check(Runner.clearRunData(support: support, closeLingering: { Runner.busy = true; return true }) == nil
+              && made.allSatisfy { fm.fileExists(atPath: support.appendingPathComponent($0).path) }, "linger: nothing cleared when a run starts meanwhile")
+        Runner.busy = false
+
+        // an undo already going (respond written, no result_response yet) is waited for, not cut at 3 s
+        let undoing = fakeLingering(#"trap "" TERM; sleep 4"#)
+        undoing.responded = true
+        HarnessRun.lingering = undoing
+        var sent: [Int32] = []
+        let t0 = Date()
+        check(HarnessRun.closeLingering(grace: 0.2, term: 0.2, kill: 2, signal: { sent.append($1); return kill($0, $1) })
+              && sent.isEmpty && Date().timeIntervalSince(t0) > 3, "linger: an undo going is waited for (\(sent), \(Date().timeIntervalSince(t0)) s)")
     }
 
     // MARK: Save Full Log

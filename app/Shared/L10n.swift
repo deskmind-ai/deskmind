@@ -332,6 +332,9 @@ enum L10n {
         "Show What It Did": "查看这次运行",
         "Show Recording in Finder": "在访达中显示录像",
         "Clear the recent tasks?": "清除最近的任务？",
+        "A task is still running, so nothing was cleared. Clear again once it has finished.":
+            "还有任务在进行，什么都没有清除。等它结束后再清除一次。",
+        "OK": "好",
         "Answer: %@": "答案：%@",
         "Open NetEase Cloud Music, search 张悬 宝贝 and play it": "打开网易云音乐，搜索张悬的《宝贝》并播放",
         "In NetEase Cloud Music, search 夜空中最亮的星 — who sings the first song?":
