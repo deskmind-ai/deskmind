@@ -49,6 +49,11 @@ enum RunErrorText {
             return L("The instruction names files, but no folder is attached and none of them is open. Attach the folder they're in, or open them, then run it again.",
                      lang: lang)
         }
+        // the last run's process would not end (HarnessRun.closeLingering): this one was refused, not started
+        if r.contains("the last task's process has not ended") {
+            return L("The last task's process hasn't ended yet (it may still be undoing), so this task didn't start. Wait a moment and run it again.",
+                     lang: lang)
+        }
         if r.contains("a run is already in progress") {
             return L("The last task is still running. Wait for it to finish, or click “Stop” first.", lang: lang)
         }

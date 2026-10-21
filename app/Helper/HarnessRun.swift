@@ -23,10 +23,15 @@ enum HarnessRun {
         let input: FileHandle
         var runID = ""
         var response: [String: Any]?
-        /// The card was answered: one answer per card (the harness reads only the first).
+        /// task_done passed on: the run's lines from then on are this process's (result_response), not the run's.
+        var over = false
+        /// The card was answered: one answer per card (the harness reads only the first); an undo may be going until
+        /// its result_response comes.
         var responded = false
         /// The machine lock taken for that answer (undo acts on the Mac), let go at its result_response or the exit.
         var undoRelease: (() -> Void)?
+        /// The processes under it found by a close that failed, for the next attempt (HarnessProcess.end).
+        var members = Set<HarnessProcess.Member>()
         private(set) var closed = false
         init(process: Process, input: FileHandle) { self.process = process; self.input = input }
         /// stdin closed (EOF): the harness stops waiting for a respond and exits. Once; called under `lock`.
@@ -37,27 +42,59 @@ enum HarnessRun {
     /// The last finished run whose undo expired (another task started on this Mac): a late answer to its card is told
     /// so (`undo_expired`), not just that nothing waits. Under `lock`.
     nonisolated(unsafe) static var expiredRun: String?
+    /// One close at a time: a new run and 「清除全部」 may both let the lingering run go, and the second must not find
+    /// nothing to close and go on while the first is still waiting for it to end.
+    private static let closing = NSLock()
 
-    /// Let the lingering run go, before a new run starts, so two harness processes never drive the desktop at once
-    /// (an undo still going in the old one): its stdin is closed, so it exits (it would by itself after
-    /// `lingerSeconds`); waited for up to 3 s, then terminated, and waited for up to 2 s more.
-    static func closeLingering() {
+    /// Let the lingering run go, before a new run starts or the run data is cleared, so two harness processes never
+    /// drive the desktop at once (an undo still going in the old one): its stdin is closed, so it exits (it would by
+    /// itself after `lingerSeconds`); waited for up to 3 s (`undoGrace` while an undo it was sent has not answered),
+    /// then SIGTERM, 2 s, then SIGKILL, 2 s -- the harness and every process under it (HarnessProcess.end). False when
+    /// it is still up after that: it stays registered (the next attempt tries again), and the caller must not start a
+    /// run (`stillRunning`) or clear its files.
+    static func closeLingering(grace: Double = 3, term: Double = 2, kill: Double = 2,
+                               signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
+        closing.lock(); defer { closing.unlock() }
         lock.lock()
         let l = lingering
-        l?.close(); lingering = nil
-        if let l { expiredRun = l.runID }   // a new run: its undo has expired
+        lingering = nil
+        if let l { expiredRun = l.runID }   // a new run (or the data cleared): its undo has expired
         lock.unlock()
-        guard let p = l?.process else { return }
-        if waitForExit(p, seconds: 3) { return }
-        NSLog("DeskMind Hands: the finished run's process did not exit on stdin closed; terminating it")
-        p.terminate()
-        if !waitForExit(p, seconds: 2) { NSLog("DeskMind Hands: the finished run's process is still running") }
+        guard let l else { return true }
+        let grace = l.responded && l.response == nil ? max(grace, undoGrace) : grace
+        if HarnessProcess.end(l.process, members: &l.members, close: { lock.lock(); l.close(); lock.unlock() },
+                              grace: grace, term: term, kill: kill, signal: signal) { return true }
+        NSLog("DeskMind Hands: the finished run's process \(l.process.processIdentifier) is still running after SIGKILL")
+        lock.lock(); if lingering == nil { lingering = l }; lock.unlock()
+        return false
     }
 
-    private static func waitForExit(_ p: Process, seconds: Double) -> Bool {
-        let until = Date().addingTimeInterval(seconds)
-        while p.isRunning && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
-        return !p.isRunning
+    /// How long an undo already going is waited for before it is cut short (the harness writes its result_response
+    /// when it is done; respond itself waits up to 15 s for it).
+    static let undoGrace = 15.0
+
+    /// The error a run is refused with when the last run's process would not end (closeLingering).
+    static let stillRunning: [String: Any] = [
+        "event": "error", "code": "previous_run_alive",
+        "error": "the last task's process has not ended (it may still be undoing), so this task was not started",
+    ]
+
+    /// One of the run's events to the app. task_done: the run is registered as lingering before the app hears of it
+    /// (finished), and is over only once it has been sent -- the run thread then sends `done`, which must come after.
+    static func pass(_ ev: [String: Any], linger: Lingering, emit: ([String: Any]) -> Bool) {
+        let done = ev["event"] as? String == "task_done"
+        if done { finished(linger, runID: ev["run_id"] as? String ?? "") }
+        _ = emit(ev)
+        if done { lock.lock(); linger.over = true; lock.unlock() }
+    }
+
+    /// task_done is being passed on: its result card can be answered (op respond) from now on. Registered before the
+    /// event reaches the app, so an undo clicked the moment the card shows finds the run (it was registered on the run
+    /// thread's next poll, up to 250 ms later).
+    static func finished(_ linger: Lingering, runID: String) {
+        lock.lock(); defer { lock.unlock() }
+        if !runID.isEmpty { linger.runID = runID }
+        if linger.process.isRunning && !linger.closed { lingering = linger; expiredRun = nil }
     }
 
     /// Each run's own stdout / stderr copies (`<run_id>.stdout|.stderr`): a lingering process writes on after the
@@ -299,7 +336,9 @@ enum HarnessRun {
         // Busy until task_done (this function returns then), not until the process exits: it lingers for the result
         // card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
-        closeLingering()    // after busy is set: no second run starts while it is waited for
+        // after busy is set: no second run starts while it is waited for
+        guard closeLingering() else { _ = emit(stillRunning); return }
+        Runner.clearing.lock(); Runner.clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         guard available else {
             _ = emit(["event": "error", "code": "harness_missing", "error": "this build has no harness runtime"]); return
         }
@@ -341,11 +380,10 @@ enum HarnessRun {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
         Runner.current = p   // stopRequested is not cleared here: a stop since the check above stands
+        // once task_done is passed on (`linger.over`), the run's lines go to `linger` (result_response), not to this
+        // run's connection, and the state is the next run's
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
         linger.runID = runID
-        // set by the reader once task_done is passed on: from then on its lines go to `linger` (result_response), not
-        // to this run's connection, and the state is the next run's
-        var over = false
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
         // a stop between the check above and here found no stdin to write to: it is sent now
         if Runner.cancelled { Runner.stopRequested = true; stop(p) }
@@ -378,7 +416,7 @@ enum HarnessRun {
                     pending.removeSubrange(pending.startIndex...nl)
                     guard let e = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else { continue }
                     lock.lock()
-                    if over {
+                    if linger.over {
                         // the answer is carried out: the Mac is free again
                         if e["kind"] as? String == "result_response" { linger.response = e; linger.releaseUndo() }
                         lock.unlock(); continue
@@ -387,22 +425,20 @@ enum HarnessRun {
                     lock.unlock()
                     for ev in out {
                         show(ev)
-                        _ = emit(ev)
-                        if ev["event"] as? String == "task_done" {
-                            lock.lock(); over = true; if let r = ev["run_id"] as? String, !r.isEmpty { linger.runID = r }; lock.unlock()
-                        }
+                        pass(ev, linger: linger, emit: emit)
                     }
                 }
             }
         }
         // The run is over at task_done, or when the process ends without one (then its last lines are read first).
-        let isOver = { lock.lock(); defer { lock.unlock() }; return over }
+        let isOver = { lock.lock(); defer { lock.unlock() }; return linger.over }
         while p.isRunning && !isOver() { Thread.sleep(forTimeInterval: 0.25) }
         if !isOver() { _ = reader.wait(timeout: .now() + 3) }
         lock.lock()
-        over = true; input = nil
+        linger.over = true; input = nil
         let lingers = p.isRunning
-        if lingers { lingering = linger; expiredRun = nil } else { linger.close() }
+        // registered at task_done already (pass); not again once it was let go meanwhile (undo expired)
+        if lingers { if !linger.closed { lingering = linger } } else { linger.close(); if lingering === linger { lingering = nil } }
         lock.unlock()
         if lingers {
             // The process waits up to `lingerSeconds` for the result card's answer (op respond), then exits; or sooner,

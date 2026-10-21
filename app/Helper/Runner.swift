@@ -260,16 +260,33 @@ enum Runner {
     /// arguments) — run data like hands' runs/, cleared and pruned with them. Outside `work`, which prepareWork resets.
     static var harnessRuns: URL { DeskMindIPC.supportDir.appendingPathComponent("work/harness-runs") }
 
-    static func clearRunData() -> Int? {
+    /// 「清除全部」: every run's folder (hands' runs/, the harness's runs), the harness's per-run stdout / stderr copies
+    /// (HarnessRun.logs: the task's words, its cards, the actions' arguments) and the feedback file. A finished run
+    /// still lingering for its result card's answer is let go first: it writes into its log and run folder until it
+    /// ends, and its undo would have nothing left to read. nil (nothing removed) while a run is going, or when the
+    /// lingering one would not end. `support` and `closeLingering`: a test's folder and stand-in.
+    /// Held while 「清除全部」 removes files; a run passes it (busy already set) before it makes any.
+    static let clearing = NSLock()
+
+    static func clearRunData(support: URL = DeskMindIPC.supportDir,
+                             closeLingering: () -> Bool = { HarnessRun.closeLingering() }) -> Int? {
+        if busy { return nil }
+        guard closeLingering() else { return nil }
+        // a run starting now (busy set) waits on `clearing` before it makes a file; one already started is left alone
+        clearing.lock(); defer { clearing.unlock() }
         if busy { return nil }
         let fm = FileManager.default
+        // the same places under `support`
+        let at = { (u: URL) in support.appendingPathComponent(String(u.path.dropFirst(DeskMindIPC.supportDir.path.count))) }
         var n = 0
-        for runs in [work.appendingPathComponent("runs"), harnessRuns] {
+        for runs in [at(work.appendingPathComponent("runs")), at(harnessRuns)] {
             let dirs = (try? fm.contentsOfDirectory(atPath: runs.path)) ?? []
             for d in dirs { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
             n += dirs.count
         }
-        try? fm.removeItem(at: DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl"))
+        let logs = at(HarnessRun.logs)
+        for f in (try? fm.contentsOfDirectory(atPath: logs.path)) ?? [] { try? fm.removeItem(at: logs.appendingPathComponent(f)) }
+        try? fm.removeItem(at: at(DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl")))
         return n
     }
 
@@ -483,8 +500,9 @@ enum Runner {
         busy = true; cancelled = false
         defer { busy = false }
         // a finished harness run still waiting for its result card's answer is let go first (after busy is set, so
-        // no second run starts meanwhile)
-        HarnessRun.closeLingering()
+        // no second run starts meanwhile); a run is not started beside one that would not end
+        guard HarnessRun.closeLingering() else { _ = emit(HarnessRun.stillRunning); return }
+        clearing.lock(); clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         let set = spec.set
         if spec.real && spec.planner == BrainServer.url && BrainServer.status()["state"] as? String != "ready" {
             BrainServer.ensure()

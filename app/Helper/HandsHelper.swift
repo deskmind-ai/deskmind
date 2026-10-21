@@ -176,7 +176,10 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true]
     case "clear_runs":
         // "Clear all" in Recent: the list, and with it what the runs left on disk.
-        guard let n = Runner.clearRunData() else { return ["ok": false, "error": "a task is running"] }
+        // refused while a task runs, or while the last one's process would not end: the app keeps its list then
+        guard let n = Runner.clearRunData() else {
+            return ["ok": false, "error": Runner.busy ? "a task is running" : "the last task's process has not ended"]
+        }
         return ["ok": true, "removed": n]
     case "save_log":
         // "Save Full Log…" after a failed run: the run's folder and the model servers' logs, zipped where the user chose.
