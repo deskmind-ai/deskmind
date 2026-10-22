@@ -185,6 +185,14 @@ enum HarnessEvents {
         return nil
     }
 
+    /// Whether an answer needs no model, so the helper lets it through while cloud models are off: the way out (deny,
+    /// a cancel option) or undo. Picks, words and approvals let the run go on with the model, and are refused then.
+    static func needsNoModel(_ b: CardButton, state: State) -> Bool {
+        if case .deny = b { return true }
+        guard let i = answerLine(b, askID: nil, state: state)?["option"] as? Int, state.askOptions.indices.contains(i) else { return false }
+        return ["cancel", "undo"].contains(state.askOptions[i]["kind"] as? String ?? "")
+    }
+
     /// The user's answer, as the harness reads it: an option's index, or their own words. Nil when it is refused
     /// (`refusal`), or when the button has nothing on this card to send (Approve on a card with no approve option).
     /// The line names the card only when the request did (`askID`); an answer that names none (an older app) goes

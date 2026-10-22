@@ -42,6 +42,7 @@ enum SessionE2E {
                                   logs: dir.appendingPathComponent("logs"),
                                   environment: { ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"].merging(pass) { x, _ in x } },
                                   prepare: {}, idleSeconds: Double(a[6]) ?? 300, driver: "sim")
+        SessionHost.onModelsOff = { uiLock.lock(); modelsOffStops += 1; uiLock.unlock() }
         SessionHost.setup.ui = .init(start: { run, _, _ in note(run, "start") }, show: { run, ev in note(run, "show", ev) },
                                      record: { run, ev in note(run, "record", ev) }, finish: { run, st in note(run, "finish", ["status": "\(String(describing: st))"]) })
         serve(path: a[2])
@@ -49,6 +50,8 @@ enum SessionE2E {
 
     // what the live card and the recording were driven with
     nonisolated(unsafe) static var ui: [[String: Any]] = []
+    /// How often models.off (true) asked the helper's op run to stop (SessionHost.onModelsOff).
+    nonisolated(unsafe) static var modelsOffStops = 0
     static let uiLock = NSLock()
     static func note(_ run: String, _ what: String, _ ev: [String: Any] = [:]) {
         uiLock.lock(); ui.append(["run_id": run, "what": what, "event": ev["event"] ?? ev["status"] ?? ""]); uiLock.unlock()
@@ -60,7 +63,8 @@ enum SessionE2E {
             uiLock.lock(); defer { uiLock.unlock() }
             return ["ok": true, "ui": ui]
         case "e2e.state":
-            return ["ok": true, "task_running": SessionHost.taskRunning]
+            uiLock.lock(); defer { uiLock.unlock() }
+            return ["ok": true, "task_running": SessionHost.taskRunning, "models_off_stops": modelsOffStops]
         case "e2e.run":
             // the helper's op run as far as the models-off bit goes (HandsHelper: refused before anything starts)
             return SessionHost.refusesRun(req) ?? ["ok": true, "would_run": true]

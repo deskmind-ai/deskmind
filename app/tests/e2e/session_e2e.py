@@ -578,8 +578,11 @@ def run(env, helper):
             except OSError:
                 return []
         request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
+        stops = request({"op": "e2e.state"}).get("models_off_stops")
         r = request({"op": "models.off", "off": True})
-        check(r.get("ok") is True and r.get("off") is True, f"models.off: {r}")
+        check(r.get("ok") is True and r.get("off") is True and r.get("persisted") is True, f"models.off: {r}")
+        # the helper's own harness op run (the old window's) is stopped by its normal stop path when cloud goes off
+        check(request({"op": "e2e.state"}).get("models_off_stops") == (stops or 0) + 1, "models off: the helper's op run asked to stop")
         check(until(lambda: cfgs(sid) and cfgs(sid)[-1].get("config") is None, 10) is not None, "models off: a running session nulled at once (stored)")
         calls = model_calls()
         r = send(sid, {"type": "say", "text": "你好", "client_id": "c_hoff"})

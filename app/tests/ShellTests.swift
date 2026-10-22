@@ -62,6 +62,9 @@ enum ShellTests {
         openBannerTests()
         reopenNoModelTests()
         oldWindowRunTests()
+        oneOwnerTests()
+        nulledRepairTests()
+        runAnswerGateTests()
         textTests()
     }
 
@@ -1248,9 +1251,9 @@ enum ShellTests {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let sheet = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
         let setter = sheet.components(separatedBy: "static var engineIsCloud: Bool {").dropFirst().first?.components(separatedBy: "\n    }\n").first ?? ""
-        check(setter.contains("forKey: \"engine\")") && setter.contains("ModelsOffSync.shared.assert(!newValue)"), "the engine setter tells the helper")
+        check(setter.contains("forKey: \"engine\")") && setter.contains("ModelsOffSync.shared.push()"), "the engine setter tells the helper")
         let app = (try? String(contentsOf: dir.appendingPathComponent("Main/DeskMindApp.swift"), encoding: .utf8)) ?? ""
-        check(app.contains("if self.connected && (!was ||") && app.contains("ModelsOffSync.shared.assert(off)"), "connecting tells the helper")
+        check(app.contains("if self.connected && (!was ||") && app.contains("ModelsOffSync.shared.push()"), "connecting tells the helper")
         let mock = Mock()
         mock.replies = ["models.off": ["ok": true, "off": true]]
         check(SessionClient.setModelsOff(true, via: mock) && mock.requests.first?["off"] as? Bool == true, "sent to the helper")
@@ -1294,28 +1297,111 @@ enum ShellTests {
             let lock = NSLock()
             var seen: [Bool] = []
             var failFirst = 2
+            var onSend: ((Bool) -> Void)?
             func request(_ body: [String: Any]) -> [String: Any]? {
-                lock.lock(); defer { lock.unlock() }
+                lock.lock()
                 seen.append(body["off"] as? Bool ?? false)
-                if failFirst > 0 { failFirst -= 1; return nil }
-                return ["ok": true, "off": body["off"] ?? false]
+                let fail = failFirst > 0
+                if fail { failFirst -= 1 }
+                let hook = onSend
+                lock.unlock()
+                hook?(body["off"] as? Bool ?? false)
+                return fail ? nil : ["ok": true, "off": body["off"] ?? false]
             }
             func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
         }
         let t = Flaky()
-        let sync = ModelsOffSync(transport: t)
+        let box = NSLock()
+        var switchOff = false
+        let sync = ModelsOffSync(transport: t, current: { box.lock(); defer { box.unlock() }; return switchOff })
         sync.firstDelay = 0.01
         let acked = DispatchSemaphore(value: 0)
-        sync.assert(true) { acked.signal() }
+        sync.push { acked.signal() }
         check(acked.wait(timeout: .now() + 3) == .success, "not acked twice: sent again until it is (\(t.seen))")
-        t.lock.lock(); t.seen = []; t.lock.unlock()
-        sync.assert(true); sync.assert(false)
-        let deadline = Date().addingTimeInterval(2)
-        while Date() < deadline { t.lock.lock(); let n = t.seen.count; t.lock.unlock(); if n >= 1 { usleep(50_000); break }; usleep(5_000) }
+        // (A) a retry still scheduled while the switch turns: it sends the switch as it is then, never the old value
+        t.lock.lock(); t.seen = []; t.failFirst = 1; t.lock.unlock()
+        sync.firstDelay = 0.2
+        sync.push()
+        usleep(50_000)                                       // its first try failed; its retry waits
+        box.lock(); switchOff = true; box.unlock()           // the switch turned off meanwhile (another window, say)
         sync.settle()
         t.lock.lock(); let seen = t.seen; t.lock.unlock()
-        check(seen.last == false && !(seen.lastIndex(of: true).map { $0 > (seen.lastIndex(of: false) ?? -1) } ?? false),
-              "two quick toggles: the helper ends with the last (\(seen))")
+        check(seen.last == true, "a retry sends the switch as it is when it goes (\(seen))")
+        // the switch moving while a send is out: sent again with the new one
+        t.lock.lock(); t.seen = []; t.onSend = { _ in box.lock(); switchOff = false; box.unlock(); t.onSend = nil }; t.lock.unlock()
+        sync.push(); sync.settle()
+        t.lock.lock(); let seen2 = t.seen; t.lock.unlock()
+        check(seen2.last == false, "moved while it went: sent again (\(seen2))")
+    }
+
+    /// Re-review of 62ff17a (bug 1, B): the reconcile after the helper's ack reads the switch as it is then — turned off
+    /// while models.off went, the nulled session stays null, never a configuration pushed after it. And one sync per app:
+    /// the client takes the one it is given.
+    static func oneOwnerTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true], "models.off": ["ok": true]]
+        var c: SessionClient!
+        let shared = ModelsOffSync(transport: mock, current: { c.modelOff })
+        c = SessionClient(transport: mock, modelsSync: shared)
+        check(c.modelsSync === shared, "the client uses the app's one sync, as given")
+        c.adoptSettings(config: "ds-flash", lang: "zh")
+        mock.onRequest = { op in if op == "models.off" { c.modelOff = true } }      // the switch turns off as it goes
+        mock.streamLines = [["kind": "helper.watching", "open": ["ses_k"], "models_off": true],
+                            ["kind": "session.config", "session_id": "ses_k", "seq": 1, "config": NSNull(), "lang": "zh", "by": "set_config"]]
+        _ = c.watch()
+        shared.settle(); c.reconciling.wait()
+        mock.onRequest = nil
+        let configs = mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }
+        check(!configs.contains { $0["config"] as? String == "ds-flash" }, "no configuration after the switch went off: \(configs.map { $0["config"] ?? "" })")
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let main = (try? String(contentsOf: dir.appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
+        let client = (try? String(contentsOf: dir.appendingPathComponent("Shared/SessionClient.swift"), encoding: .utf8)) ?? ""
+        check(main.contains("SessionClient(transport: transport, modelsSync: .shared)") && !client.contains("is HelperSessionTransport ?"),
+              "the shell's client is given the app's sync; never chosen by the transport's type")
+    }
+
+    /// Re-review of 62ff17a (effect 3): a session the helper nulled while the switch is on (unseen as a mismatch here), or
+    /// a no_model in the stream, is repaired — reconciled to the switch.
+    static func nulledRepairTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true], "models.off": ["ok": true]]
+        let c = SessionClient(transport: mock)
+        c.adoptSettings(config: "ds-flash", lang: "zh")
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        c.reconciling.wait()
+        mock.requests = []
+        c.feed(["kind": "session.config", "session_id": "ses_t", "seq": 7, "config": NSNull(), "lang": "zh", "by": "set_config"])
+        c.reconciling.wait()
+        check(mock.requests.compactMap { $0["line"] as? [String: Any] }.contains { $0["config"] as? String == "ds-flash" },
+              "nulled with the switch on: its configuration sent back")
+        mock.requests = []
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "no_model", "control": "say", "text": "x"])
+        c.reconciling.wait(); c.modelsSync.settle()
+        check(mock.requests.contains { $0["op"] as? String == "models.off" }, "a no_model in the stream with the switch on: the helper told again")
+        // the echo of a refused set_config is not a new one (no loop)
+        mock.requests = []
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "no_model", "control": "set_config", "text": "x"])
+        c.reconciling.wait()
+        check(mock.requests.isEmpty, "a refused set_config's echo: nothing")
+    }
+
+    /// Re-review of 62ff17a (bug 2): while cloud is off an old-window run's card takes only the way out and undo.
+    static func runAnswerGateTests() {
+        var st = HarnessEvents.State()
+        st.askID = "a1"
+        st.askOptions = [["kind": "approve", "text": "可以"], ["kind": "choice", "text": "红"], ["kind": "cancel", "text": "先别做了"], ["kind": "undo", "text": "撤销"]]
+        typealias B = HarnessEvents.CardButton
+        check(HarnessEvents.needsNoModel(.deny, state: st) && HarnessEvents.needsNoModel(.option(2, "先别做了"), state: st)
+              && HarnessEvents.needsNoModel(.option(3, "撤销"), state: st), "the way out and undo need no model")
+        check(!HarnessEvents.needsNoModel(.approve, state: st) && !HarnessEvents.needsNoModel(.option(1, "红"), state: st)
+              && !HarnessEvents.needsNoModel(.words("蓝"), state: st), "approve, a pick and words do")
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let run = (try? String(contentsOf: dir.appendingPathComponent("Helper/HarnessRun.swift"), encoding: .utf8)) ?? ""
+        check(run.contains("if SessionHost.modelsOffNow && !HarnessEvents.needsNoModel(button, state: state)") && run.contains("static func stopForModelsOff()"),
+              "the helper's answer gate and its stop for models off")
+        let helper = (try? String(contentsOf: dir.appendingPathComponent("Helper/HandsHelper.swift"), encoding: .utf8)) ?? ""
+        let main = helper.components(separatedBy: "static func main() {").dropFirst().first?.prefix(400) ?? ""
+        check(main.contains("SessionHost.onModelsOff = { HarnessRun.stopForModelsOff() }"), "set when the helper starts")
     }
 
     /// Re-review of b0ff614 (effects): a set_config sent to a process that is gone is not "under way" (its start or exit
@@ -1386,9 +1472,9 @@ enum ShellTests {
     static func oldWindowRunTests() {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let sheet = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
-        check(sheet.contains("ModelsOffSync.shared.assert(!newValue)"), "the engine setter asserts through the ordered sync")
+        check(sheet.contains("ModelsOffSync.shared.push()"), "the engine setter pushes through the app's one sync")
         let app = (try? String(contentsOf: dir.appendingPathComponent("Main/DeskMindApp.swift"), encoding: .utf8)) ?? ""
-        check(app.contains("reply?[\"models_off\"]") && app.contains("ModelsOffSync.shared.assert(off)"), "the helper's status disagreeing: asserted again")
+        check(app.contains("reply?[\"models_off\"]") && app.contains("ModelsOffSync.shared.push()"), "the helper's status disagreeing: pushed again")
         let run = (try? String(contentsOf: dir.appendingPathComponent("Main/RunView.swift"), encoding: .utf8)) ?? ""
         check(run.contains("[\"brain_not_ready\", \"no_model\"].contains"), "a run refused no_model: said as it is")
         check(L("The cloud model is off. Turn it on in the model settings to run this task.", lang: .zhHans).contains("云端模型关着"), "translated")

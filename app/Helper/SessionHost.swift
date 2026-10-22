@@ -139,11 +139,15 @@ enum SessionHost {
                 "error": L("The cloud model is off. Turn it on in the model settings to run this task.", lang: ResolvedLang.current)]
     }
     private static let nullConfig: [String: Any] = ["type": "set_config", "config": NSNull()]
+    /// What else stops when cloud models go off: the helper's harness op run (HandsHelper sets it; tests count it).
+    nonisolated(unsafe) static var onModelsOff: () -> Void = {}
 
     /// models.off {off}: holds the bit for every session this helper runs (and persists it), and with the models off
     /// writes set_config null to every running session process now.
-    /// One at a time (`offSerial`); off: the running sessions are nulled first, then the bit is written down, and the
-    /// reply comes only after both.
+    /// One at a time (`offSerial`). Off: the running sessions are nulled first, a harness op run going is stopped
+    /// (`onModelsOff`), then the bit is written down, and the reply comes only after all of it. The bit in memory is
+    /// the one that holds; a file that could not be written is said (`persisted: false`, still ok: the app does not
+    /// send it again for that) and read as off at the next start (the safe side) until the app asserts it.
     static func modelsOff(_ req: [String: Any]) -> [String: Any] {
         guard let off = req["off"] as? Bool else { return ["ok": false, "code": "bad_request", "error": "models.off needs off (true or false)"] }
         offSerial.lock(); defer { offSerial.unlock() }
@@ -152,11 +156,16 @@ enum SessionHost {
         offBit = off
         let running = sessions.values.filter { $0.started && !$0.closing }
         lock.unlock()
-        if off { for s in running { s.writeGate.lock(); _ = s.write(nullConfig); s.writeGate.unlock() } }
-        do { try Data((off ? "1" : "0").utf8 + [0x0A]).write(to: offFile, options: .atomic) } catch {
-            return ["ok": false, "off": off, "error": "models.off: \(error.localizedDescription)"]
+        if off {
+            for s in running { s.writeGate.lock(); _ = s.write(nullConfig); s.writeGate.unlock() }
+            onModelsOff()
         }
-        return ["ok": true, "off": off]
+        var persisted = true
+        do { try Data((off ? "1" : "0").utf8 + [0x0A]).write(to: offFile, options: .atomic) } catch {
+            NSLog("DeskMind Hands: models.off not written down: \(error.localizedDescription)")
+            persisted = false
+        }
+        return ["ok": true, "off": off, "persisted": persisted]
     }
     /// How long `session.end` waits for the session's answer to its end_if_idle (it answers in order, at once: this
     /// only bounds a session that hangs).

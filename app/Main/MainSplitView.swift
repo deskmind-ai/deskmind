@@ -88,7 +88,8 @@ extension ShellModel {
     static let live: ShellModel = {
         let transport = StoppableTransport(HelperSessionTransport())
         // the language as the setting has it now (not ResolvedLang.current, which the window updates in its own time)
-        let m = ShellModel(client: SessionClient(transport: transport), config: { MainSplitView.modelConfig() },
+        // (the app's one ModelsOffSync: the engine setter and the helper's connect push through the same one)
+        let m = ShellModel(client: SessionClient(transport: transport, modelsSync: .shared), config: { MainSplitView.modelConfig() },
                            lang: { (AppLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue) ?? .en).resolved },
                            cloudOn: { CloudModelSettings.engineIsCloud })
         transport.isStopped = { [weak m] in m?.stopped ?? true }

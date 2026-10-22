@@ -299,6 +299,11 @@ enum HarnessRun {
             NSLog("DeskMind Hands: answer not sent: \(why)")
             return ["ok": false, "code": "stale_card", "error": why]
         }
+        // cloud models off: only the way out and undo (no model needed); anything else would let the run go on
+        if SessionHost.modelsOffNow && !HarnessEvents.needsNoModel(button, state: state) {
+            return ["ok": false, "code": "no_model",
+                    "error": L("The cloud model is off. Turn it on in the model settings to run this task.", lang: ResolvedLang.current)]
+        }
         guard let line = HarnessEvents.answerLine(button, askID: askID, state: state),
               var data = try? JSONSerialization.data(withJSONObject: line) else { return ["ok": false, "error": "nothing to send for this button"] }
         data.append(0x0A)
@@ -523,6 +528,15 @@ enum HarnessRun {
     /// still out at the driver (docs/protocol.md, signals). A second signal cuts that wait short, so the terminate
     /// comes 12 s after the interrupt (15 s after the stop line; it was 8 s, inside the wait). A run that has written
     /// task_done and lingers for the result card's answer is left alone.
+    /// Cloud models turned off (models.off): a harness op run going is stopped by its normal stop path (Runner's
+    /// Stop); one that wrote task_done and lingers for its result card is left alone (its undo needs no model).
+    static func stopForModelsOff() {
+        lock.lock(); let going = input != nil; lock.unlock()
+        guard going, let p = Runner.current, p.isRunning, !isLingering(p) else { return }
+        NSLog("DeskMind Hands: cloud models off: stopping the harness run")
+        Runner.requestStop()
+    }
+
     static func stop(_ p: Process) {
         lock.lock()
         if let h = input, var line = try? JSONSerialization.data(withJSONObject: ["stop": true]) { line.append(0x0A); try? h.write(contentsOf: line) }

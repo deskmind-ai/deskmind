@@ -56,37 +56,60 @@ final class HelperSessionTransport: SessionTransport {
 }
 
 /// The helper's "cloud models off" bit kept equal to the app's switch (#107 review: a lost models.off left the helper
-/// off and the app on for good). Every assertion goes through one serial queue, in order — two quick toggles reach the
-/// helper as they were made — and is sent again with backoff until the helper acks it; a newer one supersedes it.
+/// off and the app on for good). One per app process, injected where it is used (never chosen by the transport's type:
+/// two would race each other). Every send reads the switch as it is when it goes (`current`), never a value captured
+/// before; sends go one at a time on one serial queue and again with backoff until the helper acks the switch as it is
+/// then. What waits for the ack (`then`) runs once it comes, whichever push it was.
 final class ModelsOffSync {
-    static let shared = ModelsOffSync(transport: HelperSessionTransport())
+    /// The app's: the helper's own transport, the engine setting as written (CloudModelSettings.engineIsCloud).
+    static let shared = ModelsOffSync(transport: HelperSessionTransport(),
+                                      current: { UserDefaults.standard.string(forKey: "engine") != "harness" })
     private let transport: SessionTransport
+    private let current: () -> Bool
     private let queue = DispatchQueue(label: "ai.deskmind.models-off")
     private let lock = NSLock()
-    private var wanted: Bool?
     private var gen = 0
+    private var pending = false
+    private var waiting: [() -> Void] = []
     /// The first wait before a try again (doubling, up to 30 s).
     var firstDelay = 0.25
-    init(transport: SessionTransport) { self.transport = transport }
+    init(transport: SessionTransport, current: @escaping () -> Bool) { self.transport = transport; self.current = current }
 
-    /// The switch as it is now: off or not. `then`: once the helper has it (not if a newer one came first).
-    func assert(_ off: Bool, then: (() -> Void)? = nil) {
-        lock.lock(); wanted = off; gen += 1; let g = gen; lock.unlock()
-        queue.async { [weak self] in self?.push(off, g, delay: self?.firstDelay ?? 0.25, then: then) }
+    /// Tells the helper the switch (as it is when the send goes), until it acks; `then` once it has.
+    func push(then: (() -> Void)? = nil) {
+        lock.lock(); gen += 1; let g = gen; pending = true; if let then { waiting.append(then) }; lock.unlock()
+        queue.async { [weak self] in self?.attempt(g, delay: self?.firstDelay ?? 0.25) }
     }
 
-    /// One try, on the queue; not acked: tried again later on the same queue (a newer assertion supersedes it).
-    private func push(_ off: Bool, _ g: Int, delay: Double, then: (() -> Void)?) {
-        lock.lock(); let current = g == gen; lock.unlock()
-        guard current else { return }
-        if SessionClient.setModelsOff(off, via: transport) { then?(); return }
-        queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.push(off, g, delay: min(delay * 2, 30), then: then) }
+    private func attempt(_ g: Int, delay: Double) {
+        lock.lock(); let latest = g == gen; lock.unlock()
+        guard latest else { return }                         // (a newer push carries on)
+        let off = current()
+        let r = transport.request(SessionClient.Request.modelsOff(off))
+        // a helper without the op holds no bit: nothing to keep equal
+        let acked = r?["ok"] as? Bool == true || r?["error"] as? String == "unknown op"
+        if acked && current() == off {
+            lock.lock()
+            var run: [() -> Void] = []
+            if g == gen { pending = false; run = waiting; waiting = [] }
+            lock.unlock()
+            for f in run { f() }
+            return
+        }
+        // not acked, or the switch moved while it went: again (at once if it only moved)
+        let next = acked ? 0 : delay
+        queue.asyncAfter(deadline: .now() + next) { [weak self] in self?.attempt(g, delay: min(delay * 2, 30)) }
     }
 
-    /// The last switch asserted (nil: none yet).
-    var asserted: Bool? { lock.lock(); defer { lock.unlock() }; return wanted }
-    /// Waits until what was asserted before has been sent (bounded).
-    func settle(timeout: Double = 3) { let s = DispatchSemaphore(value: 0); queue.async { s.signal() }; _ = s.wait(timeout: .now() + timeout) }
+    /// Waits (bounded) until the switch the helper holds is acked — a retry still scheduled is waited for too.
+    func settle(timeout: Double = 3) {
+        let until = Date().addingTimeInterval(timeout)
+        while Date() < until {
+            lock.lock(); let busy = pending; lock.unlock()
+            if !busy { return }
+            usleep(10_000)
+        }
+    }
 }
 
 /// What the user does in a session, as the session's control lines (docs/protocol.md 「会话（第 1 版）」, 控制).
@@ -243,17 +266,20 @@ final class SessionClient {
     private var opening: Set<String> = []
     /// Keeps the helper's models-off bit equal to `modelOff` (the app's switch): the app's one for the helper's own
     /// transport, else one of this client's.
-    lazy var modelsSync: ModelsOffSync = transport is HelperSessionTransport ? .shared : ModelsOffSync(transport: transport)
+    /// The one ModelsOffSync of the app (injected: `init(transport:modelsSync:)`); a client made without one (a test)
+    /// has its own, on its own switch.
+    private let injectedSync: ModelsOffSync?
+    lazy var modelsSync: ModelsOffSync = injectedSync ?? ModelsOffSync(transport: transport, current: { [weak self] in self?.modelOff ?? false })
 
     /// The helper says whether it holds cloud models off (helper.watching's `models_off`, a `no_model` refusal): when
-    /// that is not the app's switch, the switch is asserted again (until acked), then every session reconciled.
+    /// that is not the app's switch, the switch is pushed again (until acked), then every session reconciled — to the
+    /// switch as it is then, not as it was here.
     func helperSays(modelsOff theirs: Bool) {
-        let mine = modelOff
-        guard theirs != mine else { return }
-        modelsSync.assert(mine) { [weak self] in
+        guard theirs != modelOff else { return }
+        modelsSync.push { [weak self] in
             guard let self else { return }
-            self.lock.lock(); let d = self.defaults; self.lock.unlock()
-            self.reconcile(config: d.config, lang: d.lang, off: mine)
+            self.lock.lock(); let d = self.defaults, now = self.off; self.lock.unlock()
+            self.reconcile(config: d.config, lang: d.lang, off: now)
         }
     }
     /// What each session's current process is known to run with: the last set_config sent to it (or acked), else what
@@ -302,8 +328,9 @@ final class SessionClient {
     /// Called after a line changed a session's state (on the thread that fed it).
     var onChange: ((String, SessionState) -> Void)?
 
-    init(transport: SessionTransport = HelperSessionTransport()) {
+    init(transport: SessionTransport = HelperSessionTransport(), modelsSync: ModelsOffSync? = nil) {
         self.transport = transport
+        self.injectedSync = modelsSync
     }
 
     func state(_ sessionId: String) -> SessionState {
@@ -956,9 +983,19 @@ final class SessionClient {
         case .sessionConfig(let e): runsWith[id] = (e.config, e.lang)
         default: break
         }
+        // nulled while the switch is on (by the helper, unseen here), or a refusal for having no model: repaired —
+        // reconciled to the switch, and the helper told it again if it holds otherwise (a refusal of a set_config is
+        // its own answer's echo, not a new one)
+        var repair = false, noModelHere = false
+        switch line.event {
+        case .sessionConfig(let e): repair = e.config == nil && !off
+        case .sessionError(let e) where e.code == "no_model" && e.control != "set_config": repair = !off; noModelHere = !off
+        default: break
+        }
         lock.unlock()
+        if noModelHere { helperSays(modelsOff: true) }
         // a session that comes into view with a process (its first line here, its process's start): the settings now
-        if started || (first && after.exited == nil) { reconcileSession(id) }
+        if started || (first && after.exited == nil) || repair { reconcileSession(id) }
         if let p = again {
             DispatchQueue.global().async { [weak self] in
                 guard let self else { return }

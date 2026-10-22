@@ -373,7 +373,7 @@ final class ShellModel: ObservableObject {
         // the helper holds whether cloud models are off: told the switch as the app starts its watch (and again
         // whenever the helper says otherwise)
         applySettings(reconcileIfModelChanged: false)
-        client.modelsSync.assert(!cloudOn())
+        client.modelsSync.push()
         runLock.lock()
         stopWatch = false
         let already = watching

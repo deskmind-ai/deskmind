@@ -114,7 +114,7 @@ final class HelperModel: ObservableObject {
                 // and whenever it says otherwise (a lost assertion): the app's switch is the truth
                 let off = !CloudModelSettings.engineIsCloud
                 if self.connected && (!was || (reply?["models_off"] as? Bool).map({ $0 != off }) == true) {
-                    ModelsOffSync.shared.assert(off)
+                    ModelsOffSync.shared.push()
                 }
                 if was != self.connected {
                     let lang = ResolvedLang.current
