@@ -260,16 +260,33 @@ enum Runner {
     /// arguments) — run data like hands' runs/, cleared and pruned with them. Outside `work`, which prepareWork resets.
     static var harnessRuns: URL { DeskMindIPC.supportDir.appendingPathComponent("work/harness-runs") }
 
-    static func clearRunData() -> Int? {
+    /// 「清除全部」: every run's folder (hands' runs/, the harness's runs), the harness's per-run stdout / stderr copies
+    /// (HarnessRun.logs: the task's words, its cards, the actions' arguments) and the feedback file. A finished run
+    /// still lingering for its result card's answer is let go first: it writes into its log and run folder until it
+    /// ends, and its undo would have nothing left to read. nil (nothing removed) while a run is going, or when the
+    /// lingering one would not end. `support` and `closeLingering`: a test's folder and stand-in.
+    /// Held while 「清除全部」 ends the last runs and removes files; a run passes it (busy already set) before it starts.
+    static let clearing = NSLock()
+
+    static func clearRunData(support: URL = DeskMindIPC.supportDir,
+                             closeLingering: () -> Bool = { HarnessRun.closeLingering() }) -> Int? {
+        // `clearing` first: a run that has not passed it yet waits (and is not ended by the close below); one that has
+        // set busy already is left alone. Busy is set before a run passes it, so no run is ended or loses its files.
+        clearing.lock(); defer { clearing.unlock() }
         if busy { return nil }
+        guard closeLingering(), !busy else { return nil }
         let fm = FileManager.default
+        // the same places under `support`
+        let at = { (u: URL) in support.appendingPathComponent(String(u.path.dropFirst(DeskMindIPC.supportDir.path.count))) }
         var n = 0
-        for runs in [work.appendingPathComponent("runs"), harnessRuns] {
+        for runs in [at(work.appendingPathComponent("runs")), at(harnessRuns)] {
             let dirs = (try? fm.contentsOfDirectory(atPath: runs.path)) ?? []
             for d in dirs { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
             n += dirs.count
         }
-        try? fm.removeItem(at: DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl"))
+        let logs = at(HarnessRun.logs)
+        for f in (try? fm.contentsOfDirectory(atPath: logs.path)) ?? [] { try? fm.removeItem(at: logs.appendingPathComponent(f)) }
+        try? fm.removeItem(at: at(DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl")))
         return n
     }
 
@@ -451,11 +468,53 @@ enum Runner {
         }
     }
 
-    /// Stop the run: the main app's Stop, or the live view's.
+    /// Taken by a stop and by a run's launch together (`cancelled`, `stopRequested`, `current`): a stop comes either
+    /// before the launch (it does not happen) or after `current` is set (it stops that process), never between.
+    private static let stopLock = NSLock()
+
+    /// Take a run request: none going (no process, not busy), and the last run's stop flags cleared -- in one step under
+    /// the stop's lock, so a stop from the moment it is taken is this run's (it was lost when it came before the run
+    /// function cleared the flags). False: a run is already going. The run function sets `busy` false when it returns.
+    static func accept() -> Bool {
+        stopLock.lock(); defer { stopLock.unlock() }
+        guard current == nil && !busy else { return false }
+        busy = true; cancelled = false; stopRequested = false
+        return true
+    }
+
+    /// The run's process is no longer the run's (it ended, or its run is over and it lingers for the result card):
+    /// not `current`, so a stop from now on does not touch it. Whether a stop came for this run (taken: cleared).
+    static func release() -> Bool {
+        stopLock.lock(); defer { stopLock.unlock() }
+        current = nil
+        let stopped = stopRequested
+        stopRequested = false
+        return stopped
+    }
+
+    /// Start a run's process -- every run's, `hands do` and harness alike -- unless a stop came since the run was
+    /// accepted (false: nothing started; a stop while the last run's process was waited for, or a model loaded, ends
+    /// the run here). Started, it is `current` and recorded (HarnessRun.record) before a stop can look.
+    /// `started`: a test's moment between the start and `current` (a stop then must not be lost).
+    static func launch(_ p: Process, started: () -> Void = {}) throws -> Bool {
+        stopLock.lock(); defer { stopLock.unlock() }
+        if cancelled { return false }
+        try p.run()
+        started()
+        HarnessRun.record(p)
+        current = p
+        return true
+    }
+
+    /// Stop the run: the main app's Stop, or the live view's. A stop before the run's process is started keeps it
+    /// from starting (`cancelled`, read by `launch`); after, it stops that process.
     static func requestStop() {
+        stopLock.lock()
         if busy { cancelled = true }
         stopRequested = true
-        if let p = current, HarnessRun.input != nil { HarnessRun.stop(p) } else { current?.terminate() }
+        let p = current
+        stopLock.unlock()
+        if let p, HarnessRun.input != nil { HarnessRun.stop(p) } else { p?.terminate() }
     }
 
     /// Hand the user's answer (the main app's `answer` request) to the question the running `hands do` asked (a harness
@@ -477,11 +536,11 @@ enum Runner {
         // lines must not interleave on the one socket.
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
-        busy = true; cancelled = false
-        defer { busy = false }
+        defer { busy = false }    // set, with the stop flags cleared, when the request was taken (accept)
         // a finished harness run still waiting for its result card's answer is let go first (after busy is set, so
-        // no second run starts meanwhile)
-        HarnessRun.closeLingering()
+        // no second run starts meanwhile); a run is not started beside one that would not end
+        guard HarnessRun.closeLingering() else { _ = emit(HarnessRun.stillRunning); return }
+        clearing.lock(); clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         let set = spec.set
         if spec.real && spec.planner == BrainServer.url && BrainServer.status()["state"] as? String != "ready" {
             BrainServer.ensure()
@@ -608,10 +667,16 @@ enum Runner {
         let errURL = DeskMindIPC.supportDir.appendingPathComponent("work/last-run.stderr")
         fm.createFile(atPath: errURL.path, contents: nil)
         p.standardError = try? FileHandle(forWritingTo: errURL)
-        do { try p.run() } catch {
+        // what it leaves running (a Peekaboo server) is ended before the next run, as for a harness run (launch records
+        // it); stopRequested stands until the run has ended
+        do {
+            guard try launch(p) else {
+                _ = release()
+                _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
+            }
+        } catch {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
-        current = p; Runner.stopRequested = false
         answerLock.lock(); answers = inPipe.fileHandleForWriting; asking = false; answerLock.unlock()
         _ = emit(["event": "start", "set": set, "real": spec.real, "pid": Int(p.processIdentifier)])
         // The live view, for the user's own instructions: until the run ends, however it ends.
@@ -766,6 +831,8 @@ enum Runner {
             poll()
             Thread.sleep(forTimeInterval: 0.25)
         }
+        // whether this run was stopped, read once as its process ends (a stop after this is not this run's)
+        let stopped = release()
         poll()
         // Bounded: a grandchild that inherited stdout (Peekaboo's server) could hold the pipe open past hands' exit.
         _ = reader.wait(timeout: .now() + 3)
@@ -774,10 +841,9 @@ enum Runner {
         try? inPipe.fileHandleForWriting.close()
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
         // Before the clean-up closes the run's windows: how it ended, for a moment, on its last picture.
-        LiveCard.finish(Runner.stopRequested ? .stopped : freeState == "completed" ? .done : .failed)
+        LiveCard.finish(stopped ? .stopped : freeState == "completed" ? .done : .failed)
         cleanUp(quitTextEdit: !textEditWasRunning)
         pruneRuns(keep: 10)
-        current = nil
         // hands says some refusals on stdout ("refused: … is your home directory"): its tail too, when stderr is quiet.
         let errTail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         let tail = errTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -789,8 +855,7 @@ enum Runner {
         // on the task, not the run breaking: the user needs "it got stuck", not "send us the details".
         let ranToAnEnd = ["completed", "gave_up", "budget_exhausted", "cancelled"].contains(freeState)
             || (freeState == "errored" && freeFailure == "no_progress_loop")
-        if Runner.stopRequested { freeState = "cancelled" }
-        Runner.stopRequested = false
+        if stopped { freeState = "cancelled" }
         let exitCode = spec.goal != nil && (ranToAnEnd || freeState == "cancelled") ? 0 : Int(p.terminationStatus)
         _ = emit(["event": "done", "exit": exitCode, "reason": freeFailure, "passed": passed, "total": total,
                   "answer": answer,

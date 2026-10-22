@@ -60,6 +60,8 @@ struct HomeView: View {
     /// The files directly in the attached folder: the file example names one of them, or is not offered.
     @State private var folderFiles: [String] = []
     @State private var confirmClear = false
+    /// The helper refused 「清除全部」 (a task still running): nothing was cleared, the list stays.
+    @State private var clearRefused = false
     @State private var hovered: UUID?
     @FocusState private var promptFocused: Bool
     @Environment(\.lang) private var lang
@@ -168,12 +170,21 @@ struct HomeView: View {
         .onChange(of: apps.map(\.bundleID)) { _, bundles in prewarm(bundles) }
         .alert(L("Clear the recent tasks?", lang: lang), isPresented: $confirmClear) {
             Button(L("Clear all", lang: lang), role: .destructive) {
-                withAnimation { history.clear() }
-                DispatchQueue.global().async { _ = DeskMindIPC.request(["op": "clear_runs"]) }
+                // The list goes once the files have: a refusal (a task still running) leaves both, and says so. No
+                // helper to ask: the list goes as before.
+                DispatchQueue.global().async {
+                    let reply = DeskMindIPC.request(["op": "clear_runs"])
+                    let refused = reply != nil && reply?["ok"] as? Bool != true
+                    DispatchQueue.main.async { if refused { clearRefused = true } else { withAnimation { history.clear() } } }
+                }
             }
             Button(L("Cancel", lang: lang), role: .cancel) {}
         } message: {
             Text(L("This also deletes their step screenshots and records from this Mac. Recordings stay in Movies › DeskMind.", lang: lang))
+        }
+        .alert(L("A task is still running, so nothing was cleared. Clear again once it has finished.", lang: lang),
+               isPresented: $clearRefused) {
+            Button(L("OK", lang: lang), role: .cancel) {}
         }
         .alert(L("Put the sample folder back to its sample files? Everything else in it is removed.", lang: lang),
                isPresented: $confirmReset) {

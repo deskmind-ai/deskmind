@@ -3,7 +3,10 @@
 //   leaves -- the master's frames and size, the delivery copy, meta.json -- and a recording started over a stale one;
 // - "Save Full Log…" (Runner.saveLog): what the zip holds, and what it refuses;
 // - SIGTERM (Helper/Lifecycle.swift): an app quitting while it is sent SIGTERM, again and again, must exit cleanly
-//   and take its child "server" with it (the crash of 10-04 was this race).
+//   and take its child "server" with it (the crash of 10-04 was this race);
+// - the finished run that lingers for its result card's answer (Helper/HarnessRun.swift), with fake processes: let go
+//   for certain before a new run (or refused), answerable the moment task_done is passed on, closed by 「清除全部」,
+//   which also takes the per-run logs. Needs no permission (`helper.sh "" linger`).
 // Needs Screen Recording for the terminal it runs from. It shows nothing, presses no key, and records only into the
 // output folder, which tests/e2e/helper.sh deletes unless asked to keep it.
 //
@@ -33,6 +36,7 @@ enum HelperE2E {
         // registers this process with LaunchServices, and every process it starts afterwards (the 120 SIGTERM
         // children, unzip) would leave a Dock tile for the terminal that macOS never removes.
         let only = Set(args.dropFirst(2))
+        if only.isEmpty || only.contains("linger") { linger() }
         if only.isEmpty || only.contains("sigterm") { sigterm() }
         if only.isEmpty || only.contains("savelog") { saveLog() }
         if only.isEmpty || only.contains("recording") { recording() }
@@ -107,6 +111,207 @@ enum HelperE2E {
         }
         check(frames(first.appendingPathComponent("master.mov")).count >= 10, "a stale recording is finished when the next starts")
         check(frames(second.appendingPathComponent("master.mov")).count >= 10, "and the next one records")
+    }
+
+    // MARK: lingering run (deskmind #103 review)
+
+    /// A fake harness: /bin/sh running `script`, its stdin a pipe (the run's answers), registered as the lingering run.
+    static func fakeLingering(_ script: String) -> HarnessRun.Lingering {
+        let p = Process(), input = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", script]
+        p.standardInput = input
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        try? p.run()
+        HarnessRun.record(p)
+        return HarnessRun.Lingering(process: p, input: input.fileHandleForWriting)
+    }
+
+    static func linger() {
+        // P1: an old run that ignores both its stdin closing and SIGTERM (a slow undo) is killed, and is gone when
+        // closeLingering returns true
+        let deaf = fakeLingering(#"trap "" TERM; while :; do sleep 0.1; done"#)
+        HarnessRun.lingering = deaf
+        check(HarnessRun.closeLingering(grace: 0.3, term: 0.3, kill: 2) && !deaf.process.isRunning && HarnessRun.lingering == nil,
+              "linger: an old run deaf to stdin closed and SIGTERM is killed before the next run")
+        // ...and when it cannot be confirmed gone, the next run is refused: false, its tree still recorded, the error said
+        let stuck = fakeLingering("exec sleep 30")
+        HarnessRun.lingering = stuck
+        check(!HarnessRun.closeLingering(grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 }) && stuck.process.isRunning
+              && HarnessRun.trees.contains { $0.process === stuck.process } && HarnessRun.stillRunning["code"] as? String == "previous_run_alive",
+              "linger: a process not confirmed gone refuses the next run, and stays recorded for the next attempt")
+        check(HarnessRun.respond(runID: "", option: 0)["ok"] as? Bool == false, "linger: it takes no answer any more")
+        check(HarnessRun.closeLingering(grace: 0.2, term: 2, kill: 2) && !stuck.process.isRunning, "linger: the next attempt ends it")
+
+        // P2: an undo sent the moment task_done reaches the app finds the run (it was registered up to 250 ms later)
+        let got = out.appendingPathComponent("respond.txt")
+        let fresh = fakeLingering("read line; printf '%s' \"$line\" > '\(got.path)'; sleep 30")
+        var answered: [String: Any] = [:]
+        var overWhileSent = true
+        HarnessRun.pass(["event": "task_done", "run_id": "run_e2e"], linger: fresh) { ev in
+            // the app's side: the result card shows, and Undo is clicked at once
+            answered = HarnessRun.respond(runID: ev["run_id"] as? String ?? "", option: 1)
+            overWhileSent = fresh.over
+            return true
+        }
+        check(answered["ok"] as? Bool == true && answered["run_id"] as? String == "run_e2e", "linger: respond right after task_done: \(answered)")
+        check(!overWhileSent && fresh.over, "linger: the run is over (and `done` may follow) only once task_done is sent")
+        let until = Date().addingTimeInterval(3)
+        while (try? String(contentsOf: got, encoding: .utf8)) == nil && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
+        let line = (try? Data(contentsOf: got)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        check(line["type"] as? String == "respond" && line["option"] as? Int == 1, "linger: the respond line reached the run's stdin: \(line)")
+
+        // P2: 「清除全部」 takes the per-run logs too, and lets the lingering run (which writes them) go first
+        let support = out.appendingPathComponent("support")
+        let fm = FileManager.default
+        let made = ["work/hands/runs/do-1/trace.jsonl", "work/harness-runs/run_e2e/events.jsonl",
+                    "work/harness-logs/run_e2e.stdout", "work/harness-logs/run_e2e.stderr", "feedback.jsonl"]
+        func make() {
+            for f in made {
+                let u = support.appendingPathComponent(f)
+                try? fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+                fm.createFile(atPath: u.path, contents: Data("the task's words".utf8))
+            }
+        }
+        make()
+        check(Runner.clearRunData(support: support, closeLingering: { false }) == nil
+              && made.allSatisfy { fm.fileExists(atPath: support.appendingPathComponent($0).path) },
+              "linger: a lingering run that would not end: nothing cleared")
+        let removed = Runner.clearRunData(support: support)
+        let left = made.filter { fm.fileExists(atPath: support.appendingPathComponent($0).path) }
+        check(removed == 2 && left.isEmpty && !fresh.process.isRunning && HarnessRun.lingering == nil,
+              "linger: clear all: the lingering run ended, run folders and per-run logs gone (removed \(removed ?? -1), left \(left))")
+        Runner.busy = true
+        make()
+        check(Runner.clearRunData(support: support, closeLingering: { true }) == nil
+              && made.allSatisfy { fm.fileExists(atPath: support.appendingPathComponent($0).path) }, "linger: nothing cleared while a run is going")
+        Runner.busy = false
+        // a run that started while the lingering one was being closed: its files are left alone
+        check(Runner.clearRunData(support: support, closeLingering: { Runner.busy = true; return true }) == nil
+              && made.allSatisfy { fm.fileExists(atPath: support.appendingPathComponent($0).path) }, "linger: nothing cleared when a run starts meanwhile")
+        Runner.busy = false
+
+        // an undo already going (respond written, no result_response yet) is waited for, not cut at 3 s
+        let undoing = fakeLingering(#"trap "" TERM; sleep 4"#)
+        undoing.responded = true
+        HarnessRun.lingering = undoing
+        var sent: [Int32] = []
+        let t0 = Date()
+        check(HarnessRun.closeLingering(grace: 0.2, term: 0.2, kill: 2, signal: { sent.append($1); return kill($0, $1) })
+              && sent.isEmpty && Date().timeIntervalSince(t0) > 3, "linger: an undo going is waited for (\(sent), \(Date().timeIntervalSince(t0)) s)")
+        lingerFullRun()
+    }
+
+    /// The whole HarnessRun.run, with a fake harness (runtime/node/bin/node beside this binary, a shell script) and
+    /// Application Support moved into the output folder: the harness exits by itself right after task_done, leaving
+    /// two children that ignore SIGTERM -- one in its group, one in a group of its own -- writing on. `lingering` is
+    /// gone with the harness; the next run must end both before it starts (deskmind #103 external review, P1).
+    static func lingerFullRun() {
+        let fm = FileManager.default
+        let d = out.appendingPathComponent("fullrun")
+        try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+        let runtime = Runner.runtime
+        guard runtime.path.hasPrefix(out.path) else { check(false, "linger: the fake runtime is beside this binary (\(runtime.path))"); return }
+        DeskMindIPC.supportOverride = out.appendingPathComponent("support-run")
+        defer { DeskMindIPC.supportOverride = nil }
+        let node = runtime.appendingPathComponent("node/bin/node")
+        for dir in [node.deletingLastPathComponent(), runtime.appendingPathComponent("harness"), runtime.appendingPathComponent("hands")] {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        fm.createFile(atPath: runtime.appendingPathComponent("harness/harness.mjs").path, contents: Data())
+        fm.createFile(atPath: runtime.appendingPathComponent("hands/.version").path, contents: Data("e2e".utf8))
+        let done = #"{"kind":"task_done","status":"succeeded","reason":"verified","summary":"ok","result_card":null}"#
+        let script = """
+            #!/bin/sh
+            D='\(d.path)'
+            echo x >> "$D/launched"
+            read req
+            if [ -f "$D/second" ]; then
+              for f in same own; do kill -0 "$(cat "$D/$f.pid")" 2>/dev/null && echo "$f" >> "$D/alive-at-start"; done
+              echo '\(done)'
+              exit 0
+            fi
+            ( trap "" TERM; while :; do echo x >> "$D/same.txt"; sleep 0.1; done ) </dev/null >/dev/null 2>&1 &
+            echo $! > "$D/same.pid"
+            perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); open(F, ">'"$D"'/own.pid"); print F $$; close F; while (1) { open(G, ">>'"$D"'/own.txt"); print G "x\\n"; close G; select(undef, undef, undef, 0.1); }' </dev/null >/dev/null 2>&1 &
+            sleep 0.8
+            echo '\(done)'
+            exit 0
+
+            """
+        fm.createFile(atPath: node.path, contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
+        func run() -> [[String: Any]] {
+            var events: [[String: Any]] = []
+            guard Runner.accept() else { return [["event": "error", "error": "not accepted"]] }
+            HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { events.append($0); return true }
+            return events
+        }
+        func pid(_ f: String) -> pid_t { pid_t((try? String(contentsOf: d.appendingPathComponent(f), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0 }
+        func size(_ f: String) -> Int { (try? fm.attributesOfItem(atPath: d.appendingPathComponent(f).path)[.size] as? Int) ?? 0 }
+
+        let first = run()
+        let same = pid("same.pid"), own = pid("own.pid")
+        check(first.contains { $0["event"] as? String == "task_done" } && first.last?["event"] as? String == "done",
+              "linger (full run): the first run ends at task_done: \(first.map { $0["event"] as? String ?? "?" })")
+        Thread.sleep(forTimeInterval: 0.5)
+        let s0 = size("same.txt"), o0 = size("own.txt")
+        Thread.sleep(forTimeInterval: 0.5)
+        check(HarnessRun.lingering == nil && same > 0 && own > 0 && HarnessProcess.member(same) != nil && HarnessProcess.member(own) != nil
+              && getpgid(own) == own && size("same.txt") > s0 && size("own.txt") > o0,
+              "linger (full run): its harness gone, nothing lingering, both children still up and writing")
+
+        fm.createFile(atPath: d.appendingPathComponent("second").path, contents: Data())
+        let second = run()
+        check(!fm.fileExists(atPath: d.appendingPathComponent("alive-at-start").path),
+              "linger (full run): the next run starts only once both children are gone (alive then: \((try? String(contentsOf: d.appendingPathComponent("alive-at-start"), encoding: .utf8)) ?? "none"))")
+        let s1 = size("same.txt"), o1 = size("own.txt")
+        Thread.sleep(forTimeInterval: 0.5)
+        check(HarnessProcess.member(same) == nil && HarnessProcess.member(own) == nil && size("same.txt") == s1 && size("own.txt") == o1,
+              "linger (full run): neither child writes after the next run started")
+        check(!second.contains { $0["event"] as? String == "error" } && second.contains { $0["event"] as? String == "task_done" },
+              "linger (full run): the next run itself ran: \(second.map { $0["event"] as? String ?? "?" })")
+        for p in [same, own] where HarnessProcess.member(p) != nil { kill(p, SIGKILL) }
+
+        // Stop while the next run waits for the last one's process to end (a harness deaf to stdin and SIGTERM: about
+        // 5 s): the run is cancelled, and its harness is never started (deskmind #103 external review, P2)
+        let launched = { (try? String(contentsOf: d.appendingPathComponent("launched"), encoding: .utf8))?.count ?? 0 }
+        let before = launched()
+        let deaf = fakeLingering(#"trap "" TERM; sleep 30"#)
+        HarnessRun.lingering = deaf
+        Thread.detachNewThread { Thread.sleep(forTimeInterval: 0.5); Runner.requestStop() }
+        let stopped = run()
+        check(stopped.last?["reason"] as? String == "cancelled" && !stopped.contains { $0["event"] as? String == "task_done" }
+              && launched() == before && !deaf.process.isRunning,
+              "linger (stop): a stop while the last run's process is ended: no launch (\(stopped.map { $0["event"] as? String ?? "?" }))")
+        check(!Runner.stopRequested && !Runner.busy && Runner.current == nil, "linger (stop): nothing of it left for the next run")
+
+        // A stop the moment the request is taken, before the run function has begun: honoured (the run function no
+        // longer clears the flags), and a second request meanwhile is refused
+        let before2 = launched()
+        check(Runner.accept() && !Runner.accept(), "linger (stop): one request taken at a time")
+        Runner.requestStop()
+        var early: [[String: Any]] = []
+        HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { early.append($0); return true }
+        check(early.last?["reason"] as? String == "cancelled" && launched() == before2 && !Runner.busy && !Runner.stopRequested,
+              "linger (stop): a stop right after the request is taken: no launch (\(early.map { $0["event"] as? String ?? "?" }))")
+
+        // A stop between the start and `current` (the launch's own moment, held open here): it waits for the
+        // launch, then stops the process it started -- not lost
+        check(Runner.accept(), "linger (stop): taken")
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep"); sleeper.arguments = ["30"]
+        let started = (try? Runner.launch(sleeper, started: {
+            Thread.detachNewThread { Runner.requestStop() }
+            Thread.sleep(forTimeInterval: 0.3)
+        })) ?? false
+        let until = Date().addingTimeInterval(3)
+        while sleeper.isRunning && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
+        check(started && !sleeper.isRunning && Runner.stopRequested, "linger (stop): a stop during the launch stops the process started")
+        // ...and one before it: nothing started
+        let never = Process()
+        never.executableURL = URL(fileURLWithPath: "/bin/sleep"); never.arguments = ["30"]
+        check((try? Runner.launch(never)) == false && !never.isRunning, "linger (stop): a stop before the launch: nothing started")
+        _ = Runner.release(); Runner.busy = false; Runner.cancelled = false
     }
 
     // MARK: Save Full Log
