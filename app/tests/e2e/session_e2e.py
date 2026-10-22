@@ -4,7 +4,7 @@ Starts the fake model service (fake_model.py) and SessionE2E (Helper/SessionHost
 then drives the socket as the main app would. Each check prints PASS or FAIL; the exit status is the number of
 failures.
 
-    python3 -I session_e2e.py <SessionE2E> <node> <harness.mjs> <out dir>
+    python3 -I session_e2e.py <SessionE2E> <node> <harness.mjs> <out dir> [<SessionClientE2E> [<ShellE2E>]]
 """
 import json
 import os
@@ -19,7 +19,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN, NODE, BUNDLE, OUT = sys.argv[1:5]
 CLIENT = sys.argv[5] if len(sys.argv) > 5 else None     # SessionClientE2E: the app's client, on a helper of its own
+SHELL = sys.argv[6] if len(sys.argv) > 6 else None      # ShellE2E: the 0.5 window's model, on a helper (and a folder) of its own
 DIR = os.path.join(OUT, "support")
+SHELL_DIR = os.path.join(OUT, "shell-support")
 # a Unix socket's path is at most 103 bytes: beside the output when that is short enough, else in a folder of its own
 SOCK = os.path.join(OUT, "s.sock")
 if len(SOCK.encode()) > 100:
@@ -121,10 +123,10 @@ def alive(pid):
         return True
 
 
-def start_helper(env):
+def start_helper(env, folder=DIR):
     if os.path.exists(SOCK):
         os.unlink(SOCK)
-    p = subprocess.Popen([BIN, "serve", SOCK, DIR, NODE, BUNDLE, str(IDLE)], env=env, stdout=subprocess.PIPE,
+    p = subprocess.Popen([BIN, "serve", SOCK, folder, NODE, BUNDLE, str(IDLE)], env=env, stdout=subprocess.PIPE,
                          stderr=open(os.path.join(OUT, "helper.log"), "a"), text=True)
     assert p.stdout.readline().strip() == "listening"
     return p
@@ -168,15 +170,31 @@ def main():
             r = subprocess.run([CLIENT, SOCK, CONFIG], capture_output=True, text=True, timeout=240)
             print(r.stdout, end="")
             check(r.returncode == 0, f"the app's session client against the helper ({r.returncode} failures){r.stderr[-400:]}")
+        if SHELL:
+            # the 0.5 window's model: a conversation, then the app quits and the helper restarts (the sessions' processes
+            # go with it), then the app again; defaults in a suite of their own (removed at the end), a folder of its own
+            os.makedirs(SHELL_DIR, exist_ok=True)
+            suite = f"ai.deskmind.e2e.shell.{os.getpid()}"
+            state = os.path.join(OUT, "shell-state")
+            for phase in ["a", "b"]:
+                for p in helpers:
+                    if p.poll() is None:
+                        p.kill(); p.wait()
+                helpers.append(start_helper(env, SHELL_DIR))
+                r = subprocess.run([SHELL, phase, SOCK, CONFIG, suite, SHELL_DIR, state], capture_output=True, text=True, timeout=300)
+                print(r.stdout, end="")
+                check(r.returncode == 0, f"the 0.5 window's model against the helper, phase {phase} ({r.returncode} failures){r.stderr[-400:]}")
+            subprocess.run(["defaults", "delete", suite], capture_output=True)
     finally:
         for p in helpers + [fake]:
             if p.poll() is None:
                 p.kill()
         # the session processes go when their helper does (stdin's end); any left are reported, then stopped
-        left = subprocess.run(["pgrep", "-f", f"harness.mjs session --dir {DIR}"], capture_output=True, text=True).stdout.split()
-        check(until(lambda: not subprocess.run(["pgrep", "-f", f"harness.mjs session --dir {DIR}"], capture_output=True).stdout, 20) is not None,
+        pattern = f"harness.mjs session --dir {OUT}/"
+        left = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
+        check(until(lambda: not subprocess.run(["pgrep", "-f", pattern], capture_output=True).stdout, 20) is not None,
               f"no session process outlives the test ({left})")
-        for pid in subprocess.run(["pgrep", "-f", f"harness.mjs session --dir {DIR}"], capture_output=True, text=True).stdout.split():
+        for pid in subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split():
             os.kill(int(pid), signal.SIGKILL)
 
 

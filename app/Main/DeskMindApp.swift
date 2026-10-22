@@ -460,6 +460,18 @@ struct DevTools: View {
     }
 }
 
+/// The window's content: the 0.5 main window when `ui05.shell` is on, else the window as it was (RootView).
+struct AppRoot: View {
+    @AppStorage(ShellFlag.key) private var shellOn = false
+
+    var body: some View {
+        Group {
+            if shellOn { MainSplitView(shell: ShellModel.live) } else { RootView() }
+        }
+        .onChange(of: shellOn) { was, now in if was && !now { ShellModel.live.stopWatching() } }
+    }
+}
+
 /// Home, a run of the user's own instruction (new, or a past one from the recent list), or the examples screen.
 struct RootView: View {
     enum Screen { case home, run(GoalRequest), record(RunRecord), examples }
@@ -524,10 +536,12 @@ struct DeskMindApp: App {
     @AppStorage(RunRecorder.wholeScreenKey) private var recordWholeScreen = false
     @AppStorage(RunRecorder.smoothKey) private var recordSmooth = false
     @AppStorage(LiveView.enabledKey) private var liveView = true
+    /// The 0.5 main window (M1, a developer switch until it is the only one).
+    @AppStorage(ShellFlag.key) private var shellOn = false
     var body: some Scene {
         WindowGroup(L("DeskMind", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
             LocalizedRoot {
-                RootView().environmentObject(model).environmentObject(downloader)
+                AppRoot().environmentObject(model).environmentObject(downloader)
                     .environmentObject(eyes).environmentObject(history)
             }
         }
@@ -549,6 +563,13 @@ struct DeskMindApp: App {
                 // A corner card with the window the task works in, live, and the step it is taking.
                 Toggle(L("Show a Live View of the Task", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
                        isOn: $liveView)
+                // Developer: the 0.5 main window (conversations, chat, the agent's column), off by default.
+                Toggle(L("Use the New Main Window (0.5 Preview)", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                       isOn: $shellOn)
+            }
+            // The 0.5 window's keys (handoff §3.7), only while it is on: the old window keeps its own.
+            if shellOn {
+                ShellCommands(lang: (AppLanguage(rawValue: language) ?? .en).resolved)
             }
             // Help: where to report a problem, and the project.
             CommandGroup(replacing: .help) {

@@ -9,6 +9,10 @@
 //                 false is kept): a task of the session shows the live card
 //   session.send  {session_id, line}     one control line (SessionWire.validate: a JSON object of a known type)
 //   session.end   {session_id}           `end`, then stdin closed: a running task is stopped, the process exits
+//   session.delete {session_id}          the user deletes the session: its process (if any) is ended and waited for,
+//                                        then its folder (history, task runs) and its stderr log are removed. Refused
+//                                        (`task_running`) while a task of it runs, and (`busy`) while it is opening or
+//                                        a process of it from an earlier helper still holds its lock
 //   sessions.list                        `harness.mjs sessions list`, each marked `open` when its process runs here
 //   sessions.watch {after: {session_id: after_seq}, runs?: {run_id: after_seq}}
 //                 one long-lived connection: every session's lines (each has its session_id), from the cursors on.
@@ -76,7 +80,7 @@ enum SessionHost {
                                  finish: { _, status in LiveCard.finish(status) })
     }
 
-    static let ops: Set<String> = ["session.open", "session.send", "session.end", "sessions.list", "sessions.watch"]
+    static let ops: Set<String> = ["session.open", "session.send", "session.end", "session.delete", "sessions.list", "sessions.watch"]
 
     // MARK: state (under `lock`)
 
@@ -186,6 +190,7 @@ enum SessionHost {
         case "session.open": reply = open(req)
         case "session.send": reply = send(sessionID: req["session_id"] as? String ?? "", line: req["line"])
         case "session.end": reply = end(sessionID: req["session_id"] as? String ?? "")
+        case "session.delete": reply = delete(sessionID: req["session_id"] as? String ?? "")
         default: reply = list()
         }
         var out = (try? JSONSerialization.data(withJSONObject: reply)) ?? Data("{}".utf8)
@@ -331,6 +336,49 @@ enum SessionHost {
         _ = s.write(["type": "end"])
         s.closeInput()
         return ["ok": true]
+    }
+
+    /// The user deletes a session (the main app's session list): its process, if one runs here, is ended and waited
+    /// for; then its folder — the history and its tasks' run folders — and its stderr log are removed. Nothing is
+    /// removed while a task of it runs (the user stops it first: a delete is never a stop), while it is being opened,
+    /// or while a process of it this helper does not know (an earlier helper's, still stopping its task) holds the
+    /// session's lock.
+    static func delete(sessionID id: String) -> [String: Any] {
+        guard validID(id) else { return ["ok": false, "code": "bad_request", "error": "a session id is letters, digits, _ and -, at most 64"] }
+        lock.lock()
+        if opening.contains(id) { lock.unlock(); return ["ok": false, "code": "busy", "error": "session \(id) is opening"] }
+        let s = sessions[id]
+        if let s, !s.activity.running.isEmpty {
+            lock.unlock(); return ["ok": false, "code": "task_running", "error": "a task of session \(id) is running"]
+        }
+        opening.insert(id)                  // no open of it meanwhile (session.open waits on it)
+        s?.closing = true
+        lock.unlock()
+        defer { lock.lock(); opening.remove(id); lock.unlock() }
+        if let s {
+            _ = s.write(["type": "end"])
+            s.closeInput()
+            let until = Date().addingTimeInterval(15)
+            while Date() < until {
+                lock.lock(); let gone = sessions[id] !== s; lock.unlock()
+                if gone && !s.process.isRunning { break }
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            lock.lock(); let gone = sessions[id] !== s; lock.unlock()
+            if !gone || s.process.isRunning { return ["ok": false, "code": "busy", "error": "session \(id) is still closing"] }
+        }
+        let folder = setup.dir.appendingPathComponent("sessions/\(id)")
+        // a process of it from an earlier helper (stopping its task when that helper went) still holds its lock
+        if let text = try? String(contentsOf: folder.appendingPathComponent("lock"), encoding: .utf8),
+           let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0, kill(pid, 0) == 0 || errno == EPERM {
+            return ["ok": false, "code": "busy", "error": "session \(id) is held by process \(pid)"]
+        }
+        let fm = FileManager.default
+        if fm.fileExists(atPath: folder.path) {
+            do { try fm.removeItem(at: folder) } catch { return ["ok": false, "error": "remove: \(error.localizedDescription)"] }
+        }
+        try? fm.removeItem(at: setup.logs.appendingPathComponent("\(id).stderr"))
+        return ["ok": true, "session_id": id]
     }
 
     static func list() -> [String: Any] {

@@ -132,6 +132,7 @@ final class SessionClient {
         static let end = "session.end"
         static let watch = "sessions.watch"
         static let list = "sessions.list"
+        static let delete = "session.delete"
     }
 
     enum SendResult: Equatable {
@@ -152,6 +153,7 @@ final class SessionClient {
         static func send(sessionId: String, line: [String: Any]) -> [String: Any] { ["op": Op.send, "session_id": sessionId, "line": line] }
         static func end(sessionId: String) -> [String: Any] { ["op": Op.end, "session_id": sessionId] }
         static func list() -> [String: Any] { ["op": Op.list] }
+        static func delete(sessionId: String) -> [String: Any] { ["op": Op.delete, "session_id": sessionId] }
         /// `after`: per session the last stored seq the app has, and per run the last executor seq: the helper replays
         /// what came after (attach), then streams.
         static func watch(after: [String: Int], runs: [String: Int]) -> [String: Any] { ["op": Op.watch, "after": after, "runs": runs] }
@@ -181,6 +183,8 @@ final class SessionClient {
     private var opened: [String: (config: String?, lang: String?)] = [:]
     /// Sessions the app ended (`end`): their process's exit is expected, and they are not opened again by themselves.
     private var endedByApp: Set<String> = []
+    /// Sessions the user deleted (`delete`): whatever still comes of them is left.
+    private var deleted: Set<String> = []
     /// The clock the gap grace is measured by (tests set their own).
     var now: () -> Date = Date.init
     /// Called after a line changed a session's state (on the thread that fed it).
@@ -402,6 +406,44 @@ final class SessionClient {
         return r["ok"] as? Bool != false
     }
 
+    /// Ends the session's process so that the next send starts a new one, with the app's settings as they are now
+    /// (`config`, `lang`): a process keeps the environment it was started with, so a key saved after it started
+    /// reaches the session only through a new process. Not an `end`: the session is opened again by itself (on the
+    /// next send, or the next watch). Call it only while nothing runs in the session (no task, no reply): the
+    /// process's end stops a running task.
+    @discardableResult
+    func restart(_ sessionId: String, config: String?, lang: String?) -> Bool {
+        lock.lock()
+        opened[sessionId] = (config, lang)
+        endedByApp.remove(sessionId)
+        lock.unlock()
+        guard let r = transport.request(Request.end(sessionId: sessionId)) else { return false }
+        return r["ok"] as? Bool != false || r["code"] as? String == "not_open"
+    }
+
+    /// Deletes the session: the helper ends its process and removes its history from this Mac (session.delete; it
+    /// refuses while a task of the session runs). The session leaves this client's states, and lines that still come
+    /// of it are left. nil when deleted, else why not (the helper's code).
+    func delete(_ sessionId: String) -> String? {
+        lock.lock()
+        endedByApp.insert(sessionId)        // its exit is expected: never opened again
+        lock.unlock()
+        guard let r = transport.request(Request.delete(sessionId: sessionId)) else {
+            lock.lock(); endedByApp.remove(sessionId); lock.unlock()
+            return "unavailable"
+        }
+        guard r["ok"] as? Bool != false else {
+            lock.lock(); endedByApp.remove(sessionId); lock.unlock()
+            return r["code"] as? String ?? "refused"
+        }
+        lock.lock()
+        deleted.insert(sessionId)
+        states[sessionId] = nil
+        opened[sessionId] = nil
+        lock.unlock()
+        return nil
+    }
+
     /// Watches again from the same cursors at most this many times in a row when a gap stays (the helper has not the
     /// missing lines): then the stream is kept, the held lines wait, and the next reconnect asks again.
     static let maxStalledRewatches = 3
@@ -514,6 +556,7 @@ final class SessionClient {
     func feed(_ line: ProtocolLine) -> SessionReducer.Applied {
         guard let id = line.sessionId else { return .ignored }
         lock.lock()
+        if deleted.contains(id) { lock.unlock(); return .ignored }
         var after = states[id] ?? SessionState(sessionId: id)
         states[id] = nil                                    // the reducer works on the only copy (no copy-on-write)
         let applied = SessionReducer.apply(&after, line)
