@@ -482,7 +482,9 @@ enum SessionReducer {
         } else {
             if s.droppedMessages.contains(d.msgId) { return }
             dropEmptyStreaming(&s)
-            s.messages.append(ChatMessage(id: d.msgId, role: "assistant", text: "", streaming: true, t: t, anchor: s.lastSeq))
+            // its place, should it never be stored: after the newest stored line here, held ones included
+            s.messages.append(ChatMessage(id: d.msgId, role: "assistant", text: "", streaming: true, t: t,
+                                          anchor: max(s.lastSeq, s.pendingSession.keys.max() ?? 0)))
             s.timeline.append(.message(d.msgId))
             i = s.messages.count - 1
         }
@@ -522,7 +524,10 @@ enum SessionReducer {
     private static func taskIndex(_ s: inout SessionState, _ runId: String) -> Int {
         if let i = s.taskPos[runId] { return i }
         s.taskPos[runId] = s.tasks.count
-        s.tasks.append(TaskState(runId: runId))
+        var t = TaskState(runId: runId)
+        // first heard of after the process went away (a replay of what it did): it went with it, as the others did
+        if s.exited != nil { t.cutOff = true; t.closed = "session_exit" }
+        s.tasks.append(t)
         s.timeline.append(.task(runId))
         return s.tasks.count - 1
     }

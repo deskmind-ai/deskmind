@@ -1159,6 +1159,23 @@ enum SessionTests {
             mock.requests = []
             check(c.send(control, to: "s") != .sent && mock.requests.isEmpty, "3: and while exited: refused here")
         }
+        // tasks first heard of after the exit (its replay comes later): gone with the process too
+        let late = SessionClient(transport: mock)
+        _ = late.open(sessionId: "s")
+        mock.streamLines = [["kind": "helper.watching", "open": []]]
+        late.watch()
+        mock.streamLines = []
+        [taskR1, start, done, end, se(3, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"y","by":"slash""#),
+         ex(1, #""kind":"start","raw":"y""#, run: "r2"), ex(2, #""kind":"step","text":"x","step_id":"s1""#, run: "r2")].forEach { late.feed($0) }
+        let ls0 = late.state("s")
+        check(ls0.task("r1")?.undo == .expired("session_exit") && ls0.runningTask == nil && ls0.task("r2")?.steps.map(\.status) == [.unknown], "replayed after the exit: closed, cut off: \(ls0.status)")
+        mock.requests = []
+        check(late.send(.answer(.respond(runId: "r1", option: 1)), to: "s") != .sent && late.send(.steer("改"), to: "s") != .sent && mock.requests.isEmpty, "nothing sent for them")
+        // a cut-off reply's place counts stored lines held behind a gap
+        let held = SessionReducer.reduce(SessionState(), [se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"a""#),
+            se(3, #""kind":"session.task","msg_id":"m","run_id":"r1","raw":"x","by":"slash""#), se(nil, #""kind":"session.delta","msg_id":"a1","text":"好","offset":0"#),
+            se(2, #""kind":"session.message","msg_id":"u2","role":"user","text":"b""#), exit])
+        check(held.timeline == [.message("u1"), .message("u2"), .task("r1"), .message("a1")], "anchor past held lines: \(held.timeline)")
         // 4. a long session: replaying it through the client stays cheap (300 tasks × 20 steps, 40 deltas a reply)
         var ls: [ProtocolLine] = [], q = 0
         for k in 1...300 {
