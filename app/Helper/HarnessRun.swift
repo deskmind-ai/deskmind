@@ -284,10 +284,8 @@ enum HarnessRun {
     static func run(_ spec: Runner.Spec, emit unlocked: @escaping ([String: Any]) -> Bool) {
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
-        guard Runner.claim() else { _ = emit(Runner.alreadyRunning); return }
-        Runner.cancelled = false; Runner.stopRequested = false
-        // Busy until task_done (this function returns then), not until the process exits: it lingers for the result
-        // card's answer, and the next run may start meanwhile.
+        // Busy (since the request was taken: Runner.accept) until task_done (this function returns then), not until the
+        // process exits: it lingers for the result card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
         Runner.clearing.lock(); Runner.clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         guard available else {
@@ -320,39 +318,40 @@ enum HarnessRun {
         fm.createFile(atPath: outURL.path, contents: nil)
         let outLog = try? FileHandle(forWritingTo: outURL)
         pruneLogs()    // after this run's files are made, so they count among the ones kept
-        // Stop pressed while the lingering run was waited for (up to 5 s) or the run was being prepared: no process
-        // to stop yet, only `cancelled` -- the run does not start.
-        if Runner.cancelled {
-            Runner.stopRequested = false
-            _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
-        }
-        // The machine lock: in one step, refused while a task acts on this Mac; a finished run lingering for its card
-        // (this helper's, or a session's) is ended -- its undo expires; the harness is started (a process group of its
-        // own) and named in the lock, before it is sent its task.
-        var launchError = ""
+        // One path, under the machine lock (ComputerLock): accepted (Runner.accept, before this function) → the lock →
+        // launched (Runner.launch, under the stop's lock: a stop since it was accepted keeps it from starting). In one
+        // guarded step: refused while a task acts on this Mac; a finished run lingering for its card (this helper's,
+        // or a session's) is ended -- its undo expires; the harness is started (a process group of its own) and named
+        // in the lock, before it is sent its task. Refused or not started: busy is let go by the defer above.
+        var launchError = "", stoppedFirst = false
         switch ComputerLock.acquire(runID: runID, by: "helper", spawn: {
-            do { try p.run(); return p.processIdentifier } catch { launchError = error.localizedDescription; return nil }
+            do {
+                guard try Runner.launch(p) else { stoppedFirst = true; return nil }
+                return p.processIdentifier
+            } catch { launchError = error.localizedDescription; return nil }
         }) {
         case .busy(let h):
             NSLog("DeskMind Hands: run refused: \(h.runID) (\(h.by)) acts on this Mac")
-            _ = emit(ComputerLock.busy); return
+            _ = Runner.release(); _ = emit(ComputerLock.busy); return
         case .alive(let h):
             NSLog("DeskMind Hands: run refused: the lingering run \(h.runID) would not end")
-            _ = emit(stillRunning); return
+            _ = Runner.release(); _ = emit(stillRunning); return
         case .ok(nil):
-            _ = emit(["event": "error", "error": "launch: \(launchError)"]); return
+            _ = Runner.release()
+            if stoppedFirst { _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]) }
+            else { _ = emit(["event": "error", "error": "launch: \(launchError)"]) }
+            return
         case .ok:
             break
         }
         // this helper's own lingering run, if it was the one ended: its card can no longer be answered
         lock.lock(); if let l = lingering { l.close(); lingering = nil; expiredRun = l.runID }; lock.unlock()
-        Runner.current = p   // stopRequested is not cleared here: a stop since the check above stands
         // once task_done is passed on (`linger.over`), the run's lines go to `linger` (result_response), not to this
         // run's connection, and the state is the next run's
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
         linger.runID = runID
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
-        // a stop between the check above and here found no stdin to write to: it is sent now
+        // a stop between the launch and here found no stdin to write to (it terminated the process): the stop line too
         if Runner.cancelled { Runner.stopRequested = true; stop(p) }
 
         // The request: one JSON line, then stdin stays open for answers.
@@ -404,6 +403,9 @@ enum HarnessRun {
         let isOver = { lock.lock(); defer { lock.unlock() }; return linger.over }
         while p.isRunning && !isOver() { Thread.sleep(forTimeInterval: 0.25) }
         if !isOver() { _ = reader.wait(timeout: .now() + 3) }
+        // no longer the run's process before its stdin is let go: a stop from now on would find no stdin and kill a
+        // process kept up for the result card (its undo with it); whether this run was stopped, read once
+        let stopped = Runner.release()
         lock.lock()
         linger.over = true; input = nil
         let lingers = p.isRunning
@@ -429,9 +431,6 @@ enum HarnessRun {
             _ = reader.wait(timeout: .now() + 3)    // the last lines into the log (at once when they are read already)
             try? outLog?.close()
         }
-        let stopped = Runner.stopRequested
-        Runner.stopRequested = false
-        Runner.current = nil
         LiveCard.finish(stopped ? .stopped : ending(state.finished?["harness_status"] as? String))
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept

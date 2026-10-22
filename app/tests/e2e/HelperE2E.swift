@@ -245,6 +245,7 @@ enum HelperE2E {
         let script = """
             #!/bin/sh
             D='\(d.path)'
+            echo x >> "$D/launched"
             read req
             if [ -f "$D/second" ]; then
               kill -0 "$(cat "$D/same.pid")" 2>/dev/null && echo same >> "$D/alive-at-start"
@@ -267,6 +268,7 @@ enum HelperE2E {
         fm.createFile(atPath: node.path, contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
         func run() -> [[String: Any]] {
             var events: [[String: Any]] = []
+            guard Runner.accept() else { return [["event": "error", "error": "not accepted"]] }
             HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { events.append($0); return true }
             return events
         }
@@ -310,6 +312,46 @@ enum HelperE2E {
         let after = run()
         check(after.contains { $0["event"] as? String == "task_done" }, "linger (full run): the child gone, the next run runs")
         for p in [same, orphan] where up(p) { kill(p, SIGKILL) }
+
+        // Stop while the next run's machine lock ends the last one's process (a harness deaf to SIGTERM: SIGKILL after
+        // 1.5 s): the run is cancelled, and its harness is never started (deskmind #103 external review, P2)
+        let launched = { (try? String(contentsOf: d.appendingPathComponent("launched"), encoding: .utf8))?.count ?? 0 }
+        let before = launched()
+        guard let deaf = fakeLingering("run_deaf_stop", #"trap "" TERM; sleep 30"#) else { return }
+        Thread.detachNewThread { Thread.sleep(forTimeInterval: 0.5); Runner.requestStop() }
+        let stopped = run()
+        check(stopped.last?["reason"] as? String == "cancelled" && !stopped.contains { $0["event"] as? String == "task_done" }
+              && launched() == before && !deaf.process.isRunning,
+              "linger (stop): a stop while the last run's process is ended: no launch (\(stopped.map { $0["event"] as? String ?? "?" }))")
+        check(!Runner.stopRequested && !Runner.busy && Runner.current == nil, "linger (stop): nothing of it left for the next run")
+
+        // A stop the moment the request is taken, before the run function has begun: honoured (the run function no
+        // longer clears the flags), and a second request meanwhile is refused
+        let before2 = launched()
+        check(Runner.accept() && !Runner.accept(), "linger (stop): one request taken at a time")
+        Runner.requestStop()
+        var early: [[String: Any]] = []
+        HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { early.append($0); return true }
+        check(early.last?["reason"] as? String == "cancelled" && launched() == before2 && !Runner.busy && !Runner.stopRequested,
+              "linger (stop): a stop right after the request is taken: no launch (\(early.map { $0["event"] as? String ?? "?" }))")
+
+        // A stop between the start and `current` (the launch's own moment, held open here): it waits for the
+        // launch, then stops the process it started -- not lost
+        check(Runner.accept(), "linger (stop): taken")
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep"); sleeper.arguments = ["30"]
+        let started = (try? Runner.launch(sleeper, started: {
+            Thread.detachNewThread { Runner.requestStop() }
+            Thread.sleep(forTimeInterval: 0.3)
+        })) ?? false
+        let until = Date().addingTimeInterval(3)
+        while sleeper.isRunning && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
+        check(started && !sleeper.isRunning && Runner.stopRequested, "linger (stop): a stop during the launch stops the process started")
+        // ...and one before it: nothing started
+        let never = Process()
+        never.executableURL = URL(fileURLWithPath: "/bin/sleep"); never.arguments = ["30"]
+        check((try? Runner.launch(never)) == false && !never.isRunning, "linger (stop): a stop before the launch: nothing started")
+        _ = Runner.release(); Runner.busy = false; Runner.cancelled = false
     }
 
     // MARK: Save Full Log

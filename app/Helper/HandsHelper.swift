@@ -284,13 +284,12 @@ func serve() {
             if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {
                 // A run streams: one line per event until it ends, on this connection.
-                func refuse(_ e: [String: Any]) {
-                    var line = (try? JSONSerialization.data(withJSONObject: e)) ?? Data()
-                    line.append(0x0A)
-                    _ = line.withUnsafeBytes { write(c, $0.baseAddress, line.count) }
-                }
-                guard Runner.current == nil && !Runner.busy else {
-                    refuse(["event": "error", "error": "a run is already in progress"]); return
+                // taken (busy, the last stop flags cleared) in one step with the check: a stop from now on is this run's
+                guard Runner.accept() else {
+                    var busy = (try? JSONSerialization.data(withJSONObject: ["event": "error", "error": "a run is already in progress"])) ?? Data()
+                    busy.append(0x0A)
+                    _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
+                    return
                 }
                 // One computer task at a time on this Mac, whoever starts it: the run takes the machine lock as it
                 // starts (ComputerLock.acquire, in HarnessRun.run / Runner.run) and is refused there.
