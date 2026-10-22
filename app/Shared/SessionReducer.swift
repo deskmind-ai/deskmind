@@ -144,7 +144,11 @@ struct TaskState: Equatable {
     var resultResponse: ResultResponse? = nil
     /// The session seq of session.task: the task's place in the chat (nil until it comes).
     var sessionSeq: Int? = nil
-    var closed: String? = nil       // session.task_closed why
+    /// session.task_closed's why.
+    var closedWhy: String? = nil
+    /// The session process that started it is gone (its session.task seq is at or below SessionState.goneUpTo). A run
+    /// whose session.task has not come is not tied to a process yet, and is not gone.
+    var gone = false
     /// The run's contiguous cursor: every executor seq up to it is applied (replays at or below it are skipped).
     var lastSeq = 0
 
@@ -177,8 +181,10 @@ struct TaskState: Equatable {
     /// The answer: task_done's, else answer_given's, else session.task_end's.
     var answer: String? { done?.answer ?? givenAnswer ?? end?.answer }
 
-    /// The session's process ended (helper.session_exit) before this task ended: it is not running any more.
-    var cutOff = false
+    /// Its result card is closed: session.task_closed, or its process is gone (and its executor with it).
+    var closed: String? { closedWhy ?? (gone ? "session_exit" : nil) }
+    /// Its process went away before it ended (no task_done, no session.task_end): it is not running any more.
+    var cutOff: Bool { gone && done == nil && end == nil }
 
     var ended: Bool { done != nil || end != nil || cutOff }
     var running: Bool { !ended }
@@ -224,9 +230,15 @@ struct SessionState: Equatable {
     /// The stored seq the user has seen up to (markSeen): problems after it make the error dot.
     var seenSeq = 0
     var lastEventAt: Double? = nil
-    /// The session's process ended (helper.session_exit, its exit code): nothing runs until it is opened again
-    /// (SessionClient re-opens it on the next send or watch); a new session.start clears it.
+    /// The latest process ended (helper.session_exit for it, its exit code): nothing runs until it is opened again
+    /// (SessionClient re-opens it on the next send or watch); the next process's session.start clears it.
     var exited: Int? = nil
+    /// The latest process (its session.start): its pid (when the helper adds it) and the stored seq it started at.
+    var processPid: Int? = nil
+    var processStart: Int? = nil
+    /// Runs whose session.task seq is at or below this belong to processes that are gone: an exit's last_seq, or a
+    /// later process's start (only one process runs a session at a time).
+    var goneUpTo = 0
 
     func message(_ id: String) -> ChatMessage? { messages.last { $0.id == id } }
     func task(_ runId: String) -> TaskState? { taskPos[runId].map { tasks[$0] } }
@@ -310,13 +322,13 @@ enum SessionReducer {
         case .taskClosed(let e): settle(&s, e.runId)
         case .taskUndo(let e): settle(&s, e.runId)
         case .steer(let e): settle(&s, e.runId)
-        case .sessionExit: for i in s.tasks.indices { settle(&s.tasks[i]) }
+        case .sessionExit, .sessionStart: for i in s.tasks.indices { settle(&s.tasks[i], goneUpTo: s.goneUpTo) }
         default: break
         }
     }
 
     private static func settle(_ s: inout SessionState, _ runId: String) {
-        if let i = s.taskPos[runId] { settle(&s.tasks[i]) }
+        if let i = s.taskPos[runId] { settle(&s.tasks[i], goneUpTo: s.goneUpTo) }
     }
 
     /// One executor line of `runId` in its place.
@@ -325,7 +337,7 @@ enum SessionReducer {
         if let seq = line.seq { s.tasks[i].lastSeq = seq }
         if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
         executor(&s.tasks[i], line.event, line.t)
-        settle(&s.tasks[i])
+        settle(&s.tasks[i], goneUpTo: s.goneUpTo)
     }
 
     // MARK: the order of the chat
@@ -336,13 +348,18 @@ enum SessionReducer {
     // item that gets its stored seq goes at the end of the front part; a reply cut off by the process's end (never
     // stored) goes right after what was stored when it began (`placeInterrupted`).
 
-    /// `item` just got its stored seq, the newest: to the end of the stored part.
-    private static func place(_ s: inout SessionState, _ item: TimelineItem) {
+    /// `item` just got its stored seq `seq`, the newest stored: to the end of the stored part — before any cut-off
+    /// reply placed there that began after it (its anchor is at or past `seq`).
+    private static func place(_ s: inout SessionState, _ item: TimelineItem, seq: Int) {
         if let i = s.timeline.lastIndex(of: item) {
             s.timeline.remove(at: i)
             if i < s.placedItems { s.placedItems -= 1 }
         }
-        s.timeline.insert(item, at: s.placedItems)
+        var at = s.placedItems
+        while at > 0, case .message(let id) = s.timeline[at - 1], let m = s.message(id), m.seq == nil, m.interrupted, let a = m.anchor, a >= seq {
+            at -= 1
+        }
+        s.timeline.insert(item, at: at)
         s.placedItems += 1
     }
 
@@ -355,7 +372,7 @@ enum SessionReducer {
             }
             s.placedTasks += 1
         }
-        place(&s, .task(runId))
+        if let q = s.task(runId)?.sessionSeq { place(&s, .task(runId), seq: q) }
     }
 
     /// A reply cut off by the process's end: right after the stored items up to the seq it began at.
@@ -378,6 +395,19 @@ enum SessionReducer {
         s.placedItems += 1
     }
 
+    /// The latest process went away: a reply it was streaming is cut off (kept, interrupted, at its place); what it
+    /// had queued was never sent (SessionState.unsent).
+    private static func processGone(_ s: inout SessionState) {
+        dropEmptyStreaming(&s)
+        for i in s.messages.indices where s.messages[i].streaming {
+            s.messages[i].streaming = false
+            s.messages[i].interrupted = true
+            if let a = s.messages[i].anchor { placeInterrupted(&s, s.messages[i].id, anchor: a) }
+        }
+        s.unsent += s.queue
+        s.queue = []
+    }
+
     // MARK: session events
 
     private static func session(_ s: inout SessionState, _ ev: ProtocolEvent, _ line: ProtocolLine) {
@@ -385,23 +415,31 @@ enum SessionReducer {
         case .sessionStart(let e):
             if let id = line.sessionId { s.sessionId = id }
             s.resumed = e.resumed
-            s.exited = nil
-        case .sessionExit(let e):
-            s.exited = e.code ?? -1
-            // a reply in progress stops where it is; a running task is cut off, its card can no longer be answered
-            dropEmptyStreaming(&s)
-            for i in s.messages.indices where s.messages[i].streaming {
-                s.messages[i].streaming = false
-                s.messages[i].interrupted = true
-                if let a = s.messages[i].anchor { placeInterrupted(&s, s.messages[i].id, anchor: a) }
+            // the same process's start again (a replay fed twice): nothing new. By pid when the helper adds it; else
+            // a start at the same stored seq while the latest process has not exited.
+            let same: Bool
+            if let p = e.pid, let cur = s.processPid { same = p == cur }
+            else { same = s.exited == nil && s.processStart != nil && e.lastSeq == s.processStart }
+            if !same {
+                // a new process: the one before is gone, with what lived only in it (whether or not its exit came first)
+                processGone(&s)
+                s.exited = nil
+                s.processPid = e.pid
+                s.processStart = e.lastSeq
+                s.goneUpTo = max(s.goneUpTo, e.lastSeq ?? 0)
             }
-            for i in s.tasks.indices where s.tasks[i].running { s.tasks[i].cutOff = true }   // settle closes what was open
-            // what was queued lived in the process: not sent, and not pending any more (SessionClient.resend)
-            s.unsent += s.queue
-            s.queue = []
-            // a result card still answerable: its executor went with the process, and undo with it
-            // (every task the process had, whether or not its task_done has come yet: it may be replayed later)
-            for i in s.tasks.indices where s.tasks[i].closed == nil { s.tasks[i].closed = "session_exit" }
+        case .sessionExit(let e):
+            // its runs are gone whenever this comes; without last_seq, those the app has seen
+            s.goneUpTo = max(s.goneUpTo, e.lastSeq ?? max(s.lastSeq, s.pendingSession.keys.max() ?? 0))
+            // the latest process, or one before it (an exit that comes after the next process's start)?
+            let latest: Bool
+            if let p = e.pid, let cur = s.processPid { latest = p == cur }
+            else if let l = e.lastSeq, let st = s.processStart { latest = l >= st }
+            else { latest = true }
+            if latest {
+                s.exited = e.code ?? -1
+                processGone(&s)
+            }
         case .message(let m):
             if let i = s.messages.lastIndex(where: { $0.id == m.msgId }) {
                 s.messages[i].text = m.text
@@ -416,13 +454,13 @@ enum SessionReducer {
                 s.messages[i].t = line.t
                 s.messages[i].seq = line.seq
                 s.messages[i].interrupted = false
-                if line.seq != nil { place(&s, .message(m.msgId)) }
+                if let q = line.seq { place(&s, .message(m.msgId), seq: q) }
             } else {
                 if m.role == "assistant" { dropEmptyStreaming(&s) }
                 s.messages.append(ChatMessage(id: m.msgId, role: m.role, text: m.text, streaming: false, replyTo: m.replyTo, model: m.model,
                                               via: m.via, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
                 s.timeline.append(.message(m.msgId))
-                if line.seq != nil { place(&s, .message(m.msgId)) }
+                if let q = line.seq { place(&s, .message(m.msgId), seq: q) }
             }
         case .delta(let d):
             delta(&s, d, t: line.t)
@@ -431,7 +469,7 @@ enum SessionReducer {
             if let seq = line.seq {
                 s.errors.append(StoredError(seq: seq, error: e, t: line.t))
                 s.timeline.append(.error(seq))
-                place(&s, .error(seq))
+                place(&s, .error(seq), seq: seq)
             } else {
                 s.lastRefusal = e
             }
@@ -454,7 +492,7 @@ enum SessionReducer {
             s.tasks[i].endSeq = line.seq
         case .taskClosed(let e):
             let i = taskIndex(&s, e.runId)
-            s.tasks[i].closed = e.why
+            s.tasks[i].closedWhy = e.why
         case .taskUndo(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].sessionUndo = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
@@ -524,10 +562,7 @@ enum SessionReducer {
     private static func taskIndex(_ s: inout SessionState, _ runId: String) -> Int {
         if let i = s.taskPos[runId] { return i }
         s.taskPos[runId] = s.tasks.count
-        var t = TaskState(runId: runId)
-        // first heard of after the process went away (a replay of what it did): it went with it, as the others did
-        if s.exited != nil { t.cutOff = true; t.closed = "session_exit" }
-        s.tasks.append(t)
+        s.tasks.append(TaskState(runId: runId))
         s.timeline.append(.task(runId))
         return s.tasks.count - 1
     }
@@ -642,7 +677,9 @@ enum SessionReducer {
     /// first); a step shows its result, else running while the task runs, else — the task ended without one — not
     /// finished, the last such one unknown when the end says so (cause last_step_unknown) or the process went away. An
     /// ended task waits for nobody: no open card, no pause, no look-only, no stopping, no preparing.
-    private static func settle(_ task: inout TaskState) {
+    private static func settle(_ task: inout TaskState, goneUpTo: Int) {
+        let gone = task.sessionSeq.map { $0 <= goneUpTo } ?? false
+        if task.gone != gone { task.gone = gone }
         let ended = task.ended
         let endedWhy = (task.done == nil && task.end == nil) ? "session_exit" : "task_done"
         // (written only where it changes: the arrays stay shared with the state before, which keeps feeding cheap)

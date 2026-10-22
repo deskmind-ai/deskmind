@@ -39,6 +39,7 @@ enum SessionTests {
         exitLeftoversTests()
         interleavingPropertyTests()
         rereviewTests()
+        processInterleavingTests()
     }
 
     // MARK: fixtures
@@ -743,6 +744,7 @@ enum SessionTests {
         // an exit this app never heard: helper.watching does not list a session it opened
         let unheard = SessionClient(transport: mock)
         _ = unheard.open(sessionId: "s")
+        unheard.feed(taskR1)
         unheard.feed(ProtocolLine(seq: 1, runId: "r1", sessionId: "s", event: .ask(AskEvent(askId: "a1", card: CardEvent(kind: "action", text: "?", options: [CardOption(kind: "approve", text: "ok")], freeText: false, blocking: true)))))
         check(!unheard.state("s").composerEnabled, "a card waits")
         mock.streamLines = [["kind": "helper.watching", "open": ["other"]]]
@@ -1159,16 +1161,19 @@ enum SessionTests {
             mock.requests = []
             check(c.send(control, to: "s") != .sent && mock.requests.isEmpty, "3: and while exited: refused here")
         }
-        // tasks first heard of after the exit (its replay comes later): gone with the process too
+        // tasks first heard of after the exit: a session that is not running gets no replay, so they come with the next
+        // process's replay, after its session.start, whose last_seq says they are older: gone with their process
         let late = SessionClient(transport: mock)
         _ = late.open(sessionId: "s")
         mock.streamLines = [["kind": "helper.watching", "open": []]]
         late.watch()
         mock.streamLines = []
-        [taskR1, start, done, end, se(3, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"y","by":"slash""#),
+        [se(nil, #""kind":"session.start","last_seq":3,"resumed":true"#), taskR1, start, done, end,
+         se(3, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"y","by":"slash""#),
          ex(1, #""kind":"start","raw":"y""#, run: "r2"), ex(2, #""kind":"step","text":"x","step_id":"s1""#, run: "r2")].forEach { late.feed($0) }
         let ls0 = late.state("s")
         check(ls0.task("r1")?.undo == .expired("session_exit") && ls0.runningTask == nil && ls0.task("r2")?.steps.map(\.status) == [.unknown], "replayed after the exit: closed, cut off: \(ls0.status)")
+        late.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":9}"#))   // (so the sends below find it exited)
         mock.requests = []
         check(late.send(.answer(.respond(runId: "r1", option: 1)), to: "s") != .sent && late.send(.steer("改"), to: "s") != .sent && mock.requests.isEmpty, "nothing sent for them")
         // a cut-off reply's place counts stored lines held behind a gap
@@ -1195,5 +1200,117 @@ enum SessionTests {
         ls.forEach { c.feed($0) }
         let took = Date().timeIntervalSince(t0)
         check(took < 3 && c.state("s").tasks.count == 300 && c.state("s").tasks.last?.steps.count == 20, "4: \(ls.count) lines in \(took) s (debug build)")
+    }
+
+    // MARK: processes (review of 15cc6f6)
+
+    /// A session whose process A dies (helper.session_exit with last_seq and pid) and is replaced by B, with a stored
+    /// line delayed (a gap) and the runs of both: whatever the order — the exit before or after the gap fill, before or
+    /// after B's session.start and its runs' lines — the final state is the live order's.
+    static func processInterleavingTests() {
+        let card = actionCard
+        let r = { (run: String, seq: Int, body: String) in ex(seq, body, run: run) }
+        let live: [ProtocolLine] = [
+            se(nil, #""kind":"session.start","last_seq":0,"resumed":false,"pid":100"#),                         // 0  A starts
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"a""#),                          // 1
+            se(nil, #""kind":"session.delta","msg_id":"m0","text":"","offset":0"#),                               // 2
+            se(2, #""kind":"session.task","msg_id":"m0","run_id":"r1","raw":"a","by":"model""#),                 // 3
+            r("r1", 1, #""kind":"start","raw":"a""#), r("r1", 2, #""kind":"ask","ask_id":"a1","# + card),          // 4 5
+            se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"排队的"}]"#),                             // 6
+            r("r1", 3, #""kind":"resumed","ask_id":"a1""#), r("r1", 4, #""kind":"step","text":"x","step_id":"s1""#), // 7 8
+            se(3, #""kind":"session.message","msg_id":"u2","role":"user","text":"b""#),                          // 9  (late: L1)
+            se(nil, #""kind":"session.delta","msg_id":"m1","text":"","offset":0"#),                               // 10
+            se(nil, #""kind":"session.delta","msg_id":"m1","text":"从前","offset":0"#),                           // 11 A's last live-only line
+            se(4, #""kind":"session.steer","run_id":"r1","text":"改""#),                                          // 12 (late: L2)
+            L(#"{"kind":"helper.session_exit","session_id":"s","code":9,"last_seq":4,"pid":100}"#),              // 13 the exit
+            se(nil, #""kind":"session.start","last_seq":4,"resumed":true,"pid":200"#),                          // 14 B starts
+            se(5, #""kind":"session.task_end","run_id":"r1","status":"interrupted","summary":"","undo":"none","cause":"last_step_unknown""#), // 15
+            se(6, #""kind":"session.task_closed","run_id":"r1","why":"session_end""#),                            // 16
+            se(7, #""kind":"session.message","msg_id":"u3","role":"user","text":"c""#),                          // 17
+            se(nil, #""kind":"session.delta","msg_id":"m2","text":"","offset":0"#),                               // 18
+            se(nil, #""kind":"session.delta","msg_id":"m2","text":"好","offset":0"#),                             // 19
+            se(8, #""kind":"session.message","msg_id":"m2","role":"assistant","text":"好","reply_to":"u3""#),     // 20
+            se(9, #""kind":"session.task","msg_id":"m3","run_id":"r2","raw":"c","by":"slash""#),                 // 21
+            r("r2", 1, #""kind":"start","raw":"c""#), r("r2", 2, #""kind":"step","text":"y","step_id":"s1""#),     // 22 23
+            r("r2", 3, #""kind":"step_result","step_id":"s1","status":"ok""#), r("r2", 4, #""kind":"ask","ask_id":"a2","# + card), // 24 25
+        ]
+        let exitAt = 13, startA = 0, startB = 14, aLastLive = 11
+        let late: [Int: Int] = [9: 10, 12: 18]          // a delayed stored line → the live-only line it must come before
+        let session = live.indices.filter { !live[$0].event.isSessionEvent ? false : $0 != exitAt && late[$0] == nil }
+        let runs = ["r1", "r2"].map { id in live.indices.filter { !live[$0].event.isSessionEvent && live[$0].runId == id } }
+        var streams: [[Int]] = [session] + runs + late.keys.sorted().map { [$0] } + [[exitAt]]
+        streams.removeAll { $0.isEmpty }
+        func allowed(_ i: Int, _ done: Set<Int>) -> Bool {
+            if i == exitAt { return done.contains(aLastLive) }
+            if live[i].runId == "r1" && !live[i].event.isSessionEvent { return done.contains(startA) }
+            if live[i].runId == "r2" && !live[i].event.isSessionEvent { return done.contains(startB) }
+            for (l, before) in late where i == before && !done.contains(l) { return false }
+            // a delayed line is late, never early: not before the live-only lines the process wrote before it
+            if late[i] != nil { return live[..<i].indices.allSatisfy { live[$0].seq != nil || !live[$0].event.isSessionEvent || $0 == exitAt || done.contains($0) } }
+            return true
+        }
+        struct RNG { var x: UInt64; mutating func next(_ n: Int) -> Int { x = x &* 6364136223846793005 &+ 1442695040888963407; return Int((x >> 33) % UInt64(n)) } }
+        func merge(_ pick: ([Int]) -> Int) -> [Int] {
+            var idx = Array(repeating: 0, count: streams.count), out: [Int] = [], done: Set<Int> = []
+            while out.count < live.count {
+                let ready = streams.indices.filter { idx[$0] < streams[$0].count && allowed(streams[$0][idx[$0]], done) }
+                guard !ready.isEmpty else { return [] }
+                let k = pick(ready)
+                let i = streams[k][idx[k]]; idx[k] += 1; out.append(i); done.insert(i)
+            }
+            return out
+        }
+        let sIdx = 0, exitIdx = streams.count - 1
+        let lateIdx = Set(streams.indices.filter { streams[$0].count == 1 && late[streams[$0][0]] != nil })
+        var orders: [(String, [Int])] = [
+            ("session first", merge { $0.contains(sIdx) ? sIdx : $0[0] }),
+            ("runs first", merge { $0.first { $0 != sIdx && $0 != exitIdx && !lateIdx.contains($0) } ?? $0[0] }),
+            ("exit early, fills late", merge { r in r.contains(exitIdx) ? exitIdx : (r.first { !lateIdx.contains($0) } ?? r[0]) }),
+            ("exit last, fills early", merge { r in r.first { lateIdx.contains($0) } ?? (r.first { $0 != exitIdx } ?? r[0]) }),
+            ("exit after B's start, runs last", merge { r in r.first { $0 == sIdx } ?? (r.first { $0 != exitIdx } ?? r[0]) }),
+        ]
+        for seed in 1...40 { var g = RNG(x: UInt64(seed)); orders.append(("seed \(seed)", merge { $0[g.next($0.count)] })) }
+        let want = SessionReducer.reduce(SessionState(), live)
+        check(want.status == .waitingForYou(cardKind: "action") && want.openCard?.runId == "r2" && want.exited == nil && want.goneUpTo == 4
+              && want.unsent.map(\.id) == ["q1"] && want.queue.isEmpty, "live: \(want.status)")
+        check(want.task("r1")?.steps.map(\.status) == [.unknown] && want.task("r1")?.cards.map(\.outcome) == [.answered] && want.task("r1")?.closed == "session_end"
+              && want.task("r2")?.gone == false && want.task("r2")?.steps.map(\.status) == [.ok], "live: r1 gone, r2 alive")
+        check(want.timeline == [.message("u1"), .task("r1"), .message("u2"), .message("m1"), .message("u3"), .message("m2"), .task("r2")]
+              && want.message("m1")?.interrupted == true, "live: the chat, the cut-off reply in its place: \(want.timeline)")
+        var tried = 0
+        for (how, o) in orders {
+            check(o.count == live.count, "\(how): a full order")
+            guard o.count == live.count else { continue }
+            let got = SessionReducer.reduce(SessionState(), o.map { live[$0] })
+            tried += 1
+            if got != want {
+                check(false, "\(how) \(o): differs")
+                dumpDiff(got, want)
+            }
+        }
+        check(tried == orders.count, "orders: \(tried)")
+        // and the orders cover what the review asked for
+        func before(_ a: Int, _ b: Int, _ o: [Int]) -> Bool { (o.firstIndex(of: a) ?? 0) < (o.firstIndex(of: b) ?? 0) }
+        let os = orders.map(\.1)
+        check(os.contains { before(exitAt, 12, $0) } && os.contains { before(12, exitAt, $0) }, "exit before and after the gap fill")
+        check(os.contains { before(exitAt, startB, $0) } && os.contains { before(startB, exitAt, $0) }, "exit before and after B's start")
+        check(os.contains { before(22, exitAt, $0) } && os.contains { before(22, 21, $0) }, "B's run lines before the exit, and before their session.task")
+        // the reviewer's cases, one by one
+        let exitA = live[exitAt], startBLine = live[startB]
+        // a stale exit (after B's start) does not touch B: not exited, B's run alive even before its session.task
+        let b = SessionReducer.reduce(SessionState(), Array(live[0...12]) + [startBLine, live[22], live[23], exitA] + Array(live[15...21]) + [live[24], live[25]])
+        check(b == want, "a stale exit after B's start and B's run lines: the same state")
+        // without pid, by last_seq: an exit at or past the latest start's last_seq is that process's
+        let noPid = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":4"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":4}"#)])
+        check(noPid.exited == 1, "no pid: last_seq decides")
+        let stale = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":6"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":4}"#)])
+        check(stale.exited == nil && stale.goneUpTo == 6, "no pid: an exit below the latest start is an older process's")
+        // a finished task is never "cut off"
+        let fin = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"""#),
+                                                        L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"last_seq":1}"#)])
+        check(fin.task("r1")?.cutOff == false && fin.task("r1")?.gone == true && fin.task("r1")?.closed == "session_exit", "done before its process went: not cut off, its card closed")
+        // a session.start fed twice (a replay of the whole stream) is the same process
+        let twice = SessionReducer.reduce(SessionState(), [live[0], live[1], live[6], live[0]])
+        check(twice.queue.map(\.id) == ["q1"] && twice.unsent.isEmpty, "the same start again: nothing gone")
     }
 }

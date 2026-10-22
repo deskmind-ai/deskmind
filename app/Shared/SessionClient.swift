@@ -14,6 +14,15 @@
 // stays past it ends the watch, and this client watches again from its contiguous cursors (`watch`), so the helper's
 // replay fills it.
 //
+// Process lifetimes (helper side: deskmind#105). A session runs one process at a time; a run belongs to the process
+// whose stored session.task named it. The helper adds `pid` to each process's session.start as it forwards it, and
+// says a process ended with {"kind":"helper.session_exit","session_id","code","last_seq","pid"}: `last_seq` is the last
+// stored session seq it forwarded from that process. So, whatever order the lines come in, a run whose session.task
+// seq is at or below an exit's last_seq (or a later process's session.start last_seq) is gone with its process, and an
+// exit for an older pid (one that comes after the next process's start) leaves the new process alone. Without
+// last_seq / pid (an older helper, or the app's own inference below), an exit is taken for the latest process and the
+// runs the app has seen tied to it; a run whose session.task has not come stays provisional.
+//
 // A session whose process ended without the app asking (helper.session_exit, or missing from helper.watching's `open`
 // though this client opened it) is opened again (session.open with its id) on the next send to it, and — if this client
 // opened it — on the next watch. A session the app ended (`end`) is not.

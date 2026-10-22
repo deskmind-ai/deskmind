@@ -161,9 +161,22 @@ struct CardEvent: Codable, Equatable {
 struct SessionStart: Codable, Equatable {
     struct Proto: Codable, Equatable { var session: Int? }
     var protocolVersion: Proto?
+    /// The last stored seq on disk when this process started: its own stored lines come after it.
     var lastSeq: Int?
     @LBool var resumed: Bool = false
-    enum CodingKeys: String, CodingKey { case protocolVersion = "protocol", lastSeq = "last_seq", resumed }
+    /// The process's pid, added by the helper as it forwards the line (deskmind#105); nil from a helper without it.
+    var pid: Int?
+    enum CodingKeys: String, CodingKey { case protocolVersion = "protocol", lastSeq = "last_seq", resumed, pid }
+    init(protocolVersion: Proto? = nil, lastSeq: Int? = nil, resumed: Bool = false, pid: Int? = nil) {
+        self.protocolVersion = protocolVersion; self.lastSeq = lastSeq; self.resumed = resumed; self.pid = pid
+    }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = (try? c.decodeIfPresent(Proto.self, forKey: .protocolVersion)) ?? nil
+        lastSeq = (try? c.decodeIfPresent(Int.self, forKey: .lastSeq)) ?? nil
+        resumed = (try? c.decodeIfPresent(Bool.self, forKey: .resumed)) ?? false
+        pid = (try? c.decodeIfPresent(Int.self, forKey: .pid)) ?? nil
+    }
 }
 
 struct SessionMessage: Codable, Equatable {
@@ -268,15 +281,23 @@ struct SessionQueue: Codable, Equatable {
     @LList<QueueItem> var items: [QueueItem] = []
 }
 
-/// The helper's word that a session's process ended (SessionHost: {"kind":"helper.session_exit","session_id","code"}).
-/// Not stored, no seq: whatever the process was doing is over, and the session must be opened again to go on.
+/// The helper's word that a session's process ended: {"kind":"helper.session_exit","session_id","code","last_seq"?,
+/// "pid"?} (SessionHost, deskmind#105). `last_seq`: the last stored session seq the helper forwarded from that
+/// process, so the runs it started (session.task seq <= it) are known to be gone whenever the line comes; `pid`: which
+/// process (the helper adds the same `pid` to that process's session.start). Not stored, no seq. Without them (an
+/// older helper, or the app's own inference) the exit is taken for the latest process and what the app has seen.
 struct HelperSessionExit: Codable, Equatable {
     var code: Int?
-    init(code: Int?) { self.code = code }
-    /// A code of another type (or out of range) is no code: the exit itself must not be lost.
+    var lastSeq: Int?
+    var pid: Int?
+    enum CodingKeys: String, CodingKey { case code, lastSeq = "last_seq", pid }
+    init(code: Int?, lastSeq: Int? = nil, pid: Int? = nil) { self.code = code; self.lastSeq = lastSeq; self.pid = pid }
+    /// A field of another type (or out of range) is absent: the exit itself must not be lost.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         code = (try? c.decodeIfPresent(Int.self, forKey: .code)) ?? nil
+        lastSeq = (try? c.decodeIfPresent(Int.self, forKey: .lastSeq)) ?? nil
+        pid = (try? c.decodeIfPresent(Int.self, forKey: .pid)) ?? nil
     }
 }
 
