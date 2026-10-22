@@ -17,7 +17,7 @@ enum HarnessRun {
     static let lingerSeconds = 600
 
     /// A run past its task_done whose process is still up: its stdin, for the result card's `respond`; and that
-    /// answer's `result_response`, once the harness writes it.
+    /// answer's `result_response`, once the harness writes it. All under `lock`.
     final class Lingering {
         let process: Process
         let input: FileHandle
@@ -25,79 +25,38 @@ enum HarnessRun {
         var response: [String: Any]?
         /// task_done passed on: the run's lines from then on are this process's (result_response), not the run's.
         var over = false
-        /// A respond was written (an undo may be going until its result_response comes).
+        /// The card was answered: one answer per card (the harness reads only the first); an undo may be going until
+        /// its result_response comes.
         var responded = false
+        /// Its process group, as the machine lock names it (ComputerLock).
+        var pgid: Int32 { process.processIdentifier }
+        /// The machine lock as this run last wrote it: every change of it is made from exactly this (compare-and-set),
+        /// so nothing of this run writes over what another writer (its undo, a new task) made of it since.
+        var holder: SessionWire.Holder?
         private(set) var closed = false
         init(process: Process, input: FileHandle) { self.process = process; self.input = input }
         /// stdin closed (EOF): the harness stops waiting for a respond and exits. Once; called under `lock`.
         func close() { if !closed { closed = true; try? input.close() } }
     }
     nonisolated(unsafe) static var lingering: Lingering?
-    /// Every run's processes (the harness and all under it), from the moment it starts until all of them are confirmed
-    /// gone -- whether its harness ended by itself, at task_done, on a stop, at the linger deadline or on a close. A
-    /// harness that exits can leave its executor acting: dropping `lingering` drops nothing here. Under `lock`.
-    nonisolated(unsafe) static var trees: [HarnessProcess.Tree] = []
-    /// One close at a time: a new run and 「清除全部」 may both let the last runs go, and the second must not find
-    /// nothing to close and go on while the first is still waiting for them to end.
-    private static let closing = NSLock()
-
-    /// Record a run's process the moment it has started, and watch it: looked at every 0.25 s while any of it is up
-    /// (a child is known before its parent can exit), dropped once all of it is gone.
-    static func record(_ p: Process) {
-        let tree = HarnessProcess.Tree(p)
-        tree.refresh()
-        lock.lock(); trees.append(tree); lock.unlock()
-        Thread.detachNewThread {
-            while !tree.gone { Thread.sleep(forTimeInterval: 0.25) }
-            lock.lock(); trees.removeAll { $0 === tree }; lock.unlock()
-        }
-    }
-
-    /// Let the last runs go, before a new run starts or the run data is cleared, so two runs never drive the desktop
-    /// or change files at once (an undo still going in the old one, an executor left behind by a harness that exited):
-    /// every recorded tree still up is ended (HarnessProcess.Tree.end) -- the lingering run's stdin closed first, so
-    /// it exits (it would by itself after `lingerSeconds`); waited for up to 3 s (`undoGrace` while an undo it was
-    /// sent has not answered), then SIGTERM, 2 s, then SIGKILL, 2 s. False when one is still up after that: its tree
-    /// stays recorded (the next attempt tries again), and the caller must not start a run (`stillRunning`) or clear
-    /// its files.
-    static func closeLingering(grace: Double = 3, term: Double = 2, kill: Double = 2,
-                               signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
-        closing.lock(); defer { closing.unlock() }
-        lock.lock()
-        let l = lingering, all = trees
-        lingering = nil
-        lock.unlock()
-        let closeLingering = { if let l { lock.lock(); l.close(); lock.unlock() } }
-        var ok = true
-        for tree in all {
-            let its = l != nil && l!.process === tree.process
-            let wait = its && l!.responded && l!.response == nil ? max(grace, undoGrace) : grace
-            if tree.end(close: its ? closeLingering : {}, grace: wait, term: term, kill: kill, signal: signal) {
-                lock.lock(); trees.removeAll { $0 === tree }; lock.unlock()
-            } else {
-                ok = false
-                NSLog("DeskMind Hands: a run's process (harness \(tree.process.processIdentifier), \(tree.known.count) under it) is still running after SIGKILL")
-            }
-        }
-        closeLingering()    // its tree gone already: its stdin closed all the same
-        return ok
-    }
-
-    /// How long an undo already going is waited for before it is cut short (the harness writes its result_response
-    /// when it is done; respond itself waits up to 15 s for it).
-    static let undoGrace = 15.0
-
-    /// The error a run is refused with when the last run's process would not end (closeLingering).
+    /// The last finished run whose undo expired (another task started on this Mac): a late answer to its card is told
+    /// so (`undo_expired`), not just that nothing waits. Under `lock`.
+    nonisolated(unsafe) static var expiredRun: String?
+    /// The error a run is refused with when the last run's process would not end (ComputerLock.acquire: `alive`).
     static let stillRunning: [String: Any] = [
         "event": "error", "code": "previous_run_alive",
         "error": "the last task's process has not ended (it may still be undoing), so this task was not started",
     ]
 
-    /// One of the run's events to the app. task_done: the run is registered as lingering before the app hears of it
-    /// (finished), and is over only once it has been sent -- the run thread then sends `done`, which must come after.
+    /// One of the run's events to the app. task_done: the machine lock says lingering and the run is registered as
+    /// lingering before the app hears of it (an undo clicked at once is let through), and the run is over only once
+    /// task_done has been sent -- the run thread then sends `done`, which must come after.
     static func pass(_ ev: [String: Any], linger: Lingering, emit: ([String: Any]) -> Bool) {
         let done = ev["event"] as? String == "task_done"
-        if done { finished(linger, runID: ev["run_id"] as? String ?? "") }
+        if done {
+            settle(linger)
+            finished(linger, runID: ev["run_id"] as? String ?? "")
+        }
         _ = emit(ev)
         if done { lock.lock(); linger.over = true; lock.unlock() }
     }
@@ -107,8 +66,8 @@ enum HarnessRun {
     /// thread's next poll, up to 250 ms later).
     static func finished(_ linger: Lingering, runID: String) {
         lock.lock(); defer { lock.unlock() }
-        linger.runID = runID
-        if linger.process.isRunning { lingering = linger }
+        if !runID.isEmpty { linger.runID = runID }
+        if linger.process.isRunning && !linger.closed { lingering = linger; expiredRun = nil }
     }
 
     /// Each run's own stdout / stderr copies (`<run_id>.stdout|.stderr`): a lingering process writes on after the
@@ -129,25 +88,72 @@ enum HarnessRun {
         for (f, r) in zip(files, runs) where drop.contains(r) { try? fm.removeItem(at: f) }
     }
 
+    /// A finished run's result card can still be answered (its process lingers): the helper does not restart under it.
+    static var undoWaiting: Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let l = lingering else { return false }
+        return !l.closed && l.process.isRunning
+    }
+
     /// The user's answer to the finished run's result card (op `respond`): `{"type":"respond","option":n}` on the
     /// lingering process's stdin. `wait` seconds (at most 15): wait for its `result_response` and return it.
+    /// Undo acts on the Mac: the answer is let through only while the machine lock names this run, lingering, and it
+    /// acts again until its result_response (ComputerLock.undo). Another task started on this Mac since ended it
+    /// (owner 10-21): `undo_expired`.
+    /// The run acts no more (its task_done, or its undo's result_response): the lock goes from the acting holder this
+    /// run last wrote to lingering -- only if it is still exactly that.
+    static func settle(_ l: Lingering) {
+        lock.lock(); let h = l.holder; lock.unlock()
+        guard let h, let n = ComputerLock.linger(h) else { return }
+        lock.lock(); l.holder = n; lock.unlock()
+    }
+
     static func respond(runID: String, option: Int, wait: Double = 0) -> [String: Any] {
+        guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
+            return ["ok": false, "error": "bad option"]
+        }
+        line.append(0x0A)
+        // which run, under `lock`; the machine lock is asked outside it (its flock may wait on another process, and a
+        // stop or an answer must not wait behind that), then the run is looked at again
         lock.lock()
-        guard let l = lingering, l.process.isRunning, !l.closed else {
-            lock.unlock(); return ["ok": false, "error": "no finished run is waiting for an answer"]
+        guard let l = lingering, !l.closed, l.process.isRunning else {
+            let expired = expiredRun.map { runID.isEmpty || runID == $0 } ?? false
+            lock.unlock()
+            return expired ? undoExpired : ["ok": false, "error": "no finished run is waiting for an answer"]
         }
         if !runID.isEmpty && runID != l.runID {
             lock.unlock(); return ["ok": false, "error": "the run waiting for an answer is \(l.runID), not \(runID)"]
         }
-        guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
-            lock.unlock(); return ["ok": false, "error": "bad option"]
+        if l.responded {
+            lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
         }
-        line.append(0x0A)
-        do { try l.input.write(contentsOf: line) } catch {
-            lock.unlock(); return ["ok": false, "error": "write: \(error.localizedDescription)"]
-        }
-        l.responded = true
+        l.responded = true    // this answer's: a second one waits for nothing
+        let seen = l.holder
         lock.unlock()
+        switch seen.map(ComputerLock.undo) ?? .expired {
+        case .ok(let acting): lock.lock(); l.holder = acting; lock.unlock()
+        case .busy:
+            lock.lock(); l.responded = false; lock.unlock()   // not this answer's: the card can still be answered after it
+            return ["ok": false, "code": "busy", "error": "an answer to this card is being carried out"]
+        case .failed:
+            lock.lock(); l.responded = false; lock.unlock()
+            return ["ok": false, "error": "the machine lock could not be read or written"]
+        case .expired:
+            lock.lock(); l.close(); if lingering === l { lingering = nil }; expiredRun = l.runID; lock.unlock()
+            NSLog("DeskMind Hands: respond refused: another computer task started on this Mac since \(l.runID)")
+            return undoExpired
+        }
+        lock.lock()
+        let gone = l.closed || !l.process.isRunning
+        if !gone {
+            do { try l.input.write(contentsOf: line) } catch {
+                lock.unlock()
+                settle(l)
+                return ["ok": false, "error": "write: \(error.localizedDescription)"]
+            }
+        }
+        lock.unlock()
+        if gone { settle(l); return undoExpired }
         let until = Date().addingTimeInterval(min(max(wait, 0), 15))
         while Date() < until {
             lock.lock(); let r = l.response; lock.unlock()
@@ -155,6 +161,29 @@ enum HarnessRun {
             Thread.sleep(forTimeInterval: 0.1)
         }
         return ["ok": true, "run_id": l.runID]
+    }
+
+    private static let undoExpired: [String: Any] = ["ok": false, "code": "undo_expired",
+                                                      "error": "another computer task started on this Mac; this task's undo has expired"]
+
+    /// While `l` lingers, until its process exits (it answered its card, its linger ran out, or a new task on this Mac
+    /// ended its group: its undo expired). The machine lock goes once nothing of its group is left.
+    static func watchLingering(_ l: Lingering) {
+        l.process.waitUntilExit()
+        lock.lock()
+        if !l.responded { expiredRun = l.runID }
+        l.close(); if lingering === l { lingering = nil }
+        lock.unlock()
+        ComputerLock.free(runID: l.runID, pgid: l.pgid)
+        // gone during an undo (the lock still says it acts): what is left of its group is ended after a grace
+        ComputerLock.reapLeftovers(runID: l.runID, pgid: l.pgid)
+    }
+
+    /// The lingering run was ended (「清除全部」): its card can no longer be answered. True, for chaining.
+    @discardableResult
+    static func dropLingering() -> Bool {
+        lock.lock(); if let l = lingering { l.close(); lingering = nil; expiredRun = l.runID }; lock.unlock()
+        return true
     }
 
     /// Whether `p` is a finished run's lingering process (the stop path leaves it alone).
@@ -204,6 +233,58 @@ enum HarnessRun {
         return (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] ?? ["ok": false, "error": "no answer from the harness (exit \(p.terminationStatus))"]
     }
 
+    /// The harness's environment, for a run (`app-run`) and for a chat session (`session`, SessionHost), whose
+    /// executors inherit it: the model keys (models.env), Brain as the first judge, the judge's learning files, and the
+    /// execution layer (hands' executor on the bundled Python). `apps`: the apps a request names, which may be brought
+    /// forward for a step (a session names none: its tasks are not known when it starts).
+    static func environment(apps: [String] = []) -> [String: String] {
+        let runtime = Runner.runtime, work = Runner.work
+        let python = runtime.appendingPathComponent("python/bin/python3.12").path
+        let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
+        // The vision model, as for `hands do` (Runner.run): when the run may drive an app with no accessibility tree
+        // and the model is downloaded, the Eyes server is up before the first step, and the executor's driver reads
+        // such a window from its pixels (OCR words, grounded controls) — the same observe/perform, another source.
+        // Which apps a task uses is not known before the run any more (the app reads no app names out of the
+        // instruction, owner 10-20), so the vision model is started on demand: the executor is told where it would
+        // be and how to ask for it (this helper's socket, op "eyes"), and the first time a window has to be read from
+        // its pixels it asks, and waits the five seconds or so it takes. Loading it for every run cost ~4 GB beside
+        // Brain's on a 16 GB Mac (deskmind #96 review).
+        var eyes = ""
+        if DeskMindModels.eyesDir() != nil {
+            eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" "
+                + "HANDS_HELPER_SOCKET=\"\(DeskMindIPC.socketPath)\" "
+        }
+        var env: [String: String] = [
+            "HOME": NSHomeDirectory(),
+            "PATH": "\(runtime.appendingPathComponent("bin").path):/usr/bin:/bin",
+            "DESKMIND_MACTOOLS": runtime.appendingPathComponent("bin/mactools").path,
+            "DESKMIND_BRAIN_URL": BrainServer.url, "DESKMIND_BRAIN_TOKEN": ServerAuth.token,
+            // DeskMind Brain answers the executor's judge questions first (it may approve on its own above the floor,
+            // never refuse alone; the cloud model decides the rest): measured 10-18 on the gym, 70% settled locally,
+            // 0 wrong approvals, 20/20 passed. Off when the server is not up: the cloud model judges alone.
+            "DESKMIND_BRAIN_JUDGE": BrainServer.status()["state"] as? String == "ready" ? "1" : "0",
+            // The judge's routing table (which question kinds Brain is asked) learns across runs from sampled shadow
+            // comparisons with the cloud judge (one in ten settled answers): docs/localization-2026-10-19.md
+            "DESKMIND_JUDGE_STATS": DeskMindIPC.supportDir.appendingPathComponent("judge-stats.json").path,
+            "DESKMIND_JUDGE_SHADOW": "0.1",
+            // the cloud judge is asked alongside Brain and abandoned when Brain settles: a refusing Brain costs no time
+            "DESKMIND_JUDGE_RACE": "1",
+            // the execution layer: hands' executor on the bundled Python, in the same working copy `hands do` uses
+            "DESKMIND_HANDS_DIR": work.path,
+            "DESKMIND_HANDS_CMD": "PYTHONPATH=\"\(pythonPath)\" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 "
+                + "PYTHONPYCACHEPREFIX=\"\(DeskMindIPC.supportDir.appendingPathComponent("pycache").path)\" "
+                + "HANDS_PEEKABOO_TRANSPORT=mcp HANDS_PERMISSIONS_VERIFIED=\(CGPreflightScreenCaptureAccess() ? "1" : "0") "
+                + "HANDS_SPECTATOR_APPS=ai.deskmind.app,ai.deskmind.hands "
+                // the apps the request names may be brought forward for a step (briefly, only while the user is
+                // still; the executor adds any app it opened a window of); a person at their Mac is waited for
+                + "HANDS_FLASH_APPS=\"\(apps.joined(separator: ","))\" HANDS_FLASH_WAIT_S=1800 "
+                + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
+                + "\"\(python)\" -m deskmind_hands.executor",
+        ]
+        for (k, v) in modelEnv() where env[k] == nil { env[k] = v }
+        return env
+    }
+
     /// The user's answer (the main app's `answer` request) to the open card: the clicked option's index, the approve
     /// option, the way out, or their words. Refused -- `{ok: false, code: "stale_card"}` -- when the request names a
     /// card that is no longer the open one, or an option that is not the open card's: the window showed an older card
@@ -232,8 +313,6 @@ enum HarnessRun {
         // Busy (since the request was taken: Runner.accept) until task_done (this function returns then), not until the
         // process exits: it lingers for the result card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
-        // after busy is set: no second run starts while it is waited for
-        guard closeLingering() else { _ = emit(stillRunning); return }
         Runner.clearing.lock(); Runner.clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         guard available else {
             _ = emit(["event": "error", "code": "harness_missing", "error": "this build has no harness runtime"]); return
@@ -242,64 +321,21 @@ enum HarnessRun {
             _ = emit(["event": "error", "error": "prepare: \(error.localizedDescription)"]); return
         }
         let fm = FileManager.default
-        let runtime = Runner.runtime, work = Runner.work
+        let work = Runner.work
         let runs = Runner.harnessRuns
         try? fm.createDirectory(at: runs, withIntermediateDirectories: true)
-        let python = runtime.appendingPathComponent("python/bin/python3.12").path
-        let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
-        // The vision model, as for `hands do` (Runner.run): when the run may drive an app with no accessibility tree
-        // and the model is downloaded, the Eyes server is up before the first step, and the executor's driver reads
-        // such a window from its pixels (OCR words, grounded controls) — the same observe/perform, another source.
-        // Which apps a task uses is not known before the run any more (the app reads no app names out of the
-        // instruction, owner 10-20), so the vision model is started on demand: the executor is told where it would
-        // be and how to ask for it (this helper's socket, op "eyes"), and the first time a window has to be read from
-        // its pixels it asks, and waits the five seconds or so it takes. Loading it for every run cost ~4 GB beside
-        // Brain's on a 16 GB Mac (deskmind #96 review).
-        var eyes = ""
-        if DeskMindModels.eyesDir() != nil {
-            eyes = "HANDS_GROUNDER_URL=\"\(EyesServer.url)\" HANDS_GROUNDER_TOKEN=\"\(ServerAuth.token)\" "
-                + "HANDS_HELPER_SOCKET=\"\(DeskMindIPC.socketPath)\" "
-        }
-        defer { if !eyes.isEmpty { EyesServer.touch() } }   // the idle clock starts when the run ends
+        defer { if DeskMindModels.eyesDir() != nil { EyesServer.touch() } }   // the idle clock starts when the run ends
 
         let p = Process()
         p.executableURL = node
         p.arguments = [bundle.path, "app-run", "--runs", runs.path, "--linger", String(lingerSeconds)]
         p.currentDirectoryURL = work
-        var env: [String: String] = [
-            "HOME": NSHomeDirectory(),
-            "PATH": "\(runtime.appendingPathComponent("bin").path):/usr/bin:/bin",
-            "DESKMIND_MACTOOLS": runtime.appendingPathComponent("bin/mactools").path,
-            "DESKMIND_BRAIN_URL": BrainServer.url, "DESKMIND_BRAIN_TOKEN": ServerAuth.token,
-            // DeskMind Brain answers the executor's judge questions first (it may approve on its own above the floor,
-            // never refuse alone; the cloud model decides the rest): measured 10-18 on the gym, 70% settled locally,
-            // 0 wrong approvals, 20/20 passed. Off when the server is not up: the cloud model judges alone.
-            "DESKMIND_BRAIN_JUDGE": BrainServer.status()["state"] as? String == "ready" ? "1" : "0",
-            // The judge's routing table (which question kinds Brain is asked) learns across runs from sampled shadow
-            // comparisons with the cloud judge (one in ten settled answers): docs/localization-2026-10-19.md
-            "DESKMIND_JUDGE_STATS": DeskMindIPC.supportDir.appendingPathComponent("judge-stats.json").path,
-            "DESKMIND_JUDGE_SHADOW": "0.1",
-            // the cloud judge is asked alongside Brain and abandoned when Brain settles: a refusing Brain costs no time
-            "DESKMIND_JUDGE_RACE": "1",
-            // the execution layer: hands' executor on the bundled Python, in the same working copy `hands do` uses
-            "DESKMIND_HANDS_DIR": work.path,
-            "DESKMIND_HANDS_CMD": "PYTHONPATH=\"\(pythonPath)\" PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 "
-                + "PYTHONPYCACHEPREFIX=\"\(DeskMindIPC.supportDir.appendingPathComponent("pycache").path)\" "
-                + "HANDS_PEEKABOO_TRANSPORT=mcp HANDS_PERMISSIONS_VERIFIED=\(CGPreflightScreenCaptureAccess() ? "1" : "0") "
-                + "HANDS_SPECTATOR_APPS=ai.deskmind.app,ai.deskmind.hands "
-                // the apps the request names may be brought forward for a step (briefly, only while the user is
-                // still; the executor adds any app it opened a window of); a person at their Mac is waited for
-                + "HANDS_FLASH_APPS=\"\(spec.apps.map(\.bundle).joined(separator: ","))\" HANDS_FLASH_WAIT_S=1800 "
-                + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
-                + "\"\(python)\" -m deskmind_hands.executor",
-        ]
-        for (k, v) in modelEnv() where env[k] == nil { env[k] = v }
-        p.environment = env
+        p.environment = environment(apps: spec.apps.map(\.bundle))
         let outPipe = Pipe(), inPipe = Pipe()
         p.standardOutput = outPipe
         p.standardInput = inPipe
         // the run's id is the helper's, so its logs are named before the process starts (the harness takes it as given)
-        let runID = "run_" + UUID().uuidString.lowercased().prefix(8)
+        let runID = spec.runID ?? "run_" + UUID().uuidString.lowercased().prefix(8)
         try? fm.createDirectory(at: logs, withIntermediateDirectories: true)
         let errURL = logs.appendingPathComponent("\(runID).stderr")
         fm.createFile(atPath: errURL.path, contents: nil)
@@ -308,20 +344,43 @@ enum HarnessRun {
         fm.createFile(atPath: outURL.path, contents: nil)
         let outLog = try? FileHandle(forWritingTo: outURL)
         pruneLogs()    // after this run's files are made, so they count among the ones kept
-        // Stop pressed while the last runs were waited for or the run was being prepared: no process to stop yet,
-        // only `cancelled` -- the run does not start (Runner.launch, under the stop's lock). stopRequested is not
-        // cleared once it has: a stop since then stands.
-        do {
-            guard try Runner.launch(p) else {
-                _ = Runner.release()
-                _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
-            }
-        } catch {
-            _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
+        // One path, under the machine lock (ComputerLock): accepted (Runner.accept, before this function) → the lock →
+        // launched (Runner.launch, under the stop's lock: a stop since it was accepted keeps it from starting). In one
+        // guarded step: refused while a task acts on this Mac; a finished run lingering for its card (this helper's,
+        // or a session's) is ended -- its undo expires; the harness is started (a process group of its own) and named
+        // in the lock, before it is sent its task. Refused or not started: busy is let go by the defer above.
+        var launchError = "", stoppedFirst = false
+        var acquired: SessionWire.Holder?
+        switch ComputerLock.acquire(runID: runID, by: "helper", spawn: {
+            do {
+                guard try Runner.launch(p) else { stoppedFirst = true; return nil }
+                return p.processIdentifier
+            } catch { launchError = error.localizedDescription; return nil }
+        }) {
+        case .busy(let h):
+            NSLog("DeskMind Hands: run refused: \(h.runID) (\(h.by)) acts on this Mac")
+            _ = Runner.release(); _ = emit(ComputerLock.busy); return
+        case .alive(let h):
+            NSLog("DeskMind Hands: run refused: the lingering run \(h.runID) would not end")
+            _ = Runner.release(); _ = emit(stillRunning); return
+        case .failed(let why):
+            NSLog("DeskMind Hands: run refused: \(why)")
+            _ = Runner.release(); _ = emit(["event": "error", "error": why]); return
+        case .ok(nil):
+            _ = Runner.release()
+            if stoppedFirst { _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]) }
+            else { _ = emit(["event": "error", "error": "launch: \(launchError)"]) }
+            return
+        case .ok(let h):
+            acquired = h
         }
+        // this helper's own lingering run, if it was the one ended: its card can no longer be answered
+        lock.lock(); if let l = lingering { l.close(); lingering = nil; expiredRun = l.runID }; lock.unlock()
         // once task_done is passed on (`linger.over`), the run's lines go to `linger` (result_response), not to this
         // run's connection, and the state is the next run's
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
+        linger.runID = runID
+        linger.holder = acquired
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
         // a stop between the launch and here found no stdin to write to (it terminated the process): the stop line too
         if Runner.cancelled { Runner.stopRequested = true; stop(p) }
@@ -355,35 +414,17 @@ enum HarnessRun {
                     guard let e = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else { continue }
                     lock.lock()
                     if linger.over {
-                        if e["kind"] as? String == "result_response" { linger.response = e }
+                        // the answer is carried out: it acts no more
+                        if e["kind"] as? String == "result_response" {
+                            linger.response = e
+                            lock.unlock(); settle(linger); continue
+                        }
                         lock.unlock(); continue
                     }
                     let out = HarnessEvents.translate(e, state: &state, title: spec.goal ?? "", hasFolder: spec.folder != nil, pid: pid)
                     lock.unlock()
                     for ev in out {
-                        switch ev["event"] as? String {
-                        case "ask":
-                            LiveCard.status(.waitingForUser, words: ev["approval"] as? Bool == true
-                                            ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
-                                            : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
-                        case "waiting" where ev["ask_id"] == nil:   // the executor waits for the user to pause
-                            LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
-                        case "resumed" where ev["ask_id"] == nil, "ask_closed":
-                            LiveCard.status(.working)
-                        case "step":
-                            // The card shows the window the step acted in: the executor names it by bundle id and
-                            // CGWindow number (window:<bundle>#<number>), which is what the card captures by.
-                            if let object = ev["object"] as? String, let hash = object.lastIndex(of: "#"), let n = Int(object[object.index(after: hash)...]) {
-                                LiveCard.observed(windows: [["id": n, "active": true]], app: "")
-                                // the recording takes in each app the task works in, as it goes (no list before)
-                                let bundle = HarnessEvents.appOf(object)
-                                if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
-                            }
-                            let human = ev["human"] as? String ?? ""
-                            LiveCard.stepped(n: ev["n"] as? Int ?? 0, words: human, target: nil,
-                                             click: human.hasPrefix("click") || human.hasPrefix("double-click") || human.hasPrefix("select"))
-                        default: break
-                        }
+                        show(ev)
                         pass(ev, linger: linger, emit: emit)
                     }
                 }
@@ -399,26 +440,81 @@ enum HarnessRun {
         lock.lock()
         linger.over = true; input = nil
         let lingers = p.isRunning
-        if lingers { lingering = linger } else { linger.close(); if lingering === linger { lingering = nil } }
+        // registered at task_done already (pass); not again once it was let go meanwhile (undo expired)
+        if lingers { if !linger.closed { lingering = linger } } else { linger.close(); if lingering === linger { lingering = nil } }
         lock.unlock()
+        if !lingers {
+            // its harness gone: the lock goes with its group; what is left of it after a run that never said task_done
+            // still acts (the next task is refused) until it ends, or is ended after a grace (reapLeftovers decides on
+            // the lock's state)
+            ComputerLock.free(runID: runID, pgid: p.processIdentifier)
+            ComputerLock.reapLeftovers(runID: runID, pgid: p.processIdentifier)
+        }
         if lingers {
             // The process waits up to `lingerSeconds` for the result card's answer (op respond), then exits; or sooner,
-            // when the next run closes its stdin. Its log is closed once it is gone.
+            // when a new task on this Mac ends its group (ComputerLock.acquire). Its log is closed once it is gone.
             DispatchQueue.global().async {
-                p.waitUntilExit()
+                watchLingering(linger)
                 _ = reader.wait(timeout: .now() + 3)
                 try? outLog?.close()
-                lock.lock(); linger.close(); if lingering === linger { lingering = nil }; lock.unlock()
             }
         } else {
             _ = reader.wait(timeout: .now() + 3)    // the last lines into the log (at once when they are read already)
             try? outLog?.close()
         }
-        LiveCard.finish(stopped ? .stopped : state.finished?["harness_status"] as? String == "succeeded" ? .done : .failed)
+        LiveCard.finish(stopped ? .stopped : ending(state.finished?["harness_status"] as? String))
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept
         // a lingering process has no exit status yet (reading it would raise); a run that wrote task_done needs none
         _ = emit(HarnessEvents.done(state: state, terminationStatus: lingers ? 0 : p.terminationStatus, stopped: stopped, stderrTail: tail))
+    }
+
+    /// What the live card and the recording make of one of the app's events (HarnessEvents.translate): the run waits
+    /// for the user, pauses while they use the Mac, or takes a step in a window (the card follows that window, the
+    /// recording takes in its app). For a run of this helper's own and for a task of a chat session (SessionHost) alike.
+    static func show(_ ev: [String: Any]) {
+        switch ev["event"] as? String {
+        case "ask":
+            LiveCard.status(.waitingForUser, words: ev["approval"] as? Bool == true
+                            ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
+                            : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
+        case "waiting" where ev["ask_id"] == nil:   // the executor waits for the user to pause
+            LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
+        case "resumed" where ev["ask_id"] == nil, "ask_closed":
+            LiveCard.status(.working)
+        case "step":
+            // The card shows the window the step acted in: the executor names it by bundle id and
+            // CGWindow number (window:<bundle>#<number>), which is what the card captures by.
+            if let n = windowNumber(ev) { LiveCard.observed(windows: [["id": n, "active": true]], app: "") }
+            recordApp(ev)
+            let human = ev["human"] as? String ?? ""
+            LiveCard.stepped(n: ev["n"] as? Int ?? 0, words: human, target: nil,
+                             click: human.hasPrefix("click") || human.hasPrefix("double-click") || human.hasPrefix("select"))
+        default: break
+        }
+    }
+
+    /// The recording's part of an event: a step in a window takes that window's app into the recording, as it goes (no
+    /// list before). For a live task whose card is not shown (another session's) it is all there is.
+    static func recordApp(_ ev: [String: Any]) {
+        guard ev["event"] as? String == "step", windowNumber(ev) != nil, let object = ev["object"] as? String else { return }
+        let bundle = HarnessEvents.appOf(object)
+        if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
+    }
+
+    /// A step's window (window:<bundle>#<number>): its CGWindow number.
+    private static func windowNumber(_ ev: [String: Any]) -> Int? {
+        guard let object = ev["object"] as? String, let hash = object.lastIndex(of: "#") else { return nil }
+        return Int(object[object.index(after: hash)...])
+    }
+
+    /// How the live card says a task ended, from its task_done status.
+    static func ending(_ status: String?) -> LiveView.Status {
+        switch status {
+        case "succeeded": return .done
+        case "stopped", "cancelled": return .stopped
+        default: return .failed
+        }
     }
 
     /// Stop: the harness reads `{"stop":true}` on its stdin as the stop switch (its executor refuses every action from

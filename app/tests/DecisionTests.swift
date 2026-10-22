@@ -217,9 +217,9 @@ enum DecisionTests {
         recordingCaptureTests()
         helperLocationTests()
         harnessEventsTests()
-        harnessProcessTests()
         cardButtonTests()
         SessionTests.run()
+        sessionWireTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -867,89 +867,150 @@ enum DecisionTests {
         check(HarnessEvents.translate(["kind": "something_new"], state: &st, title: title, hasFolder: true, pid: 42).isEmpty, "unknown kinds are ignored")
         check(HarnessEvents.humanize("fs.append_line：target=「todo.txt」") == "fs.append_line：target=「todo.txt」", "a described file step is kept")
     }
-
-    /// HarnessProcess.Tree.end (Shared/HarnessEvents.swift): a lingering run's process and everything under it are ended for
-    /// certain before the next run starts, or the caller is told they are not (deskmind #103 review, P1).
-    static func harnessProcessTests() {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("dm-proc-\(getpid())")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
-        func start(_ script: String, stdin: Pipe? = nil) -> Process {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/sh")
-            p.arguments = ["-c", script]
-            p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-            p.standardInput = stdin ?? FileHandle.nullDevice
-            try? p.run()
-            return p
+    /// Chat sessions on the helper's socket (Shared/SessionWire.swift): which control lines are passed on, which of a
+    /// session's lines a watching connection gets, when a session has nothing going on, and the machine lock's holders.
+    static func sessionWireTests() {
+        typealias W = SessionWire
+        func ok(_ line: Any?) -> Bool { W.validate(line).line != nil }
+        // a JSON object of a known type, as an object or as its text
+        check(ok(["type": "say", "text": "你好"]) && ok(#"{"type":"say","text":"你好"}"#), "say, object and text")
+        check(ok(["type": "cua", "text": "打开备忘录"]) && ok(["type": "steer", "text": "改成明天", "run_id": "run_1"]), "cua, steer")
+        check(ok(["type": "stop"]) && ok(["type": "stop", "run_id": "run_1"]) && ok(["type": "retry"]) && ok(["type": "end"]), "stop, retry, end")
+        check(ok(["type": "answer", "run_id": "run_1", "ask_id": "ask_1", "option": 0]), "answer by index")
+        check(ok(["type": "answer", "ask_id": "ask_1", "text": "周五"]) && ok(["type": "answer", "ask_id": "ask_1"]), "answer by words, or nothing")
+        check(ok(["type": "respond", "run_id": "run_1", "option": 1]), "respond")
+        check(ok(["type": "queue_edit", "id": "q1", "text": "x"]) && ok(["type": "queue_cancel", "id": "q1"]) && ok(["type": "queue_send_now", "id": "q1"]), "queue")
+        check(ok(["type": "attach", "run_id": "run_1", "after_seq": 3]) && ok(["type": "attach", "after_seq": 0]), "a replay, of a task or the session")
+        // refused, with a reason: what the session would drop without a word
+        for (bad, why) in [(nil, "nothing"), ("not json", "not JSON"), ("[1,2]", "an array"), ("\"say\"", "a string"), (#"{"text":"hi"}"#, "no type"),
+                           (#"{"type":5}"#, "a type that is no string"), (#"{"type":"dance"}"#, "an unknown type"),
+                           (#"{"type":"say"}"#, "say without text"), (#"{"type":"say","text":3}"#, "text not a string"),
+                           (#"{"type":"cua"}"#, "cua without text"), (#"{"type":"queue_edit","id":"q"}"#, "queue_edit without text"),
+                           (#"{"type":"queue_cancel"}"#, "queue_cancel without id"), (#"{"type":"answer","option":0}"#, "answer without ask_id"),
+                           (#"{"type":"answer","ask_id":"a","option":"0"}"#, "an option that is no index"),
+                           (#"{"type":"answer","ask_id":"a","option":1.5}"#, "a fractional option"),
+                           (#"{"type":"answer","ask_id":"a","option":-1}"#, "a negative option"),
+                           (#"{"type":"answer","ask_id":"a","option":true}"#, "a boolean option"),
+                           (#"{"type":"respond"}"#, "respond without option"), (#"{"type":"attach","after_seq":"3"}"#, "an after_seq that is no seq"),
+                           (#"{"type":"stop","run_id":7}"#, "run_id not a string")] as [(Any?, String)] {
+            let v = W.validate(bad)
+            check(v.line == nil && !(v.error ?? "").isEmpty, "refused: \(why) (\(String(describing: bad)))")
         }
-        func pid(_ name: String) -> pid_t {
-            let until = Date().addingTimeInterval(3)
-            while Date() < until {
-                if let s = try? String(contentsOf: dir.appendingPathComponent(name), encoding: .utf8),
-                   let n = pid_t(s.trimmingCharacters(in: .whitespacesAndNewlines)) { return n }
-                Thread.sleep(forTimeInterval: 0.02)
-            }
-            return 0
-        }
-        var sent: [Int32] = []
-        let record: (pid_t, Int32) -> Int32 = { p, sig in sent.append(sig); return kill(p, sig) }
+        check(W.validate(String(repeating: "x", count: W.maxLineBytes + 1)).error == "the line is too long", "too long")
+        check(W.validate(["type": "say", "text": String(repeating: "长", count: W.maxLineBytes / 2)]).error == "the line is too long", "too long, as an object")
 
-        // stdin closed: a process that exits on EOF is gone in the grace period, and no signal is sent
-        let input = Pipe()
-        let cat = start("cat >/dev/null", stdin: input)
-        sent = []
-        check(HarnessProcess.Tree(cat).end(close: { try? input.fileHandleForWriting.close() }, grace: 3, term: 1, kill: 1, signal: record)
-              && !cat.isRunning && sent.isEmpty, "a process that exits on stdin closed: ended with no signal (\(sent))")
-
-        // a process that does not read its stdin (an undo still going): SIGTERM ends it
-        let busy = start("exec sleep 30")
-        sent = []
-        check(HarnessProcess.Tree(busy).end(close: {}, grace: 0.3, term: 2, kill: 1, signal: record) && !busy.isRunning
-              && sent == [SIGTERM], "a sleeping process: ended by SIGTERM (\(sent))")
-
-        // one that ignores SIGTERM, with a child in its group and one in a group of its own that ignore it too
-        // (node with hands' executor under it): SIGKILL, to all of them, and each is gone when it returns
-        // (perl writes its pid once it is in its own group)
-        let deaf = start(#"trap "" TERM; sleep 30 & echo $! > \#(dir.path)/a; "#
-                         + #"perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); open(F, ">\#(dir.path)/b"); print F $$; close F; sleep 30' & wait"#)
-        let a = pid("a"), b = pid("b")
-        check(a > 0 && b > 0 && getpgid(b) == b, "the fake run's children are up (\(a), \(b), group \(getpgid(b)))")
-        sent = []
+        // the watch: stored lines once and in order; a live line that overtakes the replay waits for it
+        let msg = { (n: Int) -> [String: Any] in ["kind": "session.message", "seq": n, "session_id": "s"] }
+        func seqs(_ out: [[String: Any]]) -> [Int] { out.compactMap { ($0["seq"] as? NSNumber)?.intValue } }
+        var g = W.Gate(after: 2)
+        check(g.admit(msg(1)).isEmpty && g.admit(msg(2)).isEmpty, "at or before the cursor: dropped")
+        check(g.admit(msg(5)).isEmpty, "ahead of the replay: dropped (it comes again in the replay)")
+        check(seqs(g.admit(msg(3)) + g.admit(msg(4)) + g.admit(msg(5))) == [3, 4, 5] && g.after == 5, "the replay, in order")
+        check(g.admit(msg(4)).isEmpty && g.admit(msg(5)).isEmpty, "a second replay: no duplicates")
+        check(g.admit(["kind": "session.delta", "msg_id": "m", "text": "x", "offset": 0]).count == 1
+              && g.admit(["kind": "session.start", "last_seq": 5]).count == 1, "lines without seq: always")
+        check(g.admit(["kind": "helper.session_exit", "session_id": "s"]).count == 1, "the helper's own lines: always")
+        // a task's lines: replay first, then live, contiguous — a live line ahead of the replay waits for it
+        let ev = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_1", "seq": n] }
+        var order: [Int] = []
         let t0 = Date()
-        let ended = HarnessProcess.Tree(deaf).end(close: {}, grace: 0.3, term: 0.5, kill: 2, signal: record)
-        check(ended && !deaf.isRunning && HarnessProcess.member(a) == nil && HarnessProcess.member(b) == nil,
-              "SIGTERM ignored: SIGKILL ends the process and both children")
-        check(sent.contains(SIGKILL) && Date().timeIntervalSince(t0) >= 0.8, "SIGKILL only after the grace and SIGTERM waits (\(sent))")
+        g.expect("run_1")   // the connection asked for its replay (a task open when it started watching)
+        for n in [3, 4, 5, 6, 7, 8] { order += seqs(g.admit(ev(n), now: t0)) }   // live, before the replay came
+        check(order.isEmpty && g.holding, "live lines ahead of the replay are held")
+        for n in 1...8 { order += seqs(g.admit(ev(n), now: t0)) }               // the replay: 1..8
+        check(order == Array(1...8) && !g.holding && g.runs["run_1"] == 8, "the replay, then the held live lines behind it: \(order)")
+        check(seqs(g.admit(ev(9))) == [9] && g.admit(ev(9)).isEmpty && g.admit(ev(2)).isEmpty, "then live, once each")
+        check(seqs(g.admit(["kind": "step", "run_id": "run_2", "seq": 1])) == [1], "another run counts apart")
+        var named = W.Gate(after: 0, runs: ["run_1": 4])
+        check(named.admit(ev(4)).isEmpty && seqs(named.admit(ev(5))) == [5], "a run's cursor")
+        check(named.admit(["kind": "plan", "run_id": "run_9"]).count == 1, "a run line without seq: always")
+        // a gap the replay never fills: the held lines go, in order, after the hold limit (not before)
+        var stuck = W.Gate(after: 0, runs: ["run_1": 0])
+        _ = stuck.admit(ev(4), now: t0); _ = stuck.admit(ev(3), now: t0)
+        check(stuck.expire(now: t0.addingTimeInterval(W.Gate.holdLimit - 1)).isEmpty && stuck.holding, "held within the limit")
+        check(seqs(stuck.expire(now: t0.addingTimeInterval(W.Gate.holdLimit))) == [3, 4] && !stuck.holding, "then let go, in order")
+        check(stuck.admit(ev(2)).isEmpty && seqs(stuck.admit(ev(5))) == [5], "and the cursor moved past them")
+        // a run this connection asked no replay of (another's replay, or the app's own): at once, each line once
+        var other = W.Gate(after: 0)
+        other.expect("run_1")
+        let ev2 = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_2", "seq": n] }
+        check(other.admit(ev2(5)).isEmpty && other.admit(ev2(6)).isEmpty && !other.holding,
+              "a run not asked for, past a gap (another connection's replay, a stray last line): dropped, not held")
+        check(seqs(other.admit(ev2(1))) == [1] && seqs(other.admit(ev2(2))) == [2] && other.admit(ev2(2)).isEmpty,
+              "from its start, in order: passed on at once, once each")
+        // the app asks the session itself for a run's replay after 4 (attach{run_id}): a connection with nothing of it
+        // takes it from there; one following it keeps its own cursor
+        var app = W.Gate(after: 0)
+        app.adopt("run_7", after: 4)
+        let ev7 = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_7", "seq": n] }
+        check(app.admit(ev7(3)).isEmpty && seqs(app.admit(ev7(5)) + app.admit(ev7(6))) == [5, 6], "an app-asked replay after 4: 5, 6")
+        app.adopt("run_7", after: 0)
+        check(app.admit(ev7(1)).isEmpty && app.runs["run_7"] == 6, "asked again: its cursor kept")
+        check(other.admit(ev(3)).isEmpty && other.holding, "a run asked for: held")
 
-        // the harness gone already, its child still acting (in its group): found and ended all the same
-        let orphaning = start("sleep 30 & echo $! > \(dir.path)/c; exit 0")
-        let c = pid("c")
-        orphaning.waitUntilExit()
-        check(c > 0 && HarnessProcess.member(c) != nil, "the orphan is up")
-        check(HarnessProcess.Tree(orphaning).end(close: {}, grace: 0.3, term: 2, kill: 1) && HarnessProcess.member(c) == nil,
-              "a child left behind by an exited harness is ended too")
+        // what drives the live card: only new lines of tasks live in this process, each once — never a replay
+        var live = W.Live(lastSeq: 6)
+        let task = { (n: Int, run: String) -> [String: Any] in ["kind": "session.task", "seq": n, "run_id": run, "raw": "x"] }
+        check(!live.note(task(3, "run_old")) && !live.show(["kind": "start", "run_id": "run_old", "seq": 1]),
+              "a replayed task (stored before this process): not live, its start drives nothing")
+        check(live.note(["kind": "session.queue", "items": [Any]()]), "a line that is never stored: new")
+        check(live.note(task(7, "run_a")) && live.runs == ["run_a"] && live.lastSeq == 7, "a new task: live")
+        check(!live.note(task(7, "run_a")) && !live.note(msg(5)), "its replay: not new")
+        check(live.show(["kind": "start", "run_id": "run_a", "seq": 1]) && live.show(["kind": "step", "run_id": "run_a", "seq": 2]), "its lines drive")
+        check(!live.show(["kind": "start", "run_id": "run_a", "seq": 1]) && !live.show(["kind": "step", "run_id": "run_a", "seq": 2]), "a replay of the live task: not again")
+        check(live.show(["kind": "task_done", "run_id": "run_a", "seq": 3]) && live.runs.isEmpty, "its task_done ends it")
+        check(!live.show(["kind": "result_response", "run_id": "run_a", "seq": 4]) && !live.show(["kind": "start", "run_id": "run_a", "seq": 1]),
+              "after its end: nothing drives (a later replay neither)")
+        check(live.note(task(8, "run_b")) && live.note(["kind": "session.task_end", "seq": 9, "run_id": "run_b"]) && live.runs.isEmpty,
+              "a task_end ends a task too")
 
-        // not confirmed gone (a signal that does nothing): false, so the caller does not start the next run
-        let stuck = start("exec sleep 30")
-        check(!HarnessProcess.Tree(stuck).end(close: {}, grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 }) && stuck.isRunning,
-              "a process still up after SIGKILL: not ended, said so")
-        stuck.terminate(); stuck.waitUntilExit()
+        // nothing going on: no task running or answerable, nothing queued
+        var a = W.Activity()
+        check(a.idle && !a.holdsRestart, "a new session is idle")
+        a.note(["kind": "session.task", "run_id": "run_1", "raw": "整理桌面"])
+        check(!a.idle && a.running == ["run_1"] && a.raw["run_1"] == "整理桌面" && a.holdsRestart, "a task running")
+        a.note(["kind": "session.task_end", "run_id": "run_1", "status": "succeeded", "undo": "open"])
+        check(!a.idle && a.running.isEmpty && a.open == ["run_1"], "its result card can still be answered")
+        check(a.holdsRestart && a.undo == ["run_1"], "its undo still offered: no restart under it")
+        a.note(["kind": "session.task_closed", "run_id": "run_1", "why": "linger"])
+        check(a.idle && a.raw.isEmpty && !a.holdsRestart, "closed: idle")
+        a.note(["kind": "session.task", "run_id": "run_2", "raw": "x"])
+        a.note(["kind": "session.task_end", "run_id": "run_2", "status": "failed", "undo": "none"])
+        check(!a.holdsRestart && a.open == ["run_2"], "a card without undo does not hold a restart")
+        a.note(["kind": "session.task_closed", "run_id": "run_2", "why": "linger"])
+        a.note(["kind": "session.queue", "items": [["id": "q1", "text": "然后呢"]]])
+        check(!a.idle, "words queued")
+        a.note(["kind": "session.queue", "items": [Any]()])
+        check(a.idle, "queue empty")
+        a.note(["kind": "session.message", "seq": 9, "role": "user", "text": "hi"])
+        check(a.idle, "a message changes nothing")
 
-        // a close that failed, tried again after the harness is gone: a survivor in a group of its own, its parent
-        // gone, is found by nothing but the members the first attempt kept
-        let input2 = Pipe()
-        let leaving = start(#"perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); open(F, ">\#(dir.path)/d"); print F $$; close F; sleep 30' & cat >/dev/null"#, stdin: input2)
-        let d = pid("d")
-        let kept = HarnessProcess.Tree(leaving)
-        check(!kept.end(close: {}, grace: 0.2, term: 0.2, kill: 0.2, signal: { _, _ in 0 })
-              && kept.known.contains { $0.pid == d }, "a failed close keeps what it found (\(d) in \(kept.known.map(\.pid)))")
-        try? input2.fileHandleForWriting.close(); leaving.waitUntilExit()
-        check(HarnessProcess.member(d) != nil && getpgid(d) == d, "the survivor is up in its own group, its parent gone")
-        check(HarnessProcess.Tree(leaving).end(close: {}, grace: 0.1, term: 0.1, kill: 0.1) && HarnessProcess.member(d) != nil,
-              "(what a retry without them would wrongly call gone)")
-        check(kept.end(close: {}, grace: 0.2, term: 0.5, kill: 2) && HarnessProcess.member(d) == nil,
-              "the retry with them ends the survivor")
-        if HarnessProcess.member(d) != nil { kill(d, SIGKILL) }
+
+        // the machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2)
+        let v2 = #"{"v":2,"state":"lingering","pgid":4100,"pid":4100,"start":1792600000,"run_id":"run_a","session_id":"ses_a","by":"session","owner":4000,"t":1.5}"#
+        let h = W.Holder.parse(v2, alive: { _ in false })
+        check(h == W.Holder(state: "lingering", pgid: 4100, pid: 4100, start: 1_792_600_000, runID: "run_a", sessionID: "ses_a", by: "session", owner: 4000, t: 1.5),
+              "a holder, as the harness writes it: \(String(describing: h))")
+        check(h.map { W.Holder.parse(String(decoding: $0.json, as: UTF8.self), alive: { _ in false }) == $0 } == true, "and written back the same")
+        check(W.Holder.parse(#"{"v":2,"state":"done","pgid":1,"owner":1}"#, alive: { _ in true }) == nil
+              && W.Holder.parse(#"{"v":2,"state":"acting","pgid":"1","owner":1}"#, alive: { _ in true }) == nil
+              && W.Holder.parse("x", alive: { _ in true }) == nil && W.Holder.parse(nil, alive: { _ in true }) == nil, "no lock")
+        check(W.Holder.parse(#"{"v":2,"state":"acting","pgid":99999999999,"pid":1,"owner":1}"#, alive: { _ in true }) == nil
+              && W.Holder.parse(#"{"v":2,"state":"acting","pgid":1e300,"owner":1}"#, alive: { _ in true }) == nil, "an id out of range: no lock (no crash)")
+        var marked = h; marked?.orphanSince = 12.5
+        check(marked.map { W.Holder.parse(String(decoding: $0.json, as: UTF8.self), alive: { _ in false })?.orphanSince == 12.5 } == true, "orphan_since kept")
+        let old = W.Holder.parse(#"{"pid":12,"session_id":"s","run_id":"r","executor_pid":34}"#, alive: { $0 == 34 })
+        check(old?.acting == true && old?.pgid == 0 && old?.owner == 34, "an earlier lock: acting, held by whichever of its pids lives")
+        if let h {
+            let up = { (_: Int32) in true }, down = { (_: Int32) in false }
+            check(W.held(h, groupAlive: up, alive: down, startOf: { _ in nil }), "held while its group lives, its owner and leader gone")
+            check(!W.held(h, groupAlive: down, alive: up, startOf: { _ in h.start }), "not once its group is gone, its owner alive or not")
+            check(W.held(h, groupAlive: up, alive: up, startOf: { _ in h.start + 1 }), "its leader alive, the same start (to a second)")
+            check(!W.held(h, groupAlive: up, alive: up, startOf: { _ in h.start + 3600 }), "its leader's pid now another process: not held")
+            var inProcess = h; inProcess.pgid = 0
+            check(W.held(inProcess, groupAlive: down, alive: { $0 == 4000 }, startOf: { _ in nil })
+                  && !W.held(inProcess, groupAlive: up, alive: down, startOf: { _ in nil }), "an executor inside its owner: held while the owner lives")
+        }
     }
+
 }
