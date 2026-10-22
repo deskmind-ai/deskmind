@@ -42,6 +42,7 @@ enum SessionTests {
         processInterleavingTests()
         ownershipTests()
         resendAndAcceptanceTests()
+        duplicateSendTests()
     }
 
     // MARK: fixtures
@@ -1819,5 +1820,48 @@ enum SessionTests {
                       "\(an) × \(pn): in the history only (history \(inHistory), outbox \(st.outbox.map(\.id)), queue \(st.queue.map(\.id)))")
             }
         }
+    }
+
+    // MARK: review of 66fb28f — a resend whose original was taken while a reopen blocked sends nothing
+
+    static func duplicateSendTests() {
+        // the original say was stored but its ack missed; the exit made it unsent; the resend reopens the session and,
+        // while the open blocks, the replay brings the stored line: no session.send after the open
+        for viaNotOpen in [false, true] {
+            let m = MockTransport()
+            m.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 2, "pid": 2], SessionClient.Op.send: ["ok": true]]
+            let c = SessionClient(transport: m)
+            c.newClientId = { "x1" }
+            m.queued = [SessionClient.Op.open: [["ok": true, "session_id": "s", "last_seq": 0, "pid": 1]]]
+            _ = c.open(sessionId: "s")
+            [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { c.feed($0) }
+            _ = c.send(.cua("开个文件", scope: "/tmp/f"), to: "s")
+            if viaNotOpen {
+                // the app never heard the exit: its outbox says unsent from a refusal; the send finds not_open
+                c.feed(se(nil, #""kind":"session.error","code":"busy","text":"x","control":"cua","client_id":"x1""#))
+                m.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
+            } else {
+                c.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":2}"#))
+            }
+            check(c.state("s").unsent.map(\.id) == ["x1"], "\(viaNotOpen ? "not_open" : "reopen"): unsent before the resend")
+            m.onRequest = { op in
+                if op == SessionClient.Op.open {
+                    c.feed(se(nil, #""kind":"session.start","last_seq":2,"resumed":true"#))
+                    c.feed(se(2, #""kind":"session.message","msg_id":"m","role":"user","text":"开个文件","via":"cua","client_id":"x1""#))
+                }
+            }
+            let before = m.requests.filter { $0["op"] as? String == SessionClient.Op.send }.count
+            let r = c.resend("x1", in: "s")
+            m.onRequest = nil
+            let sends = m.requests.filter { $0["op"] as? String == SessionClient.Op.send }.count - before
+            check(r == .refused("taken") && sends == (viaNotOpen ? 1 : 0), "\(viaNotOpen ? "not_open" : "reopen"): the replay took it while the open blocked: no send after the open (\(r), \(sends) sends)")
+            check(c.state("s").outbox.isEmpty && c.state("s").messages.filter { $0.text == "开个文件" }.count == 1, "taken once, nothing held")
+        }
+        // the session's own answer to a repeat (harness#59): session.duplicate takes the words
+        var st = SessionReducer.reduce(SessionState(), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#))
+        st.outbox = [Outgoing(id: "d1", text: "b", sending: true, original: .say("b"))]
+        st = SessionReducer.reduce(st, L(#"{"session_id":"s","kind":"session.duplicate","client_id":"d1","control":"say","seq":2}"#))
+        check(st.outbox.isEmpty && st.taken.contains("d1"), "session.duplicate: taken")
+        check(ProtocolLine.parse(#"{"session_id":"s","kind":"session.duplicate","client_id":"d1","control":"say","seq":2}"#)?.event.kind == "session.duplicate", "decoded")
     }
 }

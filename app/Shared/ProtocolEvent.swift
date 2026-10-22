@@ -285,6 +285,15 @@ struct QueueItem: Codable, Equatable {
     enum CodingKeys: String, CodingKey { case id, text, held, note, clientId = "client_id" }
 }
 
+/// The session took these words already (harness#59): a say / cua / steer with a client_id it had stored is not done
+/// again; `seq` is the stored line's.
+struct SessionDuplicate: Codable, Equatable {
+    @LStr var clientId: String = ""
+    var control: String?
+    var seq: Int?
+    enum CodingKeys: String, CodingKey { case clientId = "client_id", control, seq }
+}
+
 struct SessionQueue: Codable, Equatable {
     @LList<QueueItem> var items: [QueueItem] = []
 }
@@ -529,6 +538,7 @@ enum ProtocolEvent: Equatable {
     case steer(SessionSteer)
     case retry(SessionRetry)
     case queue(SessionQueue)
+    case duplicate(SessionDuplicate)
     // the helper, about a session
     case sessionExit(HelperSessionExit)
     // the executor, forwarded
@@ -568,6 +578,7 @@ enum ProtocolEvent: Equatable {
         case .steer: return "session.steer"
         case .retry: return "session.retry"
         case .queue: return "session.queue"
+        case .duplicate: return "session.duplicate"
         case .sessionExit: return "helper.session_exit"
         case .start: return "start"
         case .preparing: return "preparing"
@@ -625,6 +636,7 @@ extension ProtocolEvent: Codable {
         case "session.steer": self = read(ProtocolEvent.steer)
         case "session.retry": self = read(ProtocolEvent.retry)
         case "session.queue": self = read(ProtocolEvent.queue)
+        case "session.duplicate": self = read(ProtocolEvent.duplicate)
         case "helper.session_exit": self = read(ProtocolEvent.sessionExit)
         case "start": self = read(ProtocolEvent.start)
         case "preparing": self = .preparing
@@ -664,6 +676,7 @@ extension ProtocolEvent: Codable {
         case .steer(let v): try v.encode(to: encoder)
         case .retry(let v): try v.encode(to: encoder)
         case .queue(let v): try v.encode(to: encoder)
+        case .duplicate(let v): try v.encode(to: encoder)
         case .sessionExit(let v): try v.encode(to: encoder)
         case .start(let v): try v.encode(to: encoder)
         case .preparing: break

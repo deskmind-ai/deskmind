@@ -117,6 +117,15 @@ enum SessionClientE2E {
         check(s.messages.filter { $0.text == "再说一句" }.count == 1, "stored once")
         check(!s.hasGap && s.lastSeq == s.messages.compactMap(\.seq).max(), "every stored line in place: lastSeq \(s.lastSeq)")
 
+        // the same words sent again with their client_id (an ack the app missed): the session does them once
+        // (session.duplicate, harness#59), whichever process gets them
+        let firstId = s.taken.sorted().first ?? ""
+        let line: [String: Any] = ["type": "say", "text": "你好", "client_id": firstId]
+        check(transport.request(SessionClient.Request.send(sessionId: sid, line: line))?["ok"] as? Bool == true, "the first say's line again")
+        usleep(1_500_000)
+        s = client.state(sid)
+        check(s.messages.filter { $0.text == "你好" }.count == 1 && assistant().count == 3 && s.outbox.isEmpty, "stored once, no new reply: \(s.messages.map(\.text).suffix(3))")
+
         // the session ended by the app: its exit (pid, start_seq, last_seq) heard; not opened again by a watch or a send
         check(client.end(sid), "end")
         check(until { client.state(sid).exited != nil }, "its exit heard: exited \(String(describing: client.state(sid).exited))")

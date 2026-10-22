@@ -644,6 +644,9 @@ enum SessionReducer {
             // them: applied while their stored line is held behind a gap, the words would be in neither place)
             if s.pendingSession.isEmpty { applyQueue(&s, q.items); s.deferredQueue = nil }
             else { s.deferredQueue = q.items; s.deferredMark = max(s.lastSeq, s.pendingSession.keys.max() ?? 0) }
+        case .duplicate(let d):
+            // the session had taken these words already (their stored line has come, or comes in a replay)
+            if !d.clientId.isEmpty { taken(&s, d.clientId) }
         case .unknown(let k, _):
             s.unknownKinds.insert(k)
         default:

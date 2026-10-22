@@ -259,7 +259,7 @@ final class SessionClient {
 
     /// The id the app gives the user's words it sends (say, cua, steer): the session gives it back on what became of
     /// them (harness#57). Tests set their own.
-    var newClientId: () -> String = { "c_" + UUID().uuidString.prefix(12).lowercased() }
+    var newClientId: () -> String = { "c_" + UUID().uuidString.lowercased() }      // unique for the session's life (harness #59)
 
     /// Blocks while it reopens an ended session (up to a minute): call it off the main thread.
     func send(_ control: SessionControl, to sessionId: String) -> SendResult { send(control, to: sessionId, clientId: nil) }
@@ -314,6 +314,8 @@ final class SessionClient {
             // (an exit heard while the open request was out may have made the word unsent: it is the new process's —
             // the next one's, if it was held so and no start was heard since)
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || (heldNext && st.starts == startsAtHold) } } }
+            // taken while the open blocked (its stored line replayed meanwhile): nothing to send
+            if let id = words, stillOurs(id, in: sessionId) == false { return .refused("taken") }
         }
         var r = transport.request(Request.send(sessionId: sessionId, line: line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
@@ -327,11 +329,21 @@ final class SessionClient {
             lock.unlock()
             guard !ended, open(sessionId: sessionId, config: how.config, lang: how.lang) != nil else { return notSent(.unavailable) }
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || st.starts == startsAtHold } } }
+            // taken while the open blocked: nothing to send again
+            if let id = words, stillOurs(id, in: sessionId) == false { return .refused("taken") }
             r = transport.request(Request.send(sessionId: sessionId, line: line))
         }
         guard let r, r["ok"] as? Bool != false else { return notSent(.unavailable) }
         // (sent: the words stay in the outbox, sending, until the session takes or refuses them)
         return .sent
+    }
+
+    /// Whether the words are still the app's to send (in the outbox, not taken by the history), read under the lock
+    /// after a step that blocked (a reopen): a replay that came meanwhile may have taken them.
+    private func stillOurs(_ id: String, in sessionId: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let st = states[sessionId] else { return false }
+        return !st.taken.contains(id) && st.outbox.contains { $0.id == id }
     }
 
     /// Why a control is moot once the session's process ended (it was for the task or the card that went with it), or
