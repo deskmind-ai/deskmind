@@ -216,6 +216,17 @@ enum SessionE2E {
             check(ha.runID == "run_o3" && !ComputerLock.groupAlive(og), "after the grace the next task ends it and takes the Mac")
         } else { check(false, "after the grace the next task ends it and takes the Mac") }
         killGroup(after.processIdentifier); after.waitUntilExit()
+        // a live owner's acting run is never orphaned, even with its leader gone and a child of its group up
+        let mine = executor("sleep 30 & exit 0")
+        _ = start("run_live", mine)
+        mine.waitUntilExit()
+        let tLive = Date().timeIntervalSince1970
+        if case .busy = ComputerLock.acquire(runID: "run_l2", by: "helper", now: tLive, spawn: { nil }),
+           case .busy = ComputerLock.acquire(runID: "run_l3", by: "helper", now: tLive + 999, spawn: { nil }),
+           ComputerLock.read()?.orphanSince == nil {
+            check(true, "a live owner's run (its leader gone, a child up): refused, never orphaned")
+        } else { check(false, "a live owner's run (its leader gone, a child up): refused, never orphaned") }
+        killGroup(mine.processIdentifier)
 
         // the lock cannot be written (a folder in its place): the task is refused and what it started is ended
         try? fm.removeItem(at: ComputerLock.file)

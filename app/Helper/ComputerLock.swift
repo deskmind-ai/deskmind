@@ -139,22 +139,21 @@ enum ComputerLock {
         guarded(otherwise: false) {
             guard var h = mine(read(), runID, pgid), h.acting else { return false }
             h.state = "lingering"; h.t = Date().timeIntervalSince1970
-            write(h)
-            return true
+            return write(h)
         }
     }
 
-    enum Undo { case ok, busy, expired }
+    /// `failed`: the lock could not be read or written (its guard, its file): nothing is let through.
+    enum Undo { case ok, busy, expired, failed }
 
     /// An answer to `runID`'s result card: only while it is the lingering holder; it acts again. `expired`: another
     /// task started since (or its tree is gone); `busy`: an answer of it is being carried out.
     static func undo(runID: String, pgid: Int32) -> Undo {
-        guarded(otherwise: .expired) {
+        guarded(otherwise: .failed) {
             guard var h = mine(read(), runID, pgid), held(h) else { return .expired }
             if h.acting { return .busy }
             h.state = "acting"; h.t = Date().timeIntervalSince1970
-            write(h)
-            return .ok
+            return write(h) ? .ok : .failed
         }
     }
 
@@ -184,12 +183,13 @@ enum ComputerLock {
     /// The machine is held by a task that acts, or by a run whose leftovers would not end (an op run is refused).
     static let busy: [String: Any] = ["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]
 
-    /// After its executor exited without its task_done, what is left of its group still acts (and holds the Mac): it
-    /// is given `grace` s to end by itself, then ended -- an orphaned tree must not hold the Mac for good.
+    /// Its executor (harness) has exited: if the lock still says it acts (no task_done; or it died during an undo), what
+    /// is left of its group is given `grace` s to end by itself, then ended -- it must not hold the Mac for good. A
+    /// lingering leftover needs nothing: the next task ends it.
     static func reapLeftovers(runID: String, pgid: Int32, grace: Double = 12) {
         DispatchQueue.global().asyncAfter(deadline: .now() + grace) {
             let left: SessionWire.Holder? = guarded(otherwise: nil) {
-                guard let h = mine(read(), runID, pgid), held(h) else { return nil }
+                guard let h = mine(read(), runID, pgid), h.acting, held(h) else { return nil }
                 return h
             }
             guard let h = left else { return }

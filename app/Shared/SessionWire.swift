@@ -97,6 +97,15 @@ enum SessionWire {
         /// This connection asked for `run`'s replay: its lines are held in order until the replay has come.
         mutating func expect(_ run: String) { expected.insert(run) }
 
+        /// The app asked a session itself for a replay of `run` after `after` (`attach{run_id}` through session.send):
+        /// a connection that has nothing of that run takes it from there (its lines held in order until the replay
+        /// has come); one that follows it already keeps its own cursor.
+        mutating func adopt(_ run: String, after: Int) {
+            guard !expected.contains(run), (runs[run] ?? 0) == 0, held[run] == nil else { return }
+            expected.insert(run)
+            runs[run] = max(0, after)
+        }
+
         /// Some run's lines wait for their replay.
         var holding: Bool { !held.isEmpty }
 

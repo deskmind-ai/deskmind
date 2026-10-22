@@ -311,6 +311,11 @@ enum SessionHost {
             lock.unlock(); return ["ok": false, "code": "not_open", "error": "session \(sessionID) is not open"]
         }
         s.lastActive = Date()
+        // a replay of a task the app asks for itself: the connections that have nothing of it take it from its cursor
+        if o["type"] as? String == "attach", let run = o["run_id"] as? String {
+            let after = (o["after_seq"] as? NSNumber)?.intValue ?? 0
+            for w in watchers { var g = w.gate(sessionID); g.adopt(run, after: after); w.gates[sessionID] = g }
+        }
         lock.unlock()
         if let error = s.write(o) { return ["ok": false, "error": error] }
         return ["ok": true]

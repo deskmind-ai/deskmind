@@ -320,6 +320,9 @@ enum HelperE2E {
         guard let deaf = fakeLingering("run_deaf_stop", #"trap "" TERM; sleep 30"#) else { return }
         Thread.detachNewThread { Thread.sleep(forTimeInterval: 0.5); Runner.requestStop() }
         let stopped = run()
+        // ended (SIGKILL) inside the next run's acquire; Foundation reaps it a moment later
+        let reaped = Date().addingTimeInterval(2)
+        while deaf.process.isRunning && Date() < reaped { Thread.sleep(forTimeInterval: 0.02) }
         check(stopped.last?["reason"] as? String == "cancelled" && !stopped.contains { $0["event"] as? String == "task_done" }
               && launched() == before && !deaf.process.isRunning,
               "linger (stop): a stop while the last run's process is ended: no launch (\(stopped.map { $0["event"] as? String ?? "?" }))")

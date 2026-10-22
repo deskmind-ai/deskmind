@@ -121,7 +121,11 @@ enum HarnessRun {
         switch ComputerLock.undo(runID: l.runID, pgid: l.pgid) {
         case .ok: break
         case .busy:
-            return ["ok": false, "code": "busy", "error": "this result card was answered already"]
+            lock.lock(); l.responded = false; lock.unlock()   // not this answer's: the card can still be answered after it
+            return ["ok": false, "code": "busy", "error": "an answer to this card is being carried out"]
+        case .failed:
+            lock.lock(); l.responded = false; lock.unlock()
+            return ["ok": false, "error": "the machine lock could not be read or written"]
         case .expired:
             lock.lock(); l.close(); if lingering === l { lingering = nil }; expiredRun = l.runID; lock.unlock()
             NSLog("DeskMind Hands: respond refused: another computer task started on this Mac since \(l.runID)")
@@ -159,6 +163,8 @@ enum HarnessRun {
         l.close(); if lingering === l { lingering = nil }
         lock.unlock()
         ComputerLock.free(runID: l.runID, pgid: l.pgid)
+        // gone during an undo (the lock still says it acts): what is left of its group is ended after a grace
+        ComputerLock.reapLeftovers(runID: l.runID, pgid: l.pgid)
     }
 
     /// The lingering run was ended (「清除全部」): its card can no longer be answered. True, for chaining.
@@ -425,10 +431,11 @@ enum HarnessRun {
         lock.unlock()
         if !lingers {
             // its harness gone: the lock goes with its group; what is left of it after a run that never said task_done
-            // still acts (the next task is refused) until it ends, or is ended after a grace
-            if state.finished == nil { ComputerLock.reapLeftovers(runID: runID, pgid: p.processIdentifier) }
-            else { ComputerLock.linger(runID: runID, pgid: p.processIdentifier) }
+            // still acts (the next task is refused) until it ends, or is ended after a grace (reapLeftovers decides on
+            // the lock's state)
+            if state.finished != nil { ComputerLock.linger(runID: runID, pgid: p.processIdentifier) }
             ComputerLock.free(runID: runID, pgid: p.processIdentifier)
+            ComputerLock.reapLeftovers(runID: runID, pgid: p.processIdentifier)
         }
         if lingers {
             // The process waits up to `lingerSeconds` for the result card's answer (op respond), then exits; or sooner,

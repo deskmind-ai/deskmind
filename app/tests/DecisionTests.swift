@@ -937,6 +937,14 @@ enum DecisionTests {
               "a run not asked for, past a gap (another connection's replay, a stray last line): dropped, not held")
         check(seqs(other.admit(ev2(1))) == [1] && seqs(other.admit(ev2(2))) == [2] && other.admit(ev2(2)).isEmpty,
               "from its start, in order: passed on at once, once each")
+        // the app asks the session itself for a run's replay after 4 (attach{run_id}): a connection with nothing of it
+        // takes it from there; one following it keeps its own cursor
+        var app = W.Gate(after: 0)
+        app.adopt("run_7", after: 4)
+        let ev7 = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_7", "seq": n] }
+        check(app.admit(ev7(3)).isEmpty && seqs(app.admit(ev7(5)) + app.admit(ev7(6))) == [5, 6], "an app-asked replay after 4: 5, 6")
+        app.adopt("run_7", after: 0)
+        check(app.admit(ev7(1)).isEmpty && app.runs["run_7"] == 6, "asked again: its cursor kept")
         check(other.admit(ev(3)).isEmpty && other.holding, "a run asked for: held")
 
         // what drives the live card: only new lines of tasks live in this process, each once — never a replay
