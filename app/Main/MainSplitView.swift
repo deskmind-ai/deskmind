@@ -23,6 +23,7 @@ struct MainSplitView: View {
     @Environment(\.lang) private var lang
     @State private var settingsOpen = false
     @State private var settingsBefore = ""
+    @State private var envBefore = ""
 
     var body: some View {
         NavigationSplitView {
@@ -53,19 +54,25 @@ struct MainSplitView: View {
     /// The model settings as saved now (the key file, the configuration, the service, and cloud models on or off), to
     /// tell whether the sheet changed them.
     static func settingsFingerprint() -> String {
-        let env = CloudModelSettings.read().sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
-        return env + "|" + (UserDefaults.standard.string(forKey: "engine.config") ?? "") + "|" + CloudModelSettings.provider.id
+        return envFingerprint() + "|" + (UserDefaults.standard.string(forKey: "engine.config") ?? "") + "|" + CloudModelSettings.provider.id
             + "|" + (UserDefaults.standard.string(forKey: "engine") ?? "") + "|" + ResolvedLang.current.rawValue
+    }
+
+    /// The key file (keys, a custom service's URL and model): a session process reads it when it starts, so only a
+    /// change here needs a new process (set_config carries the rest in place).
+    static func envFingerprint() -> String {
+        CloudModelSettings.read().sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
     }
 
     private func openSettings() {
         settingsBefore = Self.settingsFingerprint()
+        envBefore = Self.envFingerprint()
         settingsOpen = true
     }
 
     private func settingsClosed() {
         model.refreshCloud()
-        if Self.settingsFingerprint() != settingsBefore { shell.settingsChanged() }
+        if Self.settingsFingerprint() != settingsBefore { shell.settingsChanged(keyChanged: Self.envFingerprint() != envBefore) }
     }
 
     /// The configuration sessions open with: the one the settings saved, else the chosen service's.
@@ -242,8 +249,11 @@ struct ChatColumn: View {
             if !shell.reachable {
                 Banner(text: L("DeskMind's helper isn't answering. Conversations come back when it does.", lang: lang))
             }
-            if shell.cloudOff {
+            if shell.showsCloudOff(s) {
                 CloudOffRow(openSettings: openSettings)
+            }
+            if s?.settingsRefused != nil {
+                Banner(text: L("The new model settings didn't reach this conversation. Open the settings and save them again.", lang: lang))
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -671,7 +681,7 @@ struct CardView: View {
                 ForEach(card.buttons.filter { $0.role != .choice }, id: \.index) { b in button(b) }
             }
             .fixedSize(horizontal: false, vertical: true)
-            if !seen && card.buttons.contains(where: { $0.role.needsWholeBody }) {
+            if outcome == .open && !seen && card.buttons.contains(where: { $0.role.needsWholeBody }) {
                 // (neutral: it holds the card's own field too, for someone who wants to type)
                 Text(L("Read the whole card first: scroll to its end", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)

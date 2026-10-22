@@ -634,8 +634,14 @@ enum SessionTests {
         // its process went away, or its executor: still undoing (its result comes on reopen), never expired
         let exited = SessionReducer.reduce(asked, L(#"{"kind":"helper.session_exit","session_id":"s","code":3,"last_seq":3}"#))
         check(exited.exited == 3 && exited.task("r1")?.undo == .undoing, "session_exit after task_respond: undoing, not expired: \(String(describing: exited.task("r1")?.undo))")
+        // closed with no undo result (an older log: harness#63 records task_undo before the closure): unknown, never
+        // an undo under way for good, never expired
         let closed = SessionReducer.reduce(asked, se(4, #""kind":"session.task_closed","run_id":"r1","why":"linger""#))
-        check(closed.task("r1")?.undo == .undoing, "task_closed after task_respond: undoing, not expired")
+        check(closed.task("r1")?.undo == .unknown(nil) && closed.task("r1")?.undo.finished == false,
+              "task_closed after task_respond, no undo result: unknown: \(String(describing: closed.task("r1")?.undo))")
+        // its result after all (the executor's result_response, another stream, later): done
+        let late = SessionReducer.reduce(closed, ex(3, #""kind":"result_response","picked":"undo","effect":"undone","undone":1,"total":1"#))
+        check(late.task("r1")?.undo == .done(undone: 1, total: 1, refused: nil), "its result after the closure: done")
         // reopened: the undo recorded as unknown — not done, not "nothing undone"
         let reopened = SessionReducer.reduce(exited, [se(nil, #""kind":"session.start","resumed":true,"last_seq":3"#), se(4, #""kind":"session.task_undo","run_id":"r1","undone":0,"total":0,"refused":"the undo was cut off","unknown":true"#),
                                                       se(5, #""kind":"session.task_closed","run_id":"r1","why":"session_end""#)])
@@ -847,6 +853,7 @@ enum SessionTests {
         check(!unheard.state("s").composerEnabled, "a card waits")
         mock.streamLines = [["kind": "helper.watching", "open": ["other"]]]
         unheard.watch()
+        unheard.backfilling.wait()          // (its stored lines read after the reconnect, off the stream's thread)
         check(unheard.state("s").exited != nil && unheard.state("s").composerEnabled, "not in helper.watching's open: exited, its card voided")
         mock.streamLines = [["kind": "helper.watching", "open": ["s"]]]
         let listed = SessionClient(transport: mock)

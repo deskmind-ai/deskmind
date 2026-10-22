@@ -187,13 +187,15 @@ struct TaskState: Equatable {
     var lastSeq = 0
 
     /// Undo, from the facts whichever order they came in: an undo's result (done, or unknown when it was cut off); else
-    /// an undo asked for (session.task_respond) is under way — whatever became of its process or executor, never
-    /// expired: its result is recorded when the session opens again; else the result card answered otherwise; else
+    /// an undo asked for (session.task_respond) is under way while the run is not closed — its process gone, its
+    /// result is recorded when the session opens again, never expired — and unknown once the run is closed
+    /// (session.task_closed) with no result (harness#63 records task_undo before the closure: an older log, or one
+    /// that lost it, must not show an undo under way for good); else the result card answered otherwise; else
     /// offered by session.task_end's `undo` ("open" / "none") when it came, by the result card's options before; an
     /// offer whose executor closed (session.task_closed) is expired.
     var undo: UndoState {
         if let d = sessionUndo ?? responseUndo { return d }
-        if respond?.undo == true { return .undoing }
+        if respond?.undo == true { return closedWhy != nil ? .unknown(nil) : .undoing }
         let offered: Bool
         if let u = end?.undo, u == "open" || u == "none" { offered = u == "open" }
         else { offered = done?.resultCard?.options.contains { $0.kind == "undo" } == true }
@@ -285,6 +287,12 @@ struct SessionState: Equatable {
     var errors: [StoredError] = []
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
     var lastRefusal: SessionErrorEvent? = nil
+    /// The session's settings as it stored them last (session.config): its model configuration (nil: no model) and
+    /// language from there on.
+    var settings: SessionConfigEvent? = nil
+    /// New settings this app sent (set_config) were not stored: its refusal's code (busy twice, bad_config). Cleared by
+    /// the next session.config of a set_config.
+    var settingsRefused: String? = nil
     var unknownKinds: Set<String> = []
     /// Replies whose bubble left (never said a word, or failed): their deltas, replayed, do not bring it back.
     var droppedMessages: Set<String> = []
@@ -658,6 +666,9 @@ enum SessionReducer {
         case .taskRespond(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].respond = e
+        case .sessionConfig(let e):
+            s.settings = e
+            if e.by == "set_config" { s.settingsRefused = nil }
         case .steer(let e):
             if let c = e.clientId { taken(&s, c) }
             let i = taskIndex(&s, e.runId)

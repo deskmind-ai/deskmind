@@ -8,10 +8,10 @@
 //                 (`already_open`, with the last stored seq it has sent). `live_view` (default true, as for `op run`;
 //                 false is kept): a task of the session shows the live card
 //   session.send  {session_id, line}     one control line (SessionWire.validate: a JSON object of a known type)
-//   session.end   {session_id, when_idle?}  ends the process (`end`, then stdin closed) only when the session is idle
-//                                        (SessionWire.IdleCheck, asked here: never the app's guess); else refused
-//                                        (`not_idle`). `when_idle: true` (a restart after the settings changed): ended now
-//                                        if idle, else at its next idle moment (`deferred: true`)
+//   session.end   {session_id, when_idle?}  ends the process only when the session is idle: the helper writes it
+//                                        `end_if_idle` (harness#62; SessionWire.EndAsk) and the session decides — it
+//                                        ends, or refuses (`not_idle`, with `why`). `when_idle: true` (a restart so a new
+//                                        key reaches it): ended now if idle, else at its next idle moment (`deferred`)
 //   session.history {session_id, after_seq?, runs?: {run_id: after_seq}}
 //                                        the session's stored lines after the cursor, and its tasks' (from session.jsonl
 //                                        and runs/<run>/events.jsonl), with `open` (a process of it runs here) and the
@@ -29,8 +29,9 @@
 //                 connection gets, per stream (the session's stored lines; each task's lines), the replay first, then
 //                 the live lines, with contiguous seqs: a live task line that overtakes its replay is held until the
 //                 replay below it has been sent (SessionWire.Gate). The
-//                 first line is {"kind":"helper.watching","open":[…],"idle":[…]} (`idle`: sessions this helper
-//                 closed because they were idle, not opened since); a process that ends says
+//                 first line is {"kind":"helper.watching","open":[…],"idle":[…],"last_seq":{…}} (`idle`: sessions this
+//                 helper closed because they were idle, not opened since; `last_seq`: the last stored seq of each session
+//                 whose process ended in this helper, not open now); a process that ends says
 //                 {"kind":"helper.session_exit","session_id":…,"code":…,"pid":…,"start_seq":…,"last_seq":…,"idle"?:true}:
 //                 which process (pid), the stored seq it began after (its session.start's last_seq) and the last stored
 //                 seq it sent; `idle` when this helper closed it because nothing was going on (no run was cut).
@@ -40,10 +41,9 @@
 //
 // Lifecycle (owner 10-21): the processes are this helper's children. When the helper exits, their stdin reaches its
 // end and each stops its running task itself (the harness's "app went away"). The main app closing changes nothing:
-// a session keeps its task running and its card waiting. A session that is idle (SessionWire.IdleCheck: no task
-// running or lingering, nothing queued, no reply, no control unanswered) and quiet for `idleSeconds` has its stdin
-// closed, and its process exits on its own — watched or not (#107 review: each process is ~80 MB). The watch goes on;
-// the next send (or open) starts it again.
+// a session keeps its task running and its card waiting. A session quiet for `idleSeconds` is asked to end if it is
+// idle (`end_if_idle`: the session decides — no reply, nothing queued, no task open, no recovery under way), watched or
+// not (#107 review: each process is ~80 MB). The watch goes on; the next send (or open) starts it again.
 
 import AppKit
 import Foundation
@@ -102,8 +102,25 @@ enum SessionHost {
     nonisolated(unsafe) private static var expiring = false
     /// Sessions this helper closed because they were idle, not opened since (helper.watching's `idle`).
     nonisolated(unsafe) private static var idleClosed: Set<String> = []
-    /// How long an idle check waits for the session's answer (it answers at once unless it is very busy: not idle).
-    static let idleCheckTimeout: Double = 5
+    /// The last stored seq of each session whose process ended in this helper (helper.watching's `last_seq`): a
+    /// watch that comes later reads the stored log of only those it has not all of.
+    nonisolated(unsafe) private static var exitedLastSeq: [String: Int] = [:]
+    /// How long `session.end` waits for the session's answer to its end_if_idle (it answers in order, at once: this
+    /// only bounds a session that hangs).
+    static let endAnswerTimeout: Double = 15
+    /// How long a control line waits for an end_if_idle under way (the session answers it at once): a line written
+    /// after it to a session that then ends would be lost; after its answer it goes to the session, or is not_open
+    /// (the app opens the session again and sends it there).
+    static let endAskHold: Double = 2
+
+    /// The helper's end_if_idle under way: answered by the session's refusal (`why`) or by its process's exit (`ended`).
+    final class EndAsk {
+        let wire = SessionWire.EndAsk()
+        let answered = DispatchGroup()
+        var why: [String]?
+        var ended = false
+        init() { answered.enter() }
+    }
 
     final class Session {
         let id: String
@@ -126,20 +143,12 @@ enum SessionHost {
         var started = false
         var first: [String: Any]?
         let firstLine = DispatchSemaphore(value: 0)
-        /// Serialises the app's control lines with an idle check (`closeIfIdle`): a line written before the check is
-        /// answered before it; one that comes during it waits, then finds the session open (not idle) or closing.
-        let controlLock = NSLock()
-        /// The idle check waiting for the session's answer, and the semaphore it waits on (under SessionHost.lock).
-        var check: SessionWire.IdleCheck?
-        var checkDone: DispatchSemaphore?
-        /// Markers of checks that gave up waiting: their late refusal is still the helper's own.
-        var staleMarkers: Set<String> = []
-        /// Closed by this helper because it was idle: its exit says so (no run was cut).
+        /// The helper's end_if_idle under way, if any (one at a time).
+        var ask: EndAsk?
+        /// Closed by this helper's end_if_idle (it was idle): its exit says so (no run was cut).
         var closedIdle = false
-        /// A restart the app asked for (session.end when_idle): ended at its next idle moment.
+        /// A restart the app asked for (session.end when_idle): asked again at its next idle moment.
         var endWhenIdle = false
-        /// An idle check is scheduled or running.
-        var checking = false
         // the reader thread's own: the live card's view of each live task
         var cards: [String: HarnessEvents.State] = [:]
         var cardRun: String?
@@ -250,11 +259,12 @@ enum SessionHost {
             return ["ok": false, "code": "bad_request", "error": "\(k) must be a string"]
         }
         let liveView = req["live_view"] as? Bool
-        // one opener per id at a time; a process on its way out is waited for (its lock is the session's)
+        // one opener per id at a time; a process on its way out is waited for (its lock is the session's): one closing,
+        // one asked to end if idle (its answer may be its exit), one that exited and is not reaped yet
         let until = Date().addingTimeInterval(20)
         while true {
             lock.lock()
-            if let s = sessions[id], s.started, !s.closing {
+            if let s = sessions[id], s.started, !s.closing, s.ask == nil, s.process.isRunning {
                 if let liveView { s.liveView = liveView }
                 s.lastActive = Date()
                 lock.unlock()
@@ -321,7 +331,7 @@ enum SessionHost {
         // header: a first line with a type is no header, and the session would refuse to start.
         lock.lock()
         sessions[id] = s
-        idleClosed.remove(id)
+        idleClosed.remove(id); exitedLastSeq[id] = nil
         _ = s.write(header)
         var after: Int?
         for w in watchers {
@@ -345,9 +355,10 @@ enum SessionHost {
         guard let found = sessions[sessionID] else {
             lock.unlock(); return ["ok": false, "code": "not_open", "error": "session \(sessionID) is not open"]
         }
+        // an end_if_idle under way: wait for its answer (at once), so the line is not written to a session that ends
+        let ask = found.ask
         lock.unlock()
-        // (after an idle check under way: the line is the session's next, or the session is closing)
-        found.controlLock.lock(); defer { found.controlLock.unlock() }
+        if let ask { _ = ask.answered.wait(timeout: .now() + endAskHold) }
         lock.lock()
         guard let s = sessions[sessionID], s === found, s.started, !s.closing else {
             lock.unlock(); return ["ok": false, "code": "not_open", "error": "session \(sessionID) is not open"]
@@ -363,9 +374,9 @@ enum SessionHost {
         return ["ok": true]
     }
 
-    /// The app ends a session: only when it is idle (`closeIfIdle`, never on the app's own reading of its state: a
-    /// /cua sent a moment ago, a reply starting, an undo still open). `whenIdle` (a restart so that new settings apply):
-    /// ended now if idle, else once it is (`deferred`); otherwise refused (`not_idle`).
+    /// The app ends a session: only when it is idle, as the session itself decides (`end_if_idle`, never the app's or
+    /// this helper's reading of its state). `whenIdle` (a restart so that a new key reaches it): ended now if idle,
+    /// else asked again once it may be (`deferred`); otherwise refused (`not_idle`, with the session's `why`).
     static func end(sessionID: String, whenIdle: Bool = false) -> [String: Any] {
         lock.lock()
         guard let s = sessions[sessionID], !s.closing else {
@@ -373,42 +384,38 @@ enum SessionHost {
         }
         if whenIdle { s.endWhenIdle = true }
         lock.unlock()
-        switch closeIfIdle(s, sendEnd: true) {
+        let answer = endIfIdle(s, wait: true)
+        switch answer.code {
         case nil: return ["ok": true]
         case "not_open"?: return ["ok": false, "code": "not_open", "error": "session \(sessionID) is not open"]
         default:
             if whenIdle { return ["ok": true, "deferred": true] }
-            return ["ok": false, "code": "not_idle", "error": "session \(sessionID) is not idle (a task, a reply, a queue or an open undo)"]
+            return ["ok": false, "code": "not_idle", "why": answer.why, "error": "session \(sessionID) is not idle"]
         }
     }
 
-    /// The one place that decides a session is idle, and ends it then (nil), or says why not ("not_open", "not_idle").
-    /// What it has going on (SessionWire.Activity), then the session itself is asked (SessionWire.IdleCheck) with the
-    /// app's control lines held back meanwhile (`controlLock`): every line written before the check is answered before
-    /// it, none slips in between the answer and the end.
-    static func closeIfIdle(_ s: Session, sendEnd: Bool) -> String? {
-        s.controlLock.lock(); defer { s.controlLock.unlock() }
+    /// Asks the session to end if it is idle (`end_if_idle`, one ask at a time: a second asker shares the first's
+    /// answer). `wait`: until it answers (bounded by `endAnswerTimeout`); else only asked (the reaper), its answer
+    /// handled as it comes. nil when it ended; else "not_open", "not_idle" (with the session's `why`), "asked" or
+    /// "timeout".
+    @discardableResult
+    static func endIfIdle(_ s: Session, wait: Bool) -> (code: String?, why: [String]) {
         lock.lock()
-        guard sessions[s.id] === s, s.started, !s.closing else { lock.unlock(); return "not_open" }
-        guard s.activity.idle else { lock.unlock(); return "not_idle" }
-        let check = SessionWire.IdleCheck()
-        let done = DispatchSemaphore(value: 0)
-        s.check = check; s.checkDone = done
+        guard sessions[s.id] === s, s.started, !s.closing else { lock.unlock(); return ("not_open", []) }
+        let ask: EndAsk
+        var write = false
+        if let a = s.ask { ask = a } else { ask = EndAsk(); s.ask = ask; write = true }
         lock.unlock()
-        var wrote = true
-        for l in check.lines where wrote { wrote = s.write(l) == nil }
-        if wrote { _ = done.wait(timeout: .now() + idleCheckTimeout) }
-        lock.lock()
-        let answer = s.check ?? check
-        s.check = nil; s.checkDone = nil
-        if !answer.answered { s.staleMarkers.insert(check.marker) }
-        let idle = wrote && answer.idle(s.activity) && sessions[s.id] === s && !s.closing
-        if idle { s.closing = true; s.closedIdle = true }
-        lock.unlock()
-        guard idle else { return "not_idle" }
-        if sendEnd { _ = s.write(["type": "end"]) }
-        s.closeInput()
-        return nil
+        if write, s.write(ask.wire.line) != nil {
+            lock.lock(); if s.ask === ask { s.ask = nil; ask.answered.leave() }; lock.unlock()
+            return ("not_open", [])
+        }
+        guard wait else { return ("asked", []) }
+        if ask.answered.wait(timeout: .now() + endAnswerTimeout) == .timedOut { return ("timeout", []) }
+        lock.lock(); defer { lock.unlock() }
+        if ask.ended { return (nil, []) }
+        if let why = ask.why { return ("not_idle", why) }
+        return ("not_open", [])             // its process exited, not as this answer (an error)
     }
 
     /// The user deletes a session (the main app's session list): its process, if one runs here, is ended and waited
@@ -451,7 +458,7 @@ enum SessionHost {
             do { try fm.removeItem(at: folder) } catch { return ["ok": false, "error": "remove: \(error.localizedDescription)"] }
         }
         try? fm.removeItem(at: setup.logs.appendingPathComponent("\(id).stderr"))
-        lock.lock(); idleClosed.remove(id); lock.unlock()
+        lock.lock(); idleClosed.remove(id); exitedLastSeq[id] = nil; lock.unlock()
         return ["ok": true, "session_id": id]
     }
 
@@ -544,7 +551,9 @@ enum SessionHost {
             }
             w.gates[id] = g
         }
-        if let line = lineData(["kind": "helper.watching", "open": open.sorted(), "idle": idleClosed.subtracting(open).sorted()]) { w.send(line) }
+        let ended = exitedLastSeq.filter { !open.contains($0.key) }
+        if let line = lineData(["kind": "helper.watching", "open": open.sorted(), "idle": idleClosed.subtracting(open).sorted(),
+                                "last_seq": ended]) { w.send(line) }
         lock.unlock()
         for (s, a) in attach { _ = s.write(a) }
         // until the other side closes (or a write to it failed and shut it)
@@ -592,12 +601,17 @@ enum SessionHost {
         // app tells this process's runs from a newer one's whatever order lines arrive in
         var exit: [String: Any] = ["kind": "helper.session_exit", "session_id": s.id, "code": code,
                                    "pid": Int(s.process.processIdentifier), "start_seq": s.startSeq, "last_seq": s.live.lastSeq]
+        // an end_if_idle under way that the process ended on: it was idle (a clean exit; another is an error)
+        let ask = s.ask
+        s.ask = nil
+        if let ask, code == 0 { ask.ended = true; s.closedIdle = true }
         if s.closedIdle { exit["idle"] = true; if sessions[s.id] == nil { idleClosed.insert(s.id) } }
+        exitedLastSeq[s.id] = s.live.lastSeq
         let line = wasStarted ? lineData(exit) : nil
         if let line { for w in watchers { w.send(line) } }
-        let waiting = s.checkDone
         lock.unlock()
-        waiting?.signal()
+        ask?.answered.leave()
+        if s.closedIdle { NSLog("DeskMind Hands: session \(s.id) idle; closed it") }
         s.firstLine.signal()
         if let run = s.cardRun { setup.ui.finish(run, .failed); s.cardRun = nil }
     }
@@ -626,14 +640,13 @@ enum SessionHost {
             if kind != "session.start" { return }
             lock.lock()
         }
-        // an idle check's answer: noted; its marker (or a late one's) is the helper's own, passed on to nobody
-        if var c = s.check {
-            let end = c.note(e)
-            s.check = c
-            if end { let d = s.checkDone; lock.unlock(); d?.signal(); return }
-        }
-        if kind == "session.error", let m = s.staleMarkers.first(where: { SessionWire.IdleCheck.isMarker(e, $0) }) {
-            s.staleMarkers.remove(m); lock.unlock(); return
+        // the refusal of the helper's own end_if_idle: its answer (by the client_id and the code only), passed on to nobody
+        if SessionWire.EndAsk.isRefusal(e) {
+            var answered: EndAsk?
+            if let a = s.ask, a.wire.refused(e) { a.why = SessionWire.EndAsk.why(e); s.ask = nil; answered = a }
+            lock.unlock()
+            answered?.answered.leave()
+            return
         }
         // what the session has going on, and what drives the card: from new lines only, never from a replay
         var drive = false
@@ -658,15 +671,9 @@ enum SessionHost {
         if hold { scheduleExpiry() }
         // a restart waits for the session to be idle: asked again when what may have been going on ends
         let ends: Set<String> = ["session.task_end", "session.task_closed", "session.message", "session.error", "session.queue"]
-        let recheck = s.endWhenIdle && !s.closing && !s.checking && s.check == nil && ends.contains(kind) && s.activity.idle
-        if recheck { s.checking = true }
+        let recheck = s.endWhenIdle && !s.closing && s.ask == nil && ends.contains(kind) && s.activity.idle
         lock.unlock()
-        if recheck {
-            DispatchQueue.global().async {
-                _ = closeIfIdle(s, sendEnd: true)
-                lock.lock(); s.checking = false; lock.unlock()
-            }
-        }
+        if recheck { DispatchQueue.global().async { endIfIdle(s, wait: false) } }
         if drive, let run = e["run_id"] as? String { self.drive(s, run: run, e, raw: raw, liveView: liveView) }
         // a task that ended without its executor's task_done (the executor died, the app went away): its card ends
         // here, or it would stay up and keep every later task of the session from showing one
@@ -724,9 +731,9 @@ enum SessionHost {
 
     // MARK: idle
 
-    /// Every few seconds: a session quiet for `idleSeconds` (or one the app asked to restart) is asked whether it is
-    /// idle (`closeIfIdle`), watched or not, and closed when it is: its stdin's end, and it exits. The watch goes on
-    /// without it; the next send or open starts it again.
+    /// Every few seconds: a session quiet for `idleSeconds` (or one the app asked to restart) is asked to end if it is
+    /// idle (`end_if_idle`), watched or not; the session decides. The watch goes on without it; the next send or open
+    /// starts it again.
     private static func startReaper() {   // under lock
         guard !reaping else { return }
         reaping = true
@@ -736,15 +743,12 @@ enum SessionHost {
                 Thread.sleep(forTimeInterval: every)
                 lock.lock()
                 var due: [Session] = []
-                for s in sessions.values where s.started && !s.closing && !s.checking && s.activity.idle
+                for s in sessions.values where s.started && !s.closing && s.ask == nil && s.activity.idle
                     && (s.endWhenIdle || Date().timeIntervalSince(s.lastActive) > setup.idleSeconds) {
-                    s.checking = true; due.append(s)
+                    due.append(s)
                 }
                 lock.unlock()
-                for s in due {
-                    if closeIfIdle(s, sendEnd: s.endWhenIdle) == nil { NSLog("DeskMind Hands: session \(s.id) idle; closed it") }
-                    lock.lock(); s.checking = false; lock.unlock()
-                }
+                for s in due { endIfIdle(s, wait: false) }
             }
         }
     }

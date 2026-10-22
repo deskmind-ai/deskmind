@@ -8,15 +8,20 @@ It answers by who is asking, read from the tools the request offers:
 - anything else (a judge): an empty answer, which the executor reads as no conclusion.
 
     python3 fake_model.py <port file>      (listens on 127.0.0.1, a free port, written to the file)
+
+GET /calls answers {"calls": n}: how many model requests it has had (any caller), so a test can tell that none went out.
 """
 import json
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 QUESTION = "要用哪个颜色？"
 OPTIONS = ["红", "蓝"]
 LONG = [f"第{i}段。" for i in range(40)]
+CALLS = [0]
+COUNT = threading.Lock()
 
 
 def text_of(content):
@@ -33,7 +38,19 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        with COUNT:
+            n = CALLS[0]
+        data = json.dumps({"calls": n}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
+        with COUNT:
+            CALLS[0] += 1
         body = json.loads(self.rfile.read(int(self.headers.get("content-length", "0"))) or b"{}")
         tools = [t.get("function", {}).get("name") for t in body.get("tools") or []]
         msgs = body.get("messages") or []

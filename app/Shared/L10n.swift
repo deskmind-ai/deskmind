@@ -545,6 +545,8 @@ enum L10n {
         "Undid %d of %d": "撤回了 %d/%d 步",
         "Undo is no longer available": "已经不能撤回了",
         "Undoing…": "正在撤销…",
+        "Not sent: the cloud model is off": "没发出去：云端模型关着",
+        "The new model settings didn't reach this conversation. Open the settings and save them again.": "新的模型设置没送到这个对话。请打开设置再保存一次。",
         "The undo was cut off: some of it may not have been undone. Please check": "撤销被打断了：可能有一部分没撤回，请检查一下",
         "Stop task": "停止任务",
         "Stop the task (⌘.)": "停止任务（⌘.）",

@@ -181,7 +181,8 @@ def main():
                     if p.poll() is None:
                         p.kill(); p.wait()
                 helpers.append(start_helper(env, SHELL_DIR))
-                r = subprocess.run([SHELL, phase, SOCK, CONFIG, suite, SHELL_DIR, state], capture_output=True, text=True, timeout=300)
+                r = subprocess.run([SHELL, phase, SOCK, CONFIG, suite, SHELL_DIR, state], capture_output=True, text=True, timeout=300,
+                                   env={**os.environ, "FAKE_MODEL_PORT": open(port_file).read().strip()})
                 print(r.stdout, end="")
                 check(r.returncode == 0, f"the 0.5 window's model against the helper, phase {phase} ({r.returncode} failures){r.stderr[-400:]}")
             subprocess.run(["defaults", "delete", suite], capture_output=True)
@@ -233,12 +234,46 @@ def run(env, helper):
     check(r.get("ok") is True, "a line as JSON text")
     until(lambda: len([m for m in w1.kinds("session.message", sid) if m.get("role") == "assistant"]) == 2)
 
+    # cloud models off (harness#64 set_config, the app's switch): no model call at all — a running task stopped, no turn
+    # after it, the words refused (no_model) — and back on, the next say answered, in place by the same process
+    import urllib.request
+
+    def model_calls():
+        with urllib.request.urlopen(env["LOCAL_URL"] + "/calls", timeout=5) as f:
+            return json.loads(f.read())["calls"]
+
+    so = request({"op": "session.open", "config": CONFIG, "lang": "zh", "driver": "sim"})
+    off = so.get("session_id", "")
+    check(send(off, {"type": "cua", "text": "给笔记换个颜色"}).get("ok") is True, "model off: a task first")
+    check(until(lambda: w1.kinds("ask", off), 30) is not None, "model off: its card waits")
+    calls = model_calls()
+    r = send(off, {"type": "set_config", "config": None, "client_id": "c_off"})
+    cfg = until(lambda: [e for e in w1.kinds("session.config", off) if e.get("client_id") == "c_off"], 10)
+    check(r.get("ok") is True and bool(cfg) and cfg[0].get("config") is None, f"set_config null: sent, stored ({r})")
+    send(off, {"type": "stop"})       # the user's Stop as well
+    ended = until(lambda: w1.kinds("session.task_end", off), 20)
+    check(ended is not None, f"model off: the running task stopped ({ended and ended[0].get('status')})")
+    until(lambda: w1.kinds("session.task_closed", off), 20)
+    time.sleep(2)
+    check(model_calls() == calls, f"model off: no model call after the switch and Stop (no turn after the task): {model_calls() - calls}")
+    send(off, {"type": "say", "text": "你好", "client_id": "c_say_off"})
+    no = until(lambda: [e for e in w1.kinds("session.error", off) if e.get("code") == "no_model" and e.get("client_id") == "c_say_off"], 10)
+    check(no is not None and model_calls() == calls, "model off: a say is refused (no_model), nothing reaches the model")
+    r = send(off, {"type": "set_config", "config": CONFIG, "lang": "zh", "client_id": "c_on"})
+    check(until(lambda: [e for e in w1.kinds("session.config", off) if e.get("client_id") == "c_on"], 10) is not None, "model back on: stored")
+    send(off, {"type": "say", "text": "你好"})
+    back = until(lambda: [m for m in w1.kinds("session.message", off) if m.get("role") == "assistant" and m.get("text") == "你好，我是测试模型。"], 30)
+    check(back is not None and alive(so.get("pid")), "model back on: answered, by the same process (no restart)")
+    r = request({"op": "session.end", "session_id": off})
+    check(r.get("ok") is True and until(lambda: not alive(so.get("pid")), 15) is not None, f"its session ends, idle ({r})")
+
     # a computer task on the simulated computer: its question card, answered over the socket
     check(send(sid, {"type": "cua", "text": "给笔记换个颜色"}).get("ok") is True, "cua")
     # the app ends the session right after the /cua, before its session.task can have come back (#107 review): the
     # helper asks the session itself, after the /cua, and refuses — the task is not stopped
     r = request({"op": "session.end", "session_id": sid})
-    check(r.get("ok") is False and r.get("code") == "not_idle", f"session.end right after a /cua: refused, not idle ({r})")
+    check(r.get("ok") is False and r.get("code") == "not_idle" and "busy" in (r.get("why") or []),
+          f"session.end right after a /cua: refused, not idle, and why — the session's own answer to end_if_idle ({r})")
     ask = until(lambda: w1.kinds("ask", sid))
     task = w1.kinds("session.task", sid)
     check(bool(ask) and bool(task) and ask[0].get("run_id") == task[0].get("run_id"), f"the task's card comes through, with its session: {ask and ask[0].get('card', {}).get('text')}")
@@ -277,7 +312,8 @@ def run(env, helper):
     check(until(lambda: session_lines(sid)[-1]["seq"] == n + 2, 10) is not None, "its reply is stored")
     check(send(sid, {"type": "say", "text": "讲个长故事"}).get("ok") is True, "a long reply starts")
     r = request({"op": "session.end", "session_id": sid})
-    check(r.get("ok") is False and r.get("code") == "not_idle", f"session.end while a reply streams: refused ({r})")
+    check(r.get("ok") is False and r.get("code") == "not_idle" and "busy" in (r.get("why") or []),
+          f"session.end while a reply streams: refused, busy ({r})")
     time.sleep(0.6)   # some of it streamed while nobody watched
     w2 = Watch(after={sid: n})
     w3 = Watch()       # from the beginning, at the same time
@@ -461,9 +497,9 @@ def run(env, helper):
     check(until(lambda: not alive(pid2), IDLE + 20) is not None, f"an idle session nobody watches closes after {IDLE} s")
     o3 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim", "live_view": False})
     w4 = Watch(after={sid: last})
-    send(sid, {"type": "cua", "text": "给笔记换个颜色"})
+    sent2 = send(sid, {"type": "cua", "text": "给笔记换个颜色"})
     ask2 = until(lambda: w4.kinds("ask", sid), 30)
-    check(ask2 is not None, "a second task waits on its card")
+    check(ask2 is not None, f"a second task waits on its card ({sent2}, {[(e.get('code'), e.get('why'), e.get('text')) for e in w4.kinds('session.error', sid)]})")
     run2 = ask2[0]["run_id"] if ask2 else ""
     whats = [d["what"] for d in ui(run2)]
     check("start" not in whats and "show" not in whats, f"live_view false: no card, the recording only ({whats})")

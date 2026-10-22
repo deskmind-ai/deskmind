@@ -14,7 +14,8 @@ enum SessionWire {
     /// carry. A replay (`attach`) the app asks for itself is safe: each watching connection takes a stored line once
     /// (Gate), whoever asked for it.
     static let knownTypes: Set<String> = ["say", "cua", "steer", "answer", "respond", "stop", "retry", "attach",
-                                          "queue_edit", "queue_cancel", "queue_send_now", "end"]
+                                          "queue_edit", "queue_cancel", "queue_send_now", "end",
+                                          "end_if_idle", "set_config"]     // (harness#62, #64)
     /// A control line's longest JSON (the harness refuses a user message over 32k characters itself; this only keeps a
     /// runaway write off the session's stdin).
     static let maxLineBytes = 1 << 20
@@ -61,6 +62,12 @@ enum SessionWire {
             if !integer("option") { return (nil, "respond needs option (an index)") }
         case "attach":
             if o["after_seq"] != nil && !integer("after_seq") { return (nil, "attach's after_seq must be a seq") }
+        case "set_config":
+            // a configuration, or null (no model): it must be there (harness docs/protocol.md set_config)
+            guard let c = o["config"], c is String || c is NSNull else { return (nil, "set_config needs config (a string or null)") }
+            if let l = o["lang"], !(l is NSNull), (l as? String).map({ ["zh", "en"].contains($0) }) != true {
+                return (nil, "set_config's lang is zh or en")
+            }
         default: break
         }
         if o["run_id"] != nil && !has("run_id") { return (nil, "run_id must be a string") }
@@ -236,52 +243,27 @@ enum SessionWire {
         }
     }
 
-    /// Whether a session is idle, asked of the session itself (#107 review: the helper is the one place that decides it,
-    /// for the idle reclaim, a restart after the settings changed, and `session.end`). Idle: no task running or
-    /// lingering (its result card, its undo), nothing queued, no card open (`Activity.idle`), no reply streaming, and
-    /// no control line of the app's that the session has not answered yet.
-    ///
-    /// The helper writes two lines, after every control line written before them (SessionHost serialises them):
-    /// `attach{after_seq: past}` — no replay, but while a reply runs a delta at offset 0 with its text so far, then the
-    /// whole queue (`session.queue`, empty included) — and `attach{run_id: marker}`, which the session refuses
-    /// (`session.error` no_task, control attach, naming the marker): the end of the answer. The session reads its stdin
-    /// in order, so a say or cua written before the check has started its reply or its task by then (its delta, its
-    /// session.task came first). The marker is the helper's own and goes to nobody.
-    struct IdleCheck {
-        let marker: String
-        /// Saw a delta: a reply runs.
-        private(set) var replying = false
-        /// The queue as the session said it (nil: not said yet).
-        private(set) var queued: Bool?
-        private(set) var answered = false
+    /// The helper's own end_if_idle (harness#62: the one place that decides a session is idle — for the idle reclaim,
+    /// a restart for a new key, and `session.end`). The session handles its stdin in order and answers this line by
+    /// ending (its process exits, as on `end`: it was idle) or with a refusal that is not stored,
+    /// `session.error{code:"not_idle", control:"end_if_idle", why, client_id}`. Only the code, `why` and the client_id
+    /// are read, never the text. The client_id is the helper's own: its refusal goes to nobody.
+    struct EndAsk {
+        static let prefix = "helper_end_"
+        let clientId: String
+        init(clientId: String = EndAsk.prefix + UUID().uuidString.lowercased().prefix(12)) { self.clientId = clientId }
 
-        static let pastEverySeq = 1_000_000_000_000
-        init(marker: String = "idlecheck_" + UUID().uuidString.lowercased().prefix(12)) { self.marker = marker }
+        var line: [String: Any] { ["type": "end_if_idle", "client_id": clientId] }
 
-        /// The two lines to write.
-        var lines: [[String: Any]] {
-            [["type": "attach", "after_seq": Self.pastEverySeq], ["type": "attach", "run_id": marker, "after_seq": 0]]
+        /// A refusal of a helper's end_if_idle (this one, or an earlier one's that came late).
+        static func isRefusal(_ e: [String: Any]) -> Bool {
+            e["kind"] as? String == "session.error" && e["code"] as? String == "not_idle"
+                && (e["client_id"] as? String)?.hasPrefix(prefix) == true
         }
-
-        /// The marker's refusal: the helper's own line (never passed on).
-        static func isMarker(_ e: [String: Any], _ marker: String) -> Bool {
-            e["kind"] as? String == "session.error" && e["code"] as? String == "no_task" && e["control"] as? String == "attach"
-                && (e["text"] as? String)?.contains(marker) == true
-        }
-
-        /// A line of the session while the check waits; true when it is the end of the answer.
-        mutating func note(_ e: [String: Any]) -> Bool {
-            guard !answered else { return false }
-            switch e["kind"] as? String {
-            case "session.delta": replying = true
-            case "session.queue": queued = !((e["items"] as? [Any]) ?? []).isEmpty
-            default: if Self.isMarker(e, marker) { answered = true; return true }
-            }
-            return false
-        }
-
-        /// Idle, from the answer and what the session has going on now (`activity`, after every line before the marker).
-        func idle(_ activity: Activity) -> Bool { answered && !replying && queued == false && activity.idle }
+        /// This ask's refusal.
+        func refused(_ e: [String: Any]) -> Bool { Self.isRefusal(e) && e["client_id"] as? String == clientId }
+        /// Why it was not idle (busy, queue, task, recovering).
+        static func why(_ e: [String: Any]) -> [String] { (e["why"] as? [Any])?.compactMap { $0 as? String } ?? [] }
     }
 
     /// The machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2): the executor's process group, which

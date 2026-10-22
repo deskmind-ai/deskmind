@@ -130,6 +130,7 @@ enum ShellText {
         case "card_open": return L("Not sent: a card is waiting for your answer", lang: lang)
         case "no_task", "task_ended": return L("Not sent: the task has ended", lang: lang)
         case "exited": return L("Not sent: the conversation was restarted", lang: lang)
+        case "no_model": return L("Not sent: the cloud model is off", lang: lang)
         default: return L("Not sent", lang: lang)
         }
     }
@@ -329,6 +330,7 @@ final class ShellModel: ObservableObject {
     func applySettings() {
         let now = sessionSettings()
         if client.defaultConfig != now.config || client.defaultLang != now.lang { client.adoptSettings(config: now.config, lang: now.lang) }
+        client.modelOff = !cloudOn()
     }
 
     /// The settings as the window shows them (on the main thread): cloud models on or off.
@@ -681,20 +683,31 @@ final class ShellModel: ObservableObject {
     // MARK: settings
 
     /// The model settings were saved (a key, a service, cloud on or off): every session opens again with them, whenever
-    /// its next process starts; and each one with a process asks the helper for a new one. The helper decides when
-    /// (SessionHost.closeIfIdle: at once if the session is idle, else once what runs — a task, a reply, a queue, an open
-    /// undo, a line just sent — is over); this app never decides that from its own view of the session.
-    /// The UI language goes the same way (MainSplitView: on a language change).
-    func settingsChanged() {
+    /// its next process starts. The UI language goes the same way (MainSplitView: on a language change).
+    ///
+    /// Each live session gets them in place (set_config, harness#64: no restart, nothing stopped); with cloud models
+    /// off, no model at all (set_config null: it stops its running task, nothing that needs a model goes on). Only a
+    /// new key needs a new process (a process reads its keys when it starts): `keyChanged` then asks the helper for one
+    /// once the session is idle (end_if_idle; the helper and the session decide when).
+    func settingsChanged(keyChanged: Bool = false) {
         applySettings()
         refreshSettings()
         let (config, lang) = sessionSettings()
+        let off = !cloudOn()
         client.adoptSettings(config: config, lang: lang)
         let live = states.filter { $0.value.exited == nil }.map(\.key).sorted()
         work { [weak self] in
             guard let self else { return }
-            for id in live { self.client.restart(id, config: config, lang: lang) }
+            for id in live { self.client.setConfig(id, config: off ? nil : config, lang: lang) }
+            if keyChanged && !off { for id in live { self.client.restart(id, config: config, lang: lang) } }
         }
+    }
+
+    /// The chat's "cloud model is off" row: the settings say so, or this session refused words for having no model
+    /// (no_model: its stored settings say so, whatever this app's switch says).
+    func showsCloudOff(_ s: SessionState?) -> Bool {
+        cloudOff || s?.outbox.contains { $0.refused == "no_model" } == true || s?.lastRefusal?.code == "no_model"
+            || (s?.settings.map { $0.config == nil } ?? false)
     }
 
     /// A task runs in some session with no card waiting for the user (a reopen of the app then is not the user's:
@@ -727,6 +740,8 @@ enum ModelChoice {
     static func switchLocked(inShell: Bool, saved: Bool) -> Bool { inShell && saved }
     /// What Save writes for the engine: nothing unless the user moved the switch (shown differs from stored).
     static func engineToWrite(saved: Bool, shown: Bool) -> Bool? { shown == saved ? nil : shown }
+    /// A model name as saved and sent: without the spaces and line ends a paste brings (the harness trims too).
+    static func modelName(_ typed: String) -> String { typed.trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
 /// A card's body on screen (MainSplitView.CardView: the body scrolls inside a bounded height, its header and buttons

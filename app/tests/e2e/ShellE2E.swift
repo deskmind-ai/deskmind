@@ -10,7 +10,8 @@
 //       the app again (a new client): the list has the session, under the user's name; a message to it opens it again
 //       with the app's settings (defaultConfig) and its history comes back; a conversation with no key for its model
 //       shows session.error no_key with the settings button, and after the settings change a retry is answered;
-//       delete removes it from the list and from the disk
+//       cloud models off (set_config null): a running task stopped, Stop pressed, no model call after it and no
+//       model-bound control written; back on, a message answered; delete removes it from the list and from the disk
 //
 // No window, no real model, nothing driven on this Mac (the simulated computer). Prints PASS or FAIL per check; the
 // exit status is the number of failures. Built with PathTransport.swift.
@@ -35,11 +36,36 @@ enum ShellE2E {
     /// part in the app).
     static let ui = DispatchQueue(label: "shell.e2e.main")
     nonisolated(unsafe) static var config = ""
+    /// The settings' cloud switch.
+    nonisolated(unsafe) static var cloud = true
+    /// Every request the app made to the helper, in order (what the helper sees).
+    nonisolated(unsafe) static var sent: [[String: Any]] = []
+    static let sentLock = NSLock()
+
+    /// Records the app's requests, then passes them on.
+    final class Recording: SessionTransport {
+        let inner: SessionTransport
+        init(_ inner: SessionTransport) { self.inner = inner }
+        func request(_ body: [String: Any]) -> [String: Any]? {
+            sentLock.lock(); sent.append(body); sentLock.unlock()
+            return inner.request(body)
+        }
+        func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
+            inner.stream(body, onLine: onLine, onIdle: onIdle)
+        }
+    }
+
+    /// The fake model's request count (GET /calls).
+    static func modelCalls() -> Int {
+        guard let port = ProcessInfo.processInfo.environment["FAKE_MODEL_PORT"], let url = URL(string: "http://127.0.0.1:\(port)/calls"),
+              let data = try? Data(contentsOf: url), let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return -1 }
+        return (o["calls"] as? NSNumber)?.intValue ?? -1
+    }
 
     static func makeModel(socket: String, suite: String) -> ShellModel {
-        let transport = StoppableTransport(PathTransport(path: socket))
+        let transport = StoppableTransport(Recording(PathTransport(path: socket)))
         let m = ShellModel(client: SessionClient(transport: transport), defaults: UserDefaults(suiteName: suite)!,
-                           config: { config }, lang: { .zhHans },
+                           config: { config }, lang: { .zhHans }, cloudOn: { cloud },
                            work: { DispatchQueue.global().async(execute: $0) }, deliver: { ui.async(execute: $0) })
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         return m
@@ -170,9 +196,40 @@ enum ShellE2E {
         check(row?.showsSettings == true && row?.showsRetry == true && row?.headline == "模型没有 API 密钥", "its row: the settings button and a retry: \(String(describing: row))")
         config = good
         on { m.settingsChanged() }
-        check(until { on { m.states[nokey]?.exited != nil } }, "the settings changed: its idle process ended, to start again with them")
+        // in place (set_config, harness#64): the service the settings name now has its key in the process already
+        check(until { on { m.states[nokey]?.settings?.config == good } }, "the settings changed: set_config stored in place (\(on { String(describing: m.states[nokey]?.settings?.config) }))")
+        check(on { m.states[nokey]?.exited == nil }, "its process not restarted")
         on { m.retry() }
         check(until(60) { assistant(m, nokey).first?.text == "你好，我是测试模型。" }, "retried with the new settings: answered")
+
+        // cloud models off while a task waits on its card: every live session gets set_config null (the task stops),
+        // the user presses Stop too; no model call after it, and nothing that needs a model is written to the helper
+        on { m.selected = nokey; m.draft = "/cua 给笔记换个颜色"; m.submit() }
+        check(until(60) { on { m.states[nokey]?.openCard != nil } }, "model off: a task's card waits")
+        let offRun = on { m.states[nokey]?.openCard?.runId } ?? ""
+        let calls = modelCalls()
+        sentLock.lock(); let mark = sent.count; sentLock.unlock()
+        cloud = false
+        on { m.settingsChanged() }
+        check(until { on { m.states[nokey]?.settings.map { $0.config == nil } ?? false } }, "model off: set_config null stored")
+        on { m.stop() }      // (Stop on the running task, if the session has not stopped it yet)
+        check(until(30) { on { m.states[nokey]?.task(offRun)?.ended == true } }, "model off: the task stopped (\(on { m.states[nokey]?.task(offRun)?.status ?? "-" }))")
+        on { m.draft = "还在吗"; m.submit() }
+        on { m.retry() }
+        usleep(2_000_000)
+        check(calls >= 0 && modelCalls() == calls, "model off: no model call after the switch and Stop (\(modelCalls() - calls) made)")
+        sentLock.lock(); let after = Array(sent[mark...]); sentLock.unlock()
+        let bound: Set<String> = ["say", "cua", "retry", "steer", "queue_send_now"]
+        let wrote = after.compactMap { ($0["line"] as? [String: Any])?["type"] as? String }
+        check(!wrote.contains { bound.contains($0) } && wrote.contains("set_config"), "model off: the helper saw no model-bound control: \(wrote)")
+        check(on { m.showsCloudOff(m.states[nokey]) && m.draft == "还在吗" }, "model off: the row says so, the words stay in the box")
+        // back on: in place, a message answered
+        cloud = true
+        on { m.settingsChanged() }
+        check(until { on { m.states[nokey]?.settings?.config == good } }, "model back on: set_config stored")
+        on { m.submit() }
+        check(until(60) { assistant(m, nokey).last?.text == "你好，我是测试模型。" || assistant(m, nokey).last?.text == "收到。" },
+              "model back on: a message answered (\(assistant(m, nokey).last?.text ?? "-"))")
 
         // delete: gone from the list and from the disk; the other one stays
         on { m.delete(nokey) }

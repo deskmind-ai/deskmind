@@ -36,6 +36,15 @@ enum ShellTests {
         endMarkTests()
         backfillTests()
         languageTests()
+        modelOffConfigTests()
+        modelOffOpenTests()
+        configBusyTests()
+        noModelTests()
+        modelNameTests()
+        backfillOffStreamTests()
+        historyWatchDownTests()
+        hintOpenOnlyTests()
+        historyOpenedCrashTests()
         textTests()
     }
 
@@ -369,12 +378,20 @@ enum ShellTests {
             var l = l; l.sessionId = "ses_undo"; m.client.feed(l)
         }
         check(m.undoOpen("ses_undo"), "the undo is open")
+        mock.replies[SessionClient.Op.send] = ["ok": true]
         m.settingsChanged()
-        // the helper decides when each can end (now if idle, else once it is): this app only asks, for every session
-        // with a process, and never a bare end (#107 review: the app's own view missed a /cua in flight)
+        // the new settings reach every live session in place (set_config, harness#64): nothing restarted, nothing stopped
+        let configs = mock.requests.filter { (($0["line"] as? [String: Any])?["type"] as? String) == "set_config" }
+        check(configs.compactMap { $0["session_id"] as? String } == ["ses_busy", "ses_t", "ses_undo"]
+              && configs.allSatisfy { ($0["line"] as? [String: Any])?["config"] as? String == "or-luna" && ($0["line"] as? [String: Any])?["lang"] as? String == "en" },
+              "set_config to each live session, with the settings now: \(configs)")
+        check(!mock.requests.contains { $0["op"] as? String == SessionClient.Op.end }, "no restart for a model or language change")
+        // a new key: the process reads keys when it starts, so a new one is asked of the helper too, when idle (end_if_idle)
+        mock.requests = []
+        m.settingsChanged(keyChanged: true)
         let ends = mock.requests.filter { $0["op"] as? String == SessionClient.Op.end }
         check(ends.compactMap { $0["session_id"] as? String } == ["ses_busy", "ses_t", "ses_undo"] && ends.allSatisfy { $0["when_idle"] as? Bool == true },
-              "a restart asked of the helper for each live session, when idle: \(ends)")
+              "a new key: a restart asked of the helper for each live session, when idle: \(ends)")
     }
 
     /// #107 review (C, item 4): a /cua sent and not yet echoed is not "idle" to anyone but the helper; a settings change
@@ -390,7 +407,7 @@ enum ShellTests {
         m.draft = "/cua 把报告发给老板"
         m.submit()
         check(m.client.state("ses_t").outbox.first?.sending == true && m.client.state("ses_t").runningTask == nil, "the /cua is on its way, no task here yet")
-        m.settingsChanged()
+        m.settingsChanged(keyChanged: true)
         let after = mock.requests.drop { $0["op"] as? String != SessionClient.Op.send }
         check(after.filter { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool != true }.isEmpty
               && after.contains { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true },
@@ -796,6 +813,7 @@ enum ShellTests {
         mock.requests = []
         mock.streamLines = [["kind": "helper.watching", "open": [Any](), "idle": ["ses_t"]]]
         _ = m.client.watch()
+        m.client.backfilling.wait()
         let h = mock.requests.first { $0["op"] as? String == SessionClient.Op.history }
         check(h?["after_seq"] as? Int == 5, "the reconnect reads what was stored after its cursor: \(String(describing: h))")
         let r = m.states["ses_t"]!.messages.last!
@@ -814,6 +832,204 @@ enum ShellTests {
         // a delta of it coming after the stored message changes nothing
         m2.client.feed(all[cut])
         check(m2.states["ses_t"]!.messages.last!.text == whole, "a late delta after the stored message: nothing")
+    }
+
+    /// Final round (4): settings reach live sessions in place (set_config); cloud models off: set_config null to every
+    /// live session, remembered for its next process.
+    static func modelOffConfigTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        var on = true
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                           cloudOn: { on }, work: { $0() }, deliver: { $0() })
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        on = false
+        m.settingsChanged()
+        let lines = mock.requests.compactMap { $0["line"] as? [String: Any] }
+        check(lines.count == 1 && lines[0]["type"] as? String == "set_config" && lines[0]["config"] is NSNull && lines[0]["client_id"] is String,
+              "cloud off: set_config null to the live session: \(lines)")
+        check(!mock.requests.contains { $0["op"] as? String == SessionClient.Op.end }, "no restart for it")
+    }
+
+    /// Final round (4): with cloud models off an open never carries a configuration (it would outrank the stored null)
+    /// and set_config null is its first control, before any other; an automatic reopen after an exit the same.
+    static func modelOffOpenTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.send: ["ok": true]]
+        let c = SessionClient(transport: mock)
+        c.modelOff = true
+        _ = c.open(sessionId: "ses_t", config: "ds-flash", lang: "zh")
+        check(mock.requests.count == 2 && mock.requests[0]["op"] as? String == SessionClient.Op.open && mock.requests[0]["config"] == nil
+              && (mock.requests[1]["line"] as? [String: Any])?["type"] as? String == "set_config" && (mock.requests[1]["line"] as? [String: Any])?["config"] is NSNull,
+              "model off: open without a config, then set_config null first: \(mock.requests)")
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 1])
+        mock.requests = []
+        _ = c.reopenIfExited("ses_t", onlyOpenedHere: true)
+        check(mock.requests.first?["op"] as? String == SessionClient.Op.open && mock.requests.first?["config"] == nil
+              && (mock.requests.dropFirst().first?["line"] as? [String: Any])?["config"] is NSNull,
+              "an automatic reopen after an exit: the same: \(mock.requests)")
+        // back on: the open carries the configuration again, no set_config needed
+        c.modelOff = false
+        c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 1])
+        mock.requests = []
+        _ = c.reopenIfExited("ses_t", onlyOpenedHere: true)
+        check(mock.requests.count == 1 && mock.requests[0]["config"] as? String == "ds-flash", "model on: opened with its configuration: \(mock.requests)")
+    }
+
+    /// Final round (4): set_config is never taken as applied: a `busy` refusal (it took effect, was not stored) is sent
+    /// once more; a second busy, or bad_config, shows the settings did not reach it; its session.config clears that.
+    static func configBusyTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let c = SessionClient(transport: mock)
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        c.setConfig("ses_t", config: "ds-flash", lang: "en")
+        func sentConfigs() -> [[String: Any]] { mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" } }
+        let first = sentConfigs().last?["client_id"] as? String ?? ""
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "busy", "control": "set_config", "client_id": first, "text": "x"])
+        let deadline = Date().addingTimeInterval(2)
+        while sentConfigs().count < 2 && Date() < deadline { usleep(10_000) }
+        let second = sentConfigs().last
+        check(sentConfigs().count == 2 && second?["config"] as? String == "ds-flash" && second?["client_id"] as? String != first,
+              "busy (not stored): sent once more: \(sentConfigs())")
+        check(c.state("ses_t").settingsRefused == nil, "not shown yet")
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "busy", "control": "set_config", "client_id": second?["client_id"] as? String ?? "", "text": "x"])
+        check(c.state("ses_t").settingsRefused == "busy", "busy again: shown, never assumed applied")
+        c.setConfig("ses_t", config: "ds-flash", lang: "en")
+        c.feed(["kind": "session.config", "session_id": "ses_t", "seq": 7, "config": "ds-flash", "lang": "en", "by": "set_config",
+                "client_id": sentConfigs().last?["client_id"] as? String ?? ""])
+        check(c.state("ses_t").settingsRefused == nil && c.state("ses_t").settings?.config == "ds-flash", "stored: cleared, the session's settings")
+        c.setConfig("ses_t", config: "openai:nope|x", lang: "en")
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "bad_config", "control": "set_config", "client_id": sentConfigs().last?["client_id"] as? String ?? "", "text": "x"])
+        check(c.state("ses_t").settingsRefused == "bad_config" && sentConfigs().count == 4, "bad_config: shown at once, not sent again")
+    }
+
+    /// Final round (4): no_model — the words are not sent (the bubble says the cloud model is off) and the chat's row
+    /// shows, whatever this app's switch says.
+    static func noModelTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let m = model(mock)
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.selected = "ses_t"; m.draft = "你好"; m.submit()
+        let cid = sent(mock)?["client_id"] as? String ?? ""
+        m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": "no_model", "control": "say", "client_id": cid, "text": "x"])
+        let s = m.states["ses_t"]!
+        check(s.unsent.first?.refused == "no_model" && ShellText.unsent("no_model", lang: .zhHans) == "没发出去：云端模型关着",
+              "no_model: not sent, the bubble says why: \(String(describing: s.unsent.first?.refused))")
+        check(!m.cloudOff && m.showsCloudOff(s), "the cloud-off row shows for it")
+    }
+
+    /// Final round (5): a pasted model name is saved and sent without its spaces.
+    static func modelNameTests() {
+        check(ModelChoice.modelName("  deepseek-chat \n") == "deepseek-chat" && ModelChoice.modelName("a b") == "a b", "trimmed at its ends only")
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CloudModel.swift")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let persist = text.components(separatedBy: "private func persist()").dropFirst().first?.components(separatedBy: "private func save()").first ?? ""
+        check(persist.contains("ModelChoice.modelName(modelID)") && !persist.contains("model: modelID") && !persist.contains("= modelID"),
+              "persist saves the trimmed name")
+    }
+
+    /// Final round (6, E1): the stored lines a watch reconnect reads come off the stream's thread (the live lines go on
+    /// meanwhile), and not for a session whose last stored seq the helper says is the cursor already.
+    static func backfillOffStreamTests() {
+        final class Slow: SessionTransport {
+            let lock = NSLock()
+            var ops: [String] = []
+            let release = DispatchSemaphore(value: 0)
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                let op = body["op"] as? String ?? ""
+                lock.lock(); ops.append(op + ":" + (body["session_id"] as? String ?? "")); lock.unlock()
+                if op == SessionClient.Op.history { release.wait(); return ["ok": true, "open": false, "lines": [Any]()] }
+                return ["ok": true]
+            }
+            var lines: [[String: Any]] = []
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
+                for l in lines where !onLine(l) { return true }
+                return true
+            }
+        }
+        let t = Slow()
+        let c = SessionClient(transport: t)
+        for l in SessionTests.lines("chat") { c.feed(l) }                    // ses_t at 6
+        c.feed(["kind": "session.message", "session_id": "ses_u", "seq": 1, "msg_id": "u", "role": "user", "text": "x"])
+        t.lines = [["kind": "helper.watching", "open": [Any](), "last_seq": ["ses_t": 6]],
+                   ["kind": "session.message", "session_id": "ses_v", "seq": 1, "msg_id": "v", "role": "user", "text": "live"]]
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { _ = c.watch(); done.signal() }
+        let returned = done.wait(timeout: .now() + 2) == .success
+        check(returned && c.state("ses_v").messages.first?.text == "live", "the live lines go on while the history is read")
+        t.release.signal(); t.release.signal()
+        c.backfilling.wait()
+        t.lock.lock(); let ops = t.ops; t.lock.unlock()
+        check(ops.filter { $0.hasPrefix(SessionClient.Op.history) } == [SessionClient.Op.history + ":ses_u"],
+              "read: only the session the helper's last_seq does not match: \(ops)")
+    }
+
+    /// Final round (6, E2): a history read while the watch is down (a helper restarting has no process yet) does not
+    /// mark the session closed for being idle: the watch, back, says what ran, and the session opened here reopens.
+    static func historyWatchDownTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"],
+                        SessionClient.Op.history: ["ok": true, "open": false, "last_seq": 6, "lines": [Any]()]]
+        let c = SessionClient(transport: mock)
+        _ = c.open(sessionId: "ses_t", config: "c", lang: "zh")
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        mock.streamLines = []
+        _ = c.watch()                                          // the stream ended: the watch is down
+        _ = c.history("ses_t")                                 // the user selects it meanwhile
+        check(c.state("ses_t").exited == nil, "the watch down: open: false is not read as its process ended")
+        mock.streamLines = [["kind": "helper.watching", "open": [Any]()]]
+        _ = c.watch()                                          // back: the helper runs none
+        c.backfilling.wait()
+        mock.requests = []
+        check(c.state("ses_t").exited != nil && c.reopenIfExited("ses_t", onlyOpenedHere: true)
+              && mock.requests.contains { $0["op"] as? String == SessionClient.Op.open },
+              "the watch back: not running, not idle-closed: opened again (\(mock.requests.map { $0["op"] ?? "" }))")
+    }
+
+    /// #107 review of 21d06c8 (P2): after the app restarts, a session read through its history (never opened here)
+    /// whose process runs a reply; the watch drops, the process crashes; the watch comes back and the helper does not
+    /// list it. It reads as exited all the same — the reply interrupted, the composer on — and a send opens it again.
+    static func historyOpenedCrashTests() {
+        let mock = Mock()
+        let raw = SessionTests.raw("chat")
+        let stored = raw.compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+            .filter { ($0["seq"] as? Int).map { $0 <= 5 } ?? false }.prefix(5)
+        mock.replies = [SessionClient.Op.history: ["ok": true, "open": true, "last_seq": 5, "lines": Array(stored)],
+                        SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.send: ["ok": true]]
+        let m = model(mock)
+        m.select("ses_t")                                           // the app again: read, a process runs it
+        check(mock.requests.map { $0["op"] as? String ?? "" } == [SessionClient.Op.history], "read from its history, not opened here")
+        // its live reply through the watch
+        let lines = SessionTests.lines("chat")
+        let from = raw.firstIndex { $0.contains(#""msg_id":"msg_51abfa55","text":"","offset":0"#) }!
+        let to = raw.firstIndex { $0.contains(#""text":"第1句。","offset":4"#) }!
+        for l in lines[from...to] { m.client.feed(l) }
+        check(m.states["ses_t"]?.streamingMessage != nil && m.composer.replying, "a reply streams: the composer waits")
+        // the watch drops; the process crashes meanwhile; the watch comes back: the helper runs none
+        mock.replies[SessionClient.Op.history] = ["ok": true, "open": false, "last_seq": 5, "lines": [Any]()]
+        mock.streamLines = [["kind": "helper.watching", "open": [Any]()]]
+        _ = m.client.watch()
+        m.client.backfilling.wait()
+        let s = m.states["ses_t"]!
+        check(s.exited != nil && s.streamingMessage == nil && s.messages.last?.interrupted == true,
+              "not in the helper's list: exited, the reply interrupted (\(String(describing: s.messages.last?.text)))")
+        check(s.composerEnabled && !m.composer.replying, "the composer on")
+        mock.requests = []
+        m.selected = "ses_t"; m.draft = "还在吗"; m.submit()
+        let ops = mock.requests.map { $0["op"] as? String ?? "" }
+        check(ops.contains(SessionClient.Op.open) && sent(mock)?["text"] as? String == "还在吗", "a send opens it again and goes: \(ops)")
+    }
+
+    /// Final round (6): the "read the whole card first" hint only while the card is open.
+    static func hintOpenOnlyTests() {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let card = text.components(separatedBy: "struct CardView").dropFirst().first ?? ""
+        let before = card.components(separatedBy: "Text(L(\"Read the whole card first: scroll to its end\"").first ?? ""
+        check(before.split(separator: "\n").suffix(3).contains { $0.contains("if outcome == .open && !seen") }, "the hint shows only while the card is open")
     }
 
     /// #107 external review (P2 2): the language is a session setting like the model's: one value for both. A switch

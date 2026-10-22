@@ -187,12 +187,13 @@ struct CloudModelSheet: View {
     }
 
     private func persist() throws {
+        let model = ModelChoice.modelName(modelID)         // (a pasted name's spaces never saved)
         var env = CloudModelSettings.read()
         env[provider.keyEnv] = key
-        if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = modelID }
+        if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = model }
         try CloudModelSettings.write(env)
         CloudModelSettings.provider = provider
-        UserDefaults.standard.set(CloudModelSettings.config(for: provider, model: modelID), forKey: "engine.config")
+        UserDefaults.standard.set(CloudModelSettings.config(for: provider, model: model), forKey: "engine.config")
     }
 
     private func save() {
