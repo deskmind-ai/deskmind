@@ -310,14 +310,8 @@ def run(env, helper):
     again = request({"op": "session.open", "session_id": sid})
     check(again.get("already_open") is True and again.get("last_seq") == last, f"open again: last_seq is the last stored ({again.get('last_seq')} vs {last})")
 
-    # op run as it starts (ComputerLock.begin): computer.last names it, whoever started the last task
-    with open(os.path.join(DIR, "sessions", "computer.last")) as f:
-        check(json.load(f).get("run_id") == run1, "a session's task named itself in computer.last")
-    check(request({"op": "e2e.begin", "run_id": "run_oprun1"}).get("ok") is True, "op run begins")
-    with open(os.path.join(DIR, "sessions", "computer.last")) as f:
-        lastf = json.load(f)
-    check(lastf.get("run_id") == "run_oprun1" and lastf.get("session_id") == "" and isinstance(lastf.get("t"), (int, float)),
-          f"op run names itself in computer.last, as the harness writes it: {lastf}")
+    # the helper's side of the same lock file (ComputerLock): an op run takes the Mac between two session tasks
+    check(request({"op": "e2e.acquire", "run_id": "run_oprun1"}).get("ok") is True, "an op run takes the Mac when no task acts")
 
     # a task whose executor dies before its task_done: its card ends with the session's task_end, and the next task of
     # the session still gets one
@@ -351,11 +345,16 @@ def run(env, helper):
 
     # the machine lock: held by a live process the way the helper's own run holds it, a session's task is refused
     lock = os.path.join(DIR, "sessions", "computer.lock")
-    with open(lock, "w") as f:
-        json.dump({"pid": helper.pid, "session_id": "", "run_id": "", "by": "helper"}, f)
+    held = subprocess.Popen(["/bin/sleep", "60"], start_new_session=True)   # an executor's group (its owner gone)
+    with open(lock + ".tmp", "w") as f:
+        json.dump({"v": 2, "state": "acting", "pgid": held.pid, "pid": held.pid, "start": 0, "run_id": "run_helper",
+                   "session_id": "", "by": "helper", "owner": 999999, "t": 0}, f)
+    os.rename(lock + ".tmp", lock)
     send(sid, {"type": "cua", "text": "再换一次"})
     busy = until(lambda: [e for e in w2.kinds("session.error", sid) if e.get("code") == "computer_busy"], 15)
-    check(busy is not None, "the helper's lock keeps a session's task from starting (computer_busy)")
+    check(busy is not None, "the helper's lock (its run's group, acting) keeps a session's task from starting (computer_busy)")
+    held.kill()
+    held.wait()
     os.unlink(lock)
 
     # end, then reopen: resumed, and the watches get nothing twice
@@ -385,7 +384,7 @@ def run(env, helper):
     run2 = ask2[0]["run_id"] if ask2 else ""
     whats = [d["what"] for d in ui(run2)]
     check("start" not in whats and "show" not in whats, f"live_view false: no card, the recording only ({whats})")
-    r = request({"op": "e2e.begin", "run_id": "run_oprun2"})
+    r = request({"op": "e2e.acquire", "run_id": "run_oprun2"})
     check(r.get("code") == "computer_busy", f"op run while a session's task holds the Mac: computer_busy ({r.get('code')})")
     w4.close()
     time.sleep(IDLE + 6)
@@ -421,6 +420,26 @@ def run(env, helper):
         time.sleep(0.5)
         check(bool(run_seqs(w6, run_id)) and ui() == [], f"its old tasks replayed under the new helper drive neither the card nor the recording ({ui()[:3]})")
         w6.close()
+
+        # a helper killed outright (SIGKILL) while its run's executor and a child of it still act: the lock names their
+        # group, not the helper, so a new helper's run and a session's task are refused until all of it is gone
+        hold = subprocess.Popen([BIN, "holdrun", DIR], stdout=subprocess.PIPE, text=True)
+        pgid = int(hold.stdout.readline().strip() or 0)
+        hold.kill()
+        hold.wait()
+        members = subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
+        check(pgid > 0 and len(members) >= 2, f"the helper gone, its run's group still up ({members})")
+        r = subprocess.run([BIN, "tryacquire", DIR], capture_output=True, text=True).stdout.strip()
+        check(r == "busy run_held", f"a new helper's op run is refused (computer_busy): {r}")
+        w8 = Watch(after={sid: 10 ** 6})
+        send(sid, {"type": "cua", "text": "再换一次"})
+        refused = until(lambda: [e for e in w8.kinds("session.error", sid) if e.get("code") == "computer_busy"], 15)
+        check(refused is not None, "a session's task is refused (computer_busy)")
+        os.killpg(pgid, signal.SIGKILL)
+        until(lambda: not subprocess.run(["pgrep", "-g", str(pgid)], capture_output=True).stdout, 10)
+        r = subprocess.run([BIN, "tryacquire", DIR], capture_output=True, text=True).stdout.strip()
+        check(r == "ok", f"the group gone: the next run takes the Mac ({r})")
+        w8.close()
     finally:
         helper2.kill()
         helper2.wait()

@@ -119,7 +119,7 @@ func status(probe: Bool) -> [String: Any] {
     // Granted, but this process will not see it until it restarts: restart now, between tasks, rather than leave the
     // setup saying "not granted" (the app starts the installed copy again within seconds).
     // a task running, or a finished one whose undo can still be asked for (its process would go with this one)
-    let busy = Runner.current != nil || SessionHost.taskRunning || HarnessRun.undoWaiting || ActingGuard.watching
+    let busy = Runner.current != nil || SessionHost.taskRunning || HarnessRun.undoWaiting || ComputerLock.acting
     if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: busy, alreadyScheduled: restartingForGrant) {
         restartingForGrant = true
         restartSelf()
@@ -292,36 +292,10 @@ func serve() {
                 guard Runner.current == nil && !Runner.busy else {
                     refuse(["event": "error", "error": "a run is already in progress"]); return
                 }
-                // One computer task at a time on this Mac, whoever starts it: a chat session's task holds the harness's
-                // machine lock (sessions/computer.lock) while it runs, and this run takes it too. computer.last then
-                // names this run: every finished task's undo expires, a session's and this helper's own.
-                let runID = "run_" + UUID().uuidString.lowercased().prefix(8)
-                // What the last runs left (a lingering run, processes still up under a run or a session that ended)
-                // is ended before this one starts, or this one is refused; not while another's task holds the Mac.
-                if let refusal = ComputerLock.clearForRun() { refuse(refusal); return }
-                var release: (() -> Void)?
-                switch ComputerLock.begin(runID: runID) {
-                case .taken(let r): release = r
-                case .busy(let held):
-                    NSLog("DeskMind Hands: run refused: the computer lock is held (\(held.prefix(200)))")
-                    refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
-                case .unrecorded(let why):
-                    // a task that cannot expire the others' undo does not start (as in the harness)
-                    NSLog("DeskMind Hands: run refused: \(why)")
-                    refuse(["event": "error", "error": "this task could not be recorded on this Mac (\(why))"]); return
-                case .failed(let why):
-                    // the lock cannot be made (the folder): not a reason to refuse the user's run, but a live holder is
-                    NSLog("DeskMind Hands: computer lock: \(why)")
-                    if ComputerLock.holder() != nil {
-                        refuse(["event": "error", "code": "computer_busy", "error": "another task is using this Mac"]); return
-                    }
-                    try? ComputerLock.setLast(runID)
-                    release = nil
-                }
-                // the lock goes at the run's end, unless something of it is still up (ActingGuard keeps it then)
-                defer { ActingGuard.start(handing: release) }
+                // One computer task at a time on this Mac, whoever starts it: the run takes the machine lock as it
+                // starts (ComputerLock.acquire, in HarnessRun.run / Runner.run) and is refused there.
                 var spec = Runner.Spec(req)
-                spec.runID = runID
+                spec.runID = "run_" + UUID().uuidString.lowercased().prefix(8)
                 let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
                 run(spec) { event in
                     guard var line = try? JSONSerialization.data(withJSONObject: event) else { return true }
@@ -379,10 +353,6 @@ struct HandsHelper {
         Thread.detachNewThread { serve() }
         Runner.warmUp()
         BrainServer.ensure()
-        // atexit runs the last registered first: the model servers stop at once (a second exit or a kill during the
-        // wait below must not leave them up), then the sessions: their tasks stop and their executors are seen gone,
-        // or ended (SessionHost.shutdown, at most ~14 s, inside the 15 s a successor helper waits)
-        atexit { SessionHost.shutdown() }
         atexit { BrainServer.stop(); EyesServer.stop() }
         // A replaced or terminated helper must take its model servers with it: left running, the next helper would
         // adopt a server still loaded with the old models. exit runs the atexit above (Lifecycle).

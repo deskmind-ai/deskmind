@@ -4,13 +4,14 @@
 // Application Support folder.
 //
 //   SessionE2E serve <socket> <dir> <node> <harness.mjs> <idle seconds>   (LOCAL_URL / LOCAL_API_KEY passed on)
-//   SessionE2E lock <dir>                                                  the machine lock: take, busy, stale
-//   SessionE2E linger <dir>                                                a finished run's undo: lock, expiry
-//   SessionE2E leftover <dir>                                              what an ended session or run leaves up
+//   SessionE2E lock <dir>                                                  the machine lock's protocol, real groups
+//   SessionE2E linger <dir>                                                a finished run's undo on the lock
+//   SessionE2E holdrun <dir>                                               hold the Mac with a run (to be SIGKILLed)
+//   SessionE2E tryacquire <dir>                                            one acquire: ok | busy | alive
 //
 // `serve` adds test ops beside the session ops: `e2e.ui` (what the live card and the recording were driven with, by
-// run), `e2e.state` (SessionHost.taskRunning), `e2e.begin {run_id}` (what `op run` does as it starts: the machine lock
-// and computer.last, the lock let go again at once, as at its task_done).
+// run), `e2e.state` (SessionHost.taskRunning), `e2e.acquire {run_id}` (an op run that starts on the lock and is over
+// at once: ok, or computer_busy).
 // `lock` and `linger` print PASS or FAIL per check; their exit status is the number of failures.
 
 import AppKit
@@ -30,7 +31,8 @@ enum SessionE2E {
         let a = CommandLine.arguments
         if a.count == 3, a[1] == "lock" { lock(dir: a[2]) }
         if a.count == 3, a[1] == "linger" { linger(dir: a[2]) }
-        if a.count == 3, a[1] == "leftover" { leftover(dir: a[2]) }
+        if a.count == 3, a[1] == "holdrun" { holdRun(dir: a[2]) }
+        if a.count == 3, a[1] == "tryacquire" { tryAcquire(dir: a[2]) }
         guard a.count == 7, a[1] == "serve" else {
             print("usage: SessionE2E serve <socket> <dir> <node> <harness.mjs> <idle s> | lock <dir>"); exit(2)
         }
@@ -59,11 +61,13 @@ enum SessionE2E {
             return ["ok": true, "ui": ui]
         case "e2e.state":
             return ["ok": true, "task_running": SessionHost.taskRunning]
-        case "e2e.begin":
-            switch ComputerLock.begin(runID: req["run_id"] as? String ?? "run_e2e") {
-            case .taken(let release): release(); return ["ok": true]
-            case .busy(let held): return ["ok": false, "code": "computer_busy", "held": held]
-            case .failed(let why), .unrecorded(let why): return ["ok": false, "error": why]
+        case "e2e.acquire":
+            let run = req["run_id"] as? String ?? "run_e2e"
+            let p = executor("true")
+            switch start(run, p) {
+            case .ok: p.waitUntilExit(); ComputerLock.free(runID: run, pgid: p.processIdentifier); return ["ok": true]
+            case .busy(let h): return ["ok": false, "code": "computer_busy", "held_by": h.runID]
+            case .alive(let h): return ["ok": false, "code": "previous_run_alive", "held_by": h.runID]
             }
         default: return nil
         }
@@ -106,262 +110,174 @@ enum SessionE2E {
         }
     }
 
-    /// ComputerLock against a lock file in `dir`: taken when free, busy while a live process holds it (a session, or
-    /// only its executor), taken over when its holders are gone, and released only while it is still ours.
-    static func lock(dir: String) {
+    static func setup(_ dir: String) {
         SessionHost.setup = .init(node: URL(fileURLWithPath: "/"), bundle: URL(fileURLWithPath: "/"), dir: URL(fileURLWithPath: dir), cwd: nil,
                                   logs: URL(fileURLWithPath: dir), environment: { [:] }, prepare: {}, idleSeconds: 300)
-        let file = ComputerLock.file.path
-        try? FileManager.default.removeItem(atPath: file)
-        let me = Int(ProcessInfo.processInfo.processIdentifier)
-        func content() -> [String: Any] {
-            (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: file)))) as? [String: Any] ?? [:]
-        }
-        guard case .taken(let release) = ComputerLock.take(runID: "run_t") else { check(false, "a free lock is taken"); exit(1) }
-        check(content()["pid"] as? Int == me && content()["run_id"] as? String == "run_t", "it names this process: \(content())")
-        check(ComputerLock.holder() != nil, "held")
-        if case .busy = ComputerLock.take(runID: "run_2") { check(true, "a second take is busy") } else { check(false, "a second take is busy") }
-        release()
-        check(!FileManager.default.fileExists(atPath: file), "released")
-        // a lock whose holders are gone (a pid that is no process)
-        var dead: Int32 = 99_999
-        while ComputerLock.alive(dead) { dead -= 1 }
-        try? #"{"pid":\#(dead),"session_id":"ses_old","run_id":"run_old"}"#.write(toFile: file, atomically: true, encoding: .utf8)
-        check(ComputerLock.holder() == nil, "a dead holder holds nothing")
-        if case .taken(let r) = ComputerLock.take(runID: "run_3") {
-            check(content()["run_id"] as? String == "run_3", "a stale lock is taken over"); r()
-        } else { check(false, "a stale lock is taken over") }
-        // a live holder: the session (pid 1 stands for a live process this user cannot signal), or only its executor
-        for (text, what) in [(#"{"pid":1,"session_id":"s","run_id":"r"}"#, "a live session"),
-                             (#"{"pid":\#(dead),"session_id":"s","run_id":"r","executor_pid":1}"#, "a killed session's executor still stopping")] {
-            try? text.write(toFile: file, atomically: true, encoding: .utf8)
-            if case .busy = ComputerLock.take(runID: "run_4") { check(true, "busy while \(what) holds it") } else { check(false, "busy while \(what) holds it") }
-            check((try? String(contentsOfFile: file, encoding: .utf8)) == text, "\(what): its lock untouched")
-        }
-        // released only while ours: a lock replaced meanwhile is left alone
-        if case .taken(let r) = { try? FileManager.default.removeItem(atPath: file); return ComputerLock.take(runID: "run_5") }() {
-            let other = #"{"pid":1,"session_id":"other","run_id":"r"}"#
-            try? other.write(toFile: file, atomically: true, encoding: .utf8)
-            r()
-            check((try? String(contentsOfFile: file, encoding: .utf8)) == other, "a release leaves another's lock")
-        } else { check(false, "taken again") }
-        try? FileManager.default.removeItem(atPath: file)
+    }
+
+    static func until(_ f: () -> Bool, _ s: Double = 5) -> Bool {
+        let t = Date().addingTimeInterval(s)
+        while Date() < t { if f() { return true }; Thread.sleep(forTimeInterval: 0.02) }
+        return f()
+    }
+
+    /// A stand-in executor: /bin/sh running `script`, the leader of its own process group (as Process starts a child).
+    static func executor(_ script: String, stdin: Pipe? = nil) -> Process {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", script]
+        if let stdin { p.standardInput = stdin }
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        return p
+    }
+
+    /// Acquire for `run` with `p` as its executor; nil when refused.
+    static func start(_ run: String, _ p: Process, by: String = "helper", hold: Double = 0) -> ComputerLock.Acquired {
+        ComputerLock.acquire(runID: run, by: by, spawn: {
+            do { try p.run() } catch { return nil }
+            if hold > 0 { Thread.sleep(forTimeInterval: hold) }   // still inside the guard
+            return p.processIdentifier
+        })
+    }
+
+    static func killGroup(_ pgid: Int32) { Darwin.kill(-pgid, SIGKILL) }
+
+    /// The machine lock's protocol on real process groups (ComputerLock; harness docs/protocol.md 「电脑锁」).
+    static func lock(dir: String) {
+        setup(dir)
+        let fm = FileManager.default
+        try? fm.removeItem(at: ComputerLock.file)
+        let a = executor("sleep 30")
+        guard case .ok(let h?) = start("run_a", a) else { check(false, "a free Mac is taken"); exit(1) }
+        check(h.acting && h.pgid == a.processIdentifier && h.start == ComputerLock.startOf(a.processIdentifier) && h.owner == getpid(),
+              "the holder is the executor's group, acting, written before its task is sent: \(h)")
+        check(ComputerLock.read() == h, "as read back from the file")
+        var spawned = false
+        if case .busy(let b) = ComputerLock.acquire(runID: "run_b", by: "helper", spawn: { spawned = true; return nil }), b.runID == "run_a", !spawned {
+            check(true, "a holder that acts refuses the next task, which starts nothing")
+        } else { check(false, "a holder that acts refuses the next task, which starts nothing") }
+
+        // its task_done: lingering; the next task ends its group (deaf to SIGTERM: SIGKILL), its undo expiring
+        check(ComputerLock.linger(runID: "run_a", pgid: a.processIdentifier) && ComputerLock.read()?.state == "lingering", "task_done: lingering")
+        killGroup(a.processIdentifier); a.waitUntilExit()
+        let deaf = executor("trap '' TERM; while :; do sleep 0.1; done")
+        _ = start("run_d", deaf)
+        ComputerLock.linger(runID: "run_d", pgid: deaf.processIdentifier)
+        let c = executor("sleep 30")
+        if case .ok(let hc?) = ComputerLock.acquire(runID: "run_c", by: "helper", term: 0.3, kill: 2, spawn: { try? c.run(); return c.processIdentifier }) {
+            check(!deaf.isRunning && hc.runID == "run_c", "a lingering run is ended (SIGTERM ignored: SIGKILL) and the new task takes the Mac")
+        } else { check(false, "a lingering run is ended and the new task takes the Mac") }
+
+        // undo: only its own lingering run; it acts again until its result_response
+        check(ComputerLock.undo(runID: "run_c", pgid: c.processIdentifier) == .busy, "no undo before its task_done")
+        ComputerLock.linger(runID: "run_c", pgid: c.processIdentifier)
+        check(ComputerLock.undo(runID: "run_x", pgid: c.processIdentifier) == .expired, "another run's undo: expired")
+        check(ComputerLock.undo(runID: "run_c", pgid: c.processIdentifier) == .ok && ComputerLock.read()?.acting == true, "its own: acting again")
+        if case .busy = start("run_e", executor("true")) { check(true, "a new task is refused while an undo acts") } else { check(false, "a new task is refused while an undo acts") }
+        killGroup(c.processIdentifier); c.waitUntilExit()
+
+        // an executor that exits leaving a child: the group holds the Mac, acting; free keeps it; gone: free removes it
+        let leaving = executor("sleep 30 & exit 0")
+        _ = start("run_l", leaving)
+        leaving.waitUntilExit()
+        let hl = ComputerLock.read()!
+        ComputerLock.free(runID: "run_l", pgid: leaving.processIdentifier)
+        check(ComputerLock.held(hl) && ComputerLock.read() == hl, "its executor gone, its child up: still held, acting")
+        if case .busy = start("run_f", executor("true")) { check(true, "the next task is refused") } else { check(false, "the next task is refused") }
+        killGroup(leaving.processIdentifier)
+        check(until { !ComputerLock.held(hl) }, "the child gone: nothing holds it")
+        ComputerLock.free(runID: "run_l", pgid: leaving.processIdentifier)
+        check(!fm.fileExists(atPath: ComputerLock.file.path), "and its owner removes it")
+
+        // a holder with another start time (the group id reused): nothing holds it
+        let g = executor("sleep 30"); _ = start("run_g", g)
+        var stale = ComputerLock.read()!; stale.start -= 3600
+        check(!ComputerLock.held(stale) && ComputerLock.held(ComputerLock.read()!), "a reused id (another start time) holds nothing")
+        killGroup(g.processIdentifier); g.waitUntilExit()
+
+        // two op runs at once (forced interleaving): B asks while A is inside the guard, its executor started and not
+        // yet written. B waits for the guard, then finds A acting: busy -- nothing of A's is ended.
+        try? fm.removeItem(at: ComputerLock.file)
+        let ea = executor("sleep 30")
+        var ra: ComputerLock.Acquired?, rb: ComputerLock.Acquired?
+        let both = DispatchGroup()
+        DispatchQueue.global().async(group: both) { ra = start("run_A", ea, hold: 0.8) }
+        Thread.sleep(forTimeInterval: 0.3)
+        DispatchQueue.global().async(group: both) { rb = start("run_B", executor("sleep 30")) }
+        both.wait()
+        if case .ok(_?) = ra, case .busy(let hb) = rb { check(hb.runID == "run_A" && ea.isRunning, "two at once: A takes the Mac, B is busy, A's executor untouched") }
+        else { check(false, "two at once: A takes the Mac, B is busy (\(String(describing: ra)), \(String(describing: rb)))") }
+        killGroup(ea.processIdentifier)
         print(failures == 0 ? "lock: all passed" : "lock: \(failures) failed")
         exit(Int32(min(failures, 100)))
     }
 
-    /// The old path's finished run (HarnessRun.Lingering, op respond) with a stand-in process (`cat`, which waits on its
-    /// stdin as a lingering harness run does): its answer takes the machine lock (refused while another holds it), one
-    /// answer per card, the lock goes with the process; and its undo expires once computer.last names another task —
-    /// at the answer, and by itself while it lingers.
+    /// The old path's finished run (HarnessRun.Lingering, op respond) on the lock, with a stand-in harness (`cat`
+    /// waiting on its stdin, as a lingering run does).
     static func linger(dir: String) {
-        SessionHost.setup = .init(node: URL(fileURLWithPath: "/"), bundle: URL(fileURLWithPath: "/"), dir: URL(fileURLWithPath: dir), cwd: nil,
-                                  logs: URL(fileURLWithPath: dir), environment: { [:] }, prepare: {}, idleSeconds: 300)
+        setup(dir)
         let fm = FileManager.default
-        try? fm.removeItem(atPath: ComputerLock.file.path); try? fm.removeItem(atPath: ComputerLock.lastFile.path)
-        HarnessRun.lastEvery = 0.05
-        func content() -> [String: Any] {
-            (try? JSONSerialization.jsonObject(with: Data(contentsOf: ComputerLock.file))) as? [String: Any] ?? [:]
-        }
-        func until(_ f: () -> Bool, _ s: Double = 5) -> Bool {
-            let t = Date().addingTimeInterval(s)
-            while Date() < t { if f() { return true }; Thread.sleep(forTimeInterval: 0.02) }
-            return f()
-        }
-        /// a finished run `run` of this helper's, lingering: begun (lock + computer.last), lock let go at its task_done
-        func lingering(_ run: String) -> (HarnessRun.Lingering, Thread)? {
-            guard case .taken(let release) = ComputerLock.begin(runID: run) else { check(false, "\(run) begins"); return nil }
-            release()
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/cat")
-            let inPipe = Pipe()
-            p.standardInput = inPipe; p.standardOutput = FileHandle.nullDevice
-            do { try p.run() } catch { check(false, "cat: \(error)"); return nil }
-            let l = HarnessRun.Lingering(process: p, input: inPipe.fileHandleForWriting)
-            l.runID = run
-            HarnessRun.lingering = l
-            let t = Thread { HarnessRun.watchLingering(l) }
-            t.start()
-            return (l, t)
-        }
-
-        check(ComputerLock.lastRunID() == nil, "no task yet: computer.last names none")
-        guard let (l1, _) = lingering("run_old") else { exit(1) }
-        check(ComputerLock.lastRunID() == "run_old" && !fm.fileExists(atPath: ComputerLock.file.path), "op run's start names it in computer.last; the lock went at its task_done")
-        check(HarnessRun.undoWaiting, "its undo can be asked for: a restart waits (undoWaiting)")
-        // another task holds the Mac (a live process): the answer is refused, its lock untouched
-        let other = #"{"pid":1,"session_id":"ses_x","run_id":"run_x"}"#
-        try? other.write(to: ComputerLock.file, atomically: true, encoding: .utf8)
-        let busy = HarnessRun.respond(runID: "run_old", option: 1)
-        check(busy["code"] as? String == "computer_busy" && (try? String(contentsOf: ComputerLock.file, encoding: .utf8)) == other,
-              "an undo while another task holds the Mac: computer_busy, its lock untouched (\(busy))")
         try? fm.removeItem(at: ComputerLock.file)
-        // free: the answer takes the lock, for this run's undo, held by the lingering process too
-        let r = HarnessRun.respond(runID: "run_old", option: 1)
-        let c = content()
-        check(r["ok"] as? Bool == true && c["run_id"] as? String == "run_old" && c["undo"] as? Bool == true
-              && c["executor_pid"] as? Int == Int(l1.process.processIdentifier), "the undo holds the machine lock while it acts: \(c)")
-        if case .busy = ComputerLock.begin(runID: "run_session") { check(true, "no task starts during the undo") } else { check(false, "no task starts during the undo") }
-        check(ComputerLock.lastRunID() == "run_old", "and computer.last is left alone")
+        /// a run of this helper's: started on the lock, its task_done passed to the app through HarnessRun.pass
+        func run(_ id: String, onDone: @escaping ([String: Any]) -> Void = { _ in }) -> HarnessRun.Lingering? {
+            let input = Pipe()
+            let p = executor("cat > /dev/null", stdin: input)
+            guard case .ok(_?) = start(id, p) else { check(false, "\(id) starts"); return nil }
+            let l = HarnessRun.Lingering(process: p, input: input.fileHandleForWriting)
+            l.runID = id
+            HarnessRun.pass(["event": "task_done", "run_id": id], linger: l) { ev in onDone(ev); return true }
+            Thread.detachNewThread { HarnessRun.watchLingering(l) }
+            return l
+        }
+        // an undo clicked the moment task_done reaches the app
+        var atOnce: [String: Any] = [:]
+        var stateThen = ""
+        guard let l1 = run("run_old", onDone: { ev in
+            stateThen = ComputerLock.read()?.state ?? "none"
+            atOnce = HarnessRun.respond(runID: ev["run_id"] as? String ?? "", option: 1)
+        }) else { exit(1) }
+        check(stateThen == "lingering" && atOnce["ok"] as? Bool == true, "an undo right at task_done is let through (the lock said lingering first): \(atOnce)")
+        check(ComputerLock.read()?.acting == true, "the undo acts: the lock says acting")
+        if case .busy = start("run_session", executor("true"), by: "session") { check(true, "no task starts during the undo") } else { check(false, "no task starts during the undo") }
         let twice = HarnessRun.respond(runID: "run_old", option: 1)
-        check(twice["ok"] as? Bool == false && twice["code"] as? String == "busy", "one answer per card: \(twice)")
-        // its process ends (the undo done, or its linger over): the lock goes with it
+        check(twice["code"] as? String == "busy", "one answer per card: \(twice)")
+        check(HarnessRun.undoWaiting, "its process lingers: a restart waits")
         l1.process.terminate()
-        check(until { !fm.fileExists(atPath: ComputerLock.file.path) && !HarnessRun.undoWaiting }, "the process gone: the lock let go, nothing lingers")
+        check(until { !fm.fileExists(atPath: ComputerLock.file.path) && !HarnessRun.undoWaiting }, "its process gone: the lock goes with it")
 
-        // undo expires when another computer task starts on this Mac: at the answer...
-        HarnessRun.lastEvery = 30   // its watch asleep: the answer itself finds it out
-        guard let (l2, _) = lingering("run_two") else { exit(1) }
-        try? ComputerLock.setLast("run_ses")   // a session's task began (harness setLastTask)
-        let expired = HarnessRun.respond(runID: "run_two", option: 1)
-        check(expired["code"] as? String == "undo_expired" && !fm.fileExists(atPath: ComputerLock.file.path), "an undo after another task began: undo_expired, the Mac not taken (\(expired))")
-        check(until { !l2.process.isRunning } && !HarnessRun.undoWaiting, "and the finished run is let go (its stdin closed, it exits)")
-        HarnessRun.lastEvery = 0.05
-
-        // ...and by itself while it lingers (a session's task, or a new op run, names itself in computer.last)
-        guard let (l3, _) = lingering("run_three") else { exit(1) }
-        check(HarnessRun.undoWaiting, "lingering again")
-        if case .taken(let rel) = ComputerLock.begin(runID: "run_next") { rel() }
-        check(until { !l3.process.isRunning } && HarnessRun.lingering == nil && !HarnessRun.undoWaiting, "a new task began: the lingering run is let go by itself")
-        let late = HarnessRun.respond(runID: "run_three", option: 1)
-        check(late["ok"] as? Bool == false && late["code"] as? String == "undo_expired", "its undo is gone, and said so: \(late)")
-        // computer.last cannot be written (here: a folder in its place): the task does not start, and the lock is let go
-        try? fm.removeItem(at: ComputerLock.lastFile)
-        try? fm.createDirectory(at: ComputerLock.lastFile.appendingPathComponent("x"), withIntermediateDirectories: true)
-        if case .unrecorded = ComputerLock.begin(runID: "run_unrecorded") { check(true, "computer.last not written: unrecorded") }
-        else { check(false, "computer.last not written: unrecorded") }
-        check(!fm.fileExists(atPath: ComputerLock.file.path), "and the lock let go: nothing starts under it")
-        try? fm.removeItem(at: ComputerLock.lastFile)
+        // a new task on this Mac (a session's, here) ends the lingering run: its undo expired
+        guard let l2 = run("run_two") else { exit(1) }
+        check(ComputerLock.read()?.state == "lingering" && HarnessRun.undoWaiting, "lingering for its card")
+        let s = executor("sleep 30")
+        if case .ok(_?) = start("run_ses", s, by: "session") { check(!l2.process.isRunning, "a new task ends the lingering run first") }
+        else { check(false, "a new task ends the lingering run first") }
+        check(until { HarnessRun.lingering == nil && !HarnessRun.undoWaiting }, "and the helper lets it go")
+        let late = HarnessRun.respond(runID: "run_two", option: 1)
+        check(late["code"] as? String == "undo_expired", "its undo, asked afterwards: undo_expired (\(late))")
+        killGroup(s.processIdentifier)
         print(failures == 0 ? "linger: all passed" : "linger: \(failures) failed")
         exit(Int32(min(failures, 100)))
     }
 
-    /// A session process that ends while its task's executor is still up (a stand-in: /bin/sh that starts a child
-    /// ignoring SIGTERM, then exits at stdin's end), on each way a session ends (`end`, idle, the helper exiting), and
-    /// an op run whose harness exits leaving a child: the helper keeps track of what is left, holds the machine lock
-    /// while it is up (a session's task is refused), and its own next run ends it first or is refused.
-    nonisolated(unsafe) static var harnessLock = false
+    /// A helper's run that holds the Mac, for a test that kills this process outright (SIGKILL): its executor (a group
+    /// whose leader starts a child) outlives it. Prints the group id, then waits.
+    static func holdRun(dir: String) {
+        setup(dir)
+        let p = executor("sleep 300 & sleep 300")
+        guard case .ok(let h?) = start("run_held", p) else { print("refused"); exit(1) }
+        print(h.pgid); fflush(stdout)
+        while true { Thread.sleep(forTimeInterval: 60) }
+    }
 
-    static func leftover(dir: String) {
-        let fm = FileManager.default
-        let root = URL(fileURLWithPath: dir)
-        try? fm.createDirectory(at: root, withIntermediateDirectories: true)
-        let script = root.appendingPathComponent("fake-session.sh")
-        // the session protocol's first line, an "executor" left behind, then wait for stdin's end
-        try? #"""
-        echo '{"kind":"session.start","last_seq":0,"resumed":false}'
-        ( trap '' TERM; exec sleep 300 ) </dev/null >/dev/null 2>&1 &
-        echo $! > "$EXECUTOR_PID"
-        # as the harness does for a task: the machine lock names the session and its executor
-        if [ -n "$HARNESS_LOCK" ]; then
-          printf '{"pid":%s,"session_id":"ses_lock","run_id":"run_lock","executor_pid":%s}' $$ $! > "$HARNESS_LOCK.$$"
-          ln "$HARNESS_LOCK.$$" "$HARNESS_LOCK"; rm -f "$HARNESS_LOCK.$$"
-        fi
-        cat > /dev/null
-        exit 0
-        """#.write(to: script, atomically: true, encoding: .utf8)
-        let pidFile = root.appendingPathComponent("executor.pid")
-        SessionHost.setup = .init(node: URL(fileURLWithPath: "/bin/sh"), bundle: script, dir: root, cwd: nil,
-                                  logs: root.appendingPathComponent("logs"),
-                                  environment: { ["PATH": "/usr/bin:/bin", "EXECUTOR_PID": pidFile.path,
-                                                  "HARNESS_LOCK": harnessLock ? ComputerLock.file.path : ""] },
-                                  prepare: {}, idleSeconds: 1)
-        SessionHost.setup.ui = .init(start: { _, _, _ in }, show: { _, _ in }, record: { _, _ in }, finish: { _, _ in })
-        let me = Int(ProcessInfo.processInfo.processIdentifier)
-        func until(_ f: () -> Bool, _ s: Double = 10) -> Bool {
-            let t = Date().addingTimeInterval(s)
-            while Date() < t { if f() { return true }; Thread.sleep(forTimeInterval: 0.05) }
-            return f()
+    /// One acquire, as a new helper's op run would: prints ok, busy or alive.
+    static func tryAcquire(dir: String) {
+        setup(dir)
+        let p = executor("true")
+        switch start("run_try", p) {
+        case .ok: print("ok")
+        case .busy(let h): print("busy \(h.runID)")
+        case .alive(let h): print("alive \(h.runID)")
         }
-        func owner() -> [String: Any] {
-            (try? JSONSerialization.jsonObject(with: Data(contentsOf: ComputerLock.file))) as? [String: Any] ?? [:]
-        }
-        func executor() -> pid_t { pid_t((try? String(contentsOf: pidFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0 }
-        func helperHolds() -> Bool { ComputerLock.holder() != nil && owner()["pid"] as? Int == me }
-        func sessionTaskRefused() -> Bool {
-            switch ComputerLock.take(runID: "run_session") {
-            case .busy: return true
-            case .taken(let r): r(); return false   // not refused: let it go again, so one failure does not cascade
-            default: return false
-            }
-        }
-        /// open the fake session, wait for its executor; nil when it did not start
-        func open(_ id: String) -> pid_t? {
-            try? fm.removeItem(at: pidFile)
-            let r = SessionHost.open(["session_id": id])
-            SessionHost.setup.idleSeconds = id == "ses_idle" ? 1 : 300   // only that one is let go as idle
-            guard r["ok"] as? Bool == true, until({ executor() > 0 }) else { check(false, "\(id) opens: \(r)"); return nil }
-            Thread.sleep(forTimeInterval: 0.6)   // the tree has been looked at with the executor in it
-            return executor()
-        }
-
-        // 1. session.end while its executor is up: tracked, the Mac held; the next op run ends it
-        guard let ex1 = open("ses_end") else { exit(1) }
-        check(ComputerLock.holder() == nil, "a session with nothing running holds nothing")
-        _ = SessionHost.end(sessionID: "ses_end")
-        check(until { helperHolds() && HarnessRun.acting }, "session.end, its executor still up: the helper holds the Mac for it (\(owner()))")
-        check(ComputerLock.alive(ex1) && sessionTaskRefused(), "a session's task is refused meanwhile (computer_busy)")
-        check(!HarnessRun.closeLingering(grace: 0.1, term: 0.1, kill: 0.1, signal: { _, _ in 0 }) && ComputerLock.alive(ex1),
-              "an op run whose kill does not take: refused (previous_run_alive), still tracked")
-        check(HarnessRun.acting && helperHolds(), "and the Mac still held")
-        check(HarnessRun.closeLingering(grace: 0.1, term: 0.3, kill: 2) && !ComputerLock.alive(ex1), "the next op run ends it first")
-        ActingGuard.drop()
-        check(!HarnessRun.acting && ComputerLock.holder() == nil, "then nothing acts, the Mac is free")
-
-        // 1b. as the harness leaves it: the session gone, the lock still naming its executor (a session's task is
-        // refused by the harness's lock itself). The next op run is not refused for it: it ends the executor first
-        // (or is refused previous_run_alive when that does not take), then takes the lock over.
-        harnessLock = true
-        try? fm.createDirectory(at: ComputerLock.file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        guard let exL = open("ses_lock") else { exit(1) }
-        harnessLock = false
-        check(until { owner()["executor_pid"] as? Int == Int(exL) }, "the stand-in harness holds the lock for its task (\(owner()))")
-        _ = SessionHost.end(sessionID: "ses_lock")
-        check(until { HarnessRun.acting && HarnessRun.owns(exL) }, "session.end, its executor still up: tracked")
-        check(sessionTaskRefused() && !ActingGuard.holding, "a session's task is refused (the harness's lock names the executor)")
-        let stuck = ComputerLock.clearForRun(close: { HarnessRun.closeLingering(grace: 0.1, term: 0.1, kill: 0.1, signal: { _, _ in 0 }) })
-        check(stuck?["code"] as? String == "previous_run_alive" && ComputerLock.alive(exL), "an op run whose kill does not take: previous_run_alive (\(String(describing: stuck)))")
-        check(ComputerLock.clearForRun() == nil && !ComputerLock.alive(exL), "the next op run ends the executor first")
-        if case .taken(let r) = ComputerLock.begin(runID: "run_after") { check(true, "then takes the Mac"); r() } else { check(false, "then takes the Mac (\(owner()))") }
-        // an undo going (this helper's own lock for it) is still refused
-        try? #"{"pid":\#(me),"session_id":"","run_id":"run_u","by":"helper","undo":true}"#.write(to: ComputerLock.file, atomically: true, encoding: .utf8)
-        check(ComputerLock.clearForRun()?["code"] as? String == "computer_busy", "an undo going: computer_busy")
-        try? fm.removeItem(at: ComputerLock.file)
-
-        // 2. closed as idle (stdin closed by the reaper), the executor then exits by itself: the lock goes with it
-        guard let ex2 = open("ses_idle") else { exit(1) }
-        check(until({ ComputerLock.holder() != nil }, 20) && helperHolds() && ComputerLock.alive(ex2), "closed as idle, its executor up: the Mac held")
-        kill(ex2, SIGKILL)
-        check(until { ComputerLock.holder() == nil && !HarnessRun.acting }, "the executor gone by itself: the lock let go")
-
-        // 3. the helper exiting (SessionHost.shutdown): no executor left behind
-        guard let ex3 = open("ses_exit") else { exit(1) }
-        SessionHost.shutdown(wait: 1)
-        check(until { !ComputerLock.alive(ex3) }, "the helper exiting ends what its sessions left (SIGTERM ignored: SIGKILL)")
-
-        check(until { ComputerLock.holder() == nil && !ActingGuard.watching }, "and the Mac let go")
-        check(SessionHost.open(["session_id": "ses_late"])["ok"] as? Bool == false, "no session opens once the helper is exiting")
-
-        // 4. an op run whose harness exits leaving a child up (vice versa): the run's lock is kept for it
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "( trap '' TERM; exec sleep 300 ) & echo $! > \"\(pidFile.path)\"; sleep 0.6"]
-        try? fm.removeItem(at: pidFile)
-        guard case .taken(let release) = ComputerLock.begin(runID: "run_op") else { check(false, "op run begins"); exit(1) }
-        try? p.run()
-        HarnessRun.record(p)
-        p.waitUntilExit()
-        let ex4 = executor()
-        ActingGuard.start(handing: release)   // the run is over (HandsHelper's defer)
-        check(ComputerLock.alive(ex4) && helperHolds() && owner()["run_id"] as? String == "run_op",
-              "an op run's harness gone, its child up: the run's lock kept (\(owner()))")
-        check(sessionTaskRefused(), "a session's task is refused meanwhile")
-        kill(ex4, SIGKILL)
-        check(until { ComputerLock.holder() == nil && !HarnessRun.acting }, "the child gone: the Mac free")
-        // a run that left nothing: the lock goes at once
-        if case .taken(let r) = ComputerLock.begin(runID: "run_clean") { ActingGuard.start(handing: r) }
-        check(ComputerLock.holder() == nil, "a run that left nothing up lets the Mac go at its end")
-        print(failures == 0 ? "leftover: all passed" : "leftover: \(failures) failed")
-        exit(Int32(min(failures, 100)))
+        exit(0)
     }
 }

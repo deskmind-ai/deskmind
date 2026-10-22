@@ -226,36 +226,58 @@ enum SessionWire {
         }
     }
 
-    /// The machine lock's holder (harness sessions/computer.lock: `{pid, session_id, run_id, executor_pid?}`, or an
-    /// old bare pid): the processes whose life holds it. Nil when the text is no lock.
-    static func lockHolders(_ text: String?) -> [Int32]? {
-        guard let t = text?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
-        if let o = (try? JSONSerialization.jsonObject(with: Data(t.utf8))) as? [String: Any] {
-            guard let pid = o["pid"] as? NSNumber else { return nil }
-            var out = [pid.int32Value]
-            if let e = o["executor_pid"] as? NSNumber { out.append(e.int32Value) }
-            return out
+    /// The machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2): the executor's process group, which
+    /// state it is in, and whose task it is. ComputerLock (the helper) and harness src/session/computer.ts (a session)
+    /// read and write the same file.
+    struct Holder: Equatable {
+        var state: String          // "acting" | "lingering"
+        var pgid: Int32            // 0: an executor inside its owner's process (harness tests): held while `owner` lives
+        var pid: Int32
+        var start: Int             // the leader's start time, seconds since 1970 (0: unknown)
+        var runID: String
+        var sessionID: String
+        var by: String
+        var owner: Int32
+        var t: Double
+
+        var acting: Bool { state == "acting" }
+
+        /// The lock's text → its holder; an earlier format (`{pid, executor_pid}`) reads as acting, held while one of
+        /// those lives (`alive`); nil when it is no lock.
+        static func parse(_ text: String?, alive: (Int32) -> Bool) -> Holder? {
+            guard let t = text, let o = (try? JSONSerialization.jsonObject(with: Data(t.utf8))) as? [String: Any] else { return nil }
+            func int(_ k: String) -> Int? {
+                guard let n = o[k] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue == n.doubleValue.rounded() else { return nil }
+                return n.intValue
+            }
+            if int("v") == 2, let state = o["state"] as? String, state == "acting" || state == "lingering",
+               let pgid = int("pgid"), let owner = int("owner") {
+                return Holder(state: state, pgid: Int32(pgid), pid: Int32(int("pid") ?? pgid), start: int("start") ?? 0,
+                              runID: o["run_id"] as? String ?? "", sessionID: o["session_id"] as? String ?? "",
+                              by: o["by"] as? String ?? "", owner: Int32(owner), t: (o["t"] as? NSNumber)?.doubleValue ?? 0)
+            }
+            if let pid = int("pid") {
+                let up = [pid, int("executor_pid") ?? 0].map { Int32(truncatingIfNeeded: $0) }.first { $0 > 0 && alive($0) }
+                return Holder(state: "acting", pgid: 0, pid: 0, start: 0, runID: o["run_id"] as? String ?? "",
+                              sessionID: o["session_id"] as? String ?? "", by: "old", owner: up ?? 0, t: 0)
+            }
+            return nil
         }
-        if let n = Int32(t), n > 0 { return [n] }
-        return nil
+
+        var json: Data {
+            let o: [String: Any] = ["v": 2, "state": state, "pgid": Int(pgid), "pid": Int(pid), "start": start, "run_id": runID,
+                                    "session_id": sessionID, "by": by, "owner": Int(owner), "t": t]
+            return (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data()
+        }
     }
 
-    /// `computer.last` (harness setLastTask), beside the lock: `{run_id, session_id, t}`, the last computer task that
-    /// started on this Mac, whoever started it. Undo expires when any new task starts (owner 10-21): a finished task's
-    /// result card is answerable only while this still names it.
-    static func lastText(runID: String, sessionID: String = "", t: Double) -> Data? {
-        try? JSONSerialization.data(withJSONObject: ["run_id": runID, "session_id": sessionID, "t": t])
-    }
-
-    /// The run `computer.last` names; nil when there is none (or it is unreadable).
-    static func lastRunID(_ text: String?) -> String? {
-        guard let t = text, let o = (try? JSONSerialization.jsonObject(with: Data(t.utf8))) as? [String: Any],
-              let run = o["run_id"] as? String, !run.isEmpty else { return nil }
-        return run
-    }
-
-    /// Whether the lock is held: some holder is alive (`alive` asks the system; injected for the tests).
-    static func lockHeld(_ text: String?, alive: (Int32) -> Bool) -> Bool {
-        (lockHolders(text) ?? []).contains { $0 > 0 && alive($0) }
+    /// Whether the holder's tree may still act: some (not zombie) process of its group lives — whether or not its owner
+    /// does — unless the group's id now names another group (its leader's pid alive with another start time). The
+    /// system is asked through `groupAlive`, `alive` and `startOf` (injected for the tests).
+    static func held(_ h: Holder, groupAlive: (Int32) -> Bool, alive: (Int32) -> Bool, startOf: (Int32) -> Int?) -> Bool {
+        if h.pgid == 0 { return h.owner > 0 && alive(h.owner) }
+        guard h.pgid > 1, groupAlive(h.pgid) else { return false }
+        if h.start > 0, alive(h.pid), let s = startOf(h.pid), abs(s - h.start) > 1 { return false }
+        return true
     }
 }

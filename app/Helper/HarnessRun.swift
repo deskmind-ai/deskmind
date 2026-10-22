@@ -28,109 +28,32 @@ enum HarnessRun {
         /// The card was answered: one answer per card (the harness reads only the first); an undo may be going until
         /// its result_response comes.
         var responded = false
-        /// The machine lock taken for that answer (undo acts on the Mac), let go at its result_response or the exit.
-        var undoRelease: (() -> Void)?
+        /// Its process group, as the machine lock names it (ComputerLock).
+        var pgid: Int32 { process.processIdentifier }
         private(set) var closed = false
         init(process: Process, input: FileHandle) { self.process = process; self.input = input }
         /// stdin closed (EOF): the harness stops waiting for a respond and exits. Once; called under `lock`.
         func close() { if !closed { closed = true; try? input.close() } }
-        func releaseUndo() { undoRelease?(); undoRelease = nil }
     }
     nonisolated(unsafe) static var lingering: Lingering?
     /// The last finished run whose undo expired (another task started on this Mac): a late answer to its card is told
     /// so (`undo_expired`), not just that nothing waits. Under `lock`.
     nonisolated(unsafe) static var expiredRun: String?
-    /// Every run's processes (the harness and all under it), from the moment it starts until all of them are confirmed
-    /// gone -- whether its harness ended by itself, at task_done, on a stop, at the linger deadline or on a close. A
-    /// harness that exits can leave its executor acting: dropping `lingering` drops nothing here. Under `lock`.
-    nonisolated(unsafe) static var trees: [HarnessProcess.Tree] = []
-    /// One close at a time: a new run and 「清除全部」 may both let the last runs go, and the second must not find
-    /// nothing to close and go on while the first is still waiting for them to end.
-    private static let closing = NSLock()
-
-    /// Record a run's process the moment it has started, and watch it: looked at every 0.25 s while any of it is up
-    /// (a child is known before its parent can exit), dropped once all of it is gone.
-    static func record(_ p: Process) {
-        let tree = HarnessProcess.Tree(p)
-        tree.refresh()
-        adopt(tree)
-    }
-
-    /// Take on a tree recorded elsewhere: a chat session's process that has exited while processes under it (a task's
-    /// executor still stopping) are up (SessionHost). From then on it is one of the last runs: the next run or
-    /// 「清除全部」 ends it first (closeLingering), and while it acts this helper holds the machine lock (ActingGuard).
-    static func adopt(_ tree: HarnessProcess.Tree) {
-        lock.lock(); if !trees.contains(where: { $0 === tree }) { trees.append(tree) }; lock.unlock()
-        Thread.detachNewThread {
-            while !tree.gone { Thread.sleep(forTimeInterval: 0.25) }
-            lock.lock(); trees.removeAll { $0 === tree }; lock.unlock()
-        }
-    }
-
-    /// `pid` is one of the recorded trees' processes (a run's harness, or a process under a run or an ended session).
-    static func owns(_ pid: pid_t) -> Bool {
-        lock.lock(); let all = trees; lock.unlock()
-        return all.contains { t in
-            (t.process.isRunning && t.process.processIdentifier == pid) || t.known.contains { $0.pid == pid }
-        }
-    }
-
-    /// Some recorded process may still act on this Mac: a tree not gone, other than the finished run that lingers
-    /// for its card and was not answered (it waits, it does not act). The machine lock is held for it (ActingGuard).
-    static var acting: Bool {
-        lock.lock(); let l = lingering, all = trees; lock.unlock()
-        return all.contains { t in
-            if let l, l.process === t.process, t.process.isRunning, !l.closed, !l.responded || l.response != nil { return false }
-            return !t.gone
-        }
-    }
-
-    /// Let the last runs go, before a new run starts or the run data is cleared, so two runs never drive the desktop
-    /// or change files at once (an undo still going in the old one, an executor left behind by a harness that exited):
-    /// every recorded tree still up is ended (HarnessProcess.Tree.end) -- the lingering run's stdin closed first, so
-    /// it exits (it would by itself after `lingerSeconds`); waited for up to 3 s (`undoGrace` while an undo it was
-    /// sent has not answered), then SIGTERM, 2 s, then SIGKILL, 2 s. False when one is still up after that: its tree
-    /// stays recorded (the next attempt tries again), and the caller must not start a run (`stillRunning`) or clear
-    /// its files.
-    static func closeLingering(grace: Double = 3, term: Double = 2, kill: Double = 2,
-                               signal: (pid_t, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Bool {
-        closing.lock(); defer { closing.unlock() }
-        lock.lock()
-        let l = lingering, all = trees
-        lingering = nil
-        if let l { expiredRun = l.runID }   // a new run (or the data cleared): its undo has expired
-        lock.unlock()
-        let closeLingering = { if let l { lock.lock(); l.close(); lock.unlock() } }
-        var ok = true
-        for tree in all {
-            let its = l != nil && l!.process === tree.process
-            let wait = its && l!.responded && l!.response == nil ? max(grace, undoGrace) : grace
-            if tree.end(close: its ? closeLingering : {}, grace: wait, term: term, kill: kill, signal: signal) {
-                lock.lock(); trees.removeAll { $0 === tree }; lock.unlock()
-            } else {
-                ok = false
-                NSLog("DeskMind Hands: a run's process (harness \(tree.process.processIdentifier), \(tree.known.count) under it) is still running after SIGKILL")
-            }
-        }
-        closeLingering()    // its tree gone already: its stdin closed all the same
-        return ok
-    }
-
-    /// How long an undo already going is waited for before it is cut short (the harness writes its result_response
-    /// when it is done; respond itself waits up to 15 s for it).
-    static let undoGrace = 15.0
-
-    /// The error a run is refused with when the last run's process would not end (closeLingering).
+    /// The error a run is refused with when the last run's process would not end (ComputerLock.acquire: `alive`).
     static let stillRunning: [String: Any] = [
         "event": "error", "code": "previous_run_alive",
         "error": "the last task's process has not ended (it may still be undoing), so this task was not started",
     ]
 
-    /// One of the run's events to the app. task_done: the run is registered as lingering before the app hears of it
-    /// (finished), and is over only once it has been sent -- the run thread then sends `done`, which must come after.
+    /// One of the run's events to the app. task_done: the machine lock says lingering and the run is registered as
+    /// lingering before the app hears of it (an undo clicked at once is let through), and the run is over only once
+    /// task_done has been sent -- the run thread then sends `done`, which must come after.
     static func pass(_ ev: [String: Any], linger: Lingering, emit: ([String: Any]) -> Bool) {
         let done = ev["event"] as? String == "task_done"
-        if done { finished(linger, runID: ev["run_id"] as? String ?? "") }
+        if done {
+            ComputerLock.linger(runID: linger.runID, pgid: linger.pgid)
+            finished(linger, runID: ev["run_id"] as? String ?? "")
+        }
         _ = emit(ev)
         if done { lock.lock(); linger.over = true; lock.unlock() }
     }
@@ -171,9 +94,9 @@ enum HarnessRun {
 
     /// The user's answer to the finished run's result card (op `respond`): `{"type":"respond","option":n}` on the
     /// lingering process's stdin. `wait` seconds (at most 15): wait for its `result_response` and return it.
-    /// Undo acts on the Mac, so the answer holds the machine lock until its result_response (refused with
-    /// `computer_busy` while a session's task holds it), and it is refused with `undo_expired` once another computer
-    /// task has started on this Mac since this run (computer.last names another run; owner 10-21).
+    /// Undo acts on the Mac: the answer is let through only while the machine lock names this run, lingering, and it
+    /// acts again until its result_response (ComputerLock.undo). Another task started on this Mac since ended it
+    /// (owner 10-21): `undo_expired`.
     static func respond(runID: String, option: Int, wait: Double = 0) -> [String: Any] {
         lock.lock()
         guard let l = lingering, !l.closed, l.process.isRunning else {
@@ -187,31 +110,22 @@ enum HarnessRun {
         if l.responded {
             lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
         }
-        if expired(l) {
+        guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
+            lock.unlock(); return ["ok": false, "error": "bad option"]
+        }
+        line.append(0x0A)
+        switch ComputerLock.undo(runID: l.runID, pgid: l.pgid) {
+        case .ok: break
+        case .busy:
+            lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
+        case .expired:
             l.close(); lingering = nil; expiredRun = l.runID
             lock.unlock()
             NSLog("DeskMind Hands: respond refused: another computer task started on this Mac since \(l.runID)")
             return undoExpired
         }
-        guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
-            lock.unlock(); return ["ok": false, "error": "bad option"]
-        }
-        line.append(0x0A)
-        switch ComputerLock.take(runID: l.runID, undo: true, executorPID: l.process.processIdentifier) {
-        case .taken(let release): l.undoRelease = release
-        case .busy(let held):
-            lock.unlock()
-            NSLog("DeskMind Hands: respond refused: the computer lock is held (\(held.prefix(200)))")
-            return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
-        case .failed(let why), .unrecorded(let why):
-            // the lock cannot be made (the folder): as for a run, only a live holder is a reason to refuse
-            NSLog("DeskMind Hands: computer lock: \(why)")
-            if ComputerLock.holder() != nil {
-                lock.unlock(); return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
-            }
-        }
         do { try l.input.write(contentsOf: line) } catch {
-            l.releaseUndo()
+            ComputerLock.linger(runID: l.runID, pgid: l.pgid)
             lock.unlock(); return ["ok": false, "error": "write: \(error.localizedDescription)"]
         }
         l.responded = true
@@ -228,33 +142,22 @@ enum HarnessRun {
     private static let undoExpired: [String: Any] = ["ok": false, "code": "undo_expired",
                                                       "error": "another computer task started on this Mac; this task's undo has expired"]
 
-    /// Whether another computer task has started on this Mac since `l`'s run (computer.last names another run). Its
-    /// own run wrote its name there when it began (ComputerLock.begin); none at all (a folder that could not be
-    /// written) expires nothing.
-    private static func expired(_ l: Lingering) -> Bool {
-        guard let last = ComputerLock.lastRunID() else { return false }
-        return last != l.runID
+    /// While `l` lingers, until its process exits (it answered its card, its linger ran out, or a new task on this Mac
+    /// ended its group: its undo expired). The machine lock goes once nothing of its group is left.
+    static func watchLingering(_ l: Lingering) {
+        l.process.waitUntilExit()
+        lock.lock()
+        if !l.responded { expiredRun = l.runID }
+        l.close(); if lingering === l { lingering = nil }
+        lock.unlock()
+        ComputerLock.free(runID: l.runID, pgid: l.pgid)
     }
 
-    /// How often a lingering run looks at computer.last (the harness's sessions look every 0.5 s).
-    nonisolated(unsafe) static var lastEvery: TimeInterval = 0.5
-
-    /// While `l` lingers: once another computer task starts on this Mac (a session's task, or a run of this helper),
-    /// its undo has expired, and its process is let go (stdin closed: it exits). An answer already being carried out
-    /// is let finish (it holds the machine lock: nothing else has started). Returns when the process has exited; the
-    /// machine lock taken for an answer goes with it.
-    static func watchLingering(_ l: Lingering) {
-        while l.process.isRunning {
-            Thread.sleep(forTimeInterval: lastEvery)
-            lock.lock()
-            let expire = !l.closed && !l.responded && expired(l)
-            if expire { l.close(); expiredRun = l.runID; if lingering === l { lingering = nil } }
-            lock.unlock()
-            if expire { NSLog("DeskMind Hands: another computer task started on this Mac; \(l.runID)'s undo has expired") }
-        }
-        lock.lock(); l.close(); l.releaseUndo(); if lingering === l { lingering = nil }; lock.unlock()
-        // its harness gone, but maybe not what it started (an undo's executor): the Mac stays held while that acts
-        ActingGuard.start()
+    /// The lingering run was ended (「清除全部」): its card can no longer be answered. True, for chaining.
+    @discardableResult
+    static func dropLingering() -> Bool {
+        lock.lock(); if let l = lingering { l.close(); lingering = nil; expiredRun = l.runID }; lock.unlock()
+        return true
     }
 
     /// Whether `p` is a finished run's lingering process (the stop path leaves it alone).
@@ -381,12 +284,11 @@ enum HarnessRun {
     static func run(_ spec: Runner.Spec, emit unlocked: @escaping ([String: Any]) -> Bool) {
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
-        Runner.busy = true; Runner.cancelled = false; Runner.stopRequested = false
+        guard Runner.claim() else { _ = emit(Runner.alreadyRunning); return }
+        Runner.cancelled = false; Runner.stopRequested = false
         // Busy until task_done (this function returns then), not until the process exits: it lingers for the result
         // card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
-        // after busy is set: no second run starts while it is waited for
-        guard closeLingering() else { _ = emit(stillRunning); return }
         Runner.clearing.lock(); Runner.clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         guard available else {
             _ = emit(["event": "error", "code": "harness_missing", "error": "this build has no harness runtime"]); return
@@ -408,8 +310,7 @@ enum HarnessRun {
         let outPipe = Pipe(), inPipe = Pipe()
         p.standardOutput = outPipe
         p.standardInput = inPipe
-        // the run's id is the helper's, so its logs are named before the process starts (the harness takes it as given);
-        // the one computer.last names (op run: ComputerLock.begin)
+        // the run's id is the helper's, so its logs are named before the process starts (the harness takes it as given)
         let runID = spec.runID ?? "run_" + UUID().uuidString.lowercased().prefix(8)
         try? fm.createDirectory(at: logs, withIntermediateDirectories: true)
         let errURL = logs.appendingPathComponent("\(runID).stderr")
@@ -425,11 +326,27 @@ enum HarnessRun {
             Runner.stopRequested = false
             _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
         }
-        do { try p.run() } catch {
-            _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
+        // The machine lock: in one step, refused while a task acts on this Mac; a finished run lingering for its card
+        // (this helper's, or a session's) is ended -- its undo expires; the harness is started (a process group of its
+        // own) and named in the lock, before it is sent its task.
+        var launchError = ""
+        switch ComputerLock.acquire(runID: runID, by: "helper", spawn: {
+            do { try p.run(); return p.processIdentifier } catch { launchError = error.localizedDescription; return nil }
+        }) {
+        case .busy(let h):
+            NSLog("DeskMind Hands: run refused: \(h.runID) (\(h.by)) acts on this Mac")
+            _ = emit(ComputerLock.busy); return
+        case .alive(let h):
+            NSLog("DeskMind Hands: run refused: the lingering run \(h.runID) would not end")
+            _ = emit(stillRunning); return
+        case .ok(nil):
+            _ = emit(["event": "error", "error": "launch: \(launchError)"]); return
+        case .ok:
+            break
         }
+        // this helper's own lingering run, if it was the one ended: its card can no longer be answered
+        lock.lock(); if let l = lingering { l.close(); lingering = nil; expiredRun = l.runID }; lock.unlock()
         Runner.current = p   // stopRequested is not cleared here: a stop since the check above stands
-        record(p)
         // once task_done is passed on (`linger.over`), the run's lines go to `linger` (result_response), not to this
         // run's connection, and the state is the next run's
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
@@ -467,8 +384,11 @@ enum HarnessRun {
                     guard let e = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any] else { continue }
                     lock.lock()
                     if linger.over {
-                        // the answer is carried out: the Mac is free again
-                        if e["kind"] as? String == "result_response" { linger.response = e; linger.releaseUndo() }
+                        // the answer is carried out: it acts no more
+                        if e["kind"] as? String == "result_response" {
+                            linger.response = e
+                            lock.unlock(); ComputerLock.linger(runID: linger.runID, pgid: linger.pgid); continue
+                        }
                         lock.unlock(); continue
                     }
                     let out = HarnessEvents.translate(e, state: &state, title: spec.goal ?? "", hasFolder: spec.folder != nil, pid: pid)
@@ -490,10 +410,16 @@ enum HarnessRun {
         // registered at task_done already (pass); not again once it was let go meanwhile (undo expired)
         if lingers { if !linger.closed { lingering = linger } } else { linger.close(); if lingering === linger { lingering = nil } }
         lock.unlock()
+        if !lingers {
+            // its harness gone: the lock goes with its group; what is left of it after a run that never said task_done
+            // still acts (the next task is refused) until it ends, or is ended after a grace
+            if state.finished == nil { ComputerLock.reapLeftovers(runID: runID, pgid: p.processIdentifier) }
+            else { ComputerLock.linger(runID: runID, pgid: p.processIdentifier) }
+            ComputerLock.free(runID: runID, pgid: p.processIdentifier)
+        }
         if lingers {
             // The process waits up to `lingerSeconds` for the result card's answer (op respond), then exits; or sooner,
-            // when the next run closes its stdin, or another computer task starts on this Mac (watchLingering). Its log
-            // is closed once it is gone.
+            // when a new task on this Mac ends its group (ComputerLock.acquire). Its log is closed once it is gone.
             DispatchQueue.global().async {
                 watchLingering(linger)
                 _ = reader.wait(timeout: .now() + 3)

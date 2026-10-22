@@ -24,7 +24,6 @@ fi
 status=0
 "$BIN" lock "$OUT/lock" || status=$?
 "$BIN" linger "$OUT/linger" || status=$((status + $?))
-"$BIN" leftover "$OUT/leftover" || status=$((status + $?))
 python3 -I tests/e2e/session_e2e.py "$BIN" "$RUNTIME/node/bin/node" "$RUNTIME/harness/harness.mjs" "$OUT" || status=$((status + $?))
 [ -z "$KEEP" ] && [ "$status" = 0 ] && rm -rf "$OUT"
 [ "$status" = 0 ] || echo "session.sh: output kept in $OUT"
