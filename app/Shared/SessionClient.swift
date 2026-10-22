@@ -199,7 +199,9 @@ final class SessionClient {
         // (unless that start came in while the request was out: a start heard since, at the stored seq the helper
         // says the process starts at, when it says it)
         let want = (r["last_seq"] as? NSNumber)?.intValue
-        let heard = (states[id]?.starts ?? 0) != startsBefore && (want == nil || states[id]?.processStart == want)
+        // (or a newer process than this one has started already: two opens, the other's reply handled first)
+        let heard = ((states[id]?.starts ?? 0) != startsBefore && (want == nil || states[id]?.processStart == want))
+            || (want != nil && (states[id]?.processStart ?? Int.min) > want!)
         if r["already_open"] as? Bool != true && !heard {
             let pid = (r["pid"] as? NSNumber)?.intValue
             // two opens whose replies come back in reverse order: the newer process (the higher seq) is the one awaited
@@ -244,6 +246,7 @@ final class SessionClient {
         // the user's words: held in the outbox from here until the session says what became of them
         var line = control.line
         var words: String? = nil
+        var startsAtHold = 0
         if let w = control.words {
             // the session answers nothing for empty words (harness docs): never sent, so never held
             if w.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}"))).isEmpty { return .refused("empty") }
@@ -253,6 +256,7 @@ final class SessionClient {
             mutate(sessionId) { st in
                 // the send opens the session again, or it was opened and its process's start not heard yet: the
                 // words are the next process's (decided on the state as it is now, not as it was read above)
+                startsAtHold = st.starts
                 let next = st.exited != nil || st.awaitingStart
                 if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = next }
                 else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true, toNextProcess: next)) }
@@ -270,7 +274,7 @@ final class SessionClient {
         if s.exited != nil {
             guard reopenIfExited(sessionId) else { return notSent(.unavailable) }
             // (an exit heard while the open request was out may have made the word unsent: it is the new process's)
-            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart } } }
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || st.starts == startsAtHold } } }
         }
         var r = transport.request(Request.send(sessionId: sessionId, line: line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
@@ -283,7 +287,7 @@ final class SessionClient {
             let ended = endedByApp.contains(sessionId), how = opened[sessionId]
             lock.unlock()
             guard !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil else { return notSent(.unavailable) }
-            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart } } }
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || st.starts == startsAtHold } } }
             r = transport.request(Request.send(sessionId: sessionId, line: line))
         }
         guard let r, r["ok"] as? Bool != false else { return notSent(.unavailable) }

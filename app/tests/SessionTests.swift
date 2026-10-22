@@ -1589,6 +1589,28 @@ enum SessionTests {
         check(cf.send(.say("x"), to: "s") == .sent, "sent through a reopen")
         pf.onRequest = nil
         check(cf.state("s").outbox.first?.sending == true && cf.resend("f1", in: "s") != .sent, "still the new process's: sending, not sent twice")
+        // a reopen that finds the process already open (another thread's open started it): the word stays the new
+        // process's until its start
+        let pg = MockTransport()
+        pg.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 2, "already_open": true], SessionClient.Op.send: ["ok": true]]
+        let cg = SessionClient(transport: pg)
+        cg.newClientId = { "g1" }
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { cg.feed($0) }
+        _ = cg.send(.say("x"), to: "s")
+        cg.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
+        check(cg.state("s").outbox.first?.sending == true && cg.resend("g1", in: "s") != .sent, "already_open: the word stays sending through the start")
+        // an open reply without pid: an exit at the awaited seq that stored past it is the awaited process's
+        let ph = MockTransport()
+        ph.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1], SessionClient.Op.send: ["ok": true]]
+        let ch = SessionClient(transport: ph)
+        ch.newClientId = { "h1" }
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { ch.feed($0) }
+        _ = ch.send(.say("y"), to: "s")
+        ch.feed(se(2, #""kind":"session.message","msg_id":"m","role":"user","text":"z""#))
+        ch.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":2,"start_seq":1,"last_seq":2}"#))
+        check(ch.state("s").exited == 1 && ch.state("s").unsent.map(\.id) == ["h1"], "no pid in the reply: it stored past its start, so the exit is its own")
         queueInterleavingTests()
     }
 

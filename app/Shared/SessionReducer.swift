@@ -529,7 +529,7 @@ enum SessionReducer {
             if s.awaitingStart, let es = e.startSeq {
                 // past the seq the awaited process starts at: it (its start missed); before: an older one; at it: by pid
                 // (the open reply's), else taken for the older one (which loses nothing; a send recovers on not_open)
-                if let want = s.awaitedStart { latest = es > want || (es == want && e.pid != nil && e.pid == s.awaitedPid) }
+                if let want = s.awaitedStart { latest = es > want || (es == want && ((e.pid != nil && e.pid == s.awaitedPid) || (e.lastSeq ?? es) > want)) }
                 else if let st = s.processStart, es <= st { latest = false }
             }
             // its runs are gone whenever this comes; without last_seq, those the app has seen of the latest process
