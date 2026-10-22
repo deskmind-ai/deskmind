@@ -249,6 +249,9 @@ final class SessionClient {
         if control.isTyping && !s.composerEnabled { return .refused("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
         if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return .refused(why) }
+        // a steer names its task: the one running now, made explicit, so that a resend never goes to another one
+        var control = control
+        if case .steer(let t, nil) = control, let r = s.runningTask?.runId { control = .steer(t, runId: r) }
         // the user's words: held in the outbox from here until the session says what became of them
         var line = control.line
         var words: String? = nil
@@ -266,7 +269,7 @@ final class SessionClient {
                 let next = st.exited != nil || st.awaitingStart
                 heldNext = next
                 if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = next }
-                else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true, toNextProcess: next)) }
+                else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true, toNextProcess: next, original: control)) }
             }
         }
         // not sent after all: the words are the app's, not sent (never lost)
@@ -314,15 +317,17 @@ final class SessionClient {
         }
     }
 
-    /// Sends again words the app holds, not sent (SessionState.unsent: refused, or queued when the process ended), as
-    /// they were sent (say / cua / steer) with their client_id. They stay in the outbox until the session takes them.
+    /// Sends again words the app holds, not sent (SessionState.unsent: refused, or queued when the process ended),
+    /// exactly as they were first sent (the whole line: a /cua's scope, a steer's task) with their client_id. A steer
+    /// whose task is no longer running is not sent anywhere else: refused, and the words stay unsent ("task_ended").
+    /// They stay in the outbox until the session takes them.
     func resend(_ id: String, in sessionId: String) -> SendResult {
-        guard let item = state(sessionId).unsent.first(where: { $0.id == id }) else { return .refused("no such unsent message") }
-        let control: SessionControl
-        switch item.control {
-        case "cua": control = .cua(item.text)
-        case "steer": control = .steer(item.text)
-        default: control = .say(item.text)
+        let s = state(sessionId)
+        guard let item = s.unsent.first(where: { $0.id == id }) else { return .refused("no such unsent message") }
+        let control = item.original ?? .say(item.text)
+        if case .steer(_, let r?) = control, s.task(r)?.running != true {
+            mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].refused = "task_ended" } }
+            return .refused("task_ended")
         }
         return send(control, to: sessionId, clientId: item.id)
     }

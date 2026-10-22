@@ -41,6 +41,7 @@ enum SessionTests {
         rereviewTests()
         processInterleavingTests()
         ownershipTests()
+        resendAndAcceptanceTests()
     }
 
     // MARK: fixtures
@@ -534,7 +535,7 @@ enum SessionTests {
         client.newClientId = { "c_fixed" }
         check(client.send(.say("好"), to: "ses_t") == .sent, "no card: say is sent")
         check(mock.requests.last as NSDictionary? == ["op": "session.send", "session_id": "ses_t", "line": ["type": "say", "text": "好", "client_id": "c_fixed"]] as NSDictionary, "say line, with its client_id")
-        check(client.state("ses_t").outbox == [Outgoing(id: "c_fixed", text: "好", control: "say", sending: true)] && client.state("ses_t").unsent.isEmpty, "sent: held as sending, not unsent")
+        check(client.state("ses_t").outbox == [Outgoing(id: "c_fixed", text: "好", control: "say", sending: true, original: .say("好"))] && client.state("ses_t").unsent.isEmpty, "sent: held as sending, not unsent")
         // a line from another session goes to that session; one with none is left
         client.feed(["kind": "session.queue", "session_id": "ses_2", "items": [["id": "q1", "text": "x"]]])
         client.feed(["kind": "session.queue", "items": [["id": "q1", "text": "x"]]])
@@ -1718,5 +1719,68 @@ enum SessionTests {
         }
         check(tried == orders.count && orders.contains { ($0.firstIndex(of: exitAt) ?? 0) < ($0.firstIndex(of: 14) ?? 0) }
               && orders.contains { ($0.firstIndex(of: 14) ?? 0) < ($0.firstIndex(of: exitAt) ?? 0) }, "orders: \(tried), the exit before and after the delayed message")
+    }
+
+    // MARK: review of 8dbce99 — resend sends the line as it was; one acceptance path for every place
+
+    static func resendAndAcceptanceTests() {
+        // a /cua with its folder, refused: the resend carries the same folder and client_id
+        let m = MockTransport()
+        m.replies = [SessionClient.Op.send: ["ok": true]]
+        let c = SessionClient(transport: m)
+        c.newClientId = { "r1" }
+        _ = c.send(.cua("整理文件", scope: "/Users/x/项目"), to: "s")
+        c.feed(se(nil, #""kind":"session.error","code":"computer_busy","text":"x","control":"cua","client_id":"r1""#))
+        check(c.resend("r1", in: "s") == .sent, "the /cua resent")
+        check((m.requests.last?["line"] as? [String: Any]).map { $0 as NSDictionary } == ["type": "cua", "text": "整理文件", "scope": "/Users/x/项目", "client_id": "r1"] as NSDictionary,
+              "with its own folder and id: \(String(describing: m.requests.last?["line"]))")
+        // a steer for a task: its run made explicit; refused; that task ends and another runs: the resend is refused,
+        // the words stay unsent, nothing goes to the new task
+        let m2 = MockTransport()
+        m2.replies = [SessionClient.Op.send: ["ok": true]]
+        let c2 = SessionClient(transport: m2)
+        c2.newClientId = { "r2" }
+        [taskR1, ex(1, #""kind":"start","raw":"x""#)].forEach { c2.feed($0) }
+        _ = c2.send(.steer("改成 b"), to: "s")
+        check((m2.requests.last?["line"] as? [String: Any])?["run_id"] as? String == "r1", "the steer names its task")
+        c2.feed(se(nil, #""kind":"session.error","code":"no_task","text":"x","control":"steer","client_id":"r2""#))
+        [ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"""#), se(2, #""kind":"session.task","msg_id":"m2","run_id":"rB","raw":"y","by":"slash""#),
+         ex(1, #""kind":"start","raw":"y""#, run: "rB")].forEach { c2.feed($0) }
+        let n = m2.requests.count
+        check(c2.resend("r2", in: "s") == .refused("task_ended") && m2.requests.count == n, "the task ended: not resent anywhere")
+        check(c2.state("s").unsent.first.map { [$0.id, $0.refused ?? ""] } == ["r2", "task_ended"], "still unsent, with why")
+
+        // every acceptance event × every place the words can be: afterwards they are in the history only — not in the
+        // outbox (sending or unsent), the queue, a held snapshot — and an older snapshot and an exit bring nothing back
+        let accept: [(String, ProtocolLine)] = [
+            ("message", se(3, #""kind":"session.message","msg_id":"mk","role":"user","text":"话","client_id":"k""#)),
+            ("message via queue", se(3, #""kind":"session.message","msg_id":"mk","role":"user","text":"话","via":"queue","client_id":"k""#)),
+            ("steer", se(3, #""kind":"session.steer","run_id":"r1","text":"话","client_id":"k""#)),
+        ]
+        let entry = #"{"id":"q1","text":"话","client_id":"k"}"#
+        let places: [(String, (inout SessionState) -> Void)] = [
+            ("outbox sending", { $0.outbox = [Outgoing(id: "k", text: "话", sending: true, original: .say("话"))] }),
+            ("outbox unsent", { $0.outbox = [Outgoing(id: "k", text: "话", sending: false, refused: "busy", original: .say("话"))] }),
+            ("queue", { $0 = SessionReducer.reduce($0, se(nil, "\"kind\":\"session.queue\",\"items\":[\(entry)]")) }),
+            ("held snapshot", { st in
+                st = SessionReducer.reduce(st, se(5, #""kind":"session.retry","reply_to":"u""#))          // a gap: 3, 4 missing
+                st = SessionReducer.reduce(st, se(nil, "\"kind\":\"session.queue\",\"items\":[\(entry)]"))
+            }),
+        ]
+        for (pn, put) in places {
+            for (an, line) in accept {
+                var st = SessionReducer.reduce(SessionState(), [se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+                                                                se(2, #""kind":"session.task","msg_id":"m","run_id":"r1","raw":"x","by":"slash""#), ex(1, #""kind":"start","raw":"x""#)])
+                put(&st)
+                st = SessionReducer.reduce(st, line)
+                if pn == "held snapshot" { st = SessionReducer.reduce(st, se(4, #""kind":"session.retry","reply_to":"u""#)) }   // the gap fills
+                st = SessionReducer.reduce(st, se(nil, "\"kind\":\"session.queue\",\"items\":[\(entry)]"))   // an older snapshot, late
+                st = SessionReducer.reduce(st, L(#"{"kind":"helper.session_exit","session_id":"s","code":0}"#))
+                let inHistory = st.messages.filter { $0.text == "话" }.count + (st.task("r1")?.steersSent.filter { $0 == "话" }.count ?? 0)
+                check(inHistory == 1 && !st.outbox.contains { $0.id == "k" } && !st.queue.contains { $0.clientId == "k" }
+                      && !(st.deferredQueue ?? []).contains { $0.clientId == "k" } && st.taken.contains("k"),
+                      "\(an) × \(pn): in the history only (history \(inHistory), outbox \(st.outbox.map(\.id)), queue \(st.queue.map(\.id)))")
+            }
+        }
     }
 }

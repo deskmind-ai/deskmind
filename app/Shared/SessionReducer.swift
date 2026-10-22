@@ -59,6 +59,9 @@ struct Outgoing: Equatable {
     /// process, so that process's session.start leaves it alone; words sent to a process that a new one replaced
     /// without an exit heard are made unsent by that start.
     var toNextProcess = false
+    /// The line as it was first sent, all of it (a /cua's scope, a steer's run): what a resend sends again, never
+    /// retargeted. nil for words the app took over from the queue at an exit (a say).
+    var original: SessionControl? = nil
 }
 
 struct StoredError: Equatable {
@@ -243,6 +246,8 @@ struct SessionState: Equatable {
     var outbox: [Outgoing] = []
     /// A queue snapshot held back while stored session lines before it wait behind a gap (applied when they are in).
     var deferredQueue: [QueueItem]? = nil
+    /// The client_ids the history took (a stored user message or session.steer): never anyone else's again.
+    var taken: Set<String> = []
     /// The newest stored seq received when it was held: it applies once the stored lines up to there are in.
     var deferredMark = 0
     /// The app opened the session (SessionClient.open started a process) and has not heard that process's start yet:
@@ -475,8 +480,21 @@ enum SessionReducer {
         return ids
     }
 
-    /// A queue snapshot in its place: the whole queue; the app's words in it are the queue's now.
+    /// The session took the app's words into the history (a stored user message or session.steer with their
+    /// client_id): the one place they live from now on. Every acceptance goes through here, and it takes them out of
+    /// every other place they could be — the outbox (sending or unsent), the queue, a held queue snapshot — and keeps
+    /// the id, so that no older snapshot puts them back.
+    private static func taken(_ s: inout SessionState, _ id: String) {
+        s.taken.insert(id)
+        if s.outbox.contains(where: { $0.id == id }) { s.outbox.removeAll { $0.id == id } }
+        if s.queue.contains(where: { $0.clientId == id }) { s.queue.removeAll { $0.clientId == id } }
+        if s.deferredQueue?.contains(where: { $0.clientId == id }) == true { s.deferredQueue?.removeAll { $0.clientId == id } }
+    }
+
+    /// A queue snapshot in its place: the whole queue; the app's words in it are the queue's now (words the history
+    /// took already are not: the snapshot is older than that).
     private static func applyQueue(_ s: inout SessionState, _ items: [QueueItem]) {
+        let items = items.filter { $0.clientId.map { !s.taken.contains($0) } ?? true }
         s.queue = items
         let queued = Set(items.compactMap(\.clientId))
         if !queued.isEmpty { s.outbox.removeAll { queued.contains($0.id) } }
@@ -547,10 +565,7 @@ enum SessionReducer {
             }
         case .message(let m):
             // the session took the app's words: they leave the outbox, and the queue entry they waited in
-            if let c = m.clientId, m.role == "user" {
-                s.outbox.removeAll { $0.id == c }
-                if s.queue.contains(where: { $0.clientId == c }) { s.queue.removeAll { $0.clientId == c } }
-            }
+            if let c = m.clientId, m.role == "user" { taken(&s, c) }
             if let i = s.messages.lastIndex(where: { $0.id == m.msgId }) {
                 s.messages[i].text = m.text
                 s.messages[i].role = m.role
@@ -616,7 +631,7 @@ enum SessionReducer {
             let i = taskIndex(&s, e.runId)
             s.tasks[i].sessionUndo = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
         case .steer(let e):
-            if let c = e.clientId { s.outbox.removeAll { $0.id == c } }
+            if let c = e.clientId { taken(&s, c) }
             let i = taskIndex(&s, e.runId)
             s.tasks[i].steersSent.append(e.text)
         case .retry(let e):
