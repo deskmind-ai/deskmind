@@ -875,7 +875,10 @@ enum Runner {
             cleanUp(quitTextEdit: !textEditWasRunning)
             ComputerLock.cancel(r)
         } else {
-            NSLog("DeskMind Hands: the Mac is no longer this run's; its windows are left as they are")
+            let now = ComputerLock.read()
+            NSLog(now?.runID == runID
+                  ? "DeskMind Hands: what the run left would not end (or the lock could not be written); its windows are left as they are"
+                  : "DeskMind Hands: the Mac is no longer this run's (\(now.map { "\($0.runID) \($0.state)" } ?? "free")); its windows are left as they are")
             if let acquired { ComputerLock.linger(acquired) }   // its own, if still there: the next task ends it
             ComputerLock.free(runID: runID, pgid: p.processIdentifier)
         }
