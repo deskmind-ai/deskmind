@@ -118,8 +118,9 @@ func status(probe: Bool) -> [String: Any] {
     let probed = !live && probe && probeScreen()
     // Granted, but this process will not see it until it restarts: restart now, between tasks, rather than leave the
     // setup saying "not granted" (the app starts the installed copy again within seconds).
-    if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: Runner.current != nil,
-                                      alreadyScheduled: restartingForGrant) {
+    // a task running, or a finished one whose undo can still be asked for (its process would go with this one)
+    let busy = Runner.current != nil || SessionHost.taskRunning || HarnessRun.undoWaiting || ComputerLock.acting
+    if HelperLocation.restartForGrant(live: live, probe: probed, taskRunning: busy, alreadyScheduled: restartingForGrant) {
         restartingForGrant = true
         restartSelf()
     }
@@ -166,6 +167,9 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true]
     case "record_start":
         // The task's apps (or the whole screen), recorded by the helper, which holds Screen Recording: ScreenRecorder.
+        // Not while another task acts on this Mac: the run it is for would be refused (computer_busy), and nothing of a
+        // refused request may start on the desktop.
+        if ComputerLock.acting { return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"] }
         return ScreenRecorder.start(req)
     case "record_stop":
         return ScreenRecorder.stop()
@@ -279,6 +283,8 @@ func serve() {
             // The main app's language, sent with every request (status polls included): steps, hints and errors
             // follow a switch within a second. English until the first request says otherwise.
             if let lang = (req["lang"] as? String).flatMap(ResolvedLang.init(rawValue:)) { ResolvedLang.current = lang }
+            // Chat sessions (session.open / send / end, sessions.list / watch): SessionHost.
+            if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {
                 // A run streams: one line per event until it ends, on this connection.
                 // taken (busy, the last stop flags cleared) in one step with the check: a stop from now on is this run's
@@ -288,7 +294,10 @@ func serve() {
                     _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
                     return
                 }
-                let spec = Runner.Spec(req)
+                // One computer task at a time on this Mac, whoever starts it: the run takes the machine lock as it
+                // starts (ComputerLock.acquire, in HarnessRun.run / Runner.run) and is refused there.
+                var spec = Runner.Spec(req)
+                spec.runID = "run_" + UUID().uuidString.lowercased().prefix(8)
                 let run = spec.engine == "harness" && spec.goal != nil ? HarnessRun.run : Runner.run
                 run(spec) { event in
                     guard var line = try? JSONSerialization.data(withJSONObject: event) else { return true }

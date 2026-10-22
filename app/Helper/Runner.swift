@@ -261,20 +261,21 @@ enum Runner {
     static var harnessRuns: URL { DeskMindIPC.supportDir.appendingPathComponent("work/harness-runs") }
 
     /// 「清除全部」: every run's folder (hands' runs/, the harness's runs), the harness's per-run stdout / stderr copies
-    /// (HarnessRun.logs: the task's words, its cards, the actions' arguments) and the feedback file. A finished run
-    /// still lingering for its result card's answer is let go first: it writes into its log and run folder until it
-    /// ends, and its undo would have nothing left to read. nil (nothing removed) while a run is going, or when the
-    /// lingering one would not end. `support` and `closeLingering`: a test's folder and stand-in.
+    /// (HarnessRun.logs: the task's words, its cards, the actions' arguments) and the feedback file. This helper's
+    /// finished run still lingering for its result card's answer is let go first (ComputerLock.endOwnLingering): it
+    /// writes into its log and run folder until it ends, and its undo would have nothing left to read. nil (nothing
+    /// removed) while a run is going, or when the lingering one would not end. `support` and `endLast`: a test's
+    /// folder and stand-in.
     /// Held while 「清除全部」 ends the last runs and removes files; a run passes it (busy already set) before it starts.
     static let clearing = NSLock()
 
     static func clearRunData(support: URL = DeskMindIPC.supportDir,
-                             closeLingering: () -> Bool = { HarnessRun.closeLingering() }) -> Int? {
+                             endLast: () -> Bool = { ComputerLock.endOwnLingering() && HarnessRun.dropLingering() }) -> Int? {
         // `clearing` first: a run that has not passed it yet waits (and is not ended by the close below); one that has
         // set busy already is left alone. Busy is set before a run passes it, so no run is ended or loses its files.
         clearing.lock(); defer { clearing.unlock() }
         if busy { return nil }
-        guard closeLingering(), !busy else { return nil }
+        guard endLast(), !busy else { return nil }
         let fm = FileManager.default
         // the same places under `support`
         let at = { (u: URL) in support.appendingPathComponent(String(u.path.dropFirst(DeskMindIPC.supportDir.path.count))) }
@@ -391,6 +392,8 @@ enum Runner {
         /// Which engine thinks: hands' own decision loop (the default) or the harness (HarnessRun), by the request's
         /// `engine` -- the main app's developer setting.
         var engine = "hands"
+        /// The run's id, named by the helper (the machine lock names it; a harness run takes it as its own).
+        var runID: String? = nil
         /// The harness's model configuration name and the request's language (card texts follow it).
         var config = "ds-flash"
         var lang = "zh"
@@ -423,6 +426,10 @@ enum Runner {
         /// hands decides per window whether to look with vision, and a server that loads for nothing costs seconds.
         var mayNeedVision: Bool { goal != nil && apps.contains { !Self.accessibleApps.contains($0.bundle) } }
     }
+
+    /// What a `hands do` run does to the desktop before its process starts (reopenWindowless), only once it holds
+    /// the machine lock; a recorder in tests.
+    nonisolated(unsafe) static var reopenWindows: ([String]) -> Void = { reopenWindowless($0) }
 
     /// Bring back the window of each named app that runs with none (see AppWindow), without bringing it forward,
     /// and wait a moment for it to appear.
@@ -494,14 +501,14 @@ enum Runner {
 
     /// Start a run's process -- every run's, `hands do` and harness alike -- unless a stop came since the run was
     /// accepted (false: nothing started; a stop while the last run's process was waited for, or a model loaded, ends
-    /// the run here). Started, it is `current` and recorded (HarnessRun.record) before a stop can look.
+    /// the run here). Started, it is `current` before a stop can look. Called inside ComputerLock.acquire's step, so
+    /// the machine lock names its group before it is sent its task.
     /// `started`: a test's moment between the start and `current` (a stop then must not be lost).
     static func launch(_ p: Process, started: () -> Void = {}) throws -> Bool {
         stopLock.lock(); defer { stopLock.unlock() }
         if cancelled { return false }
         try p.run()
         started()
-        HarnessRun.record(p)
         current = p
         return true
     }
@@ -537,9 +544,6 @@ enum Runner {
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
         defer { busy = false }    // set, with the stop flags cleared, when the request was taken (accept)
-        // a finished harness run still waiting for its result card's answer is let go first (after busy is set, so
-        // no second run starts meanwhile); a run is not started beside one that would not end
-        guard HarnessRun.closeLingering() else { _ = emit(HarnessRun.stillRunning); return }
         clearing.lock(); clearing.unlock()    // a 「清除全部」 going ends first: it takes none of this run's files
         let set = spec.set
         if spec.real && spec.planner == BrainServer.url && BrainServer.status()["state"] as? String != "ready" {
@@ -616,11 +620,23 @@ enum Runner {
                 return
             }
         }
+        // The machine lock before anything touches the desktop (its apps launched, their windows reopened): refused
+        // while a task acts on this Mac, a finished run lingering for its card ended first. Reserved for this run now,
+        // given to its process when it starts (commit, under the stop's lock).
+        let runID = spec.runID ?? "run_" + UUID().uuidString.lowercased().prefix(8)
+        let reservation: SessionWire.Holder
+        switch ComputerLock.reserve(runID: runID, by: "hands") {
+        case .ok(let r?): reservation = r
+        case .busy: _ = release(); _ = emit(ComputerLock.busy); return
+        case .alive: _ = release(); _ = emit(HarnessRun.stillRunning); return
+        case .failed(let why): _ = release(); _ = emit(["event": "error", "error": why]); return
+        case .ok(nil): _ = release(); _ = emit(["event": "error", "error": "the machine lock could not be reserved"]); return
+        }
         if spec.goal != nil {
             if spec.apps.contains(where: { NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundle).isEmpty }) {
                 _ = emit(["event": "preparing", "what": "apps"])
             }
-            reopenWindowless(spec.apps.map(\.bundle))
+            reopenWindows(spec.apps.map(\.bundle))
         }
         p.arguments = args
         p.currentDirectoryURL = work
@@ -667,15 +683,24 @@ enum Runner {
         let errURL = DeskMindIPC.supportDir.appendingPathComponent("work/last-run.stderr")
         fm.createFile(atPath: errURL.path, contents: nil)
         p.standardError = try? FileHandle(forWritingTo: errURL)
-        // what it leaves running (a Peekaboo server) is ended before the next run, as for a harness run (launch records
-        // it); stopRequested stands until the run has ended
-        do {
-            guard try launch(p) else {
-                _ = release()
-                _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
-            }
-        } catch {
-            _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
+        // One path: accepted → the machine lock (reserved above) → launched under the stop's lock and named in the lock
+        // (a process group of its own), only while the reservation is still this run's.
+        var launchError = "", stoppedFirst = false
+        var acquired: SessionWire.Holder?
+        switch ComputerLock.commit(reservation, spawn: {
+            do {
+                guard try launch(p) else { stoppedFirst = true; return nil }
+                return p.processIdentifier
+            } catch { launchError = error.localizedDescription; return nil }
+        }) {
+        case .busy, .alive: _ = release(); ComputerLock.cancel(reservation); _ = emit(ComputerLock.busy); return
+        case .failed(let why): _ = release(); ComputerLock.cancel(reservation); _ = emit(["event": "error", "error": why]); return
+        case .ok(nil):
+            _ = release()
+            if stoppedFirst { _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]) }
+            else { _ = emit(["event": "error", "error": "launch: \(launchError)"]) }
+            return
+        case .ok(let h): acquired = h
         }
         answerLock.lock(); answers = inPipe.fileHandleForWriting; asking = false; answerLock.unlock()
         _ = emit(["event": "start", "set": set, "real": spec.real, "pid": Int(p.processIdentifier)])
@@ -842,7 +867,21 @@ enum Runner {
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
         // Before the clean-up closes the run's windows: how it ended, for a moment, on its last picture.
         LiveCard.finish(stopped ? .stopped : freeState == "completed" ? .done : .failed)
-        cleanUp(quitTextEdit: !textEditWasRunning)
+        // The clean-up closes windows and may quit TextEdit -- the desktop, so under the machine lock: only if the lock is
+        // still exactly what this run left (reserveIfMine: what is left of its own group, a Peekaboo server, is ended,
+        // and the lock is held for the clean-up). Taken over meanwhile -- another task holds it, or has come and left
+        // it lingering for its undo -- nothing of it is touched, and the clean-up is skipped.
+        if let acquired, let r = ComputerLock.reserveIfMine(acquired) {
+            cleanUp(quitTextEdit: !textEditWasRunning)
+            ComputerLock.cancel(r)
+        } else {
+            let now = ComputerLock.read()
+            NSLog(now?.runID == runID
+                  ? "DeskMind Hands: what the run left would not end (or the lock could not be written); its windows are left as they are"
+                  : "DeskMind Hands: the Mac is no longer this run's (\(now.map { "\($0.runID) \($0.state)" } ?? "free")); its windows are left as they are")
+            if let acquired { ComputerLock.linger(acquired) }   // its own, if still there: the next task ends it
+            ComputerLock.free(runID: runID, pgid: p.processIdentifier)
+        }
         pruneRuns(keep: 10)
         // hands says some refusals on stdout ("refused: … is your home directory"): its tail too, when stderr is quiet.
         let errTail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
