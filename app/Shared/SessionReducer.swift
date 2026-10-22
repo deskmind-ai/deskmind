@@ -429,13 +429,19 @@ enum SessionReducer {
                 s.goneUpTo = max(s.goneUpTo, e.lastSeq ?? 0)
             }
         case .sessionExit(let e):
-            // its runs are gone whenever this comes; without last_seq, those the app has seen
-            s.goneUpTo = max(s.goneUpTo, e.lastSeq ?? max(s.lastSeq, s.pendingSession.keys.max() ?? 0))
-            // the latest process, or one before it (an exit that comes after the next process's start)?
+            // the latest process, or one before it (an exit that comes after the next process's start)? By pid when
+            // both have it; else by the stored seq it started at (start_seq): another start is another process; the same
+            // start is the latest if it stored anything (a later process starts past it), and ambiguous if not — taken
+            // for an older one, which loses nothing (a process that stored nothing queued and streamed nothing; a send
+            // to it finds it not_open and recovers).
             let latest: Bool
             if let p = e.pid, let cur = s.processPid { latest = p == cur }
-            else if let l = e.lastSeq, let st = s.processStart { latest = l >= st }
+            else if let st = s.processStart, let es = e.startSeq { latest = es == st && (e.lastSeq ?? st) > st }
+            else if let st = s.processStart, let l = e.lastSeq { latest = l > st }
             else { latest = true }
+            // its runs are gone whenever this comes; without last_seq, those the app has seen of the latest process
+            if let l = e.lastSeq { s.goneUpTo = max(s.goneUpTo, l) }
+            else if latest { s.goneUpTo = max(s.goneUpTo, s.lastSeq, s.pendingSession.keys.max() ?? 0) }
             if latest {
                 s.exited = e.code ?? -1
                 processGone(&s)
@@ -454,8 +460,11 @@ enum SessionReducer {
                 s.messages[i].t = line.t
                 s.messages[i].seq = line.seq
                 s.messages[i].interrupted = false
+                s.messages[i].anchor = nil              // stored: its place is its seq
                 if let q = line.seq { place(&s, .message(m.msgId), seq: q) }
             } else {
+                // (stored: whatever was dropped of it before — an empty bubble the process's end removed — is back)
+                s.droppedMessages.remove(m.msgId)
                 if m.role == "assistant" { dropEmptyStreaming(&s) }
                 s.messages.append(ChatMessage(id: m.msgId, role: m.role, text: m.text, streaming: false, replyTo: m.replyTo, model: m.model,
                                               via: m.via, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
@@ -552,11 +561,15 @@ enum SessionReducer {
     }
 
     /// A failed reply's deltas are void: the growing bubble leaves (a final message is never removed).
+    /// (Also one already cut off by the process's end, whichever of the two came first: it was never a reply.)
     private static func dropStreaming(_ s: inout SessionState, _ id: String) {
-        guard let m = s.message(id), m.streaming else { return }
+        guard let m = s.message(id), m.streaming || (m.seq == nil && m.interrupted) else { return }
         s.droppedMessages.insert(id)
         s.messages.removeAll { $0.id == id }
-        s.timeline.removeAll { $0 == .message(id) }
+        if let i = s.timeline.lastIndex(of: .message(id)) {
+            s.timeline.remove(at: i)
+            if i < s.placedItems { s.placedItems -= 1 }
+        }
     }
 
     private static func taskIndex(_ s: inout SessionState, _ runId: String) -> Int {

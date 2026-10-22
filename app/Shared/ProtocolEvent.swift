@@ -281,23 +281,29 @@ struct SessionQueue: Codable, Equatable {
     @LList<QueueItem> var items: [QueueItem] = []
 }
 
-/// The helper's word that a session's process ended: {"kind":"helper.session_exit","session_id","code","last_seq"?,
-/// "pid"?} (SessionHost, deskmind#105). `last_seq`: the last stored session seq the helper forwarded from that
-/// process, so the runs it started (session.task seq <= it) are known to be gone whenever the line comes; `pid`: which
-/// process (the helper adds the same `pid` to that process's session.start). Not stored, no seq. Without them (an
-/// older helper, or the app's own inference) the exit is taken for the latest process and what the app has seen.
+/// The helper's word that a session's process ended: {"kind":"helper.session_exit","session_id","code","pid"?,
+/// "start_seq"?,"last_seq"?} (SessionHost, deskmind#105). `last_seq`: the last stored session seq the helper
+/// forwarded from that process, so the runs it started (session.task seq <= it) are known to be gone whenever the line
+/// comes; `start_seq`: the stored seq it began after (its session.start's last_seq) and `pid`: which process (matched
+/// against a session.start's `pid` when the helper adds one). Not stored, no seq. Without them (an older helper, or the
+/// app's own inference) the exit is taken for the latest process and what the app has seen of it.
 struct HelperSessionExit: Codable, Equatable {
     var code: Int?
     var lastSeq: Int?
     var pid: Int?
-    enum CodingKeys: String, CodingKey { case code, lastSeq = "last_seq", pid }
-    init(code: Int?, lastSeq: Int? = nil, pid: Int? = nil) { self.code = code; self.lastSeq = lastSeq; self.pid = pid }
+    /// The stored seq the process began after (its session.start's last_seq).
+    var startSeq: Int?
+    enum CodingKeys: String, CodingKey { case code, lastSeq = "last_seq", pid, startSeq = "start_seq" }
+    init(code: Int?, lastSeq: Int? = nil, pid: Int? = nil, startSeq: Int? = nil) {
+        self.code = code; self.lastSeq = lastSeq; self.pid = pid; self.startSeq = startSeq
+    }
     /// A field of another type (or out of range) is absent: the exit itself must not be lost.
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         code = (try? c.decodeIfPresent(Int.self, forKey: .code)) ?? nil
         lastSeq = (try? c.decodeIfPresent(Int.self, forKey: .lastSeq)) ?? nil
         pid = (try? c.decodeIfPresent(Int.self, forKey: .pid)) ?? nil
+        startSeq = (try? c.decodeIfPresent(Int.self, forKey: .startSeq)) ?? nil
     }
 }
 

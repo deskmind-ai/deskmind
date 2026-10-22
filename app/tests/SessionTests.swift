@@ -1300,15 +1300,61 @@ enum SessionTests {
         // a stale exit (after B's start) does not touch B: not exited, B's run alive even before its session.task
         let b = SessionReducer.reduce(SessionState(), Array(live[0...12]) + [startBLine, live[22], live[23], exitA] + Array(live[15...21]) + [live[24], live[25]])
         check(b == want, "a stale exit after B's start and B's run lines: the same state")
-        // without pid, by last_seq: an exit at or past the latest start's last_seq is that process's
-        let noPid = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":4"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":4}"#)])
-        check(noPid.exited == 1, "no pid: last_seq decides")
+        // without pid on the start: by start_seq (another start: another process; the same start and something stored:
+        // the latest; the same start and nothing stored: ambiguous, taken for an older one), else by last_seq past it
+        let st4 = se(nil, #""kind":"session.start","last_seq":4"#)
+        let exitOf = { (json: String) in SessionReducer.reduce(SessionState(), [st4, L(json)]).exited }
+        check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":7,"start_seq":4,"last_seq":6}"#) == 1, "same start_seq, stored: the latest")
+        check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":7,"start_seq":2,"last_seq":4}"#) == nil, "another start_seq: an older one")
+        check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":7,"start_seq":4,"last_seq":4}"#) == nil, "same start, nothing stored: ambiguous, older")
+        check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":5}"#) == 1, "no start_seq: last_seq past the start: the latest")
         let stale = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":6"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":4}"#)])
         check(stale.exited == nil && stale.goneUpTo == 6, "no pid: an exit below the latest start is an older process's")
         // a finished task is never "cut off"
         let fin = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"""#),
                                                         L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"last_seq":1}"#)])
         check(fin.task("r1")?.cutOff == false && fin.task("r1")?.gone == true && fin.task("r1")?.closed == "session_exit", "done before its process went: not cut off, its card closed")
+        // the same 45 orders as the helper writes them today: session.start without pid, the exit with start_seq
+        let stripped = live.map { l -> ProtocolLine in
+            if case .sessionStart(var e) = l.event { e.pid = nil; return ProtocolLine(sessionId: "s", event: .sessionStart(e)) }
+            if case .sessionExit(var e) = l.event { e.startSeq = 0; return ProtocolLine(sessionId: "s", event: .sessionExit(e)) }
+            return l
+        }
+        let want2 = SessionReducer.reduce(SessionState(), stripped)
+        check(want2.status == want.status && want2.timeline == want.timeline && want2.unsent == want.unsent && want2.exited == nil, "no pid on starts: the same live state")
+        for (how, o) in orders where o.count == live.count {
+            if SessionReducer.reduce(SessionState(), o.map { stripped[$0] }) != want2 { check(false, "no pid on starts, \(how): differs") }
+        }
+        // re-review of 9480c89, one by one (each against its live order)
+        let sA = se(nil, #""kind":"session.start","last_seq":0,"pid":100"#), u1 = se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"a""#)
+        let eq = { (name: String, liveOrder: [ProtocolLine], other: [ProtocolLine]) in
+            let a = SessionReducer.reduce(SessionState(), liveOrder), b = SessionReducer.reduce(SessionState(), other)
+            check(a == b, "\(name): the same state in either order"); if a != b { dumpDiff(b, a) }
+        }
+        // 1. a reply's stored error after the exit still removes the cut-off reply
+        let d1 = se(nil, #""kind":"session.delta","msg_id":"m1","text":"从前","offset":0"#)
+        let err = se(2, #""kind":"session.error","code":"network","text":"x","msg_id":"m1""#)
+        let ex2 = L(#"{"kind":"helper.session_exit","session_id":"s","code":9,"pid":100,"start_seq":0,"last_seq":2}"#)
+        eq("error after the exit", [sA, u1, d1, err, ex2], [sA, u1, d1, ex2, err])
+        check(SessionReducer.reduce(SessionState(), [sA, u1, d1, ex2, err]).timeline == [.message("u1"), .error(2)], "the failed reply is gone")
+        // 2. A's exit after B's start (starts without pid): B keeps its queue and its reply
+        let sA0 = se(nil, #""kind":"session.start","last_seq":0"#), sB1 = se(nil, #""kind":"session.start","last_seq":1"#)
+        let dB = se(nil, #""kind":"session.delta","msg_id":"m2","text":"嗯","offset":0"#), qB = se(nil, #""kind":"session.queue","items":[{"id":"qb","text":"x"}]"#)
+        let exA = L(#"{"kind":"helper.session_exit","session_id":"s","code":9,"pid":100,"start_seq":0,"last_seq":1}"#)
+        eq("a late exit of A", [sA0, u1, exA, sB1, dB, qB], [sA0, u1, sB1, dB, qB, exA])
+        let late2 = SessionReducer.reduce(SessionState(), [sA0, u1, sB1, dB, qB, exA])
+        check(late2.exited == nil && late2.queue.map(\.id) == ["qb"] && late2.status == .thinking, "B untouched: \(late2.status)")
+        // 3. an exit with pid but no last_seq for an older process does not touch B's runs
+        let u2 = se(2, #""kind":"session.message","msg_id":"u2","role":"user","text":"b""#)
+        let sB2 = se(nil, #""kind":"session.start","last_seq":2,"pid":200"#)
+        let r2t = se(3, #""kind":"session.task","msg_id":"m","run_id":"r2","raw":"y","by":"slash""#)
+        let r2s = ex(1, #""kind":"start","raw":"y""#, run: "r2"), r2a = ex(2, #""kind":"ask","ask_id":"a2","# + card, run: "r2")
+        let exPidOnly = L(#"{"kind":"helper.session_exit","session_id":"s","code":9,"pid":100}"#)
+        eq("an older pid without last_seq", [sA, u1, u2, exPidOnly, sB2, r2t, r2s, r2a], [sA, u1, u2, sB2, r2t, r2s, r2a, exPidOnly])
+        // 4. an empty first delta, the exit, then the reply's delayed final message
+        let d0 = se(nil, #""kind":"session.delta","msg_id":"m1","text":"","offset":0"#)
+        let m1 = se(2, #""kind":"session.message","msg_id":"m1","role":"assistant","text":"好""#)
+        eq("the final message after the exit", [sA, u1, d0, m1, ex2], [sA, u1, d0, ex2, m1])
         // a session.start fed twice (a replay of the whole stream) is the same process
         let twice = SessionReducer.reduce(SessionState(), [live[0], live[1], live[6], live[0]])
         check(twice.queue.map(\.id) == ["q1"] && twice.unsent.isEmpty, "the same start again: nothing gone")
