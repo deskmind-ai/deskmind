@@ -194,16 +194,16 @@ final class SessionClient {
         if control.isTyping && !s.composerEnabled { return .refused("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
         if s.exited != nil {
-            if case .stop = control { return .refused("the session is not running") }   // nothing to stop: not opened for it
+            if let why = Self.goneWithProcess(control, in: s) { return .refused(why) }
             guard reopenIfExited(sessionId) else { return .unavailable }
         }
         var r = transport.request(Request.send(sessionId: sessionId, line: control.line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
         // the session reads as exited here too; it is opened again once and the line sent again — unless the app ended
-        // it, or the line is a stop (a stop never opens a session: there is nothing to stop)
+        // it, or the line was for what went with the process (a stop, a steer, a card's answer: never opens a session)
         if r?["code"] as? String == "not_open" {
             if state(sessionId).exited == nil { feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil)))) }
-            if case .stop = control { return .refused("the session is not running") }
+            if let why = Self.goneWithProcess(control, in: state(sessionId)) { return .refused(why) }
             lock.lock()
             let ended = endedByApp.contains(sessionId), how = opened[sessionId]
             lock.unlock()
@@ -212,6 +212,17 @@ final class SessionClient {
         }
         guard let r, r["ok"] as? Bool != false else { return .unavailable }
         return .sent
+    }
+
+    /// Why a control is moot once the session's process ended (it was for the task or the card that went with it), or
+    /// nil when a new process can take it (say, cua, retry, the queue's controls, attach).
+    static func goneWithProcess(_ control: SessionControl, in s: SessionState) -> String? {
+        switch control {
+        case .stop: return "the session is not running"
+        case .steer: return s.runningTask == nil ? "no task is running" : nil
+        case .answer(let a): return refusal(a, in: s)
+        default: return nil
+        }
     }
 
     /// Sends again what was queued when the session's process ended (SessionState.unsent), as a new message; it leaves
@@ -361,12 +372,13 @@ final class SessionClient {
     func feed(_ line: ProtocolLine) -> SessionReducer.Applied {
         guard let id = line.sessionId else { return .ignored }
         lock.lock()
-        let before = states[id] ?? SessionState(sessionId: id)
-        var after = before
+        var after = states[id] ?? SessionState(sessionId: id)
+        states[id] = nil                                    // the reducer works on the only copy (no copy-on-write)
         let applied = SessionReducer.apply(&after, line)
         states[id] = after
         lock.unlock()
-        if after != before { onChange?(id, after) }
+        // (no whole-state comparison per line: in a long session that cost more than the line itself)
+        if applied == .applied || applied == .held { onChange?(id, after) }
         return applied
     }
 

@@ -38,6 +38,7 @@ enum SessionTests {
         crossStreamTests()
         exitLeftoversTests()
         interleavingPropertyTests()
+        rereviewTests()
     }
 
     // MARK: fixtures
@@ -1122,5 +1123,60 @@ enum SessionTests {
         for (x, y) in zip(ma.children, mb.children) where "\(x.value)" != "\(y.value)" {
             print("  field \(x.label ?? "?"):\n    got  \(x.value)\n    live \(y.value)")
         }
+    }
+
+    // MARK: re-review of 74e5d4b
+
+    static func rereviewTests() {
+        let exit = L(#"{"kind":"helper.session_exit","session_id":"s","code":9}"#)
+        let start = ex(1, #""kind":"start","raw":"x""#)
+        let done = ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]}"#)
+        let end = se(2, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"","undo":"open""#)
+        // 1. the exit closes every task's result card, whether its task_done came before or comes after
+        for (how, order) in [("done, end, exit", [taskR1, start, done, end, exit]), ("end, exit, done", [taskR1, start, end, exit, done]),
+                             ("exit, done, end", [taskR1, start, exit, done, end])] {
+            let st = SessionReducer.reduce(SessionState(), order)
+            check(st.task("r1")?.undo == .expired("session_exit") && SessionClient.refusal(.respond(runId: "r1", option: 1), in: st) != nil, "1 \(how): undo gone with the process: \(String(describing: st.task("r1")?.undo))")
+        }
+        // 2. a cut-off reply keeps its place; the chat goes on after it and the dot can be done again
+        let st = SessionReducer.reduce(SessionState(), [se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"a""#),
+            se(nil, #""kind":"session.delta","msg_id":"m1","text":"从前","offset":0"#), exit, se(nil, #""kind":"session.start","resumed":true"#),
+            se(2, #""kind":"session.message","msg_id":"u2","role":"user","text":"b""#), se(nil, #""kind":"session.delta","msg_id":"m2","text":"好","offset":0"#),
+            se(3, #""kind":"session.message","msg_id":"m2","role":"assistant","text":"好""#)])
+        check(st.timeline == [.message("u1"), .message("m1"), .message("u2"), .message("m2")], "2: the cut-off reply where it began: \(st.timeline)")
+        check(st.status == .done(at: nil, stopped: false), "2: the next reply done: \(st.status)")
+        // 3. not_open on a card's answer or a steer: the card went with the process; nothing opened, nothing sent
+        let mock = MockTransport()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
+        for control in [SessionControl.answer(.option(runId: "r1", askId: "a1", option: 0)), .steer("改", runId: "r1")] {
+            let c = SessionClient(transport: mock)
+            _ = c.open(sessionId: "s")
+            [taskR1, start, ex(2, #""kind":"step","text":"x","step_id":"s1""#), ex(3, #""kind":"ask","ask_id":"a1","# + actionCard)].forEach { c.feed($0) }
+            if case .steer = control { c.feed(ex(4, #""kind":"resumed","ask_id":"a1""#)) }
+            mock.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
+            mock.requests = []
+            check(c.send(control, to: "s") != .sent && mock.requests.map { $0["op"] as? String ?? "" } == ["session.send"], "3: \(control) after an unheard exit: not opened again, not re-sent: \(mock.requests.map { $0["op"] ?? "" })")
+            mock.requests = []
+            check(c.send(control, to: "s") != .sent && mock.requests.isEmpty, "3: and while exited: refused here")
+        }
+        // 4. a long session: replaying it through the client stays cheap (300 tasks × 20 steps, 40 deltas a reply)
+        var ls: [ProtocolLine] = [], q = 0
+        for k in 1...300 {
+            q += 1; ls.append(se(q, "\"kind\":\"session.message\",\"msg_id\":\"u\(k)\",\"role\":\"user\",\"text\":\"hi\""))
+            for d in 0..<40 { ls.append(se(nil, "\"kind\":\"session.delta\",\"msg_id\":\"a\(k)\",\"text\":\"x\",\"offset\":\(d)")) }
+            q += 1; ls.append(se(q, "\"kind\":\"session.message\",\"msg_id\":\"a\(k)\",\"role\":\"assistant\",\"text\":\"\(String(repeating: "x", count: 40))\""))
+            q += 1; ls.append(se(q, "\"kind\":\"session.task\",\"msg_id\":\"m\(k)\",\"run_id\":\"r\(k)\",\"raw\":\"a\",\"by\":\"model\""))
+            var r = 0
+            func R(_ body: String) { r += 1; ls.append(ex(r, body, run: "r\(k)")) }
+            R(#""kind":"start","raw":"a""#)
+            for n in 1...20 { R("\"kind\":\"step\",\"text\":\"x\",\"step_id\":\"s\(n)\""); R("\"kind\":\"step_result\",\"step_id\":\"s\(n)\",\"status\":\"ok\"") }
+            R(#""kind":"task_done","status":"succeeded","reason":"","summary":"s""#)
+            q += 1; ls.append(se(q, "\"kind\":\"session.task_end\",\"run_id\":\"r\(k)\",\"status\":\"succeeded\",\"summary\":\"s\",\"undo\":\"none\""))
+        }
+        let c = SessionClient(transport: MockTransport())
+        let t0 = Date()
+        ls.forEach { c.feed($0) }
+        let took = Date().timeIntervalSince(t0)
+        check(took < 3 && c.state("s").tasks.count == 300 && c.state("s").tasks.last?.steps.count == 20, "4: \(ls.count) lines in \(took) s (debug build)")
     }
 }

@@ -13,7 +13,7 @@
 // is the same whichever stream came first: what a session event implies about a run (its end voids an open card,
 // closes steps with no result) is provisional, recomputed from the facts after every line (`settle`), and the run's own
 // word (resumed, ask_void, step_result) always wins; the chat and the tasks are kept in the session's stored order
-// (`order`). SessionTests.interleavingPropertyTests holds the reducer to it.
+// (`place`). SessionTests.interleavingPropertyTests holds the reducer to it.
 
 import Foundation
 
@@ -37,6 +37,8 @@ struct ChatMessage: Equatable {
     var t: Double? = nil
     /// The stored seq of its final session.message (nil while it streams): its place in the chat.
     var seq: Int? = nil
+    /// The session's stored seq when it began streaming: its place if it is never stored (interrupted).
+    var anchor: Int? = nil
     /// The session's process ended while it streamed: no final message came and nothing was stored. It shows as
     /// interrupted, never as a finished reply.
     var interrupted = false
@@ -204,6 +206,11 @@ struct SessionState: Equatable {
     var messages: [ChatMessage] = []
     var tasks: [TaskState] = []
     var timeline: [TimelineItem] = []
+    /// How many items at the front of `timeline` / `tasks` have their stored place (SessionReducer.place).
+    var placedItems = 0
+    var placedTasks = 0
+    /// Where each run's task is in `tasks` (a long session has many; looking one up must not scan them all).
+    var taskPos: [String: Int] = [:]
     var queue: [QueueItem] = []
     /// What was queued when the session's process ended: never sent, and no longer in any queue. Shown with
     /// 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent); never as pending.
@@ -221,8 +228,8 @@ struct SessionState: Equatable {
     /// (SessionClient re-opens it on the next send or watch); a new session.start clears it.
     var exited: Int? = nil
 
-    func message(_ id: String) -> ChatMessage? { messages.first { $0.id == id } }
-    func task(_ runId: String) -> TaskState? { tasks.first { $0.runId == runId } }
+    func message(_ id: String) -> ChatMessage? { messages.last { $0.id == id } }
+    func task(_ runId: String) -> TaskState? { taskPos[runId].map { tasks[$0] } }
     /// The open card, whichever task holds it (one computer task per session at a time: at most one).
     var openCard: (runId: String, card: CardState)? {
         for t in tasks.reversed() { if let c = t.openCard { return (t.runId, c) } }
@@ -276,15 +283,15 @@ enum SessionReducer {
             if case .unknown(let k, _) = ev { s.unknownKinds.insert(k) }
             guard let runId = line.runId else { return .ignored }   // an executor event belongs to a run
             guard let seq = line.seq else { applyExecutor(&s, runId, line); return .applied }
-            let cursor = s.task(runId)?.lastSeq ?? 0
+            let cursor = s.taskPos[runId].map { s.tasks[$0].lastSeq } ?? 0
             if seq <= cursor { return .duplicate }
             if seq > cursor + 1 { s.pendingRuns[runId, default: [:]][seq] = line; return .held }
             applyExecutor(&s, runId, line)
-            while let i = s.tasks.firstIndex(where: { $0.runId == runId }),
+            while let i = s.taskPos[runId],
                   let next = s.pendingRuns[runId]?.removeValue(forKey: s.tasks[i].lastSeq + 1) {
                 applyExecutor(&s, runId, next)
             }
-            let now = s.task(runId)?.lastSeq ?? 0
+            let now = s.taskPos[runId].map { s.tasks[$0].lastSeq } ?? 0
             let rest = (s.pendingRuns[runId] ?? [:]).filter { $0.key > now }
             s.pendingRuns[runId] = rest.isEmpty ? nil : rest
             return .applied
@@ -296,8 +303,20 @@ enum SessionReducer {
         if let seq = line.seq { s.lastSeq = seq }
         if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
         session(&s, line.event, line)
-        for i in s.tasks.indices { settle(&s.tasks[i]) }
-        order(&s)
+        // what the line implies about runs: their own task only, or every task when the process went away
+        switch line.event {
+        case .task(let e): settle(&s, e.runId)
+        case .taskEnd(let e): settle(&s, e.runId)
+        case .taskClosed(let e): settle(&s, e.runId)
+        case .taskUndo(let e): settle(&s, e.runId)
+        case .steer(let e): settle(&s, e.runId)
+        case .sessionExit: for i in s.tasks.indices { settle(&s.tasks[i]) }
+        default: break
+        }
+    }
+
+    private static func settle(_ s: inout SessionState, _ runId: String) {
+        if let i = s.taskPos[runId] { settle(&s.tasks[i]) }
     }
 
     /// One executor line of `runId` in its place.
@@ -309,26 +328,54 @@ enum SessionReducer {
         settle(&s.tasks[i])
     }
 
-    /// The chat and the tasks in the order the session stored them (by session seq), whatever order the streams came
-    /// in; what has no stored place yet (a reply streaming, a run whose session.task has not come) after, as it came.
-    private static func order(_ s: inout SessionState) {
-        var msgSeq: [String: Int] = [:], taskSeq: [String: Int] = [:]
-        for m in s.messages { if let q = m.seq { msgSeq[m.id] = q } }
+    // MARK: the order of the chat
+
+    // The chat (timeline) and the tasks are in the order the session stored them, whatever order the streams came in:
+    // a front part of stored items in seq order (`placedItems`, `placedTasks` long), then what has no stored place yet
+    // (a reply streaming, a run whose session.task has not come) as it came. Session lines come in seq order, so an
+    // item that gets its stored seq goes at the end of the front part; a reply cut off by the process's end (never
+    // stored) goes right after what was stored when it began (`placeInterrupted`).
+
+    /// `item` just got its stored seq, the newest: to the end of the stored part.
+    private static func place(_ s: inout SessionState, _ item: TimelineItem) {
+        if let i = s.timeline.lastIndex(of: item) {
+            s.timeline.remove(at: i)
+            if i < s.placedItems { s.placedItems -= 1 }
+        }
+        s.timeline.insert(item, at: s.placedItems)
+        s.placedItems += 1
+    }
+
+    /// The task got its session.task: to the end of the stored tasks, and its item in the chat with it.
+    private static func placeTask(_ s: inout SessionState, _ runId: String) {
+        if let i = s.taskPos[runId], i >= s.placedTasks {
+            if i != s.placedTasks {
+                s.tasks.insert(s.tasks.remove(at: i), at: s.placedTasks)
+                for k in s.placedTasks...i { s.taskPos[s.tasks[k].runId] = k }
+            }
+            s.placedTasks += 1
+        }
+        place(&s, .task(runId))
+    }
+
+    /// A reply cut off by the process's end: right after the stored items up to the seq it began at.
+    private static func placeInterrupted(_ s: inout SessionState, _ id: String, anchor: Int) {
+        guard let i = s.timeline.lastIndex(of: .message(id)), i >= s.placedItems else { return }
+        s.timeline.remove(at: i)
+        var msgSeq: [String: Int] = [:]
+        for m in s.messages { if let q = m.seq { msgSeq[m.id] = q } else if m.interrupted, let a = m.anchor { msgSeq[m.id] = a } }
+        var taskSeq: [String: Int] = [:]
         for t in s.tasks { if let q = t.sessionSeq { taskSeq[t.runId] = q } }
-        func key(_ item: TimelineItem) -> Int? {
+        func key(_ item: TimelineItem) -> Int {
             switch item {
-            case .message(let id): return msgSeq[id]
-            case .task(let id): return taskSeq[id]
-            case .error(let seq): return seq
+            case .message(let m): return msgSeq[m] ?? 0
+            case .task(let r): return taskSeq[r] ?? 0
+            case .error(let q): return q
             }
         }
-        let keys = s.timeline.map(key)
-        var keyed: [(Int, TimelineItem)] = [], loose: [TimelineItem] = []
-        for (k, item) in zip(keys, s.timeline) { if let k { keyed.append((k, item)) } else { loose.append(item) } }
-        keyed.sort { $0.0 < $1.0 }
-        s.timeline = keyed.map(\.1) + loose
-        let tasks = s.tasks.compactMap { t in t.sessionSeq.map { ($0, t) } }.sorted { $0.0 < $1.0 }.map(\.1)
-        s.tasks = tasks + s.tasks.filter { $0.sessionSeq == nil }
+        let at = s.timeline[..<s.placedItems].firstIndex { key($0) > anchor } ?? s.placedItems
+        s.timeline.insert(.message(id), at: at)
+        s.placedItems += 1
     }
 
     // MARK: session events
@@ -346,15 +393,17 @@ enum SessionReducer {
             for i in s.messages.indices where s.messages[i].streaming {
                 s.messages[i].streaming = false
                 s.messages[i].interrupted = true
+                if let a = s.messages[i].anchor { placeInterrupted(&s, s.messages[i].id, anchor: a) }
             }
             for i in s.tasks.indices where s.tasks[i].running { s.tasks[i].cutOff = true }   // settle closes what was open
             // what was queued lived in the process: not sent, and not pending any more (SessionClient.resend)
             s.unsent += s.queue
             s.queue = []
             // a result card still answerable: its executor went with the process, and undo with it
-            for i in s.tasks.indices where s.tasks[i].closed == nil && s.tasks[i].done != nil { s.tasks[i].closed = "session_exit" }
+            // (every task the process had, whether or not its task_done has come yet: it may be replayed later)
+            for i in s.tasks.indices where s.tasks[i].closed == nil { s.tasks[i].closed = "session_exit" }
         case .message(let m):
-            if let i = s.messages.firstIndex(where: { $0.id == m.msgId }) {
+            if let i = s.messages.lastIndex(where: { $0.id == m.msgId }) {
                 s.messages[i].text = m.text
                 s.messages[i].role = m.role
                 s.messages[i].streaming = false
@@ -367,11 +416,13 @@ enum SessionReducer {
                 s.messages[i].t = line.t
                 s.messages[i].seq = line.seq
                 s.messages[i].interrupted = false
+                if line.seq != nil { place(&s, .message(m.msgId)) }
             } else {
                 if m.role == "assistant" { dropEmptyStreaming(&s) }
                 s.messages.append(ChatMessage(id: m.msgId, role: m.role, text: m.text, streaming: false, replyTo: m.replyTo, model: m.model,
                                               via: m.via, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
                 s.timeline.append(.message(m.msgId))
+                if line.seq != nil { place(&s, .message(m.msgId)) }
             }
         case .delta(let d):
             delta(&s, d, t: line.t)
@@ -380,6 +431,7 @@ enum SessionReducer {
             if let seq = line.seq {
                 s.errors.append(StoredError(seq: seq, error: e, t: line.t))
                 s.timeline.append(.error(seq))
+                place(&s, .error(seq))
             } else {
                 s.lastRefusal = e
             }
@@ -392,7 +444,10 @@ enum SessionReducer {
             s.tasks[i].by = e.by
             s.tasks[i].replyTo = e.replyTo
             s.tasks[i].startedAt = line.t ?? s.tasks[i].startedAt     // session.task's time, before or after the run's start
-            if let seq = line.seq { s.tasks[i].sessionSeq = seq }
+            if let seq = line.seq, s.tasks[i].sessionSeq == nil {
+                s.tasks[i].sessionSeq = seq
+                placeTask(&s, e.runId)
+            }
         case .taskEnd(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].end = e
@@ -422,12 +477,12 @@ enum SessionReducer {
     /// Streaming assembly, by offset in UTF-16 code units (the harness counts a JavaScript string's length).
     private static func delta(_ s: inout SessionState, _ d: SessionDelta, t: Double?) {
         let i: Int
-        if let found = s.messages.firstIndex(where: { $0.id == d.msgId }) {
+        if let found = s.messages.lastIndex(where: { $0.id == d.msgId }) {
             i = found
         } else {
             if s.droppedMessages.contains(d.msgId) { return }
             dropEmptyStreaming(&s)
-            s.messages.append(ChatMessage(id: d.msgId, role: "assistant", text: "", streaming: true, t: t))
+            s.messages.append(ChatMessage(id: d.msgId, role: "assistant", text: "", streaming: true, t: t, anchor: s.lastSeq))
             s.timeline.append(.message(d.msgId))
             i = s.messages.count - 1
         }
@@ -465,7 +520,8 @@ enum SessionReducer {
     }
 
     private static func taskIndex(_ s: inout SessionState, _ runId: String) -> Int {
-        if let i = s.tasks.firstIndex(where: { $0.runId == runId }) { return i }
+        if let i = s.taskPos[runId] { return i }
+        s.taskPos[runId] = s.tasks.count
         s.tasks.append(TaskState(runId: runId))
         s.timeline.append(.task(runId))
         return s.tasks.count - 1
@@ -584,17 +640,20 @@ enum SessionReducer {
     private static func settle(_ task: inout TaskState) {
         let ended = task.ended
         let endedWhy = (task.done == nil && task.end == nil) ? "session_exit" : "task_done"
+        // (written only where it changes: the arrays stay shared with the state before, which keeps feeding cheap)
         for i in task.cards.indices {
-            task.cards[i].outcome = task.cards[i].explicit ?? (ended ? .void(endedWhy) : .open)
+            let o = task.cards[i].explicit ?? (ended ? .void(endedWhy) : .open)
+            if task.cards[i].outcome != o { task.cards[i].outcome = o }
         }
-        task.openCardId = ended ? nil : task.cards.last { $0.outcome == .open }?.askId
+        let open = ended ? nil : task.cards.last { $0.outcome == .open }?.askId
+        if task.openCardId != open { task.openCardId = open }
         let lastUnknown = task.cause == .lastStepUnknown || (task.cutOff && task.done == nil && task.end == nil)
-        let unresolved = task.steps.indices.filter { task.steps[$0].result == nil }
+        let lastUnresolved = task.steps.lastIndex { $0.result == nil }
         for i in task.steps.indices {
-            if let r = task.steps[i].result { task.steps[i].status = r; continue }
-            task.steps[i].status = !ended ? .running : (lastUnknown && i == unresolved.last) ? .unknown : .notFinished
+            let st = task.steps[i].result ?? (!ended ? .running : (lastUnknown && i == lastUnresolved) ? .unknown : .notFinished)
+            if task.steps[i].status != st { task.steps[i].status = st }
         }
-        if ended {
+        if ended && (task.userActive || task.lookOnly || task.stopping || task.preparing) {
             task.userActive = false
             task.lookOnly = false
             task.stopping = false
