@@ -20,6 +20,12 @@ enum ShellTests {
         cardAnswerTests()
         deleteRenameTests()
         settingsTests()
+        settingsOrderTests()
+        cloudOffTests()
+        cardBodyTests()
+        focusTests()
+        idleReclaimTests()
+        historyTests()
         textTests()
     }
 
@@ -353,8 +359,220 @@ enum ShellTests {
         }
         check(m.undoOpen("ses_undo"), "the undo is open")
         m.settingsChanged()
-        let ends = mock.requests.filter { $0["op"] as? String == SessionClient.Op.end }.compactMap { $0["session_id"] as? String }
-        check(ends == ["ses_t"], "only the idle session restarted (not the running task's, not the open undo's): \(ends)")
+        // the helper decides when each can end (now if idle, else once it is): this app only asks, for every session
+        // with a process, and never a bare end (#107 review: the app's own view missed a /cua in flight)
+        let ends = mock.requests.filter { $0["op"] as? String == SessionClient.Op.end }
+        check(ends.compactMap { $0["session_id"] as? String } == ["ses_busy", "ses_t", "ses_undo"] && ends.allSatisfy { $0["when_idle"] as? Bool == true },
+              "a restart asked of the helper for each live session, when idle: \(ends)")
+    }
+
+    /// #107 review (C, item 4): a /cua sent and not yet echoed is not "idle" to anyone but the helper; a settings change
+    /// right after it asks for a restart only when idle, and only after the send (one request per session at a time).
+    /// (B) Every session opens again with the new settings, whether or not its process could end then.
+    static func settingsOrderTests() {
+        // the reviewer's order: /cua acked by the helper, its session.task not here yet, then the settings saved
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true], SessionClient.Op.end: ["ok": true, "deferred": true]]
+        let m = model(mock)
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.selected = "ses_t"
+        m.draft = "/cua 把报告发给老板"
+        m.submit()
+        check(m.client.state("ses_t").outbox.first?.sending == true && m.client.state("ses_t").runningTask == nil, "the /cua is on its way, no task here yet")
+        m.settingsChanged()
+        let after = mock.requests.drop { $0["op"] as? String != SessionClient.Op.send }
+        check(after.filter { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool != true }.isEmpty
+              && after.contains { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true },
+              "no bare session.end after the /cua: a restart when idle, for the helper to decide: \(after.map { $0["op"] ?? "" })")
+
+        // the client never lets a restart overtake a send it made first (the send blocks in the helper meanwhile)
+        final class Slow: SessionTransport {
+            let lock = NSLock()
+            var log: [String] = []
+            let release = DispatchSemaphore(value: 0)
+            let inSend = DispatchSemaphore(value: 0)
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                let op = body["op"] as? String ?? ""
+                lock.lock(); log.append(op + ">"); lock.unlock()
+                if op == SessionClient.Op.send { inSend.signal(); release.wait() }
+                lock.lock(); log.append("<" + op); lock.unlock()
+                return ["ok": true]
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+        }
+        let slow = Slow()
+        let c = SessionClient(transport: slow)
+        c.feed(SessionTests.lines("chat")[0])
+        let sendDone = DispatchSemaphore(value: 0), restartDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { _ = c.send(.cua("x"), to: "ses_t"); sendDone.signal() }
+        slow.inSend.wait()
+        DispatchQueue.global().async { c.restart("ses_t", config: "b", lang: "zh"); restartDone.signal() }
+        usleep(100_000)
+        slow.lock.lock(); let early = slow.log; slow.lock.unlock()
+        slow.release.signal()
+        sendDone.wait(); restartDone.wait()
+        check(early == ["session.send>"] && slow.log == ["session.send>", "<session.send", "session.end>", "<session.end"],
+              "the restart waits for the send before it: \(early) then \(slow.log)")
+
+        // B: a session that exited (or was busy) opens again with the new settings, not the ones it was opened with
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_x"], SessionClient.Op.send: ["ok": true],
+                         SessionClient.Op.end: ["ok": false, "code": "not_open"]]
+        var config = "provider-a"
+        let m2 = ShellModel(client: SessionClient(transport: mock2), defaults: scratchDefaults(), config: { config }, lang: { .zhHans },
+                            work: { $0() }, deliver: { $0() })
+        m2.newConversation(); m2.draft = "你好"; m2.submit()
+        check(mock2.requests.first { $0["op"] as? String == SessionClient.Op.open }?["config"] as? String == "provider-a", "opened with provider a")
+        m2.client.feed(["kind": "session.start", "session_id": "ses_x", "resumed": false, "last_seq": 0])
+        m2.client.feed(["kind": "helper.session_exit", "session_id": "ses_x", "code": 0])
+        check(m2.states["ses_x"]?.exited != nil, "its process gone")
+        config = "provider-b"
+        m2.settingsChanged()
+        mock2.requests = []
+        m2.selected = "ses_x"; m2.draft = "再问"; m2.submit()
+        let reopen = mock2.requests.first { $0["op"] as? String == SessionClient.Op.open }
+        check(reopen?["config"] as? String == "provider-b", "the exited session opens again with the new provider: \(String(describing: reopen?["config"]))")
+    }
+
+    /// #107 review (A): cloud models off — a session sends nothing (no session.open, no say), even with a key saved;
+    /// the chat says so; turned back on, the next send goes.
+    static func cloudOffTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_c"], SessionClient.Op.send: ["ok": true]]
+        var on = false
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                           cloudOn: { on }, work: { $0() }, deliver: { $0() })
+        m.refreshSettings()
+        check(m.cloudOff, "cloud off: the chat's row says a conversation needs a cloud model")
+        m.newConversation(); m.draft = "你好"; m.submit()
+        check(mock.requests.isEmpty && m.draft == "你好" && m.notice != nil, "a new conversation: nothing opened, nothing sent, the text stays: \(mock.requests)")
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.selected = "ses_t"; m.draft = "/cua 打开备忘录"; m.submit()
+        m.retry()
+        check(mock.requests.isEmpty, "an open session: no say, no cua, no retry")
+        on = true
+        m.settingsChanged()
+        mock.requests = []
+        m.submit()
+        check(!m.cloudOff && sent(mock)?["type"] as? String == "cua", "cloud on again: the next send goes: \(String(describing: sent(mock)))")
+    }
+
+    /// #107 review (item 1): an approve-type option takes a click only once the card's whole body has been on screen —
+    /// it fits, or it was scrolled to its end (the scroll geometry, never the text). The way out always works.
+    static func cardBodyTests() {
+        check(CardBody.endShown(contentHeight: 100, visibleHeight: 100, offset: 0), "a body that fits: its end is shown")
+        check(!CardBody.endShown(contentHeight: 900, visibleHeight: 200, offset: 0), "a long body at its top: not")
+        check(!CardBody.endShown(contentHeight: 900, visibleHeight: 200, offset: 650), "nearly at its end: not")
+        check(CardBody.endShown(contentHeight: 900, visibleHeight: 200, offset: 700), "scrolled to its end")
+        check(!CardBody.endShown(contentHeight: 0, visibleHeight: 0, offset: 0), "not laid out yet: not")
+        check(CardBody.cap(columnHeight: 600) >= CardBody.minHeight && CardBody.cap(columnHeight: 600) <= 200 && CardBody.cap(columnHeight: 3000) == CardBody.maxHeight,
+              "the body's cap: a share of the column, bounded: \(CardBody.cap(columnHeight: 600))")
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let m = model(mock)
+        feed(m, "task-card", upTo: SessionTests.isKind("ask"))
+        m.selected = "ses_t"
+        let s = m.states["ses_t"]!
+        let (run, open) = s.openCard!
+        let card = CardModel(card: open.card, runId: run, askId: open.askId)
+        guard let approve = card.buttons.first(where: { $0.role == .approve }) else { check(false, "the fixture's card has an approve option"); return }
+        check(!m.buttonEnabled(approve, card: card, in: s), "approve: off before the body was seen")
+        m.click(approve)
+        check(sends(mock) == 0, "a click on it then sends nothing")
+        m.cardBody(card, contentHeight: 900, visibleHeight: 200, offset: 300)
+        check(!m.buttonEnabled(approve, card: card, in: s), "half way down: still off")
+        m.cardBody(card, contentHeight: 900, visibleHeight: 200, offset: 700)
+        check(m.buttonEnabled(approve, card: card, in: s), "its end on screen: on")
+        m.cardBody(card, contentHeight: 900, visibleHeight: 200, offset: 0)
+        check(m.buttonEnabled(approve, card: card, in: s), "scrolled back up: stays on (it was all on screen)")
+        m.click(approve)
+        check(sent(mock)?["option"] as? Int == approve.index, "then the click sends the approve option")
+        // another card starts unseen; its way out needs nothing
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.send: ["ok": true]]
+        let m2 = model(mock2)
+        feed(m2, "task-card", upTo: SessionTests.isKind("ask"))
+        m2.selected = "ses_t"
+        if let cancel = card.buttons.first(where: { $0.role == .cancel }) {
+            check(m2.buttonEnabled(cancel, card: card, in: m2.states["ses_t"]!), "the way out: on without scrolling")
+            m2.click(cancel)
+            check(sent(mock2)?["option"] as? Int == cancel.index, "and sent")
+        }
+        check(CardModel.Role.approve.needsWholeBody && CardModel.Role.delegate.needsWholeBody && !CardModel.Role.cancel.needsWholeBody
+              && !CardModel.Role.choice.needsWholeBody && !CardModel.Role.undo.needsWholeBody, "approve and delegate wait for the whole body; the rest do not")
+    }
+
+    /// #107 review (item 5, handoff §3.1): nothing in the window's views moves the keyboard focus — a card that arrives
+    /// while the user types must never get the typing (its field's Return would send it as the answer).
+    static func focusTests() {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { check(false, "Main/MainSplitView.swift readable from \(url.path)"); return }
+        let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        let movers = ["@FocusState", ".focused(", "defaultFocus", "makeFirstResponder", "becomeFirstResponder", "prefersDefaultFocus", "focusScope", "FocusedValue"]
+        let found = movers.filter { code.contains($0) }
+        check(found.isEmpty, "the views set no focus anywhere (a card's field is focused only by the user's click): \(found)")
+        check(code.contains("struct CardView") && code.contains("TextField(L(\"Or answer in your own words\""), "the check reads the card's own field's file")
+    }
+
+    /// #107 review (item 3): the helper closed an idle session (watched or not): nothing shows as cut off, a watch does
+    /// not bring it back, the next send does.
+    static func idleReclaimTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.send: ["ok": true]]
+        let m = model(mock)
+        _ = m.client.open(sessionId: "ses_t", config: "c", lang: "zh")
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        let before = m.states["ses_t"]!
+        m.client.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0, "start_seq": 0, "last_seq": before.lastSeq, "idle": true])
+        let after = m.states["ses_t"]!
+        check(after.exited != nil && after.status == before.status && !after.messages.contains { $0.interrupted } && after.unsent.isEmpty,
+              "closed for being idle: the dot as it was (\(after.status)), nothing interrupted, nothing unsent")
+        mock.requests = []
+        check(!m.client.reopenIfExited("ses_t", onlyOpenedHere: true) && mock.requests.isEmpty, "a watch does not open it again")
+        m.selected = "ses_t"; m.draft = "还在吗"; m.submit()
+        check(mock.requests.first?["op"] as? String == SessionClient.Op.open && sent(mock)?["type"] as? String == "say", "the next send opens it, then sends")
+        // helper.watching's `idle` (closed while this app was not watching) reads the same
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"]]
+        let c = SessionClient(transport: mock2)
+        _ = c.open(sessionId: "ses_t")
+        mock2.streamLines = [["kind": "helper.watching", "open": [Any](), "idle": ["ses_t"]]]
+        mock2.nextStreams = [mock2.streamLines, []]
+        _ = c.watch()
+        let opens = mock2.requests.filter { $0["op"] as? String == SessionClient.Op.open }.count
+        check(c.state("ses_t").exited != nil && opens == 1, "closed idle while away: exited, not opened again by the watch (\(opens) opens)")
+    }
+
+    /// #107 review (item 3): reading a session needs no process — its history from the helper's stored log.
+    static func historyTests() {
+        let mock = Mock()
+        let stored = SessionTests.raw("chat").compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }.filter { $0["seq"] != nil }
+        mock.replies = [SessionClient.Op.history: ["ok": true, "open": false, "last_seq": stored.compactMap { $0["seq"] as? Int }.max() ?? 0, "lines": stored]]
+        let m = model(mock)
+        m.select("ses_t")
+        check(mock.requests.map { $0["op"] as? String ?? "" } == [SessionClient.Op.history], "opened to read: history only, no process: \(mock.requests.map { $0["op"] ?? "" })")
+        check(m.states["ses_t"]?.messages.isEmpty == false && m.states["ses_t"]?.exited != nil, "its messages are here; it reads as not running")
+        mock.requests = []
+        m.select("ses_t")
+        check(mock.requests.isEmpty, "known: opened again without asking anything")
+        // an older helper without the op: opened (the reclaim closes it once idle)
+        let old = Mock()
+        old.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_o"]]
+        let o = model(old)
+        o.select("ses_o")
+        check(old.requests.map { $0["op"] as? String ?? "" } == [SessionClient.Op.history, SessionClient.Op.open], "no history op: opened instead")
+        // a task left running by a process that is gone: interrupted, not running, not done
+        let cut = Mock()
+        cut.replies = [SessionClient.Op.history: ["ok": true, "open": false, "last_seq": 3, "lines": [
+            ["kind": "session.message", "session_id": "ses_k", "seq": 1, "msg_id": "u1", "role": "user", "text": "整理桌面"],
+            ["kind": "session.message", "session_id": "ses_k", "seq": 2, "msg_id": "m1", "role": "assistant", "text": "好的", "reply_to": "u1"],
+            ["kind": "session.task", "session_id": "ses_k", "seq": 3, "msg_id": "m1", "run_id": "r1", "raw": "整理桌面", "by": "model"],
+            ["kind": "start", "session_id": "ses_k", "run_id": "r1", "seq": 1, "raw": "整理桌面"]]]]
+        let k = model(cut)
+        k.client.feed(["kind": "session.message", "session_id": "ses_z", "seq": 1, "msg_id": "x", "role": "user", "text": "x"])
+        _ = k.client.history("ses_k")
+        let ks = k.client.state("ses_k")
+        check(ks.runningTask == nil && ks.status == .error("interrupted"), "a task its gone process left: interrupted (\(ks.status))")
     }
 
     // MARK: words

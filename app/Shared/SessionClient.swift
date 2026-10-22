@@ -133,6 +133,7 @@ final class SessionClient {
         static let watch = "sessions.watch"
         static let list = "sessions.list"
         static let delete = "session.delete"
+        static let history = "session.history"
     }
 
     enum SendResult: Equatable {
@@ -152,6 +153,11 @@ final class SessionClient {
         }
         static func send(sessionId: String, line: [String: Any]) -> [String: Any] { ["op": Op.send, "session_id": sessionId, "line": line] }
         static func end(sessionId: String) -> [String: Any] { ["op": Op.end, "session_id": sessionId] }
+        /// A restart: the helper ends the process once the session is idle (now, or when what runs is over).
+        static func restart(sessionId: String) -> [String: Any] { ["op": Op.end, "session_id": sessionId, "when_idle": true] }
+        static func history(sessionId: String, after: Int, runs: [String: Int]) -> [String: Any] {
+            ["op": Op.history, "session_id": sessionId, "after_seq": after, "runs": runs]
+        }
         static func list() -> [String: Any] { ["op": Op.list] }
         static func delete(sessionId: String) -> [String: Any] { ["op": Op.delete, "session_id": sessionId] }
         /// `after`: per session the last stored seq the app has, and per run the last executor seq: the helper replays
@@ -185,6 +191,16 @@ final class SessionClient {
     private var endedByApp: Set<String> = []
     /// Sessions the user deleted (`delete`): whatever still comes of them is left.
     private var deleted: Set<String> = []
+    /// Sessions whose process the helper closed because they were idle (helper.session_exit `idle`, helper.watching's
+    /// `idle`): nothing was cut, so nothing reopens them but the next send (or open).
+    private var idleClosed: Set<String> = []
+    /// One request at a time per session (a send, a restart): a restart never overtakes a send the app made before it.
+    private var sessionLocks: [String: NSLock] = [:]
+    private func sessionLock(_ id: String) -> NSLock {
+        lock.lock(); defer { lock.unlock() }
+        if let l = sessionLocks[id] { return l }
+        let l = NSLock(); sessionLocks[id] = l; return l
+    }
     /// The clock the gap grace is measured by (tests set their own).
     var now: () -> Date = Date.init
     /// Called after a line changed a session's state (on the thread that fed it).
@@ -241,6 +257,7 @@ final class SessionClient {
         }
         opened[id] = (config, lang)
         endedByApp.remove(id)
+        idleClosed.remove(id)
         lock.unlock()
         return id
     }
@@ -254,10 +271,11 @@ final class SessionClient {
         lock.lock()
         let exited = states[sessionId]?.exited != nil
         let mine = opened[sessionId] != nil, how = reopenSettings(sessionId)
-        let ended = endedByApp.contains(sessionId)
+        let ended = endedByApp.contains(sessionId), idle = idleClosed.contains(sessionId)
         lock.unlock()
         guard exited else { return true }
-        if ended || (onlyOpenedHere && !mine) { return false }
+        // (a watch does not bring back a session the helper closed for being idle: the next send does)
+        if ended || (onlyOpenedHere && (!mine || idle)) { return false }
         return open(sessionId: sessionId, config: how.config, lang: how.lang) != nil
     }
 
@@ -270,6 +288,8 @@ final class SessionClient {
 
     /// `clientId`: the words' id when they are sent again (resend); new words get one.
     private func send(_ control: SessionControl, to sessionId: String, clientId: String?) -> SendResult {
+        let serial = sessionLock(sessionId)
+        serial.lock(); defer { serial.unlock() }
         let s = state(sessionId)
         if control.isTyping && !s.composerEnabled { return .refused("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
@@ -406,19 +426,48 @@ final class SessionClient {
         return r["ok"] as? Bool != false
     }
 
-    /// Ends the session's process so that the next send starts a new one, with the app's settings as they are now
-    /// (`config`, `lang`): a process keeps the environment it was started with, so a key saved after it started
-    /// reaches the session only through a new process. Not an `end`: the session is opened again by itself (on the
-    /// next send, or the next watch). Call it only while nothing runs in the session (no task, no reply): the
-    /// process's end stops a running task.
+    /// The settings changed: every session this client knows opens again with these (`config`, `lang`), whenever its
+    /// next process starts — whether or not its process now can end (#107 review: a busy or exited session kept the old
+    /// ones).
+    func adoptSettings(config: String?, lang: String?) {
+        lock.lock()
+        defaults = (config, lang)
+        for id in Set(opened.keys).union(states.keys) { opened[id] = (config, lang) }
+        lock.unlock()
+    }
+
+    /// Asks the helper for a new process for the session, so that new settings (a key, a service) reach it: a process
+    /// keeps the environment it was started with. The helper decides when (SessionHost.closeIfIdle: now if the session
+    /// is idle, else once it is — never under a task, a reply, a queue, an open undo or a line it has not answered);
+    /// this client only asks, after any send it made before (one request per session at a time). Not an `end`: the
+    /// next send opens it again, with `config` and `lang`.
     @discardableResult
     func restart(_ sessionId: String, config: String?, lang: String?) -> Bool {
+        let serial = sessionLock(sessionId)
+        serial.lock(); defer { serial.unlock() }
         lock.lock()
         opened[sessionId] = (config, lang)
         endedByApp.remove(sessionId)
         lock.unlock()
-        guard let r = transport.request(Request.end(sessionId: sessionId)) else { return false }
+        guard let r = transport.request(Request.restart(sessionId: sessionId)) else { return false }
         return r["ok"] as? Bool != false || r["code"] as? String == "not_open"
+    }
+
+    /// Reads a session's history from the helper's stored log (session.history): no process is started. A session
+    /// with no process running there reads as exited (its tasks that never ended were cut off). False when the helper
+    /// could not (an older helper without the op: open it instead).
+    func history(_ sessionId: String) -> Bool {
+        let s = state(sessionId)
+        var runs: [String: Int] = [:]
+        for t in s.tasks { runs[t.runId] = t.lastSeq }
+        guard let r = transport.request(Request.history(sessionId: sessionId, after: s.lastSeq, runs: runs)), r["ok"] as? Bool == true,
+              let lines = r["lines"] as? [[String: Any]] else { return false }
+        for l in lines { feed(l) }
+        if r["open"] as? Bool == false, state(sessionId).exited == nil {
+            lock.lock(); idleClosed.insert(sessionId); lock.unlock()
+            feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: (r["last_seq"] as? NSNumber)?.intValue))))
+        }
+        return true
     }
 
     /// Deletes the session: the helper ends its process and removes its history from this Mac (session.delete; it
@@ -480,7 +529,7 @@ final class SessionClient {
             let ok = transport.stream(Request.watch(after: c.after, runs: c.runs), onLine: { [weak self] obj in
                 guard let self else { return false }
                 if obj["kind"] as? String == "helper.watching", let open = obj["open"] as? [String] {
-                    self.notRunning(openedBefore.subtracting(open))
+                    self.notRunning(openedBefore.subtracting(open), idle: Set(obj["idle"] as? [String] ?? []))
                 } else {
                     self.feed(obj)
                 }
@@ -518,12 +567,13 @@ final class SessionClient {
 
     /// Sessions this client opened that the helper does not run (helper.watching): their process ended unheard (the
     /// idle reaper, a helper restart). They read as exited, and are opened again on the next send or watch.
-    private func notRunning(_ ids: Set<String>) {
+    private func notRunning(_ ids: Set<String>, idle: Set<String> = []) {
         for id in ids {
             lock.lock()
             let skip = endedByApp.contains(id) || states[id]?.exited != nil
+            if idle.contains(id) { idleClosed.insert(id) }
             lock.unlock()
-            if !skip { feed(ProtocolLine(sessionId: id, event: .sessionExit(HelperSessionExit(code: nil)))) }
+            if !skip { feed(ProtocolLine(sessionId: id, event: .sessionExit(HelperSessionExit(code: nil, idle: idle.contains(id) ? true : nil)))) }
         }
     }
 
@@ -557,6 +607,7 @@ final class SessionClient {
         guard let id = line.sessionId else { return .ignored }
         lock.lock()
         if deleted.contains(id) { lock.unlock(); return .ignored }
+        if case .sessionExit(let e) = line.event, e.idle == true { idleClosed.insert(id) }
         var after = states[id] ?? SessionState(sessionId: id)
         states[id] = nil                                    // the reducer works on the only copy (no copy-on-write)
         let applied = SessionReducer.apply(&after, line)

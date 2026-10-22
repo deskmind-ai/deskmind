@@ -164,8 +164,9 @@ struct TaskState: Equatable {
     var resultResponse: ResultResponse? = nil
     /// The session seq of session.task: the task's place in the chat (nil until it comes).
     var sessionSeq: Int? = nil
-    /// session.task_closed's why.
+    /// session.task_closed's why, and its stored seq.
     var closedWhy: String? = nil
+    var closedSeq: Int? = nil
     /// The session process that started it is gone (its session.task seq is at or below SessionState.goneUpTo). A run
     /// whose session.task has not come is not tied to a process yet, and is not gone.
     var gone = false
@@ -269,6 +270,8 @@ struct SessionState: Equatable {
     var droppedMessages: Set<String> = []
     /// The stored seq the user has seen up to (markSeen): problems after it make the error dot.
     var seenSeq = 0
+    /// `goneUpTo` when the user last looked (markSeen): a task cut off by a process that went after it is not seen yet.
+    var seenGone = 0
     var lastEventAt: Double? = nil
     /// The latest process ended (helper.session_exit for it, its exit code): nothing runs until it is opened again
     /// (SessionClient re-opens it on the next send or watch); the next process's session.start clears it.
@@ -296,7 +299,7 @@ struct SessionState: Equatable {
     var hasGap: Bool { !pendingSession.isEmpty || !pendingRuns.isEmpty }
 
     /// The user opened this session: the error dot clears.
-    mutating func markSeen() { seenSeq = lastSeq }
+    mutating func markSeen() { seenSeq = lastSeq; seenGone = goneUpTo }
 }
 
 // MARK: - Reducer
@@ -627,6 +630,7 @@ enum SessionReducer {
         case .taskClosed(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].closedWhy = e.why
+            s.tasks[i].closedSeq = line.seq
         case .taskUndo(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].sessionUndo = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
@@ -904,7 +908,9 @@ enum SessionStatus: Equatable {
         for item in s.timeline.reversed() {
             switch item {
             case .task(let id):
-                guard let t = s.task(id), let st = t.status else { continue }
+                guard let t = s.task(id) else { continue }
+                // ended with no status (cut off): never a finish, whatever came before it
+                guard let st = t.status else { if t.ended { return .idle }; continue }
                 if st == "succeeded" { return .done(at: t.doneAt ?? s.lastEventAt, stopped: false) }
                 if st == "cancelled" || st == "stopped" { return .done(at: t.doneAt ?? s.lastEventAt, stopped: true) }
                 return .idle
@@ -921,14 +927,20 @@ enum SessionStatus: Equatable {
 
     private static func problem(_ s: SessionState) -> SessionStatus? {
         // the newest of: a task's end with a bad status, a stored model error — after what the user has seen
-        var newest: (seq: Int, status: SessionStatus)? = nil
+        var newest: (seq: Int, unseen: Bool, status: SessionStatus)? = nil
         if let t = s.tasks.last, let st = t.status, problemStatuses.contains(st) {
             let seq = t.endSeq ?? Int.max                   // task_done came, task_end not yet: nothing seen of it
             let locked = t.cause == .screenLocked             // from the structured cause only, never the reason's words
-            newest = (seq, locked ? .locked : .error(st))
+            newest = (seq, seq > s.seenSeq, locked ? .locked : .error(st))
+        } else if let t = s.tasks.last, t.ended, t.status == nil {
+            // ended with no status: cut off (its process went, or its executor did) — interrupted, never done. Its
+            // place is its session.task_closed when one came, else its session.task; seen once the user looked after it
+            // went (the closed line's seq, or the process's end: goneUpTo).
+            if let c = t.closedSeq { newest = (c, c > s.seenSeq, .error("interrupted")) }
+            else { newest = (t.sessionSeq ?? 0, (t.sessionSeq ?? 0) > s.seenGone, .error("interrupted")) }
         }
-        if let e = s.errors.last, e.seq > (newest?.seq ?? 0) { newest = (e.seq, .error(e.error.code)) }
-        guard let n = newest, n.seq > s.seenSeq else { return nil }
+        if let e = s.errors.last, e.seq > (newest?.seq ?? 0) { newest = (e.seq, e.seq > s.seenSeq, .error(e.error.code)) }
+        guard let n = newest, n.unseen else { return nil }
         return n.status
     }
 }

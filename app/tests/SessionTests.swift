@@ -38,6 +38,7 @@ enum SessionTests {
         crossStreamTests()
         exitLeftoversTests()
         interleavingPropertyTests()
+        cutOffDotTests()
         rereviewTests()
         processInterleavingTests()
         ownershipTests()
@@ -1114,9 +1115,29 @@ enum SessionTests {
             r("r2", 1, #""kind":"start","raw":"b""#), r("r2", 2, #""kind":"ask","ask_id":"a9","# + card),
             se(5, #""kind":"session.task_end","run_id":"r2","status":"interrupted","summary":"","undo":"none""#),
         ]
+        // cut off (#107 review): a model-started task after the reply's first words, its process gone mid-step
+        // (helper.session_exit: no task_done, no task_end); and a /cua task cut off the same way after a finished chat
+        let exitAt = { (n: Int) in L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"start_seq":0,"last_seq":\#(n)}"#) }
+        let cutModel: [ProtocolLine] = [
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"整理桌面""#),
+            se(2, #""kind":"session.message","msg_id":"m1","role":"assistant","text":"好的，我来整理。","reply_to":"u1""#),
+            se(3, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"整理桌面","by":"model","reply_to":"u1""#),
+            r("r1", 1, #""kind":"start","raw":"整理桌面""#), r("r1", 2, #""kind":"step","text":"{}","step_id":"s1""#),
+            exitAt(3),
+        ]
+        let cutSlash: [ProtocolLine] = [
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"你好""#),
+            se(2, #""kind":"session.message","msg_id":"m1","role":"assistant","text":"你好！","reply_to":"u1""#),
+            se(3, #""kind":"session.message","msg_id":"u2","role":"user","text":"x","via":"cua""#),
+            se(4, #""kind":"session.task","msg_id":"u2","run_id":"r1","raw":"x","by":"slash""#),
+            r("r1", 1, #""kind":"start","raw":"x""#), r("r1", 2, #""kind":"plan","steps":[{"purpose":"p"}]"#),
+            exitAt(4),
+        ]
         var cases: [(String, [ProtocolLine])] = names.map { ($0, lines($0)) }
         cases.append(("multi", multi))
         cases.append(("interrupted", interrupted))
+        cases.append(("cut off, model", cutModel))
+        cases.append(("cut off, /cua", cutSlash))
         var runs = 0
         for (name, ls) in cases {
             let live = SessionReducer.reduce(SessionState(), ls)
@@ -1131,6 +1152,18 @@ enum SessionTests {
             }
         }
         check(runs >= cases.count * 15, "orders tried: \(runs)")
+        // a run cut off with no status is interrupted, never done, in every order (the walk must not fall back to the
+        // assistant message before it); seen, it rests idle; acting outranks it
+        for (name, ls) in [("cut off, model", cutModel), ("cut off, /cua", cutSlash)] {
+            for (how, order) in merges(streams(ls), seeds: 12) {
+                var got = SessionReducer.reduce(SessionState(), order)
+                let unseen = got.status
+                got.markSeen()
+                if unseen != .error("interrupted") || got.status != .idle {
+                    check(false, "\(name), \(how): cut off: \(unseen), seen: \(got.status)")
+                }
+            }
+        }
         // what the hand-built ones should show
         let m = SessionReducer.reduce(SessionState(), multi)
         check(m.status == .waitingForYou(cardKind: "action") && m.openCard?.runId == "r2" && m.task("r1")?.undo == .done(undone: 1, total: 1, refused: nil)
@@ -1139,6 +1172,55 @@ enum SessionTests {
         let i = SessionReducer.reduce(SessionState(), interrupted)
         check(i.task("r1")?.steps.map(\.status) == [.ok, .unknown] && i.task("r1")?.cards.map(\.outcome) == [.answered] && i.task("r2")?.cards.map(\.outcome) == [.void("task_done")]
               && i.composerEnabled, "interrupted: \(summary(i))")
+    }
+
+    /// #107 review: a run that ended without a status (its process went mid-task) is a problem the user has not seen,
+    /// never a finish: `.error("interrupted")`, by the unseen rules (opening the session clears it, a later process end
+    /// brings back only a new one); a running task outranks it; a later stored model error is newer.
+    static func cutOffDotTests() {
+        let exit = { (n: Int) in L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"start_seq":0,"last_seq":\#(n)}"#) }
+        var s = SessionReducer.reduce(SessionState(), [
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"整理桌面""#),
+            se(2, #""kind":"session.message","msg_id":"m1","role":"assistant","text":"好的，我来整理。","reply_to":"u1""#),
+            se(3, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"整理桌面","by":"model""#),
+            ex(1, #""kind":"start","raw":"整理桌面""#), ex(2, #""kind":"step","text":"{}","step_id":"a1""#)])
+        s.markSeen()                                            // the user watched it run
+        check(s.status == .acting(step: 1, of: nil), "running: acting (\(s.status))")
+        SessionReducer.apply(&s, exit(3))
+        check(s.task("r1")?.cutOff == true && s.task("r1")?.status == nil, "the process gone mid-task: cut off, no status")
+        check(s.status == .error("interrupted") && s.status.shape == .bang, "cut off after the reply's first words: interrupted (!), not done: \(s.status)")
+        s.markSeen()
+        check(s.status == .idle, "opened: seen, idle (never done): \(s.status)")
+        // a /cua cut off: interrupted too (it was idle before the fix: the walk had nothing but the task)
+        var c = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), exit(1)])
+        check(c.status == .error("interrupted"), "a /cua cut off: interrupted: \(c.status)")
+        // the next process's start (its exit missed) cuts it off the same way
+        c = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), se(nil, #""kind":"session.start","resumed":true,"last_seq":1"#)])
+        check(c.status == .error("interrupted"), "cut off by the next process's start: interrupted: \(c.status)")
+        // the harness's own end on reopen (task_end interrupted) is the same problem, at its stored seq
+        SessionReducer.apply(&c, se(2, #""kind":"session.task_end","run_id":"r1","status":"interrupted","summary":"","undo":"none""#))
+        check(c.status == .error("interrupted"), "then its stored interrupted end: still interrupted")
+        // a running task outranks it (a later task of the session runs)
+        SessionReducer.apply(&s, se(nil, #""kind":"session.start","resumed":true,"last_seq":3"#))
+        s.markSeen()
+        let s0 = s
+        SessionReducer.apply(&s, se(4, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"再来","by":"slash""#))
+        SessionReducer.apply(&s, ex(1, #""kind":"start","raw":"再来""#, run: "r2"))
+        SessionReducer.apply(&s, ex(2, #""kind":"step","text":"{}","step_id":"b1""#, run: "r2"))
+        check(s.status == .acting(step: 1, of: nil), "a new task runs: acting: \(s.status)")
+        SessionReducer.apply(&s, exit(4))
+        check(s.status == .error("interrupted"), "it is cut off too: interrupted again (a new problem): \(s.status)")
+        // seen once, a later process's end with nothing new cut off brings nothing back
+        var q = s0
+        q.markSeen()
+        SessionReducer.apply(&q, se(4, #""kind":"session.message","msg_id":"u9","role":"user","text":"在吗""#))
+        SessionReducer.apply(&q, se(5, #""kind":"session.message","msg_id":"m9","role":"assistant","text":"在","reply_to":"u9""#))
+        SessionReducer.apply(&q, exit(5))
+        check(q.status == .done(at: nil, stopped: false), "a later chat, then an idle process end: done, no old problem back: \(q.status)")
+        // a stored model error after it is newer
+        var e = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), exit(1)])
+        SessionReducer.apply(&e, se(2, #""kind":"session.error","code":"no_key","text":"k","reply_to":"u""#))
+        check(e.status == .error("no_key"), "a later model error is the newest problem: \(e.status)")
     }
 
     static func dumpDiff(_ a: SessionState, _ b: SessionState) {

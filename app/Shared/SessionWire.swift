@@ -236,6 +236,54 @@ enum SessionWire {
         }
     }
 
+    /// Whether a session is idle, asked of the session itself (#107 review: the helper is the one place that decides it,
+    /// for the idle reclaim, a restart after the settings changed, and `session.end`). Idle: no task running or
+    /// lingering (its result card, its undo), nothing queued, no card open (`Activity.idle`), no reply streaming, and
+    /// no control line of the app's that the session has not answered yet.
+    ///
+    /// The helper writes two lines, after every control line written before them (SessionHost serialises them):
+    /// `attach{after_seq: past}` — no replay, but while a reply runs a delta at offset 0 with its text so far, then the
+    /// whole queue (`session.queue`, empty included) — and `attach{run_id: marker}`, which the session refuses
+    /// (`session.error` no_task, control attach, naming the marker): the end of the answer. The session reads its stdin
+    /// in order, so a say or cua written before the check has started its reply or its task by then (its delta, its
+    /// session.task came first). The marker is the helper's own and goes to nobody.
+    struct IdleCheck {
+        let marker: String
+        /// Saw a delta: a reply runs.
+        private(set) var replying = false
+        /// The queue as the session said it (nil: not said yet).
+        private(set) var queued: Bool?
+        private(set) var answered = false
+
+        static let pastEverySeq = 1_000_000_000_000
+        init(marker: String = "idlecheck_" + UUID().uuidString.lowercased().prefix(12)) { self.marker = marker }
+
+        /// The two lines to write.
+        var lines: [[String: Any]] {
+            [["type": "attach", "after_seq": Self.pastEverySeq], ["type": "attach", "run_id": marker, "after_seq": 0]]
+        }
+
+        /// The marker's refusal: the helper's own line (never passed on).
+        static func isMarker(_ e: [String: Any], _ marker: String) -> Bool {
+            e["kind"] as? String == "session.error" && e["code"] as? String == "no_task" && e["control"] as? String == "attach"
+                && (e["text"] as? String)?.contains(marker) == true
+        }
+
+        /// A line of the session while the check waits; true when it is the end of the answer.
+        mutating func note(_ e: [String: Any]) -> Bool {
+            guard !answered else { return false }
+            switch e["kind"] as? String {
+            case "session.delta": replying = true
+            case "session.queue": queued = !((e["items"] as? [Any]) ?? []).isEmpty
+            default: if Self.isMarker(e, marker) { answered = true; return true }
+            }
+            return false
+        }
+
+        /// Idle, from the answer and what the session has going on now (`activity`, after every line before the marker).
+        func idle(_ activity: Activity) -> Bool { answered && !replying && queued == false && activity.idle }
+    }
+
     /// The machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2): the executor's process group, which
     /// state it is in, and whose task it is. ComputerLock (the helper) and harness src/session/computer.ts (a session)
     /// read and write the same file.

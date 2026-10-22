@@ -310,9 +310,12 @@ struct HelperSessionExit: Codable, Equatable {
     var pid: Int?
     /// The stored seq the process began after (its session.start's last_seq).
     var startSeq: Int?
-    enum CodingKeys: String, CodingKey { case code, lastSeq = "last_seq", pid, startSeq = "start_seq" }
-    init(code: Int?, lastSeq: Int? = nil, pid: Int? = nil, startSeq: Int? = nil) {
-        self.code = code; self.lastSeq = lastSeq; self.pid = pid; self.startSeq = startSeq
+    /// The helper closed it because it was idle (no task, reply, queue or undo: no run was cut): it is opened again on
+    /// the next send, not by a watch.
+    var idle: Bool?
+    enum CodingKeys: String, CodingKey { case code, lastSeq = "last_seq", pid, startSeq = "start_seq", idle }
+    init(code: Int?, lastSeq: Int? = nil, pid: Int? = nil, startSeq: Int? = nil, idle: Bool? = nil) {
+        self.code = code; self.lastSeq = lastSeq; self.pid = pid; self.startSeq = startSeq; self.idle = idle
     }
     /// A field of another type (or out of range) is absent: the exit itself must not be lost.
     init(from decoder: Decoder) throws {
@@ -321,6 +324,7 @@ struct HelperSessionExit: Codable, Equatable {
         lastSeq = (try? c.decodeIfPresent(Int.self, forKey: .lastSeq)) ?? nil
         pid = (try? c.decodeIfPresent(Int.self, forKey: .pid)) ?? nil
         startSeq = (try? c.decodeIfPresent(Int.self, forKey: .startSeq)) ?? nil
+        idle = (try? c.decodeIfPresent(Bool.self, forKey: .idle)) ?? nil
     }
 }
 

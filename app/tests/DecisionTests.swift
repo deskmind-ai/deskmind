@@ -993,6 +993,33 @@ enum DecisionTests {
         a.note(["kind": "session.message", "seq": 9, "role": "user", "text": "hi"])
         check(a.idle, "a message changes nothing")
 
+        // the idle check (#107 review): the session itself answers, after every line written before the check
+        var c = W.IdleCheck(marker: "idlecheck_t1")
+        check(c.lines.count == 2 && c.lines[0]["after_seq"] as? Int == W.IdleCheck.pastEverySeq && c.lines[1]["run_id"] as? String == "idlecheck_t1",
+              "the check's lines: an attach past every seq, then the marker's attach")
+        let marker: [String: Any] = ["kind": "session.error", "code": "no_task", "control": "attach", "text": "no task idlecheck_t1 in this session"]
+        check(!c.note(["kind": "session.queue", "items": [Any]()]) && !c.idle(W.Activity()), "the queue said, the marker not yet: not answered")
+        check(c.note(marker) && c.idle(W.Activity()), "the marker: answered, nothing running, nothing queued: idle")
+        check(!c.note(marker), "a second marker is nothing")
+        var r = W.IdleCheck(marker: "idlecheck_t2")
+        _ = r.note(["kind": "session.delta", "msg_id": "m1", "text": "从前", "offset": 0])
+        _ = r.note(["kind": "session.queue", "items": [Any]()])
+        _ = r.note(["kind": "session.error", "code": "no_task", "control": "attach", "text": "no task idlecheck_t2 in this session"])
+        check(r.answered && !r.idle(W.Activity()), "a reply runs (its text so far, at offset 0): not idle")
+        var q = W.IdleCheck(marker: "idlecheck_t3")
+        _ = q.note(["kind": "session.queue", "items": [["id": "q1", "text": "然后"]]])
+        _ = q.note(["kind": "session.error", "code": "no_task", "control": "attach", "text": "no task idlecheck_t3 in this session"])
+        check(!q.idle(W.Activity()), "words queued: not idle")
+        var t = W.IdleCheck(marker: "idlecheck_t4")
+        var busy = W.Activity()
+        busy.note(["kind": "session.task", "run_id": "run_9", "raw": "x"])     // a /cua written before the check, its task begun
+        _ = t.note(["kind": "session.queue", "items": [Any]()])
+        _ = t.note(["kind": "session.error", "code": "no_task", "control": "attach", "text": "no task idlecheck_t4 in this session"])
+        check(!t.idle(busy), "a task begun from a line written before the check: not idle")
+        check(!W.IdleCheck.isMarker(["kind": "session.error", "code": "no_task", "control": "attach", "text": "no task run_x in this session"], "idlecheck_t4"),
+              "another run's no_task is not the marker")
+        check(!W.IdleCheck(marker: "m").idle(W.Activity()), "no answer (a timeout): never idle")
+
 
         // the machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2)
         let v2 = #"{"v":2,"state":"lingering","pgid":4100,"pid":4100,"start":1792600000,"run_id":"run_a","session_id":"ses_a","by":"session","owner":4000,"t":1.5}"#

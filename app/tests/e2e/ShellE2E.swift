@@ -112,6 +112,18 @@ enum ShellE2E {
         check(st.status != "succeeded" || ShellText.task(st, lang: .zhHans) == "完成", "its line says its status: \(ShellText.task(st, lang: .zhHans))")
         check(until { on { m.composer.enabled } }, "the composer back on")
         check(until(30) { assistant(m, sid).contains { $0.text == "任务结束了。" } }, "the model's line after the task")
+
+        // idle while watched: the helper closes its process (#107 review: ~80 MB each); nothing reads as cut off, the
+        // watch goes on, and the next message opens it again
+        let shown = on { m.states[sid]! }
+        check(until(30) { on { m.states[sid]?.exited != nil } }, "idle and watched: its process closed by the helper")
+        let closed = on { m.states[sid]! }
+        check(closed.status == shown.status && !closed.messages.contains { $0.interrupted } && closed.unsent.isEmpty
+              && !closed.tasks.contains { $0.cutOff } && on({ m.notice }) == nil,
+              "not shown as an interruption: the dot as it was (\(closed.status)), nothing cut off, nothing unsent")
+        on { m.draft = "还在吗"; m.submit() }
+        check(until(60) { assistant(m, sid).last?.text == "收到。" }, "the next message opens it again: answered")
+        check(on { m.states[sid]?.exited == nil }, "running again")
         let count = on { m.states[sid]!.messages.count }
         try? "\(sid)\n\(count)\n".write(toFile: stateFile, atomically: true, encoding: .utf8)
         quit(m)
@@ -128,6 +140,12 @@ enum ShellE2E {
         // the app again: the session from the list, under the user's name
         check(until { on { m.rows.contains { $0.id == sid } } }, "after a quit and a helper restart: the session is in the list")
         check(on { m.rows.first { $0.id == sid }?.title == "问候" }, "under the name the user gave it: \(on { m.rows.map(\.title) })")
+
+        // opened to read: its history from the stored log, no process (#107 review)
+        on { m.select(sid) }
+        check(until { on { (m.states[sid]?.messages.count ?? 0) == before } }, "opened to read: its history (\(on { m.states[sid]?.messages.count ?? 0 }) of \(before))")
+        let listed = PathTransport(path: socket).request(["op": "sessions.list"])?["sessions"] as? [[String: Any]] ?? []
+        check(listed.first { $0["session_id"] as? String == sid }?["open"] as? Bool == false, "and no process for it")
 
         // a message to it, not opened by this client and not running: opened again with the app's settings, then sent
         on { m.selected = sid; m.draft = "你好"; m.submit() }

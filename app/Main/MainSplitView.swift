@@ -3,7 +3,10 @@
 // views only.
 //
 // Focus (handoff §3.1): nothing here activates the app or brings a window forward. Only the user's own clicks and
-// keys act; the composer never takes the keyboard by itself when a card arrives.
+// keys act; the composer never takes the keyboard by itself when a card arrives, and nothing here ever moves the
+// keyboard focus anywhere — no @FocusState, no .focused, no defaultFocus, no makeFirstResponder (ShellTests checks
+// this file): a card that arrives while the user types must never get the typing (its own field's Return would send
+// it as the answer).
 
 import AppKit
 import SwiftUI
@@ -41,15 +44,18 @@ struct MainSplitView: View {
         }
         .onAppear {
             ShellModel.shared = shell
+            shell.refreshSettings()
             shell.start()
         }
         .onChange(of: lang) { _, _ in shell.applySettings() }
     }
 
-    /// The model settings as saved now (the key file and the configuration), to tell whether the sheet changed them.
+    /// The model settings as saved now (the key file, the configuration, the service, and cloud models on or off), to
+    /// tell whether the sheet changed them.
     static func settingsFingerprint() -> String {
         let env = CloudModelSettings.read().sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
         return env + "|" + (UserDefaults.standard.string(forKey: "engine.config") ?? "") + "|" + CloudModelSettings.provider.id
+            + "|" + (UserDefaults.standard.string(forKey: "engine") ?? "")
     }
 
     private func openSettings() {
@@ -76,7 +82,8 @@ extension ShellModel {
         let transport = StoppableTransport(HelperSessionTransport())
         // the language as the setting has it now (not ResolvedLang.current, which the window updates in its own time)
         let m = ShellModel(client: SessionClient(transport: transport), config: { MainSplitView.modelConfig() },
-                           lang: { (AppLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue) ?? .en).resolved })
+                           lang: { (AppLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue) ?? .en).resolved },
+                           cloudOn: { CloudModelSettings.engineIsCloud })
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         return m
     }()
@@ -215,16 +222,28 @@ struct StatusDot: View {
 struct ChatColumn: View {
     @ObservedObject var shell: ShellModel
     let openSettings: () -> Void
-    @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @State private var announced: String?
 
     var body: some View {
+        GeometryReader { g in column(height: g.size.height) }
+            .background(Brand.paper)
+            .onChange(of: shell.current?.openCard?.card.askId) { _, id in announce(shell.current, id) }
+    }
+
+    /// Top to bottom: the header, the chat (which gives up height first), the pinned card and queue (bounded: their
+    /// bodies scroll), the notice and the composer — the header, the card's question and buttons, and the composer with
+    /// its Stop always on screen, down to the window's least height (#107 review).
+    private func column(height: Double) -> some View {
         let s = shell.current
-        VStack(spacing: 0) {
+        return VStack(spacing: 0) {
             header(s)
+                .fixedSize(horizontal: false, vertical: true)
             if !shell.reachable {
                 Banner(text: L("DeskMind's helper isn't answering. Conversations come back when it does.", lang: lang))
+            }
+            if shell.cloudOff {
+                CloudOffRow(openSettings: openSettings)
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -238,15 +257,20 @@ struct ChatColumn: View {
                 .onChange(of: s?.streamingMessage?.text.count) { _, _ in proxy.scrollTo("bottom") }
                 .onChange(of: shell.selected) { _, _ in proxy.scrollTo("bottom") }
             }
-            if let s { pinned(s) }
+            .frame(minHeight: 0, maxHeight: .infinity)
+            .layoutPriority(0)
+            if let s { pinned(s, bodyCap: CardBody.cap(columnHeight: height)).layoutPriority(1) }
             if let n = shell.notice {
                 Text(n).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.bottom, 4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(2)
             }
             Composer(shell: shell)
+                .fixedSize(horizontal: false, vertical: true)
+                .layoutPriority(2)
         }
-        .background(Brand.paper)
-        .onChange(of: s?.openCard?.card.askId) { _, id in announce(s, id) }
+        .frame(height: height)
     }
 
     private func header(_ s: SessionState?) -> some View {
@@ -284,15 +308,17 @@ struct ChatColumn: View {
         ForEach(s.outbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
     }
 
-    /// Above the composer: the open card (handoff §3.3, pinned while it waits) and the queue.
-    @ViewBuilder private func pinned(_ s: SessionState) -> some View {
+    /// Above the composer: the open card (handoff §3.3, pinned while it waits; its body scrolls within `bodyCap`) and
+    /// the queue (scrolls past a few).
+    @ViewBuilder private func pinned(_ s: SessionState, bodyCap: Double) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let (run, card) = s.openCard {
                 let m = CardModel(card: card.card, runId: run, askId: card.askId)
-                CardView(shell: shell, card: m, outcome: card.outcome, askedAt: card.askedAt, enabled: shell.answerable(m, in: s))
+                CardView(shell: shell, card: m, outcome: card.outcome, askedAt: card.askedAt, session: s, bodyCap: bodyCap)
+                    .id(ShellModel.cardKey(m))
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
-            ForEach(s.queue, id: \.id) { q in QueuedBubble(shell: shell, item: q, cardOpen: !s.composerEnabled) }
+            if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, bodyCap)) }
         }
         .padding(.horizontal, 22)
         .animation(.easeOut(duration: 0.2), value: s.openCard?.card.askId)
@@ -304,6 +330,43 @@ struct ChatColumn: View {
         announced = id
         let m = CardModel(card: card.card, runId: run, askId: card.askId)
         AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, outcome: .open, lang: lang)).post()
+    }
+}
+
+/// The queue above the composer: as tall as its bubbles, scrolling past `cap`.
+struct QueueList: View {
+    @ObservedObject var shell: ShellModel
+    let session: SessionState
+    let cap: Double
+    @State private var content: Double = 0
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(session.queue, id: \.id) { q in QueuedBubble(shell: shell, item: q, cardOpen: !session.composerEnabled) }
+            }
+            .background(GeometryReader { g in Color.clear.preference(key: CardBodyVisible.self, value: g.size.height) })
+        }
+        .frame(height: min(cap, max(content, 1)))
+        .onPreferenceChange(CardBodyVisible.self) { content = $0 }
+    }
+}
+
+/// Cloud models are off: a conversation needs one (0.5 has no local-only conversation), so nothing is sent; the
+/// settings are one click away.
+struct CloudOffRow: View {
+    let openSettings: () -> Void
+    @Environment(\.lang) private var lang
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(L("Cloud models are off. Conversations need one: nothing is sent until it is on.", lang: lang), systemImage: "cloud.slash")
+                .font(.system(size: 12)).foregroundStyle(Brand.ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(L("Open model settings", lang: lang), action: openSettings).buttonStyle(InkButtonStyle(prominent: true))
+        }
+        .padding(.horizontal, 22).padding(.vertical, 8)
+        .background(Brand.dot.opacity(0.10))
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -407,7 +470,8 @@ struct TaskRow: View {
                 if let a = task.answer, !a.isEmpty, a != summary { Text(a).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
                 if let rc = task.resultCard, !(rc.options.isEmpty) {
                     let m = CardModel(resultCard: rc, runId: task.runId)
-                    CardView(shell: shell, card: m, outcome: .open, askedAt: nil, enabled: shell.answerable(m, in: session))
+                    CardView(shell: shell, card: m, outcome: .open, askedAt: nil, session: session, bodyCap: CardBody.maxHeight)
+                        .id(ShellModel.cardKey(m))
                 }
                 if let u = ShellText.undo(task.undo, lang: lang) {
                     Text(u).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
@@ -548,14 +612,26 @@ struct QueuedBubble: View {
 /// A card, plainly (styled cards are M2): its text, a button per option by the option's kind, and its own field when
 /// it takes the user's words. A click sends that option's index with the card's ask_id; nothing is decided by the
 /// words on the card.
+///
+/// Its header (what it asks) and its buttons stay put; its body — the text and the picks, which the harness does not
+/// cap (a send list can be long) — scrolls inside `bodyCap`. An approve-type option (CardModel.Role.needsWholeBody)
+/// takes a click only once the body's end has been on screen (it fits, or it was scrolled to the end): never approve
+/// what was never shown (ShellModel.cardBody, from the scroll geometry alone).
 struct CardView: View {
     @ObservedObject var shell: ShellModel
     let card: CardModel
     let outcome: CardState.Outcome
     let askedAt: Double?
-    let enabled: Bool
+    let session: SessionState
+    let bodyCap: Double
     @Environment(\.lang) private var lang
     @State private var words = ""
+    @State private var visible: Double = 0
+    @State private var content: Double = 0
+    @State private var offset: Double = 0
+
+    private var enabled: Bool { shell.answerable(card, in: session) }
+    private var seen: Bool { shell.bodySeen.contains(ShellModel.cardKey(card)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -565,16 +641,38 @@ struct CardView: View {
                 }
                 Text(ShellText.cardKind(card.kind.name, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
             }
-            Text(card.text).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-            let choices = card.buttons.filter { $0.role == .choice }
-            if !choices.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    ForEach(choices, id: \.index) { b in button(b) }
+            .fixedSize(horizontal: false, vertical: true)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(card.text).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    let choices = card.buttons.filter { $0.role == .choice }
+                    if !choices.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(choices, id: \.index) { b in button(b) }
+                        }
+                    }
                 }
+                .background(GeometryReader { g in
+                    Color.clear.preference(key: CardBodyGeometry.self,
+                                           value: [g.size.height, -g.frame(in: .named(coordinateSpace)).minY])
+                })
             }
+            .coordinateSpace(name: coordinateSpace)
+            .frame(minHeight: min(CardBody.minHeight, content), maxHeight: min(bodyCap, max(content, 1)))
+            .background(GeometryReader { g in Color.clear.preference(key: CardBodyVisible.self, value: g.size.height) })
+            .onPreferenceChange(CardBodyGeometry.self) { v in
+                if v.count == 2 { content = v[0]; offset = v[1]; reportBody() }
+            }
+            .onPreferenceChange(CardBodyVisible.self) { h in visible = h; reportBody() }
             HStack(spacing: 8) {
                 ForEach(card.buttons.filter { $0.role != .choice }, id: \.index) { b in button(b) }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            if !seen && card.buttons.contains(where: { $0.role.needsWholeBody }) {
+                Text(L("Scroll to the end of the card to approve", lang: lang))
+                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
             }
             if card.allowsFreeText {
                 HStack(spacing: 8) {
@@ -609,9 +707,16 @@ struct CardView: View {
             case .bordered: Button(b.text, action: action).buttonStyle(InkButtonStyle(prominent: false))
             }
         }
-        .disabled(!enabled)
+        .disabled(!shell.buttonEnabled(b, card: card, in: session))
+        .opacity(shell.buttonEnabled(b, card: card, in: session) ? 1 : 0.4)    // (InkButtonStyle does not dim: the card's own)
         .accessibilityLabel(b.text)
-        .accessibilityHint(Self.hint(b.role, lang: lang))
+        .accessibilityHint(b.role.needsWholeBody && !seen ? L("Read the whole card first: scroll to its end", lang: lang) : Self.hint(b.role, lang: lang))
+    }
+
+    private var coordinateSpace: String { "cardBody/" + ShellModel.cardKey(card) }
+
+    private func reportBody() {
+        shell.cardBody(card, contentHeight: content, visibleHeight: visible, offset: offset)
     }
 
     private func sendWords() {
@@ -650,6 +755,18 @@ struct CardView: View {
         case .other: return ""
         }
     }
+}
+
+/// The card body's content height and how far it is scrolled ([height, offset]).
+struct CardBodyGeometry: PreferenceKey {
+    static let defaultValue: [Double] = []
+    static func reduce(value: inout [Double], nextValue: () -> [Double]) { let n = nextValue(); if !n.isEmpty { value = n } }
+}
+
+/// The card body's visible height.
+struct CardBodyVisible: PreferenceKey {
+    static let defaultValue: Double = 0
+    static func reduce(value: inout Double, nextValue: () -> Double) { value = max(value, nextValue()) }
 }
 
 // MARK: - The composer

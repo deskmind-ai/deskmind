@@ -273,6 +273,11 @@ final class ShellModel: ObservableObject {
     @Published private(set) var answering: Set<String> = []
     /// The helper answers (its socket): the session list came back.
     @Published private(set) var reachable = true
+    /// Cloud models are off in the settings: a session sends nothing (0.5 has no local-only session: it needs a cloud
+    /// model, owner 10-22); the chat says so with a button to the settings.
+    @Published private(set) var cloudOff = false
+    /// Cards whose whole body has been on screen (`cardBody`), by card key: their approve-type options take a click.
+    @Published private(set) var bodySeen: Set<String> = []
 
     let client: SessionClient
     private let names: SessionNames
@@ -281,6 +286,8 @@ final class ShellModel: ObservableObject {
     /// The model configuration and language sessions are opened with: the app's settings now.
     var config: () -> String?
     var lang: () -> ResolvedLang
+    /// The settings' "use a cloud model" switch.
+    var cloudOn: () -> Bool
     private var summaries: [SessionSummary] = []
     private var deleted: Set<String> = []
     private let pendingLock = NSLock()
@@ -292,13 +299,14 @@ final class ShellModel: ObservableObject {
     weak static var shared: ShellModel?
 
     init(client: SessionClient, defaults: UserDefaults = .standard,
-         config: @escaping () -> String?, lang: @escaping () -> ResolvedLang,
+         config: @escaping () -> String?, lang: @escaping () -> ResolvedLang, cloudOn: @escaping () -> Bool = { true },
          work: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.global(qos: .userInitiated).async(execute: f) },
          deliver: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) }) {
         self.client = client
         self.names = SessionNames(defaults: defaults)
         self.config = config
         self.lang = lang
+        self.cloudOn = cloudOn
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
@@ -312,6 +320,24 @@ final class ShellModel: ObservableObject {
     func applySettings() {
         client.defaultConfig = config()
         client.defaultLang = Self.langCode(lang())
+    }
+
+    /// The settings as the window shows them (on the main thread): cloud models on or off.
+    func refreshSettings() {
+        let off = !cloudOn()
+        if cloudOff != off { cloudOff = off }
+    }
+
+    /// Cloud models are off: nothing goes to a session (said once above the composer; the chat's row offers the
+    /// settings). True when the send may go on.
+    private func cloudAllows() -> Bool {
+        applySettings()
+        refreshSettings()
+        guard cloudOn() else {
+            notice = L("A conversation needs a cloud model. Turn it on in the model settings.", lang: lang())
+            return false
+        }
+        return true
     }
 
     // MARK: watching
@@ -393,8 +419,10 @@ final class ShellModel: ObservableObject {
                 return t.resultResponse == nil && t.sessionUndo == nil && t.closed == nil
             }
         }
-        // the open session's problems are seen as they come (once per new stored line: never a loop of marks)
-        if let sel = selected, ids.contains(sel), let s = states[sel], s.lastSeq > s.seenSeq, SessionStatus.problemShown(s) { client.markSeen(sel) }
+        // the open session's problems are seen as they come (once per new stored line or process end: never a loop of
+        // marks)
+        if let sel = selected, ids.contains(sel), let s = states[sel], s.lastSeq > s.seenSeq || s.goneUpTo > s.seenGone,
+           SessionStatus.problemShown(s) { client.markSeen(sel) }
         rebuild()
     }
 
@@ -411,22 +439,27 @@ final class ShellModel: ObservableObject {
         notice = nil
     }
 
-    /// The user opened a session: its history comes through the watch (a session not running is started again, and
-    /// replays it); its error dot clears.
+    /// The user opened a session: its error dot clears. Reading it needs no process (#107 review): a session this app
+    /// has the history of is shown as it is (the watch keeps a running one current; one whose process ended — the
+    /// helper's idle reclaim, say — starts again on the next message); another one's history is read from the stored
+    /// log (session.history). Only an older helper without that op has it opened (and closes it once idle).
     func select(_ id: String) {
         selected = id
         notice = nil
         client.markSeen(id)
-        let known = states[id] != nil && (states[id]?.lastSeq ?? 0) > 0
-        let exited = client.state(id).exited != nil
-        guard !known || exited else { return }
+        let known = (states[id]?.lastSeq ?? 0) > 0 || client.state(id).lastSeq > 0
+        guard !known else { return }
         applySettings()
-        let config = self.config(), lang = Self.langCode(self.lang())
+        let config = self.config(), lang = Self.langCode(self.lang()), cloud = cloudOn()
         work { [weak self] in
             guard let self else { return }
-            // (one this client opened and that ended is opened as it was; one from an earlier launch, with the
-            // settings now)
-            let ok = exited ? self.client.reopenIfExited(id) : self.client.open(sessionId: id, config: config, lang: lang) != nil
+            if self.client.history(id) {
+                // (what it showed when opened is seen)
+                self.deliver { if self.selected == id { self.client.markSeen(id) } }
+                return
+            }
+            guard cloud else { return }     // (cloud models off: no process for it)
+            let ok = self.client.open(sessionId: id, config: config, lang: lang) != nil
             if !ok { self.deliver { self.notice = L("Couldn't open this conversation. Is DeskMind's helper running?", lang: self.lang()) } }
         }
     }
@@ -490,7 +523,7 @@ final class ShellModel: ObservableObject {
     func submit(sendNow: Bool = false) {
         let text = draft
         guard let control = composer.control(text, sendNow: sendNow) else { return }
-        applySettings()
+        guard cloudAllows() else { return }     // (the text stays in the composer)
         guard let id = selected else { openThenSend(control, text: text); return }
         draft = ""
         work { [weak self] in
@@ -553,13 +586,33 @@ final class ShellModel: ObservableObject {
     /// card; then its buttons stay off until the answer takes effect.
     func click(_ button: CardModel.Button) {
         guard let id = selected else { return }
+        // an approve-type option only once the card's whole body has been on screen (never approve what was not seen)
+        if button.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: button.runId, askId: button.askId)) { return }
+        // the way out stays open with cloud models off; anything else would make the model go on
+        if button.role != .cancel && !cloudAllows() { return }
         send(CardModel.answer(button), in: id)
     }
 
     /// The user's own words on a card that takes them (its own field).
     func answer(_ card: CardModel, text: String) {
-        guard let id = selected, let a = card.answer(text: text) else { return }
+        guard let id = selected, let a = card.answer(text: text), cloudAllows() else { return }
         send(a, in: id)
+    }
+
+    static func cardKey(runId: String, askId: String?) -> String { askId.map { "\(runId)/\($0)" } ?? runId }
+    static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
+
+    /// The card's body as it is on screen (its scroll view's geometry, CardBody.endShown): once its end has been on
+    /// screen — it fits, or it was scrolled to its last line — its approve-type options take a click, for good.
+    func cardBody(_ card: CardModel, contentHeight: Double, visibleHeight: Double, offset: Double) {
+        let key = Self.cardKey(card)
+        guard !bodySeen.contains(key), CardBody.endShown(contentHeight: contentHeight, visibleHeight: visibleHeight, offset: offset) else { return }
+        bodySeen.insert(key)
+    }
+
+    /// Whether this button takes a click now: its card can be answered, and an approve-type option's card was seen whole.
+    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool {
+        answerable(card, in: s) && (!b.role.needsWholeBody || bodySeen.contains(Self.cardKey(card)))
     }
 
     private func send(_ a: CardAnswer, in id: String) {
@@ -584,12 +637,11 @@ final class ShellModel: ObservableObject {
 
     func queueEdit(_ id: String, text: String) { control(.queueEdit(id: id, text: text)) }
     func queueCancel(_ id: String) { control(.queueCancel(id: id)) }
-    func queueSendNow(_ id: String) { control(.queueSendNow(id: id)) }
-    func retry() { control(.retry) }
+    func queueSendNow(_ id: String) { guard cloudAllows() else { return }; control(.queueSendNow(id: id)) }
+    func retry() { guard cloudAllows() else { return }; control(.retry) }
 
     func resend(_ outgoing: String) {
-        guard let id = selected else { return }
-        applySettings()
+        guard let id = selected, cloudAllows() else { return }
         work { [weak self] in _ = self?.client.resend(outgoing, in: id) }
     }
 
@@ -606,19 +658,19 @@ final class ShellModel: ObservableObject {
 
     // MARK: settings
 
-    /// The model settings were saved (a key, a service): the sessions open here with nothing running get a new process
-    /// on their next message, which starts with the key and the configuration as they are now. One with a task or a
-    /// reply going keeps its process (the change reaches it once it is opened again).
+    /// The model settings were saved (a key, a service, cloud on or off): every session opens again with them, whenever
+    /// its next process starts; and each one with a process asks the helper for a new one. The helper decides when
+    /// (SessionHost.closeIfIdle: at once if the session is idle, else once what runs — a task, a reply, a queue, an open
+    /// undo, a line just sent — is over); this app never decides that from its own view of the session.
     func settingsChanged() {
         applySettings()
+        refreshSettings()
         let config = self.config(), lang = Self.langCode(self.lang())
-        // (never one whose task's undo is still open: its process's end would close it, and the undo with it)
-        let idle = states.filter { _, s in
-            s.exited == nil && s.runningTask == nil && s.streamingMessage == nil && s.queue.isEmpty && !Self.undoOpen(s)
-        }.map(\.key)
+        client.adoptSettings(config: config, lang: lang)
+        let live = states.filter { $0.value.exited == nil }.map(\.key).sorted()
         work { [weak self] in
             guard let self else { return }
-            for id in idle { self.client.restart(id, config: config, lang: lang) }
+            for id in live { self.client.restart(id, config: config, lang: lang) }
         }
     }
 
@@ -626,6 +678,34 @@ final class ShellModel: ObservableObject {
     /// handoff §3.1).
     var taskRunningWithoutCard: Bool {
         states.values.contains { $0.runningTask != nil && $0.openCard == nil }
+    }
+}
+
+extension CardModel.Role {
+    /// An option that lets the task go ahead on what the card shows (yes; "you decide"): answered only once the card's
+    /// whole body has been on screen (owner: never approve what you can't fully see). The way out, a pick, a skip and
+    /// undo are not.
+    var needsWholeBody: Bool { self == .approve || self == .delegate }
+}
+
+/// A card's body on screen (MainSplitView.CardView: the body scrolls inside a bounded height, its header and buttons
+/// stay put): whether its end is on screen, from the scroll view's geometry only (never from the text).
+enum CardBody {
+    /// The tallest the body is shown before it scrolls (points); a short window makes it less.
+    static let maxHeight: Double = 220
+    /// The least it keeps when the window is short.
+    static let minHeight: Double = 60
+
+    /// It fits, or its last line is on screen (the content's top is `offset` above the visible top).
+    static func endShown(contentHeight: Double, visibleHeight: Double, offset: Double) -> Bool {
+        guard contentHeight > 0, visibleHeight > 0 else { return false }
+        return contentHeight <= visibleHeight + 0.5 || offset + visibleHeight >= contentHeight - 0.5
+    }
+
+    /// The body's height cap in a chat column `columnHeight` tall: a share of it, between minHeight and maxHeight, so
+    /// that the header, the card's buttons and the composer always keep their place.
+    static func cap(columnHeight: Double) -> Double {
+        min(maxHeight, max(minHeight, columnHeight * 0.3))
     }
 }
 

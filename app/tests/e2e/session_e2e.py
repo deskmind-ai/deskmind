@@ -235,6 +235,10 @@ def run(env, helper):
 
     # a computer task on the simulated computer: its question card, answered over the socket
     check(send(sid, {"type": "cua", "text": "给笔记换个颜色"}).get("ok") is True, "cua")
+    # the app ends the session right after the /cua, before its session.task can have come back (#107 review): the
+    # helper asks the session itself, after the /cua, and refuses — the task is not stopped
+    r = request({"op": "session.end", "session_id": sid})
+    check(r.get("ok") is False and r.get("code") == "not_idle", f"session.end right after a /cua: refused, not idle ({r})")
     ask = until(lambda: w1.kinds("ask", sid))
     task = w1.kinds("session.task", sid)
     check(bool(ask) and bool(task) and ask[0].get("run_id") == task[0].get("run_id"), f"the task's card comes through, with its session: {ask and ask[0].get('card', {}).get('text')}")
@@ -272,6 +276,8 @@ def run(env, helper):
     check(send(sid, {"type": "say", "text": "你好"}).get("ok") is True, "say while nobody watches")
     check(until(lambda: session_lines(sid)[-1]["seq"] == n + 2, 10) is not None, "its reply is stored")
     check(send(sid, {"type": "say", "text": "讲个长故事"}).get("ok") is True, "a long reply starts")
+    r = request({"op": "session.end", "session_id": sid})
+    check(r.get("ok") is False and r.get("code") == "not_idle", f"session.end while a reply streams: refused ({r})")
     time.sleep(0.6)   # some of it streamed while nobody watched
     w2 = Watch(after={sid: n})
     w3 = Watch()       # from the beginning, at the same time
@@ -362,7 +368,9 @@ def run(env, helper):
     if ask:
         send(sid, {"type": "answer", "run_id": runn, "ask_id": ask[0]["ask_id"], "option": 0})
     until(lambda: [e for e in w2.kinds("session.task_closed", sid) if e.get("run_id") == runn], 30)
-    until(lambda: len([m for m in w2.kinds("session.message", sid) if m.get("text") == "任务结束了。"]) >= 4, 20)
+    # (w2 joined after the first task: it has the model's line after each of the other three; waiting for a fourth
+    # sat 20 s idle, long enough for the helper to close the session — #107: it closes idle sessions watched or not)
+    until(lambda: len([m for m in w2.kinds("session.message", sid) if m.get("text") == "任务结束了。"]) >= 3, 20)
     time.sleep(0.5)
     last = session_lines(sid)[-1]["seq"]
     until(lambda: w2.last_seq(sid) == last and w3.last_seq(sid) == last, 10)
@@ -403,7 +411,51 @@ def run(env, helper):
     check(w3.stored(sid) == list(range(1, last + 3)), "the other watch too")
     last += 2
 
+    # its history from the stored log, while it runs and with no process (#107 review: reading needs none)
+    h = request({"op": "session.history", "session_id": sid, "after_seq": last - 2})
+    check(h.get("ok") is True and h.get("open") is True and [e.get("seq") for e in h.get("lines", []) if str(e.get("kind")).startswith("session.")] == [last - 1, last]
+          and all(e.get("session_id") == sid for e in h.get("lines", [])), f"session.history after a cursor, open: {[e.get('seq') for e in h.get('lines', [])]}")
+
+    # idle and watched (#107 review: each process is ~80 MB): the helper closes it all the same, says it was idle (no
+    # run cut), and the watch goes on; reading it needs no process
+    pid2 = o2["pid"]
+    check(until(lambda: not alive(pid2), IDLE + 20) is not None, f"an idle session closes after {IDLE} s, watched")
+    exits = until(lambda: [e for e in w2.kinds("helper.session_exit", sid) if e.get("pid") == pid2], 10) or []
+    check(bool(exits) and exits[-1].get("idle") is True, f"its exit says idle: {exits[-1:]}")
+    h = request({"op": "session.history", "session_id": sid, "runs": {run_id: 0}})
+    whole = [e["seq"] for e in session_lines(sid)]
+    check(h.get("ok") is True and h.get("open") is False and h.get("last_seq") == whole[-1]
+          and [e.get("seq") for e in h.get("lines", []) if str(e.get("kind")).startswith("session.")] == whole
+          and [e["seq"] for e in h.get("lines", []) if e.get("run_id") == run_id and not str(e.get("kind")).startswith("session.")] == seqs,
+          f"session.history with no process: the whole story and the task's lines ({h.get('open')}, {h.get('last_seq')})")
+    w = request({"op": "sessions.list"})
+    check([x.get("open") for x in w.get("sessions", []) if x.get("session_id") == sid] == [False], "listed, not open")
+    w9 = Watch(after={sid: last})
+    hw = until(lambda: w9.kinds("helper.watching"), 5)
+    check(bool(hw) and sid in hw[0].get("idle", []), f"a watch that comes later hears it was closed idle: {hw and hw[0]}")
+    w9.close()
+    # a restart the app asks for while a task waits on its card: deferred, the task goes on; done once it is idle
+    o2 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
+    pid2 = o2.get("pid")
+    send(sid, {"type": "cua", "text": "给笔记换个颜色"})
+    askd = until(lambda: [a for a in w2.kinds("ask", sid) if a.get("run_id") not in (run_id, run1, runk, runn)], 30)
+    rund = askd[0]["run_id"] if askd else ""
+    r = request({"op": "session.end", "session_id": sid, "when_idle": True})
+    check(r.get("ok") is True and r.get("deferred") is True, f"a restart while a task waits on its card: deferred ({r})")
+    time.sleep(1)
+    check(alive(pid2), "the task's session stays up meanwhile")
+    if askd:
+        send(sid, {"type": "answer", "run_id": rund, "ask_id": askd[0]["ask_id"], "option": 0})
+    check(until(lambda: not alive(pid2), 40) is not None, "the task over and its reply done: the restart happens")
+    ends = [e for e in w2.kinds("session.task_end", sid) if e.get("run_id") == rund]
+    exits = until(lambda: [e for e in w2.kinds("helper.session_exit", sid) if e.get("pid") == pid2], 10) or []
+    check(bool(ends) and ends[-1].get("status") != "stopped" and bool(exits) and exits[-1].get("idle") is True,
+          f"the task was not stopped by it ({ends and ends[-1].get('status')}), the exit says idle")
+    until(lambda: w2.last_seq(sid) == session_lines(sid)[-1]["seq"], 10)
+    last = session_lines(sid)[-1]["seq"]
+
     # idle and unwatched: the session closes; with a task waiting on its card, it stays (the app closed, the card waits)
+    o2 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
     w2.close(); w3.close()
     pid2 = o2["pid"]
     check(until(lambda: not alive(pid2), IDLE + 20) is not None, f"an idle session nobody watches closes after {IDLE} s")
