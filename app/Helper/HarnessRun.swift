@@ -30,6 +30,9 @@ enum HarnessRun {
         var responded = false
         /// Its process group, as the machine lock names it (ComputerLock).
         var pgid: Int32 { process.processIdentifier }
+        /// The machine lock as this run last wrote it: every change of it is made from exactly this (compare-and-set),
+        /// so nothing of this run writes over what another writer (its undo, a new task) made of it since.
+        var holder: SessionWire.Holder?
         private(set) var closed = false
         init(process: Process, input: FileHandle) { self.process = process; self.input = input }
         /// stdin closed (EOF): the harness stops waiting for a respond and exits. Once; called under `lock`.
@@ -51,7 +54,7 @@ enum HarnessRun {
     static func pass(_ ev: [String: Any], linger: Lingering, emit: ([String: Any]) -> Bool) {
         let done = ev["event"] as? String == "task_done"
         if done {
-            ComputerLock.linger(runID: linger.runID, pgid: linger.pgid)
+            settle(linger)
             finished(linger, runID: ev["run_id"] as? String ?? "")
         }
         _ = emit(ev)
@@ -97,6 +100,14 @@ enum HarnessRun {
     /// Undo acts on the Mac: the answer is let through only while the machine lock names this run, lingering, and it
     /// acts again until its result_response (ComputerLock.undo). Another task started on this Mac since ended it
     /// (owner 10-21): `undo_expired`.
+    /// The run acts no more (its task_done, or its undo's result_response): the lock goes from the acting holder this
+    /// run last wrote to lingering -- only if it is still exactly that.
+    static func settle(_ l: Lingering) {
+        lock.lock(); let h = l.holder; lock.unlock()
+        guard let h, let n = ComputerLock.linger(h) else { return }
+        lock.lock(); l.holder = n; lock.unlock()
+    }
+
     static func respond(runID: String, option: Int, wait: Double = 0) -> [String: Any] {
         guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
             return ["ok": false, "error": "bad option"]
@@ -117,9 +128,10 @@ enum HarnessRun {
             lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
         }
         l.responded = true    // this answer's: a second one waits for nothing
+        let seen = l.holder
         lock.unlock()
-        switch ComputerLock.undo(runID: l.runID, pgid: l.pgid) {
-        case .ok: break
+        switch seen.map(ComputerLock.undo) ?? .expired {
+        case .ok(let acting): lock.lock(); l.holder = acting; lock.unlock()
         case .busy:
             lock.lock(); l.responded = false; lock.unlock()   // not this answer's: the card can still be answered after it
             return ["ok": false, "code": "busy", "error": "an answer to this card is being carried out"]
@@ -136,12 +148,12 @@ enum HarnessRun {
         if !gone {
             do { try l.input.write(contentsOf: line) } catch {
                 lock.unlock()
-                ComputerLock.linger(runID: l.runID, pgid: l.pgid)
+                settle(l)
                 return ["ok": false, "error": "write: \(error.localizedDescription)"]
             }
         }
         lock.unlock()
-        if gone { ComputerLock.linger(runID: l.runID, pgid: l.pgid); return undoExpired }
+        if gone { settle(l); return undoExpired }
         let until = Date().addingTimeInterval(min(max(wait, 0), 15))
         while Date() < until {
             lock.lock(); let r = l.response; lock.unlock()
@@ -338,6 +350,7 @@ enum HarnessRun {
         // or a session's) is ended -- its undo expires; the harness is started (a process group of its own) and named
         // in the lock, before it is sent its task. Refused or not started: busy is let go by the defer above.
         var launchError = "", stoppedFirst = false
+        var acquired: SessionWire.Holder?
         switch ComputerLock.acquire(runID: runID, by: "helper", spawn: {
             do {
                 guard try Runner.launch(p) else { stoppedFirst = true; return nil }
@@ -358,8 +371,8 @@ enum HarnessRun {
             if stoppedFirst { _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]) }
             else { _ = emit(["event": "error", "error": "launch: \(launchError)"]) }
             return
-        case .ok:
-            break
+        case .ok(let h):
+            acquired = h
         }
         // this helper's own lingering run, if it was the one ended: its card can no longer be answered
         lock.lock(); if let l = lingering { l.close(); lingering = nil; expiredRun = l.runID }; lock.unlock()
@@ -367,6 +380,7 @@ enum HarnessRun {
         // run's connection, and the state is the next run's
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
         linger.runID = runID
+        linger.holder = acquired
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
         // a stop between the launch and here found no stdin to write to (it terminated the process): the stop line too
         if Runner.cancelled { Runner.stopRequested = true; stop(p) }
@@ -403,7 +417,7 @@ enum HarnessRun {
                         // the answer is carried out: it acts no more
                         if e["kind"] as? String == "result_response" {
                             linger.response = e
-                            lock.unlock(); ComputerLock.linger(runID: linger.runID, pgid: linger.pgid); continue
+                            lock.unlock(); settle(linger); continue
                         }
                         lock.unlock(); continue
                     }
@@ -433,7 +447,6 @@ enum HarnessRun {
             // its harness gone: the lock goes with its group; what is left of it after a run that never said task_done
             // still acts (the next task is refused) until it ends, or is ended after a grace (reapLeftovers decides on
             // the lock's state)
-            if state.finished != nil { ComputerLock.linger(runID: runID, pgid: p.processIdentifier) }
             ComputerLock.free(runID: runID, pgid: p.processIdentifier)
             ComputerLock.reapLeftovers(runID: runID, pgid: p.processIdentifier)
         }

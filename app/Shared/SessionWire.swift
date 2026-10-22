@@ -245,6 +245,9 @@ enum SessionWire {
         /// When a task first found it orphaned (acting, its owner and leader gone, a process of its group up): the
         /// next task ends it `orphanSeconds` later.
         var orphanSince: Double? = nil
+        /// Bumped on every change of state (acting → lingering at task_done, → acting for an undo, back at its
+        /// result_response): a writer changes the lock only from the exact holder and generation it saw.
+        var gen: Int = 0
 
         var acting: Bool { state == "acting" }
 
@@ -265,7 +268,8 @@ enum SessionWire {
                 return Holder(state: state, pgid: pgid, pid: pid("pid") ?? pgid, start: int("start") ?? 0,
                               runID: o["run_id"] as? String ?? "", sessionID: o["session_id"] as? String ?? "",
                               by: o["by"] as? String ?? "", owner: owner, t: (o["t"] as? NSNumber)?.doubleValue ?? 0,
-                              orphanSince: (o["orphan_since"] as? NSNumber)?.doubleValue)
+                              orphanSince: (o["orphan_since"] as? NSNumber).flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? nil : $0.doubleValue },
+                              gen: int("gen") ?? 0)
             }
             // an earlier format, with no version
             if let p = pid("pid") {
@@ -280,6 +284,7 @@ enum SessionWire {
             var o: [String: Any] = ["v": 2, "state": state, "pgid": Int(pgid), "pid": Int(pid), "start": start, "run_id": runID,
                                     "session_id": sessionID, "by": by, "owner": Int(owner), "t": t]
             if let orphanSince { o["orphan_since"] = orphanSince }
+            o["gen"] = gen
             return (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data()
         }
     }

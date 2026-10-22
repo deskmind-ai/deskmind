@@ -123,11 +123,12 @@ enum HelperE2E {
         p.arguments = ["-c", script]
         p.standardInput = input
         p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
-        guard case .ok(_?) = ComputerLock.acquire(runID: id, by: "helper", spawn: { try? p.run(); return p.processIdentifier }) else {
+        guard case .ok(let h?) = ComputerLock.acquire(runID: id, by: "helper", spawn: { try? p.run(); return p.processIdentifier }) else {
             check(false, "linger: \(id) starts on the lock"); return nil
         }
         let l = HarnessRun.Lingering(process: p, input: input.fileHandleForWriting)
         l.runID = id
+        l.holder = h
         HarnessRun.pass(["event": "task_done", "run_id": id], linger: l) { ev in onDone(ev); return true }
         Thread.detachNewThread { HarnessRun.watchLingering(l) }
         return l
@@ -182,7 +183,7 @@ enum HelperE2E {
         // an undo going acts: a new task is refused meanwhile, not run beside it
         if case .busy = next("run_beside") { check(fresh.process.isRunning, "linger: an undo going: the next run is refused (computer_busy), the undo left alone") }
         else { check(false, "linger: an undo going: the next run is refused") }
-        ComputerLock.linger(runID: "run_e2e", pgid: fresh.pgid)   // its result_response came: it acts no more
+        HarnessRun.settle(fresh)   // its result_response came: it acts no more
 
         // 「清除全部」 takes the per-run logs too, and lets the lingering run (which writes them) go first
         let support = out.appendingPathComponent("support")
@@ -214,8 +215,9 @@ enum HelperE2E {
         Runner.busy = false
         // a session's lingering run is not this helper's to end for 「清除全部」
         let ses = Process(); ses.executableURL = URL(fileURLWithPath: "/bin/sleep"); ses.arguments = ["30"]
-        _ = ComputerLock.acquire(runID: "run_ses", by: "session", spawn: { try? ses.run(); return ses.processIdentifier })
-        ComputerLock.linger(runID: "run_ses", pgid: ses.processIdentifier)
+        if case .ok(let hs?) = ComputerLock.acquire(runID: "run_ses", by: "session", spawn: { try? ses.run(); return ses.processIdentifier }) {
+            ComputerLock.linger(hs)
+        }
         check(ComputerLock.endOwnLingering() && ses.isRunning, "linger: clear all leaves a session's lingering run alone")
         kill(-ses.processIdentifier, SIGKILL)
         lingerFullRun()
@@ -250,6 +252,13 @@ enum HelperE2E {
             if [ -f "$D/second" ]; then
               kill -0 "$(cat "$D/same.pid")" 2>/dev/null && echo same >> "$D/alive-at-start"
               rm -f "$D/second"
+              if [ -f "$D/undo" ]; then
+                echo '{"kind":"task_done","status":"succeeded","reason":"verified","summary":"ok","result_card":{"kind":"result","text":"done","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}],"free_text":false,"blocking":false}}'
+                read answer
+                ( trap "" TERM; exec sleep 30 ) </dev/null >/dev/null 2>&1 &
+                echo $! > "$D/undochild.pid"
+                exit 0
+              fi
               if [ -f "$D/nodone" ]; then
                 ( trap "" TERM; exec sleep 30 ) </dev/null >/dev/null 2>&1 &
                 echo $! > "$D/orphan.pid"
@@ -311,6 +320,58 @@ enum HelperE2E {
         fm.createFile(atPath: d.appendingPathComponent("second").path, contents: Data())
         let after = run()
         check(after.contains { $0["event"] as? String == "task_done" }, "linger (full run): the child gone, the next run runs")
+
+        // deskmind#105 P2: an undo sent at once at task_done acts (the lock: acting); the harness exits before the run
+        // thread is done, leaving the undo's child. The run's own end must not write lingering over the undo's acting:
+        // the child keeps the Mac (the next task is refused), not ended by it.
+        fm.createFile(atPath: d.appendingPathComponent("second").path, contents: Data())
+        fm.createFile(atPath: d.appendingPathComponent("undo").path, contents: Data())
+        var undoEvents: [[String: Any]] = []
+        var answered: [String: Any] = [:]
+        guard Runner.accept() else { check(false, "linger (undo exit): accepted"); return }
+        HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { ev in
+            undoEvents.append(ev)
+            if ev["event"] as? String == "task_done" {
+                answered = HarnessRun.respond(runID: ev["run_id"] as? String ?? "", option: 1)
+                Thread.sleep(forTimeInterval: 0.8)   // the harness reads it, starts the child, exits: before the run's end
+            }
+            return true
+        }
+        try? fm.removeItem(at: d.appendingPathComponent("undo"))
+        let undoChild = pid("undochild.pid")
+        check(answered["ok"] as? Bool == true && undoChild > 0 && up(undoChild),
+              "linger (undo exit): the undo answered at task_done, its child up after the harness exited (\(answered))")
+        check(ComputerLock.read()?.acting == true, "linger (undo exit): the lock still says acting (\(String(describing: ComputerLock.read())))")
+        let beside = Process(); beside.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        if case .busy = ComputerLock.acquire(runID: "run_beside", by: "session", spawn: { try? beside.run(); return beside.processIdentifier }) {
+            check(up(undoChild), "linger (undo exit): the next task is refused, the undo's child left alone")
+        } else { check(false, "linger (undo exit): the next task is refused, the undo's child left alone") }
+        kill(undoChild, SIGKILL)
+
+        // deskmind#105 P1: nothing of a refused request touches the desktop -- `hands do` reopens its apps' windows
+        // only once it holds the machine lock (a recorder here, never real apps)
+        var reopened: [([String], String)] = []
+        Runner.reopenWindows = { bundles in reopened.append((bundles, ComputerLock.read().map { "\($0.by) \($0.state) \($0.pgid)" } ?? "none")) }
+        defer { Runner.reopenWindows = { Runner.reopenWindowless($0) } }
+        let holder = Process(); holder.executableURL = URL(fileURLWithPath: "/bin/sleep"); holder.arguments = ["30"]
+        _ = ComputerLock.acquire(runID: "run_session_task", by: "session", spawn: { try? holder.run(); return holder.processIdentifier })
+        let handsDo = ["op": "run", "goal": "整理一下", "planner": "http://127.0.0.1:9",
+                       "apps": [["name": "TextEdit", "bundle": "com.apple.TextEdit"]]] as [String: Any]
+        var refusedDo: [[String: Any]] = []
+        guard Runner.accept() else { check(false, "hands do: accepted"); return }
+        Runner.run(Runner.Spec(handsDo)) { refusedDo.append($0); return true }
+        check(refusedDo.contains { $0["code"] as? String == "computer_busy" } && reopened.isEmpty && !Runner.busy,
+              "hands do while a session's task acts: computer_busy, and no window reopened, no app launched (\(reopened.count))")
+        kill(-holder.processIdentifier, SIGKILL); holder.waitUntilExit()
+        // the Mac free: the windows are reopened only under this run's own reservation
+        guard Runner.accept() else { check(false, "hands do: accepted again"); return }
+        var freeDo: [[String: Any]] = []
+        Runner.run(Runner.Spec(handsDo)) { freeDo.append($0); return true }
+        check(reopened.count == 1 && reopened.first?.0 == ["com.apple.TextEdit"] && reopened.first?.1 == "hands acting 0",
+              "hands do: its windows reopened while it holds the Mac (\(reopened.map(\.1)))")
+        check(ComputerLock.read() == nil && !Runner.busy,
+              "and its reservation let go when its process could not start (\(freeDo.map { $0["event"] as? String ?? "?" }))")
+
         for p in [same, orphan] where up(p) { kill(p, SIGKILL) }
 
         // Stop while the next run's machine lock ends the last one's process (a harness deaf to SIGTERM: SIGKILL after

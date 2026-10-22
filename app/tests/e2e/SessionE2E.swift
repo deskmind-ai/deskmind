@@ -158,23 +158,31 @@ enum SessionE2E {
             check(true, "a holder that acts refuses the next task, which starts nothing")
         } else { check(false, "a holder that acts refuses the next task, which starts nothing") }
 
-        // its task_done: lingering; the next task ends its group (deaf to SIGTERM: SIGKILL), its undo expiring
-        check(ComputerLock.linger(runID: "run_a", pgid: a.processIdentifier) && ComputerLock.read()?.state == "lingering", "task_done: lingering")
+        // its task_done: lingering (the next generation); the next task ends its group (deaf to SIGTERM: SIGKILL)
+        let la = ComputerLock.linger(h)
+        check(la?.state == "lingering" && la?.gen == h.gen + 1 && ComputerLock.read() == la, "task_done: lingering, the next generation")
+        check(ComputerLock.linger(h) == nil, "a second change from the same old holder: refused (compare-and-set)")
         killGroup(a.processIdentifier); a.waitUntilExit()
         let deaf = executor("trap '' TERM; while :; do sleep 0.1; done")
-        _ = start("run_d", deaf)
-        ComputerLock.linger(runID: "run_d", pgid: deaf.processIdentifier)
+        if case .ok(let hd?) = start("run_d", deaf) { ComputerLock.linger(hd) }
         let c = executor("sleep 30")
-        if case .ok(let hc?) = ComputerLock.acquire(runID: "run_c", by: "helper", term: 0.3, kill: 2, spawn: { try? c.run(); return c.processIdentifier }) {
-            check(!deaf.isRunning && hc.runID == "run_c", "a lingering run is ended (SIGTERM ignored: SIGKILL) and the new task takes the Mac")
-        } else { check(false, "a lingering run is ended and the new task takes the Mac") }
+        guard case .ok(let hc?) = ComputerLock.acquire(runID: "run_c", by: "helper", term: 0.3, kill: 2, spawn: { try? c.run(); return c.processIdentifier })
+        else { check(false, "a lingering run is ended and the new task takes the Mac"); exit(1) }
+        check(!deaf.isRunning && hc.runID == "run_c", "a lingering run is ended (SIGTERM ignored: SIGKILL) and the new task takes the Mac")
 
-        // undo: only its own lingering run; it acts again until its result_response
-        check(ComputerLock.undo(runID: "run_c", pgid: c.processIdentifier) == .busy, "no undo before its task_done")
-        ComputerLock.linger(runID: "run_c", pgid: c.processIdentifier)
-        check(ComputerLock.undo(runID: "run_x", pgid: c.processIdentifier) == .expired, "another run's undo: expired")
-        check(ComputerLock.undo(runID: "run_c", pgid: c.processIdentifier) == .ok && ComputerLock.read()?.acting == true, "its own: acting again")
+        // undo: only from its own lingering holder, exactly as last written; it acts again until its result_response
+        if case .busy = ComputerLock.undo(hc) { check(true, "no undo before its task_done") } else { check(false, "no undo before its task_done") }
+        guard let lc = ComputerLock.linger(hc) else { check(false, "c lingers"); exit(1) }
+        var other = lc; other.runID = "run_x"
+        if case .expired = ComputerLock.undo(other) { check(true, "another run's undo: expired") } else { check(false, "another run's undo: expired") }
+        guard case .ok(let uc) = ComputerLock.undo(lc), uc.acting, uc.gen == lc.gen + 1 else { check(false, "its own: acting again"); exit(1) }
+        check(true, "its own: acting again, the next generation")
         if case .busy = start("run_e", executor("true")) { check(true, "a new task is refused while an undo acts") } else { check(false, "a new task is refused while an undo acts") }
+        // the exact race of an exit cleanup: a writer that still holds the task_done holder (lc) or the acquired one
+        // (hc) cannot write lingering over the undo that acts now
+        check(ComputerLock.linger(hc) == nil && ComputerLock.linger(lc) == nil && ComputerLock.read() == uc,
+              "a stale writer cannot turn an acting undo back to lingering")
+        check(ComputerLock.linger(uc)?.state == "lingering", "its result_response: lingering again, from the undo's own holder")
         killGroup(c.processIdentifier); c.waitUntilExit()
 
         // an executor that exits leaving a child: the group holds the Mac, acting; free keeps it; gone: free removes it
@@ -264,9 +272,10 @@ enum SessionE2E {
         func run(_ id: String, onDone: @escaping ([String: Any]) -> Void = { _ in }) -> HarnessRun.Lingering? {
             let input = Pipe()
             let p = executor("cat > /dev/null", stdin: input)
-            guard case .ok(_?) = start(id, p) else { check(false, "\(id) starts"); return nil }
+            guard case .ok(let h?) = start(id, p) else { check(false, "\(id) starts"); return nil }
             let l = HarnessRun.Lingering(process: p, input: input.fileHandleForWriting)
             l.runID = id
+            l.holder = h
             HarnessRun.pass(["event": "task_done", "run_id": id], linger: l) { ev in onDone(ev); return true }
             Thread.detachNewThread { HarnessRun.watchLingering(l) }
             return l

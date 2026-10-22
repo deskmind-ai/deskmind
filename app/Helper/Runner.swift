@@ -427,6 +427,10 @@ enum Runner {
         var mayNeedVision: Bool { goal != nil && apps.contains { !Self.accessibleApps.contains($0.bundle) } }
     }
 
+    /// What a `hands do` run does to the desktop before its process starts (reopenWindowless), only once it holds
+    /// the machine lock; a recorder in tests.
+    nonisolated(unsafe) static var reopenWindows: ([String]) -> Void = { reopenWindowless($0) }
+
     /// Bring back the window of each named app that runs with none (see AppWindow), without bringing it forward,
     /// and wait a moment for it to appear.
     static func reopenWindowless(_ bundles: [String]) {
@@ -616,11 +620,23 @@ enum Runner {
                 return
             }
         }
+        // The machine lock before anything touches the desktop (its apps launched, their windows reopened): refused
+        // while a task acts on this Mac, a finished run lingering for its card ended first. Reserved for this run now,
+        // given to its process when it starts (commit, under the stop's lock).
+        let runID = spec.runID ?? "run_" + UUID().uuidString.lowercased().prefix(8)
+        let reservation: SessionWire.Holder
+        switch ComputerLock.reserve(runID: runID, by: "hands") {
+        case .ok(let r?): reservation = r
+        case .busy: _ = release(); _ = emit(ComputerLock.busy); return
+        case .alive: _ = release(); _ = emit(HarnessRun.stillRunning); return
+        case .failed(let why): _ = release(); _ = emit(["event": "error", "error": why]); return
+        case .ok(nil): _ = release(); _ = emit(["event": "error", "error": "the machine lock could not be reserved"]); return
+        }
         if spec.goal != nil {
             if spec.apps.contains(where: { NSRunningApplication.runningApplications(withBundleIdentifier: $0.bundle).isEmpty }) {
                 _ = emit(["event": "preparing", "what": "apps"])
             }
-            reopenWindowless(spec.apps.map(\.bundle))
+            reopenWindows(spec.apps.map(\.bundle))
         }
         p.arguments = args
         p.currentDirectoryURL = work
@@ -667,26 +683,24 @@ enum Runner {
         let errURL = DeskMindIPC.supportDir.appendingPathComponent("work/last-run.stderr")
         fm.createFile(atPath: errURL.path, contents: nil)
         p.standardError = try? FileHandle(forWritingTo: errURL)
-        // One path, as for a harness run: accepted → the machine lock (ComputerLock) → launched (under the stop's lock).
-        // Refused while a task acts on this Mac; a finished run lingering for its card is ended first; `hands do`
-        // started (a process group of its own) and named in the lock.
-        let runID = spec.runID ?? "run_" + UUID().uuidString.lowercased().prefix(8)
+        // One path: accepted → the machine lock (reserved above) → launched under the stop's lock and named in the lock
+        // (a process group of its own), only while the reservation is still this run's.
         var launchError = "", stoppedFirst = false
-        switch ComputerLock.acquire(runID: runID, by: "hands", spawn: {
+        var acquired: SessionWire.Holder?
+        switch ComputerLock.commit(reservation, spawn: {
             do {
                 guard try launch(p) else { stoppedFirst = true; return nil }
                 return p.processIdentifier
             } catch { launchError = error.localizedDescription; return nil }
         }) {
-        case .busy: _ = release(); _ = emit(ComputerLock.busy); return
-        case .alive: _ = release(); _ = emit(HarnessRun.stillRunning); return
-        case .failed(let why): _ = release(); _ = emit(["event": "error", "error": why]); return
+        case .busy, .alive: _ = release(); ComputerLock.cancel(reservation); _ = emit(ComputerLock.busy); return
+        case .failed(let why): _ = release(); ComputerLock.cancel(reservation); _ = emit(["event": "error", "error": why]); return
         case .ok(nil):
             _ = release()
             if stoppedFirst { _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]) }
             else { _ = emit(["event": "error", "error": "launch: \(launchError)"]) }
             return
-        case .ok: break
+        case .ok(let h): acquired = h
         }
         answerLock.lock(); answers = inPipe.fileHandleForWriting; asking = false; answerLock.unlock()
         _ = emit(["event": "start", "set": set, "real": spec.real, "pid": Int(p.processIdentifier)])
@@ -856,7 +870,7 @@ enum Runner {
         cleanUp(quitTextEdit: !textEditWasRunning)
         pruneRuns(keep: 10)
         // it acts no more: what it leaves running in its group (a Peekaboo server) is ended by the next task
-        ComputerLock.linger(runID: runID, pgid: p.processIdentifier)
+        if let acquired { ComputerLock.linger(acquired) }
         ComputerLock.free(runID: runID, pgid: p.processIdentifier)
         // hands says some refusals on stdout ("refused: … is your home directory"): its tail too, when stderr is quiet.
         let errTail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)

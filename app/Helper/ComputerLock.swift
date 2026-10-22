@@ -96,65 +96,109 @@ enum ComputerLock {
     /// `failed`: the lock could not be kept (its guard, or its file, could not be written): nothing runs.
     enum Acquired { case ok(SessionWire.Holder?), busy(SessionWire.Holder), alive(SessionWire.Holder), failed(String) }
 
-    /// Take the Mac for a new task, in one guarded step: a holder acting → busy; lingering → its tree ended (its undo
-    /// expires; `alive` when it will not end); then `spawn` starts the executor (nil: it could not start, nothing is
-    /// written) and the lock names its group, acting. The executor is sent its task only after this returns.
+    /// Inside the guard: may a new task take the Mac? nil: yes (nothing holds it, or what held it was ended); else the
+    /// refusal. A holder acting → busy (an orphaned one -- owner and leader gone, a process of its group up -- is
+    /// marked and ended `orphanSeconds` later); lingering → its tree ended (its undo expires), or `alive`.
+    private static func admit(term: Double, kill: Double, now: Double?, signal: (Int32, Int32) -> Int32) -> Acquired? {
+        guard var h = read(), held(h) else { return nil }
+        if h.acting {
+            guard h.pgid > 0, !alive(h.owner), startOf(h.pid) == nil else { return .busy(h) }
+            let t = now ?? Date().timeIntervalSince1970
+            guard let since = h.orphanSince else { h.orphanSince = t; write(h); return .busy(h) }
+            if t - since < orphanSeconds { return .busy(h) }
+            NSLog("DeskMind Hands: run \(h.runID)'s owner and leader are gone, its group still up: ending it")
+        } else {
+            NSLog("DeskMind Hands: a new task on this Mac: ending the lingering run \(h.runID) (its undo expires)")
+        }
+        return endTree(h, term: term, kill: kill, signal: signal) ? nil : .alive(h)
+    }
+
+    /// Name the group `pid` in the lock (generation `gen`); a write that fails ends that group (it must not act
+    /// unrecorded: `hands do` has its task in its arguments).
+    private static func record(_ runID: String, by: String, pid: pid_t, gen: Int, signal: (Int32, Int32) -> Int32) -> Acquired {
+        let h = SessionWire.Holder(state: "acting", pgid: pid, pid: pid, start: startOf(pid) ?? 0, runID: runID, sessionID: "",
+                                   by: by, owner: getpid(), t: Date().timeIntervalSince1970, gen: gen)
+        guard write(h) else { _ = signal(-pid, SIGKILL); return .failed("the machine lock could not be written") }
+        return .ok(h)
+    }
+
+    /// Take the Mac for a new task, in one guarded step (admit), then `spawn` starts the executor (nil: it could not
+    /// start, nothing is written) and the lock names its group, acting, generation 1. The executor is sent its task only
+    /// after this returns.
     static func acquire(runID: String, by: String, term: Double = 1.5, kill: Double = 1, now: Double? = nil,
                         signal: (Int32, Int32) -> Int32 = { Darwin.kill($0, $1) }, spawn: () -> pid_t?) -> Acquired {
         guarded(otherwise: .failed("the machine lock's guard cannot be opened")) {
-            if var h = read(), held(h) {
-                if h.acting {
-                    // orphaned (its owner and its leader gone, a process of its group still up): refused for
-                    // `orphanSeconds`, then ended -- it must not hold the Mac for good
-                    guard h.pgid > 0, !alive(h.owner), startOf(h.pid) == nil else { return .busy(h) }
-                    let t = now ?? Date().timeIntervalSince1970
-                    guard let since = h.orphanSince else { h.orphanSince = t; write(h); return .busy(h) }
-                    if t - since < orphanSeconds { return .busy(h) }
-                    NSLog("DeskMind Hands: run \(h.runID)'s owner and leader are gone, its group still up: ending it")
-                } else {
-                    NSLog("DeskMind Hands: a new task on this Mac: ending the lingering run \(h.runID) (its undo expires)")
-                }
-                if !endTree(h, term: term, kill: kill, signal: signal) { return .alive(h) }
-            }
+            if let refused = admit(term: term, kill: kill, now: now, signal: signal) { return refused }
             guard let pid = spawn() else { return .ok(nil) }
-            let h = SessionWire.Holder(state: "acting", pgid: pid, pid: pid, start: startOf(pid) ?? 0, runID: runID, sessionID: "",
-                                       by: by, owner: getpid(), t: Date().timeIntervalSince1970)
-            guard write(h) else {
-                // not recorded: it must not act unrecorded (`hands do` has its task in its arguments): its group ended
-                _ = signal(-pid, SIGKILL)
-                return .failed("the machine lock could not be written")
-            }
-            return .ok(h)
+            return record(runID, by: by, pid: pid, gen: 1, signal: signal)
+        }
+    }
+
+    /// Take the Mac before anything of the task touches the desktop (a run that must open its apps' windows before its
+    /// process starts): the same step as acquire, but the lock names this helper itself (pgid 0: held while the
+    /// helper lives), acting. Then `commit` starts the process, or `cancel` lets the Mac go.
+    static func reserve(runID: String, by: String, term: Double = 1.5, kill: Double = 1, now: Double? = nil,
+                        signal: (Int32, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> Acquired {
+        guarded(otherwise: .failed("the machine lock's guard cannot be opened")) {
+            if let refused = admit(term: term, kill: kill, now: now, signal: signal) { return refused }
+            let h = SessionWire.Holder(state: "acting", pgid: 0, pid: 0, start: 0, runID: runID, sessionID: "", by: by,
+                                       owner: getpid(), t: Date().timeIntervalSince1970, gen: 1)
+            return write(h) ? .ok(h) : .failed("the machine lock could not be written")
+        }
+    }
+
+    /// The reserved Mac to the task's process: only while the lock is still exactly that reservation (`r`), then
+    /// `spawn` starts it and the lock names its group (the next generation). nil from `spawn`: the reservation is let go.
+    static func commit(_ r: SessionWire.Holder, signal: (Int32, Int32) -> Int32 = { Darwin.kill($0, $1) },
+                       spawn: () -> pid_t?) -> Acquired {
+        guarded(otherwise: .failed("the machine lock's guard cannot be opened")) {
+            guard read() == r else { return .failed("the machine lock's reservation was lost") }
+            guard let pid = spawn() else { unlink(file.path); return .ok(nil) }
+            return record(r.runID, by: r.by, pid: pid, gen: r.gen + 1, signal: signal)
+        }
+    }
+
+    /// A reservation not used (refused, stopped before its launch): the Mac let go, if the lock is still exactly it.
+    static func cancel(_ r: SessionWire.Holder) {
+        guarded(otherwise: ()) { if read() == r { unlink(file.path) } }
+    }
+
+    /// Compare-and-set: the lock goes from exactly `from` (its run, group, state and generation, as its writer last
+    /// saw it) to `state`, the next generation. nil when the lock is no longer `from` (an undo, a new task, an end
+    /// came between): nothing is written over what it is now.
+    private static func transition(_ from: SessionWire.Holder, to state: String) -> SessionWire.Holder? {
+        guarded(otherwise: nil) {
+            guard var h = read(), h.runID == from.runID, h.pgid == from.pgid, h.state == from.state, h.gen == from.gen else { return nil }
+            h.state = state; h.gen += 1; h.t = Date().timeIntervalSince1970
+            return write(h) ? h : nil
+        }
+    }
+
+    /// Its task_done (or an undo's result_response): it acts no more; its result card may be answered, and a new task
+    /// may end it. Only from the acting holder `from` it last wrote.
+    @discardableResult
+    static func linger(_ from: SessionWire.Holder) -> SessionWire.Holder? {
+        from.acting ? transition(from, to: "lingering") : nil
+    }
+
+    /// `ok`: the lock, acting again for the undo. `failed`: the lock could not be read or written.
+    enum Undo { case ok(SessionWire.Holder), busy, expired, failed }
+
+    /// An answer to a finished run's result card: only while the lock is still exactly its lingering holder `from`;
+    /// it acts again (the next generation). `expired`: another task started since (or its tree is gone); `busy`: the
+    /// lock changed under it otherwise (an answer of it is being carried out).
+    static func undo(_ from: SessionWire.Holder) -> Undo {
+        guarded(otherwise: .failed) {
+            guard var h = mine(read(), from.runID, from.pgid), held(h) else { return .expired }
+            guard !h.acting, h.gen == from.gen else { return .busy }
+            h.state = "acting"; h.gen += 1; h.t = Date().timeIntervalSince1970
+            return write(h) ? .ok(h) : .failed
         }
     }
 
     private static func mine(_ h: SessionWire.Holder?, _ runID: String, _ pgid: Int32) -> SessionWire.Holder? {
         guard let h, h.runID == runID, h.pgid == pgid else { return nil }
         return h
-    }
-
-    /// Its task_done (or its run's end): it acts no more; its result card may be answered, and a new task may end it.
-    @discardableResult
-    static func linger(runID: String, pgid: Int32) -> Bool {
-        guarded(otherwise: false) {
-            guard var h = mine(read(), runID, pgid), h.acting else { return false }
-            h.state = "lingering"; h.t = Date().timeIntervalSince1970
-            return write(h)
-        }
-    }
-
-    /// `failed`: the lock could not be read or written (its guard, its file): nothing is let through.
-    enum Undo { case ok, busy, expired, failed }
-
-    /// An answer to `runID`'s result card: only while it is the lingering holder; it acts again. `expired`: another
-    /// task started since (or its tree is gone); `busy`: an answer of it is being carried out.
-    static func undo(runID: String, pgid: Int32) -> Undo {
-        guarded(otherwise: .failed) {
-            guard var h = mine(read(), runID, pgid), held(h) else { return .expired }
-            if h.acting { return .busy }
-            h.state = "acting"; h.t = Date().timeIntervalSince1970
-            return write(h) ? .ok : .failed
-        }
     }
 
     /// Its executor has exited: the lock goes if it still names that run and its group is gone (a child still up keeps
