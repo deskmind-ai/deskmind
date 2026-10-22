@@ -162,8 +162,21 @@ final class SessionClient {
     private var states: [String: SessionState] = [:]
     /// What a session this client did not open (one from an earlier launch) is opened again with: the app's current
     /// model config and language (the harness keeps no session's config: without one it would take its own default).
-    var defaultConfig: String? = nil
-    var defaultLang: String? = nil
+    /// A session this client opened keeps what it was opened with. Set from any thread.
+    var defaultConfig: String? {
+        get { lock.lock(); defer { lock.unlock() }; return defaults.config }
+        set { lock.lock(); defaults.config = newValue; lock.unlock() }
+    }
+    var defaultLang: String? {
+        get { lock.lock(); defer { lock.unlock() }; return defaults.lang }
+        set { lock.lock(); defaults.lang = newValue; lock.unlock() }
+    }
+    private var defaults: (config: String?, lang: String?) = (nil, nil)
+
+    /// How a session is opened again: as this client opened it, else with the defaults (read under the lock).
+    private func reopenSettings(_ sessionId: String) -> (config: String?, lang: String?) {
+        opened[sessionId] ?? defaults
+    }
     /// What each session was opened with, to open it again the same way after its process ended.
     private var opened: [String: (config: String?, lang: String?)] = [:]
     /// Sessions the app ended (`end`): their process's exit is expected, and they are not opened again by themselves.
@@ -229,25 +242,26 @@ final class SessionClient {
     }
 
     /// Opens a session again whose process ended without the app asking, as it was opened (a session this client did
-    /// not open — one from an earlier launch — with the helper's defaults, which resume its stored settings); true when
+    /// not open — one from an earlier launch — with defaultConfig / defaultLang); true when
     /// it is open, or did not end. `onlyOpenedHere`: only a session this client opened (a watch does not bring back
     /// sessions it merely saw).
     @discardableResult
     func reopenIfExited(_ sessionId: String, onlyOpenedHere: Bool = false) -> Bool {
         lock.lock()
         let exited = states[sessionId]?.exited != nil
-        let how = opened[sessionId]
+        let mine = opened[sessionId] != nil, how = reopenSettings(sessionId)
         let ended = endedByApp.contains(sessionId)
         lock.unlock()
         guard exited else { return true }
-        if ended || (onlyOpenedHere && how == nil) { return false }
-        return open(sessionId: sessionId, config: how?.config ?? defaultConfig, lang: how?.lang ?? defaultLang) != nil
+        if ended || (onlyOpenedHere && !mine) { return false }
+        return open(sessionId: sessionId, config: how.config, lang: how.lang) != nil
     }
 
     /// The id the app gives the user's words it sends (say, cua, steer): the session gives it back on what became of
     /// them (harness#57). Tests set their own.
     var newClientId: () -> String = { "c_" + UUID().uuidString.prefix(12).lowercased() }
 
+    /// Blocks while it reopens an ended session (up to a minute): call it off the main thread.
     func send(_ control: SessionControl, to sessionId: String) -> SendResult { send(control, to: sessionId, clientId: nil) }
 
     /// `clientId`: the words' id when they are sent again (resend); new words get one.
@@ -309,9 +323,9 @@ final class SessionClient {
             if state(sessionId).exited == nil { feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil)))) }
             if let why = Self.goneWithProcess(control, in: state(sessionId)) { return notSent(.refused(why)) }
             lock.lock()
-            let ended = endedByApp.contains(sessionId), how = opened[sessionId]
+            let ended = endedByApp.contains(sessionId), how = reopenSettings(sessionId)
             lock.unlock()
-            guard !ended, open(sessionId: sessionId, config: how?.config ?? defaultConfig, lang: how?.lang ?? defaultLang) != nil else { return notSent(.unavailable) }
+            guard !ended, open(sessionId: sessionId, config: how.config, lang: how.lang) != nil else { return notSent(.unavailable) }
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || st.starts == startsAtHold } } }
             r = transport.request(Request.send(sessionId: sessionId, line: line))
         }

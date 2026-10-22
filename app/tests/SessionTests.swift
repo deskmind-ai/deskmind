@@ -1671,6 +1671,16 @@ enum SessionTests {
         _ = cm.send(.say("x"), to: "old")
         let openReq = pm.requests.first { $0["op"] as? String == SessionClient.Op.open }
         check(openReq?["config"] as? String == "openai:local|fake" && openReq?["lang"] as? String == "zh", "reopened with the app's config: \(String(describing: openReq))")
+        // a session this client opened keeps what it was opened with (even none), not the defaults
+        let pn = MockTransport()
+        pn.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0, "pid": 1], SessionClient.Op.send: ["ok": true]]
+        let cn = SessionClient(transport: pn)
+        _ = cn.open(sessionId: "s")
+        cn.defaultConfig = "X"
+        cn.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#))
+        pn.requests = []
+        _ = cn.send(.say("y"), to: "s")
+        check(pn.requests.first { $0["op"] as? String == SessionClient.Op.open }.map { $0["config"] == nil } == true, "opened here without a config: reopened without one")
         queueInterleavingTests()
     }
 
