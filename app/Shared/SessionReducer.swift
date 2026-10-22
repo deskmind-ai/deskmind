@@ -122,8 +122,17 @@ enum UndoState: Equatable {
     case none                       // no result card that offers undo
     case available                  // the result card's undo can be clicked (the executor lingers)
     case done(undone: Int, total: Int, refused: String?)
+    /// The undo began and was cut off with no result (session.task_undo `unknown: true`, recorded on reopen): how much of
+    /// it was done is not known — never shown as done, nor as nothing undone. Its reason (`refused`), if any.
+    case unknown(String?)
+    /// The undo was asked for (session.task_respond `undo`) and its result has not come: under way, or — its process or
+    /// executor gone — cut off, its result recorded when the session opens again. Never expired.
+    case undoing
     case declined                   // the user picked another option on the result card ("OK")
     case expired(String)            // linger | new_task | session_end: the executor is gone, undo with it
+
+    /// The undo is known to have finished (`done`): `unknown` and `undoing` are not, and must never read as done.
+    var finished: Bool { if case .done = self { return true }; return false }
 }
 
 struct TaskState: Equatable {
@@ -163,6 +172,9 @@ struct TaskState: Equatable {
     var sessionUndo: UndoState? = nil
     var responseUndo: UndoState? = nil
     var resultResponse: ResultResponse? = nil
+    /// session.task_respond: the result card was answered (stored before the answer went to the executor); its `undo`
+    /// says the undo was asked for.
+    var respond: SessionTaskRespond? = nil
     /// The session seq of session.task: the task's place in the chat (nil until it comes).
     var sessionSeq: Int? = nil
     /// session.task_closed's why.
@@ -173,16 +185,19 @@ struct TaskState: Equatable {
     /// The run's contiguous cursor: every executor seq up to it is applied (replays at or below it are skipped).
     var lastSeq = 0
 
-    /// Undo, from the facts whichever order they came in: an undo done or the result card answered otherwise; else
+    /// Undo, from the facts whichever order they came in: an undo's result (done, or unknown when it was cut off); else
+    /// an undo asked for (session.task_respond) is under way — whatever became of its process or executor, never
+    /// expired: its result is recorded when the session opens again; else the result card answered otherwise; else
     /// offered by session.task_end's `undo` ("open" / "none") when it came, by the result card's options before; an
     /// offer whose executor closed (session.task_closed) is expired.
     var undo: UndoState {
         if let d = sessionUndo ?? responseUndo { return d }
+        if respond?.undo == true { return .undoing }
         let offered: Bool
         if let u = end?.undo, u == "open" || u == "none" { offered = u == "open" }
         else { offered = done?.resultCard?.options.contains { $0.kind == "undo" } == true }
         guard offered else { return .none }
-        if resultResponse != nil { return .declined }
+        if resultResponse != nil || respond != nil { return .declined }
         if let why = closed { return .expired(why) }
         return .available
     }
@@ -369,6 +384,7 @@ enum SessionReducer {
         case .taskEnd(let e): settle(&s, e.runId)
         case .taskClosed(let e): settle(&s, e.runId)
         case .taskUndo(let e): settle(&s, e.runId)
+        case .taskRespond(let e): settle(&s, e.runId)
         case .steer(let e): settle(&s, e.runId)
         case .sessionExit, .sessionStart: for i in s.tasks.indices { settle(&s.tasks[i], goneUpTo: s.goneUpTo) }
         default: break
@@ -634,7 +650,10 @@ enum SessionReducer {
             s.tasks[i].closedWhy = e.why
         case .taskUndo(let e):
             let i = taskIndex(&s, e.runId)
-            s.tasks[i].sessionUndo = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
+            s.tasks[i].sessionUndo = e.unknown == true ? .unknown(e.refused) : .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
+        case .taskRespond(let e):
+            let i = taskIndex(&s, e.runId)
+            s.tasks[i].respond = e
         case .steer(let e):
             if let c = e.clientId { taken(&s, c) }
             let i = taskIndex(&s, e.runId)

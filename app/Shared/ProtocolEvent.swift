@@ -209,7 +209,9 @@ struct SessionErrorEvent: Codable, Equatable {
     var control: String?
     /// A refusal of a line that carried a client_id: that id.
     var clientId: String?
-    enum CodingKeys: String, CodingKey { case code, text, msgId = "msg_id", replyTo = "reply_to", control, clientId = "client_id" }
+    /// not_idle (the end_if_idle control, harness#62): which of busy / queue / task / recovering held, in that order.
+    var why: [String]?
+    enum CodingKeys: String, CodingKey { case code, text, msgId = "msg_id", replyTo = "reply_to", control, clientId = "client_id", why }
 }
 
 struct SessionTaskEvent: Codable, Equatable {
@@ -260,7 +262,19 @@ struct SessionTaskUndo: Codable, Equatable {
     var undone: Int?
     var total: Int?
     var refused: String?
-    enum CodingKeys: String, CodingKey { case runId = "run_id", undone, total, refused }
+    /// The undo began and was cut off with no result_response (recorded on reopen, harness#61): how much of it was done
+    /// is not known (`undone` and `total` are 0 then, `refused` says why).
+    var unknown: Bool?
+    enum CodingKeys: String, CodingKey { case runId = "run_id", undone, total, refused, unknown }
+}
+
+/// The result card was answered (harness#61): stored before the answer goes to the executor. `undo`: the option picked
+/// is the card's undo — from here until session.task_undo the undo may be under way.
+struct SessionTaskRespond: Codable, Equatable {
+    @LStr var runId: String = ""
+    var option: Int?
+    var undo: Bool?
+    enum CodingKeys: String, CodingKey { case runId = "run_id", option, undo }
 }
 
 struct SessionSteer: Codable, Equatable {
@@ -535,6 +549,7 @@ enum ProtocolEvent: Equatable {
     case taskEnd(SessionTaskEnd)
     case taskClosed(SessionTaskClosed)
     case taskUndo(SessionTaskUndo)
+    case taskRespond(SessionTaskRespond)
     case steer(SessionSteer)
     case retry(SessionRetry)
     case queue(SessionQueue)
@@ -575,6 +590,7 @@ enum ProtocolEvent: Equatable {
         case .taskEnd: return "session.task_end"
         case .taskClosed: return "session.task_closed"
         case .taskUndo: return "session.task_undo"
+        case .taskRespond: return "session.task_respond"
         case .steer: return "session.steer"
         case .retry: return "session.retry"
         case .queue: return "session.queue"
@@ -633,6 +649,7 @@ extension ProtocolEvent: Codable {
         case "session.task_end": self = read(ProtocolEvent.taskEnd)
         case "session.task_closed": self = read(ProtocolEvent.taskClosed)
         case "session.task_undo": self = read(ProtocolEvent.taskUndo)
+        case "session.task_respond": self = read(ProtocolEvent.taskRespond)
         case "session.steer": self = read(ProtocolEvent.steer)
         case "session.retry": self = read(ProtocolEvent.retry)
         case "session.queue": self = read(ProtocolEvent.queue)
@@ -673,6 +690,7 @@ extension ProtocolEvent: Codable {
         case .taskEnd(let v): try v.encode(to: encoder)
         case .taskClosed(let v): try v.encode(to: encoder)
         case .taskUndo(let v): try v.encode(to: encoder)
+        case .taskRespond(let v): try v.encode(to: encoder)
         case .steer(let v): try v.encode(to: encoder)
         case .retry(let v): try v.encode(to: encoder)
         case .queue(let v): try v.encode(to: encoder)
