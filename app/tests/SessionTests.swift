@@ -133,8 +133,10 @@ enum SessionTests {
         check(s.lastSeq == 6 && s.sessionId == "ses_t", "lastSeq \(s.lastSeq)")
         check(s.status == .done(at: s.messages.last?.t, stopped: true), "a stopped reply last: done, stopped: \(s.status)")
         check(s.timeline.count == 6, "timeline: six messages")
-        // the attach at the end replayed seq 1…6: nothing changed
-        let beforeAttach = all[all.count - 7].state
+        // the attach at the end replayed seq 1…6 (and, from harness#57, the queue, empty): nothing changed
+        let replayStart = all.lastIndex { $0.line.seq == 1 }!
+        var beforeAttach = all[replayStart - 1].state
+        beforeAttach.lastEventAt = s.lastEventAt                // (the last line's time is newer, nothing else)
         check(beforeAttach == s, "attach replay changes nothing")
         check(SessionState().status == .idle, "an empty session is idle")
     }
@@ -1749,6 +1751,21 @@ enum SessionTests {
         let n = m2.requests.count
         check(c2.resend("r2", in: "s") == .refused("task_ended") && m2.requests.count == n, "the task ended: not resent anywhere")
         check(c2.state("s").unsent.first.map { [$0.id, $0.refused ?? ""] } == ["r2", "task_ended"], "still unsent, with why")
+        // a steer with no task running: not sent (nothing to name), never held
+        let c3 = SessionClient(transport: m2)
+        c3.feed(se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#))
+        check(c3.send(.steer("改"), to: "s") == .refused("no task is running") && c3.state("s").outbox.isEmpty, "no task: refused here")
+        // a resend after its stored line came: taken, not sent again (SessionClient.send also checks `taken` as it holds
+        // the words, for a stored line that comes between a resend's look and its hold)
+        let m4 = MockTransport()
+        m4.replies = [SessionClient.Op.send: ["ok": true]]
+        let c4 = SessionClient(transport: m4)
+        c4.newClientId = { "t1" }
+        _ = c4.send(.say("一"), to: "s")
+        c4.feed(se(nil, #""kind":"session.error","code":"busy","text":"x","control":"say","client_id":"t1""#))
+        let before = m4.requests.count
+        c4.feed(se(1, #""kind":"session.message","msg_id":"m","role":"user","text":"一","client_id":"t1""#))
+        check(c4.resend("t1", in: "s") != .sent && m4.requests.count == before && c4.state("s").outbox.isEmpty, "taken: nothing resent, nothing held")
 
         // every acceptance event × every place the words can be: afterwards they are in the history only — not in the
         // outbox (sending or unsent), the queue, a held snapshot — and an older snapshot and an exit bring nothing back

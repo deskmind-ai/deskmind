@@ -1,29 +1,30 @@
-{"t":1792607191.219,"session_id":"ses_t","kind":"session.start","protocol":{"session":1},"last_seq":0,"resumed":false}
-{"seq":1,"t":1792607191.219,"session_id":"ses_t","kind":"session.message","msg_id":"msg_01ad377d","role":"user","text":"你好"}
-{"t":1792607191.227,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_5ed75a19","text":"","offset":0}
-{"t":1792607191.227,"session_id":"ses_t","kind":"session.error","code":"busy","text":"上一条回复还没完：先停下它，或者等它说完","control":"say"}
-{"t":1792607191.249,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_5ed75a19","text":"你好，","offset":0}
-{"t":1792607191.265,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_5ed75a19","text":"我是 ","offset":3}
-{"t":1792607191.281,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_5ed75a19","text":"DeskMind。","offset":6}
-{"t":1792607191.297,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_5ed75a19","text":"有什么","offset":15}
-{"t":1792607191.308,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_5ed75a19","text":"可以帮你？","offset":18}
-{"seq":2,"t":1792607191.308,"session_id":"ses_t","kind":"session.message","msg_id":"msg_5ed75a19","role":"assistant","text":"你好，我是 DeskMind。有什么可以帮你？","reply_to":"msg_01ad377d","model":"test|scripted"}
-{"seq":3,"t":1792607191.313,"session_id":"ses_t","kind":"session.message","msg_id":"msg_d6072b95","role":"user","text":"hi"}
-{"t":1792607191.318,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_616e47cb","text":"","offset":0}
-{"t":1792607191.319,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_616e47cb","text":"abc","offset":0}
-{"t":1792607191.319,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_616e47cb","text":"xyz","offset":0}
-{"seq":4,"t":1792607191.319,"session_id":"ses_t","kind":"session.message","msg_id":"msg_616e47cb","role":"assistant","text":"xyz","reply_to":"msg_d6072b95","model":"test|scripted"}
-{"seq":5,"t":1792607191.323,"session_id":"ses_t","kind":"session.message","msg_id":"msg_4203e706","role":"user","text":"讲个长故事"}
-{"t":1792607191.327,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_2cb66851","text":"","offset":0}
-{"t":1792607191.359,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_2cb66851","text":"第0句。","offset":0}
-{"t":1792607191.383,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_2cb66851","text":"第1句。","offset":4}
-{"t":1792607191.408,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_2cb66851","text":"第2句。","offset":8}
-{"t":1792607191.433,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_2cb66851","text":"第3句。","offset":12}
-{"t":1792607191.458,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_2cb66851","text":"第4句。","offset":16}
-{"seq":6,"t":1792607191.462,"session_id":"ses_t","kind":"session.message","msg_id":"msg_2cb66851","role":"assistant","text":"第0句。第1句。第2句。第3句。第4句。","reply_to":"msg_4203e706","stopped":true,"model":"test|scripted"}
-{"seq":1,"t":1792607191.219,"session_id":"ses_t","kind":"session.message","msg_id":"msg_01ad377d","role":"user","text":"你好"}
-{"seq":2,"t":1792607191.308,"session_id":"ses_t","kind":"session.message","msg_id":"msg_5ed75a19","role":"assistant","text":"你好，我是 DeskMind。有什么可以帮你？","reply_to":"msg_01ad377d","model":"test|scripted"}
-{"seq":3,"t":1792607191.313,"session_id":"ses_t","kind":"session.message","msg_id":"msg_d6072b95","role":"user","text":"hi"}
-{"seq":4,"t":1792607191.319,"session_id":"ses_t","kind":"session.message","msg_id":"msg_616e47cb","role":"assistant","text":"xyz","reply_to":"msg_d6072b95","model":"test|scripted"}
-{"seq":5,"t":1792607191.323,"session_id":"ses_t","kind":"session.message","msg_id":"msg_4203e706","role":"user","text":"讲个长故事"}
-{"seq":6,"t":1792607191.462,"session_id":"ses_t","kind":"session.message","msg_id":"msg_2cb66851","role":"assistant","text":"第0句。第1句。第2句。第3句。第4句。","reply_to":"msg_4203e706","stopped":true,"model":"test|scripted"}
+{"t":1792648779.754,"session_id":"ses_t","kind":"session.start","protocol":{"session":1},"last_seq":0,"resumed":false}
+{"seq":1,"t":1792648779.755,"session_id":"ses_t","kind":"session.message","msg_id":"msg_cbaa9202","role":"user","text":"你好"}
+{"t":1792648779.761,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_407dd7ee","text":"","offset":0}
+{"t":1792648779.762,"session_id":"ses_t","kind":"session.error","code":"busy","text":"上一条回复还没完：先停下它，或者等它说完","control":"say"}
+{"t":1792648779.784,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_407dd7ee","text":"你好，","offset":0}
+{"t":1792648779.8,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_407dd7ee","text":"我是 ","offset":3}
+{"t":1792648779.816,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_407dd7ee","text":"DeskMind。","offset":6}
+{"t":1792648779.833,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_407dd7ee","text":"有什么","offset":15}
+{"t":1792648779.845,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_407dd7ee","text":"可以帮你？","offset":18}
+{"seq":2,"t":1792648779.845,"session_id":"ses_t","kind":"session.message","msg_id":"msg_407dd7ee","role":"assistant","text":"你好，我是 DeskMind。有什么可以帮你？","reply_to":"msg_cbaa9202","model":"test|scripted"}
+{"seq":3,"t":1792648779.85,"session_id":"ses_t","kind":"session.message","msg_id":"msg_327f5a79","role":"user","text":"hi"}
+{"t":1792648779.855,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_23487f22","text":"","offset":0}
+{"t":1792648779.856,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_23487f22","text":"abc","offset":0}
+{"t":1792648779.856,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_23487f22","text":"xyz","offset":0}
+{"seq":4,"t":1792648779.856,"session_id":"ses_t","kind":"session.message","msg_id":"msg_23487f22","role":"assistant","text":"xyz","reply_to":"msg_327f5a79","model":"test|scripted"}
+{"seq":5,"t":1792648779.86,"session_id":"ses_t","kind":"session.message","msg_id":"msg_85ed53d5","role":"user","text":"讲个长故事"}
+{"t":1792648779.864,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_de89fabd","text":"","offset":0}
+{"t":1792648779.896,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_de89fabd","text":"第0句。","offset":0}
+{"t":1792648779.92,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_de89fabd","text":"第1句。","offset":4}
+{"t":1792648779.946,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_de89fabd","text":"第2句。","offset":8}
+{"t":1792648779.97,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_de89fabd","text":"第3句。","offset":12}
+{"t":1792648779.997,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_de89fabd","text":"第4句。","offset":16}
+{"seq":6,"t":1792648780,"session_id":"ses_t","kind":"session.message","msg_id":"msg_de89fabd","role":"assistant","text":"第0句。第1句。第2句。第3句。第4句。","reply_to":"msg_85ed53d5","stopped":true,"model":"test|scripted"}
+{"seq":1,"t":1792648779.755,"session_id":"ses_t","kind":"session.message","msg_id":"msg_cbaa9202","role":"user","text":"你好"}
+{"seq":2,"t":1792648779.845,"session_id":"ses_t","kind":"session.message","msg_id":"msg_407dd7ee","role":"assistant","text":"你好，我是 DeskMind。有什么可以帮你？","reply_to":"msg_cbaa9202","model":"test|scripted"}
+{"seq":3,"t":1792648779.85,"session_id":"ses_t","kind":"session.message","msg_id":"msg_327f5a79","role":"user","text":"hi"}
+{"seq":4,"t":1792648779.856,"session_id":"ses_t","kind":"session.message","msg_id":"msg_23487f22","role":"assistant","text":"xyz","reply_to":"msg_327f5a79","model":"test|scripted"}
+{"seq":5,"t":1792648779.86,"session_id":"ses_t","kind":"session.message","msg_id":"msg_85ed53d5","role":"user","text":"讲个长故事"}
+{"seq":6,"t":1792648780,"session_id":"ses_t","kind":"session.message","msg_id":"msg_de89fabd","role":"assistant","text":"第0句。第1句。第2句。第3句。第4句。","reply_to":"msg_85ed53d5","stopped":true,"model":"test|scripted"}
+{"t":1792648780.007,"session_id":"ses_t","kind":"session.queue","items":[]}

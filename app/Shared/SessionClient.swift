@@ -251,7 +251,10 @@ final class SessionClient {
         if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return .refused(why) }
         // a steer names its task: the one running now, made explicit, so that a resend never goes to another one
         var control = control
-        if case .steer(let t, nil) = control, let r = s.runningTask?.runId { control = .steer(t, runId: r) }
+        if case .steer(let t, nil) = control {
+            guard let r = s.runningTask?.runId else { return .refused("no task is running") }    // nothing to name: not sent
+            control = .steer(t, runId: r)
+        }
         // the user's words: held in the outbox from here until the session says what became of them
         var line = control.line
         var words: String? = nil
@@ -262,7 +265,10 @@ final class SessionClient {
             let id = clientId ?? newClientId()
             words = id
             line["client_id"] = id
+            var gone = false
             mutate(sessionId) { st in
+                // taken by the history meanwhile (a resend racing its stored line): nothing to send
+                if st.taken.contains(id) { gone = true; return }
                 // the send opens the session again, or it was opened and its process's start not heard yet: the
                 // words are the next process's (decided on the state as it is now, not as it was read above)
                 startsAtHold = st.starts
@@ -271,6 +277,7 @@ final class SessionClient {
                 if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = next }
                 else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true, toNextProcess: next, original: control)) }
             }
+            if gone { return .refused("taken") }
         }
         // not sent after all: the words are the app's, not sent (never lost)
         let notSent = { [self] (r: SendResult) -> SendResult in
@@ -325,7 +332,7 @@ final class SessionClient {
         let s = state(sessionId)
         guard let item = s.unsent.first(where: { $0.id == id }) else { return .refused("no such unsent message") }
         let control = item.original ?? .say(item.text)
-        if case .steer(_, let r?) = control, s.task(r)?.running != true {
+        if case .steer(_, let r) = control, r.map({ s.task($0)?.running != true }) ?? true {
             mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].refused = "task_ended" } }
             return .refused("task_ended")
         }
