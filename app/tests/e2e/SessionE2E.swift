@@ -143,6 +143,15 @@ enum SessionE2E {
 
     static func killGroup(_ pgid: Int32) { Darwin.kill(-pgid, SIGKILL) }
 
+    /// How many live (not zombie) processes group `pgid` has.
+    static func members(_ pgid: Int32) -> Int {
+        let bytes = proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(pgid), nil, 0)
+        guard bytes > 0 else { return 0 }
+        var buf = [pid_t](repeating: 0, count: Int(bytes) / MemoryLayout<pid_t>.size + 32)
+        let got = proc_listpids(UInt32(PROC_PGRP_ONLY), UInt32(pgid), &buf, Int32(buf.count * MemoryLayout<pid_t>.size))
+        return got > 0 ? buf.prefix(Int(got) / MemoryLayout<pid_t>.size).filter { $0 > 0 && ComputerLock.startOf($0) != nil }.count : 0
+    }
+
     /// The machine lock's protocol on real process groups (ComputerLock; harness docs/protocol.md 「电脑锁」).
     static func lock(dir: String) {
         setup(dir)
@@ -245,6 +254,34 @@ enum SessionE2E {
         } else { check(false, "an unwritable lock: refused") }
         try? fm.removeItem(at: ComputerLock.file)
 
+        // deskmind#105 (review of 947c736): a run's clean-up after its process ended may take the Mac only while the
+        // lock is still exactly what it left -- never another task's holder, lingering for its undo included
+        try? fm.removeItem(at: ComputerLock.file)
+        let old = executor("true")
+        guard case .ok(let hOld?) = start("run_old_hands", old, by: "hands") else { check(false, "the old run starts"); exit(1) }
+        old.waitUntilExit()
+        let later = executor("sleep 30")
+        guard case .ok(let hLater?) = ComputerLock.acquire(runID: "run_later", by: "session", spawn: { try? later.run(); return later.processIdentifier }),
+              let lLater = ComputerLock.linger(hLater) else { check(false, "a later task takes the Mac and lingers"); exit(1) }
+        check(ComputerLock.reserveIfMine(hOld) == nil && later.isRunning && ComputerLock.read() == lLater,
+              "the old run's clean-up: the later task's lingering holder (its undo) is left alone, the clean-up skipped")
+        if case .ok(let u) = ComputerLock.undo(lLater) { check(u.runID == "run_later", "and the later task's undo still goes") }
+        else { check(false, "and the later task's undo still goes") }
+        killGroup(later.processIdentifier); later.waitUntilExit()
+        // a lock let go (and maybe taken and left since): nothing to clean up under
+        try? fm.removeItem(at: ComputerLock.file)
+        check(ComputerLock.reserveIfMine(hOld) == nil && ComputerLock.read() == nil, "a lock let go meanwhile: the clean-up skipped")
+        // still exactly its own: what is left of its group is ended, the Mac held for the clean-up, then let go
+        let leftover = executor("trap '' TERM; sleep 30 & exit 0")
+        guard case .ok(let hLeft?) = start("run_left", leftover, by: "hands") else { check(false, "a run with a leftover starts"); exit(1) }
+        leftover.waitUntilExit()
+        if let r = ComputerLock.reserveIfMine(hLeft, term: 0.3, kill: 1) {
+            check(r.pgid == 0 && r.owner == getpid() && ComputerLock.read() == r && !ComputerLock.groupAlive(leftover.processIdentifier),
+                  "still its own: its leftover ended, the Mac held for the clean-up")
+            ComputerLock.cancel(r)
+            check(ComputerLock.read() == nil, "then let go")
+        } else { check(false, "still its own: reserved for the clean-up") }
+
         // two op runs at once (forced interleaving): B asks while A is inside the guard, its executor started and not
         // yet written. B waits for the guard, then finds A acting: busy -- nothing of A's is ended.
         try? fm.removeItem(at: ComputerLock.file)
@@ -316,6 +353,10 @@ enum SessionE2E {
         setup(dir)
         let p = executor("sleep 300 & sleep 300")
         guard case .ok(let h?) = start("run_held", p) else { print("refused"); exit(1) }
+        // reported only once the group has its shape (the shell and its background child): before, a look at it right
+        // after the start could see the shell alone (a test raced the fork)
+        let until = Date().addingTimeInterval(10)
+        while members(h.pgid) < 2 && Date() < until { Thread.sleep(forTimeInterval: 0.02) }
         print(h.pgid); fflush(stdout)
         while true { Thread.sleep(forTimeInterval: 60) }
     }

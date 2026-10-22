@@ -158,6 +158,24 @@ enum ComputerLock {
         }
     }
 
+    /// Background work of a run that is over (its clean-up: windows closed, TextEdit quit) -- never a new task: the Mac
+    /// only if the lock is still exactly what this run left (`from`: its run, group, state and generation). Then what is
+    /// left of its own group is ended and the lock becomes this helper's reservation for the clean-up. Anything else --
+    /// another task's holder, lingering included, or a lock let go and maybe taken and left since -- is never ended:
+    /// nil, and the clean-up is skipped. (Only a new task the user asked for may end a lingering holder: acquire,
+    /// reserve.)
+    static func reserveIfMine(_ from: SessionWire.Holder, term: Double = 1.5, kill: Double = 1,
+                              signal: (Int32, Int32) -> Int32 = { Darwin.kill($0, $1) }) -> SessionWire.Holder? {
+        guarded(otherwise: nil) {
+            guard let h = read(), h == from || (h.runID == from.runID && h.pgid == from.pgid && h.gen == from.gen && h.state == from.state)
+            else { return nil }
+            if h.pgid > 1, held(h), !endTree(h, term: term, kill: kill, signal: signal) { return nil }
+            let r = SessionWire.Holder(state: "acting", pgid: 0, pid: 0, start: 0, runID: h.runID, sessionID: "", by: h.by,
+                                       owner: getpid(), t: Date().timeIntervalSince1970, gen: h.gen + 1)
+            return write(r) ? r : nil
+        }
+    }
+
     /// A reservation not used (refused, stopped before its launch): the Mac let go, if the lock is still exactly it.
     static func cancel(_ r: SessionWire.Holder) {
         guarded(otherwise: ()) { if read() == r { unlink(file.path) } }

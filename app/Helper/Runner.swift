@@ -867,17 +867,17 @@ enum Runner {
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
         // Before the clean-up closes the run's windows: how it ended, for a moment, on its last picture.
         LiveCard.finish(stopped ? .stopped : freeState == "completed" ? .done : .failed)
-        // it acts no more; the clean-up closes windows and may quit TextEdit -- the desktop, so under the machine lock
-        // too: reserved again for it (which ends what the run left in its group, a Peekaboo server), unless another
-        // task has the Mac by now (then nothing of it is touched)
-        if let acquired { ComputerLock.linger(acquired) }
-        ComputerLock.free(runID: runID, pgid: p.processIdentifier)
-        switch ComputerLock.reserve(runID: runID + "-cleanup", by: "hands") {
-        case .ok(let r?): cleanUp(quitTextEdit: !textEditWasRunning); ComputerLock.cancel(r)
-        case .busy(let h): NSLog("DeskMind Hands: \(h.runID) (\(h.by)) has the Mac; the run's windows are left as they are")
-        case .alive: NSLog("DeskMind Hands: what the run left would not end; its windows are left as they are")
-        case .failed(let why): NSLog("DeskMind Hands: the machine lock (\(why)); the run's windows are left as they are")
-        case .ok(nil): break
+        // The clean-up closes windows and may quit TextEdit -- the desktop, so under the machine lock: only if the lock is
+        // still exactly what this run left (reserveIfMine: what is left of its own group, a Peekaboo server, is ended,
+        // and the lock is held for the clean-up). Taken over meanwhile -- another task holds it, or has come and left
+        // it lingering for its undo -- nothing of it is touched, and the clean-up is skipped.
+        if let acquired, let r = ComputerLock.reserveIfMine(acquired) {
+            cleanUp(quitTextEdit: !textEditWasRunning)
+            ComputerLock.cancel(r)
+        } else {
+            NSLog("DeskMind Hands: the Mac is no longer this run's; its windows are left as they are")
+            if let acquired { ComputerLock.linger(acquired) }   // its own, if still there: the next task ends it
+            ComputerLock.free(runID: runID, pgid: p.processIdentifier)
         }
         pruneRuns(keep: 10)
         // hands says some refusals on stdout ("refused: … is your home directory"): its tail too, when stderr is quiet.
