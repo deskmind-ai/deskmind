@@ -8,6 +8,12 @@
 // cursor as a replay, and holds seq > cursor + 1 back as a gap (SessionState.hasGap) until the missing lines come; the
 // client then watches again from the cursor (SessionClient.watch). The unstored lines — deltas, the queue, refusals —
 // have no seq and are idempotent by construction. So a reconnect may simply replay, and a late line is never lost.
+//
+// Streams are not ordered against each other (a reconnect replays the session's events before the runs'), so the state
+// is the same whichever stream came first: what a session event implies about a run (its end voids an open card,
+// closes steps with no result) is provisional, recomputed from the facts after every line (`settle`), and the run's own
+// word (resumed, ask_void, step_result) always wins; the chat and the tasks are kept in the session's stored order
+// (`order`). SessionTests.interleavingPropertyTests holds the reducer to it.
 
 import Foundation
 
@@ -29,6 +35,11 @@ struct ChatMessage: Equatable {
     /// The user asked for this answer again (session.retry): it is no longer in the model's context.
     var retracted = false
     var t: Double? = nil
+    /// The stored seq of its final session.message (nil while it streams): its place in the chat.
+    var seq: Int? = nil
+    /// The session's process ended while it streamed: no final message came and nothing was stored. It shows as
+    /// interrupted, never as a finished reply.
+    var interrupted = false
 }
 
 struct StoredError: Equatable {
@@ -53,7 +64,10 @@ struct StepState: Equatable {
     var object: String?
     var planStep: Int?
     var target: StepTarget?
+    /// What the step shows: its result, else what the task's end makes of a step with none (SessionReducer.settle).
     var status: Status = .running
+    /// Its own result (step_result, or an older harness's status on the step): nil while it has none.
+    var result: Status? = nil
     var why: String? = nil
     var executorStatus: String? = nil
     var shot: String? = nil
@@ -73,7 +87,10 @@ struct CardState: Equatable {
     var askId: String
     var card: CardEvent
     var askedAt: Double?
+    /// What the card shows: its own outcome, else open, or void when its task ended first (SessionReducer.settle).
     var outcome: Outcome = .open
+    /// What the run said of it (resumed, ask_void, a newer card): it always wins over what the task's end implies.
+    var explicit: Outcome? = nil
     /// consent.picked after an action card was answered: what the consent covers (action / object / rule), if any.
     var picked: String? = nil
 }
@@ -110,16 +127,21 @@ struct TaskState: Equatable {
     var steersSent: [String] = []   // session.steer
     var steered: [String] = []      // steered: the executor took them
     var refusals: [RefusedEvent] = []
-    var changes = Changes()
+    /// The executor's running total (changes events).
+    var runChanges: Changes? = nil
     var verify: VerifyEvent? = nil
-    var answer: String? = nil
+    /// answer_given's text.
+    var givenAnswer: String? = nil
     var done: TaskDone? = nil
     var doneAt: Double? = nil
     var end: SessionTaskEnd? = nil
     var endSeq: Int? = nil          // the session seq of session.task_end
-    /// What came of an undo (session.task_undo, or result_response with an undo); nil while none was done.
-    var undoDone: UndoState? = nil
+    /// What came of an undo: session.task_undo's (preferred) and result_response's; nil while none was done.
+    var sessionUndo: UndoState? = nil
+    var responseUndo: UndoState? = nil
     var resultResponse: ResultResponse? = nil
+    /// The session seq of session.task: the task's place in the chat (nil until it comes).
+    var sessionSeq: Int? = nil
     var closed: String? = nil       // session.task_closed why
     /// The run's contiguous cursor: every executor seq up to it is applied (replays at or below it are skipped).
     var lastSeq = 0
@@ -128,7 +150,7 @@ struct TaskState: Equatable {
     /// offered by session.task_end's `undo` ("open" / "none") when it came, by the result card's options before; an
     /// offer whose executor closed (session.task_closed) is expired.
     var undo: UndoState {
-        if let d = undoDone { return d }
+        if let d = sessionUndo ?? responseUndo { return d }
         let offered: Bool
         if let u = end?.undo, u == "open" || u == "none" { offered = u == "open" }
         else { offered = done?.resultCard?.options.contains { $0.kind == "undo" } == true }
@@ -139,11 +161,25 @@ struct TaskState: Equatable {
     }
     /// Why the task ended, structured: task_done's, else session.task_end's.
     var cause: TaskCause? { done?.cause ?? end?.cause }
+    /// What it changed: task_done's (with the windows it made from the running total), else session.task_end's when
+    /// no task_done came, else the running total — whichever order they came in.
+    var changes: Changes {
+        if let d = done?.changes {
+            var m = d
+            if m.createdWindows == nil { m.createdWindows = runChanges?.createdWindows }
+            return m
+        }
+        if done == nil, let e = end?.changes { return e }
+        return runChanges ?? Changes()
+    }
+    /// The answer: task_done's, else answer_given's, else session.task_end's.
+    var answer: String? { done?.answer ?? givenAnswer ?? end?.answer }
 
     /// The session's process ended (helper.session_exit) before this task ended: it is not running any more.
     var cutOff = false
 
-    var running: Bool { done == nil && end == nil && !cutOff }
+    var ended: Bool { done != nil || end != nil || cutOff }
+    var running: Bool { !ended }
     var openCard: CardState? { openCardId.flatMap { id in cards.first { $0.askId == id } } }
     /// The task's final status: task_done's, else session.task_end's (`interrupted` when no task_done was ever written).
     var status: String? { done?.status ?? end?.status }
@@ -169,6 +205,9 @@ struct SessionState: Equatable {
     var tasks: [TaskState] = []
     var timeline: [TimelineItem] = []
     var queue: [QueueItem] = []
+    /// What was queued when the session's process ended: never sent, and no longer in any queue. Shown with
+    /// 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent); never as pending.
+    var unsent: [QueueItem] = []
     var errors: [StoredError] = []
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
     var lastRefusal: SessionErrorEvent? = nil
@@ -257,6 +296,8 @@ enum SessionReducer {
         if let seq = line.seq { s.lastSeq = seq }
         if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
         session(&s, line.event, line)
+        for i in s.tasks.indices { settle(&s.tasks[i]) }
+        order(&s)
     }
 
     /// One executor line of `runId` in its place.
@@ -265,6 +306,29 @@ enum SessionReducer {
         if let seq = line.seq { s.tasks[i].lastSeq = seq }
         if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
         executor(&s.tasks[i], line.event, line.t)
+        settle(&s.tasks[i])
+    }
+
+    /// The chat and the tasks in the order the session stored them (by session seq), whatever order the streams came
+    /// in; what has no stored place yet (a reply streaming, a run whose session.task has not come) after, as it came.
+    private static func order(_ s: inout SessionState) {
+        var msgSeq: [String: Int] = [:], taskSeq: [String: Int] = [:]
+        for m in s.messages { if let q = m.seq { msgSeq[m.id] = q } }
+        for t in s.tasks { if let q = t.sessionSeq { taskSeq[t.runId] = q } }
+        func key(_ item: TimelineItem) -> Int? {
+            switch item {
+            case .message(let id): return msgSeq[id]
+            case .task(let id): return taskSeq[id]
+            case .error(let seq): return seq
+            }
+        }
+        let keys = s.timeline.map(key)
+        var keyed: [(Int, TimelineItem)] = [], loose: [TimelineItem] = []
+        for (k, item) in zip(keys, s.timeline) { if let k { keyed.append((k, item)) } else { loose.append(item) } }
+        keyed.sort { $0.0 < $1.0 }
+        s.timeline = keyed.map(\.1) + loose
+        let tasks = s.tasks.compactMap { t in t.sessionSeq.map { ($0, t) } }.sorted { $0.0 < $1.0 }.map(\.1)
+        s.tasks = tasks + s.tasks.filter { $0.sessionSeq == nil }
     }
 
     // MARK: session events
@@ -279,12 +343,14 @@ enum SessionReducer {
             s.exited = e.code ?? -1
             // a reply in progress stops where it is; a running task is cut off, its card can no longer be answered
             dropEmptyStreaming(&s)
-            for i in s.messages.indices where s.messages[i].streaming { s.messages[i].streaming = false }
-            for i in s.tasks.indices where s.tasks[i].running {
-                if let id = s.tasks[i].openCardId { setOutcome(&s.tasks[i], id, .void("session_exit")) }
-                closeOpenParts(&s.tasks[i], cause: nil)
-                s.tasks[i].cutOff = true
+            for i in s.messages.indices where s.messages[i].streaming {
+                s.messages[i].streaming = false
+                s.messages[i].interrupted = true
             }
+            for i in s.tasks.indices where s.tasks[i].running { s.tasks[i].cutOff = true }   // settle closes what was open
+            // what was queued lived in the process: not sent, and not pending any more (SessionClient.resend)
+            s.unsent += s.queue
+            s.queue = []
             // a result card still answerable: its executor went with the process, and undo with it
             for i in s.tasks.indices where s.tasks[i].closed == nil && s.tasks[i].done != nil { s.tasks[i].closed = "session_exit" }
         case .message(let m):
@@ -299,10 +365,12 @@ enum SessionReducer {
                 s.messages[i].stopped = m.stopped ?? false
                 s.messages[i].truncated = m.truncated ?? false
                 s.messages[i].t = line.t
+                s.messages[i].seq = line.seq
+                s.messages[i].interrupted = false
             } else {
                 if m.role == "assistant" { dropEmptyStreaming(&s) }
                 s.messages.append(ChatMessage(id: m.msgId, role: m.role, text: m.text, streaming: false, replyTo: m.replyTo, model: m.model,
-                                              via: m.via, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t))
+                                              via: m.via, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
                 s.timeline.append(.message(m.msgId))
             }
         case .delta(let d):
@@ -323,20 +391,18 @@ enum SessionReducer {
             s.tasks[i].goal = e.goal
             s.tasks[i].by = e.by
             s.tasks[i].replyTo = e.replyTo
-            if s.tasks[i].startedAt == nil { s.tasks[i].startedAt = line.t }
+            s.tasks[i].startedAt = line.t ?? s.tasks[i].startedAt     // session.task's time, before or after the run's start
+            if let seq = line.seq { s.tasks[i].sessionSeq = seq }
         case .taskEnd(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].end = e
             s.tasks[i].endSeq = line.seq
-            if let c = e.changes, s.tasks[i].done == nil { s.tasks[i].changes = c }
-            if s.tasks[i].answer == nil { s.tasks[i].answer = e.answer }
-            if s.tasks[i].done == nil { closeOpenParts(&s.tasks[i], cause: e.cause) }
         case .taskClosed(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].closed = e.why
         case .taskUndo(let e):
             let i = taskIndex(&s, e.runId)
-            s.tasks[i].undoDone = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
+            s.tasks[i].sessionUndo = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
         case .steer(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].steersSent.append(e.text)
@@ -429,11 +495,11 @@ enum SessionReducer {
             st.object = e.object
             st.planStep = e.planStep
             st.target = e.target
-            if e.stepId == nil, let old = e.status { st.status = StepState.Status(rawValue: old) ?? .ok }   // an older harness: one line per step
+            if e.stepId == nil, let old = e.status { st.result = resultStatus(old, else: .ok) }   // an older harness: one line per step
             if let i = task.steps.firstIndex(where: { $0.id == id }) { task.steps[i] = st } else { task.steps.append(st) }
         case .stepResult(let r):
             guard let i = task.steps.firstIndex(where: { $0.id == r.stepId }) else { return }
-            task.steps[i].status = StepState.Status(rawValue: r.status) ?? .error
+            task.steps[i].result = resultStatus(r.status, else: .error)
             task.steps[i].why = r.why
             task.steps[i].executorStatus = r.executorStatus
             if let c = r.consequence { task.steps[i].consequence = c }
@@ -447,13 +513,11 @@ enum SessionReducer {
             task.steps[i].shotPending = false
         case .ask(let a):
             task.preparing = false
-            // a card already answered or voided, asked again (a replay without seq): it stays closed
-            if let c = task.cards.first(where: { $0.askId == a.askId }), c.outcome != .open { break }
-            if let old = task.openCardId, old != a.askId { setOutcome(&task, old, .void("replaced")) }
-            if !task.cards.contains(where: { $0.askId == a.askId }) {
-                task.cards.append(CardState(askId: a.askId, card: a.card, askedAt: t))
-            }
-            if task.running { task.openCardId = a.askId }
+            // a card asked again (a replay without seq): nothing changes, an answered or voided one stays closed
+            if task.cards.contains(where: { $0.askId == a.askId }) { break }
+            // a new card: one the run left open before it is replaced (one card waits at a time)
+            for i in task.cards.indices where task.cards[i].explicit == nil { task.cards[i].explicit = .void("replaced") }
+            task.cards.append(CardState(askId: a.askId, card: a.card, askedAt: t))
         case .waiting(let w):
             if w.askId == nil && task.running { task.userActive = true }
         case .resumed(let r):
@@ -478,23 +542,16 @@ enum SessionReducer {
             task.verify = v
             task.lookOnly = v.verdict == "unknown" && v.missingKind == "evidence"
         case .changes(let c):
-            task.changes = c
+            task.runChanges = c
         case .answerGiven(let a):
-            task.answer = a.text
+            task.givenAnswer = a.text
         case .taskDone(let d):
             task.done = d
             task.doneAt = t
-            if let c = d.changes {
-                var merged = c
-                if merged.createdWindows == nil { merged.createdWindows = task.changes.createdWindows }
-                task.changes = merged
-            }
-            if let a = d.answer { task.answer = a }
-            closeOpenParts(&task, cause: d.cause)
         case .resultResponse(let r):
             task.resultResponse = r
-            if let undone = r.undone { task.undoDone = .done(undone: undone, total: r.total ?? undone, refused: r.refused) }
-            else if r.picked == "undo" { task.undoDone = .done(undone: 0, total: r.total ?? 0, refused: r.refused) }
+            if let undone = r.undone { task.responseUndo = .done(undone: undone, total: r.total ?? undone, refused: r.refused) }
+            else if r.picked == "undo" { task.responseUndo = .done(undone: 0, total: r.total ?? 0, refused: r.refused) }
         case .modelCall, .judge, .unknown:
             break
         default:
@@ -502,22 +559,46 @@ enum SessionReducer {
         }
     }
 
+    /// The run's word on a card (the first wins): over whatever the task's end implied, which was only provisional.
     private static func setOutcome(_ task: inout TaskState, _ askId: String, _ outcome: CardState.Outcome) {
-        if let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].outcome == .open { task.cards[i].outcome = outcome }
-        if task.openCardId == askId { task.openCardId = nil }
+        if let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].explicit == nil { task.cards[i].explicit = outcome }
     }
 
-    /// The task is over (task_done, or session.task_end without one): an open card can no longer be answered, the user is
-    /// no longer waited for, steps with no result are closed — the one with the driver when the stop came is "unknown".
-    private static func closeOpenParts(_ task: inout TaskState, cause: TaskCause?) {
-        if let id = task.openCardId { setOutcome(&task, id, .void("task_done")) }
-        task.userActive = false
-        task.lookOnly = false
-        task.stopping = false
-        task.preparing = false
-        let running = task.steps.indices.filter { task.steps[$0].status == .running }
-        for i in running {
-            task.steps[i].status = (cause == .lastStepUnknown && i == running.last) ? .unknown : .notFinished
+    /// A step result's status from the wire: one of the results a step can have, else `fallback`.
+    private static func resultStatus(_ raw: String, else fallback: StepState.Status) -> StepState.Status {
+        switch StepState.Status(rawValue: raw) {
+        case .ok?: return .ok
+        case .unverified?: return .unverified
+        case .refused?: return .refused
+        case .stale?: return .stale
+        case .error?: return .error
+        default: return fallback
+        }
+    }
+
+    /// What the task's facts make of its parts, whichever stream told what first (a replay sends the session's events
+    /// before the runs'): a card shows the run's word on it, else open while the task runs, else void (its task ended
+    /// first); a step shows its result, else running while the task runs, else — the task ended without one — not
+    /// finished, the last such one unknown when the end says so (cause last_step_unknown) or the process went away. An
+    /// ended task waits for nobody: no open card, no pause, no look-only, no stopping, no preparing.
+    private static func settle(_ task: inout TaskState) {
+        let ended = task.ended
+        let endedWhy = (task.done == nil && task.end == nil) ? "session_exit" : "task_done"
+        for i in task.cards.indices {
+            task.cards[i].outcome = task.cards[i].explicit ?? (ended ? .void(endedWhy) : .open)
+        }
+        task.openCardId = ended ? nil : task.cards.last { $0.outcome == .open }?.askId
+        let lastUnknown = task.cause == .lastStepUnknown || (task.cutOff && task.done == nil && task.end == nil)
+        let unresolved = task.steps.indices.filter { task.steps[$0].result == nil }
+        for i in task.steps.indices {
+            if let r = task.steps[i].result { task.steps[i].status = r; continue }
+            task.steps[i].status = !ended ? .running : (lastUnknown && i == unresolved.last) ? .unknown : .notFinished
+        }
+        if ended {
+            task.userActive = false
+            task.lookOnly = false
+            task.stopping = false
+            task.preparing = false
         }
     }
 }
@@ -582,7 +663,8 @@ enum SessionStatus: Equatable {
                 return .idle
             case .message(let id):
                 guard let m = s.message(id) else { continue }
-                return m.role == "assistant" ? .done(at: m.t, stopped: m.stopped) : .idle
+                // done only with the final message: a reply cut off by the process's end is not a finished one
+                return m.role == "assistant" && !m.interrupted ? .done(at: m.t, stopped: m.stopped) : .idle
             case .error:
                 return .idle
             }

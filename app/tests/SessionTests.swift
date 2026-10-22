@@ -35,6 +35,9 @@ enum SessionTests {
         cardIdentityTests()
         steerLookOnlyTests()
         wireNeverCrashesTests()
+        crossStreamTests()
+        exitLeftoversTests()
+        interleavingPropertyTests()
     }
 
     // MARK: fixtures
@@ -927,5 +930,197 @@ enum SessionTests {
             }
         }
         check(fed > 100, "mutated lines fed: \(fed)")
+    }
+
+    // MARK: the order of different streams (review of e1ea7fc, "上次 5 项")
+
+    /// A reconnect replays the session's events before the runs': the session's end must not decide what the run says.
+    static func crossStreamTests() {
+        let start = ex(1, #""kind":"start","raw":"x""#), ask = ex(2, #""kind":"ask","ask_id":"a1","# + actionCard)
+        let resumed = ex(3, #""kind":"resumed","ask_id":"a1""#)
+        let step1 = ex(4, #""kind":"step","text":"x","step_id":"s1""#), res1 = ex(5, #""kind":"step_result","step_id":"s1","status":"ok""#)
+        let step2 = ex(6, #""kind":"step","text":"y","step_id":"s2""#)
+        let endInterrupted = se(2, #""kind":"session.task_end","run_id":"r1","status":"interrupted","summary":"","undo":"none","cause":"last_step_unknown""#)
+        let live = SessionReducer.reduce(SessionState(), [taskR1, start, ask, resumed, step1, res1, step2, endInterrupted])
+        let replay = SessionReducer.reduce(SessionState(), [taskR1, endInterrupted, start, ask, resumed, step1, res1, step2])
+        check(live.task("r1")?.cards.map(\.outcome) == [.answered] && replay.task("r1")?.cards.map(\.outcome) == [.answered], "1: an answered card stays answered after a replay")
+        check(live.task("r1")?.steps.map(\.status) == [.ok, .unknown], "2 live: the step in progress: unknown: \(String(describing: live.task("r1")?.steps.map(\.status)))")
+        check(replay.task("r1")?.steps.map(\.status) == [.ok, .unknown], "2 replay: the same, never running: \(String(describing: replay.task("r1")?.steps.map(\.status)))")
+        check(live == replay, "live and replay: the same state")
+        // without a cause: not finished, still never running
+        let plain = se(2, #""kind":"session.task_end","run_id":"r1","status":"interrupted","summary":"","undo":"none""#)
+        let r2 = SessionReducer.reduce(SessionState(), [taskR1, plain, start, ask, resumed, step1, res1, step2])
+        check(r2.task("r1")?.steps.map(\.status) == [.ok, .notFinished] && r2.status != .acting(step: 2, of: nil), "no cause: not finished")
+        // a card the run never answered: void by the end, in either order; a later explicit word still wins
+        let open1 = SessionReducer.reduce(SessionState(), [taskR1, plain, start, ask])
+        check(open1.task("r1")?.cards.map(\.outcome) == [.void("task_done")] && open1.composerEnabled && open1.openCard == nil, "the end first: the card void, provisionally")
+        let voided = SessionReducer.reduce(open1, ex(3, #""kind":"ask_void","ask_id":"a1","why":"stop""#))
+        check(voided.task("r1")?.cards.map(\.outcome) == [.void("stop")], "the run's own word wins")
+        // a step result after task_done (or the end) still takes its place
+        let late = SessionReducer.reduce(SessionState(), [taskR1, start, ex(2, #""kind":"step","text":"x","step_id":"s1""#),
+                                                          ex(3, #""kind":"task_done","status":"stopped","reason":"","summary":"","cause":"last_step_unknown""#)])
+        check(late.task("r1")?.steps.map(\.status) == [.unknown], "task_done with the step open: unknown")
+        let after = SessionReducer.reduce(late, ex(4, #""kind":"step_result","step_id":"s1","status":"ok""#))
+        check(after.task("r1")?.steps.map(\.status) == [.ok], "its result after task_done still takes its place")
+    }
+
+    /// What the process held when it went away: a half reply, the queue; a stop that finds no process.
+    static func exitLeftoversTests() {
+        let exit = L(#"{"kind":"helper.session_exit","session_id":"s","code":9}"#)
+        let user = se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"讲个故事""#)
+        let half = SessionReducer.reduce(SessionState(), [user, se(nil, #""kind":"session.delta","msg_id":"m","text":"从前","offset":0"#), exit])
+        check(half.message("m")?.interrupted == true && half.message("m")?.streaming == false && half.message("m")?.text == "从前", "3: the half reply is kept, marked interrupted")
+        if case .done = half.status { check(false, "3: a cut-off reply is not done: \(half.status)") }
+        let fin = SessionReducer.reduce(half, se(2, #""kind":"session.message","msg_id":"m","role":"assistant","text":"从前有座山""#))
+        check(fin.message("m")?.interrupted == false && fin.status == .done(at: nil, stopped: false), "its final message (if one comes) makes it done")
+        // 4: the queue goes to unsent, never pending
+        let q = se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"一"},{"id":"q2","text":"二"}]"#)
+        let gone = SessionReducer.reduce(SessionState(), [user, q, exit])
+        check(gone.queue.isEmpty && gone.unsent.map(\.text) == ["一", "二"], "4: queued at the exit: unsent, not pending")
+        let restarted = SessionReducer.reduce(gone, se(nil, #""kind":"session.start","resumed":true"#))
+        check(restarted.queue.isEmpty && restarted.unsent.count == 2, "a new process: still unsent")
+        let mock = MockTransport()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
+        let client = SessionClient(transport: mock)
+        _ = client.open(sessionId: "s")
+        [user, q, exit].forEach { client.feed($0) }
+        mock.requests = []
+        check(client.resend("q1", in: "s") == .sent, "重新发送: sent")
+        check(mock.requests.map { $0["op"] as? String ?? "" } == ["session.open", "session.send"]
+              && (mock.requests.last?["line"] as? [String: Any]).map { $0 as NSDictionary } == ["type": "say", "text": "一"] as NSDictionary, "opened again, said")
+        check(client.state("s").unsent.map(\.id) == ["q2"], "q1 left the unsent list")
+        client.dropUnsent("q2", in: "s")
+        check(client.state("s").unsent.isEmpty, "dropped")
+        // 5: not_open on a stop: nothing opened, the session reads as exited
+        let quiet = SessionClient(transport: mock)
+        _ = quiet.open(sessionId: "s")
+        quiet.feed(taskR1); quiet.feed(ex(1, #""kind":"start","raw":"x""#))
+        mock.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open", "error": "session s is not open"]]]
+        mock.requests = []
+        check(quiet.send(.stop(), to: "s") != .sent, "5: stop on a dead session: not sent")
+        check(mock.requests.map { $0["op"] as? String ?? "" } == ["session.send"], "5: no session.open for a stop: \(mock.requests.map { $0["op"] ?? "" })")
+        check(quiet.state("s").exited != nil && quiet.state("s").runningTask == nil, "5: exited locally, the task cut off")
+        // deep nesting on a background thread's stack (512 KB): no crash
+        var ok = false
+        let deep = #"{"session_id":"s","kind":"session.queue","items":[],"x":"# + String(repeating: "[", count: 510) + "1" + String(repeating: "]", count: 510) + "}"
+        let deepUnknown = #"{"session_id":"s","kind":"session.zzz","x":"# + String(repeating: #"{"a":"#, count: 500) + "1" + String(repeating: "}", count: 500) + "}"
+        let fine = #"{"session_id":"s","kind":"session.zzz","x":"# + String(repeating: #"{"a":"#, count: 90) + "1" + String(repeating: "}", count: 90) + "}"
+        let th = Thread {
+            let c = SessionClient(transport: MockTransport())
+            for text in [deep, deepUnknown] {
+                // as the watch reads a line (DeskMindIPC.streamWhile), and as a string
+                if let o = DeskMindIPC.lineObject(Data(text.utf8)) { c.feed(o) }
+                _ = ProtocolLine.parse(text)
+            }
+            let tooDeep = c.state("s").unknownKinds.isEmpty && ProtocolLine.parse(deep) == nil
+            if let o = DeskMindIPC.lineObject(Data(fine.utf8)) { c.feed(o) }
+            ok = tooDeep && c.state("s").unknownKinds == ["session.zzz"]
+        }
+        th.stackSize = 512 * 1024
+        let done = DispatchSemaphore(value: 0)
+        let wrapped = Thread { th.start(); while !th.isFinished { usleep(1000) }; done.signal() }
+        wrapped.start()
+        done.wait()
+        check(ok, "lines nested 500 deep on a 512 KB stack: left, no crash; 90 deep: read")
+        check(DeskMindIPC.nestingWithin(Data(#"{"a":"[[[[[[","b":"\"[[["}"#.utf8), limit: 1), "brackets in strings do not count")
+    }
+
+    /// The final state does not depend on how the streams interleave, as long as each keeps its own order.
+    static func interleavingPropertyTests() {
+        func streams(_ ls: [ProtocolLine]) -> [[ProtocolLine]] {
+            var keys: [String] = [], by: [String: [ProtocolLine]] = [:]
+            for l in ls {
+                let k = l.event.isSessionEvent ? "" : (l.runId ?? "")
+                if by[k] == nil { keys.append(k) }
+                by[k, default: []].append(l)
+            }
+            return keys.map { by[$0]! }
+        }
+        struct RNG { var x: UInt64; mutating func next(_ n: Int) -> Int { x = x &* 6364136223846793005 &+ 1442695040888963407; return Int((x >> 33) % UInt64(n)) } }
+        func merges(_ ss: [[ProtocolLine]], seeds: Int) -> [(String, [ProtocolLine])] {
+            let session = ss.first { $0.first?.event.isSessionEvent == true } ?? []
+            let runs = ss.filter { $0.first?.event.isSessionEvent != true }
+            var out: [(String, [ProtocolLine])] = [("session first", session + runs.flatMap { $0 }), ("runs first", runs.flatMap { $0 } + session),
+                                                   ("runs first, reversed", runs.reversed().flatMap { $0 } + session)]
+            for seed in 1...seeds {
+                var rng = RNG(x: UInt64(seed)), idx = Array(repeating: 0, count: ss.count), m: [ProtocolLine] = []
+                while m.count < ss.reduce(0, { $0 + $1.count }) {
+                    let live = ss.indices.filter { idx[$0] < ss[$0].count }
+                    let k = live[rng.next(live.count)]
+                    m.append(ss[k][idx[k]]); idx[k] += 1
+                }
+                out.append(("seed \(seed)", m))
+            }
+            return out
+        }
+        func summary(_ s: SessionState) -> String {
+            s.tasks.map { t in "\(t.runId) cards \(t.cards.map(\.outcome)) steps \(t.steps.map(\.status)) undo \(t.undo)" }.joined(separator: "; ")
+                + " dot \(s.status) composer \(s.composerEnabled)"
+        }
+        // hand-built: two tasks (the first done, the second waiting on a card), an interrupted one, an open card at an end
+        let card = actionCard
+        let r = { (run: String, seq: Int, body: String) in ex(seq, body, run: run) }
+        let multi: [ProtocolLine] = [
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"a""#),
+            se(2, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"a","by":"model""#),
+            r("r1", 1, #""kind":"start","raw":"a""#), r("r1", 2, #""kind":"plan","steps":[{"purpose":"p"}]"#), r("r1", 3, #""kind":"ask","ask_id":"a1","# + card),
+            r("r1", 4, #""kind":"resumed","ask_id":"a1""#), r("r1", 5, #""kind":"consent","picked":"action""#), r("r1", 6, #""kind":"step","text":"x","step_id":"s1","plan_step":1"#),
+            r("r1", 7, #""kind":"step_result","step_id":"s1","status":"ok""#), r("r1", 8, #""kind":"changes","created":["a.txt"],"created_windows":["w1"]"#),
+            r("r1", 9, #""kind":"answer_given","text":"好了""#),
+            r("r1", 10, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]},"changes":{"created":["a.txt"]}"#),
+            se(3, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"s","undo":"open","changes":{"created":["a.txt"]},"answer":"好了""#),
+            r("r1", 11, #""kind":"result_response","picked":"undo","undone":1,"total":1"#),
+            se(4, #""kind":"session.task_undo","run_id":"r1","undone":1,"total":1"#),
+            se(5, #""kind":"session.message","msg_id":"m2","role":"assistant","text":"好了","reply_to":"u1""#),
+            se(6, #""kind":"session.message","msg_id":"u2","role":"user","text":"b""#),
+            se(7, #""kind":"session.task","msg_id":"m3","run_id":"r2","raw":"b","by":"slash""#),
+            se(8, #""kind":"session.task_closed","run_id":"r1","why":"new_task""#),
+            r("r2", 1, #""kind":"start","raw":"b""#), r("r2", 2, #""kind":"step","text":"y","step_id":"s1""#), r("r2", 3, #""kind":"step_result","step_id":"s1","status":"refused""#),
+            r("r2", 4, #""kind":"waiting""#), r("r2", 5, #""kind":"resumed""#), r("r2", 6, #""kind":"verify","verdict":"unknown","reason":"r","missing_kind":"evidence""#),
+            se(9, #""kind":"session.steer","run_id":"r2","text":"改""#), r("r2", 7, #""kind":"steered","text":"改""#), r("r2", 8, #""kind":"ask","ask_id":"a1","# + card),
+        ]
+        let interrupted: [ProtocolLine] = [
+            se(1, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"a","by":"slash""#),
+            r("r1", 1, #""kind":"start","raw":"a""#), r("r1", 2, #""kind":"ask","ask_id":"a1","# + card), r("r1", 3, #""kind":"resumed","ask_id":"a1""#),
+            r("r1", 4, #""kind":"step","text":"x","step_id":"s1""#), r("r1", 5, #""kind":"step_result","step_id":"s1","status":"ok""#),
+            r("r1", 6, #""kind":"step","text":"y","step_id":"s2""#), r("r1", 7, #""kind":"refused","by":"user","reason":"stop""#),
+            se(2, #""kind":"session.task_end","run_id":"r1","status":"interrupted","summary":"","undo":"none","cause":"last_step_unknown""#),
+            se(3, #""kind":"session.task_closed","run_id":"r1","why":"session_end""#),
+            se(4, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"b","by":"slash""#),
+            r("r2", 1, #""kind":"start","raw":"b""#), r("r2", 2, #""kind":"ask","ask_id":"a9","# + card),
+            se(5, #""kind":"session.task_end","run_id":"r2","status":"interrupted","summary":"","undo":"none""#),
+        ]
+        var cases: [(String, [ProtocolLine])] = names.map { ($0, lines($0)) }
+        cases.append(("multi", multi))
+        cases.append(("interrupted", interrupted))
+        var runs = 0
+        for (name, ls) in cases {
+            let live = SessionReducer.reduce(SessionState(), ls)
+            check(!live.hasGap, "\(name): the live order applies whole")
+            for (how, order) in merges(streams(ls), seeds: 12) {
+                let got = SessionReducer.reduce(SessionState(), order)
+                runs += 1
+                if got != live {
+                    check(false, "\(name), \(how): \(summary(got)) ≠ live \(summary(live))")
+                    if summary(got) == summary(live) { dumpDiff(got, live) }
+                }
+            }
+        }
+        check(runs >= cases.count * 15, "orders tried: \(runs)")
+        // what the hand-built ones should show
+        let m = SessionReducer.reduce(SessionState(), multi)
+        check(m.status == .waitingForYou(cardKind: "action") && m.openCard?.runId == "r2" && m.task("r1")?.undo == .done(undone: 1, total: 1, refused: nil)
+              && m.task("r1")?.changes.createdWindows == ["w1"] && m.task("r1")?.answer == "好了" && m.task("r2")?.lookOnly == false && m.task("r1")?.cards.first?.picked == "action",
+              "multi: \(summary(m))")
+        let i = SessionReducer.reduce(SessionState(), interrupted)
+        check(i.task("r1")?.steps.map(\.status) == [.ok, .unknown] && i.task("r1")?.cards.map(\.outcome) == [.answered] && i.task("r2")?.cards.map(\.outcome) == [.void("task_done")]
+              && i.composerEnabled, "interrupted: \(summary(i))")
+    }
+
+    static func dumpDiff(_ a: SessionState, _ b: SessionState) {
+        let ma = Mirror(reflecting: a), mb = Mirror(reflecting: b)
+        for (x, y) in zip(ma.children, mb.children) where "\(x.value)" != "\(y.value)" {
+            print("  field \(x.label ?? "?"):\n    got  \(x.value)\n    live \(y.value)")
+        }
     }
 }

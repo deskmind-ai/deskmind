@@ -56,6 +56,35 @@ enum DeskMindIPC {
 }
 
 extension DeskMindIPC {
+    /// Deepest nesting of arrays and objects a streamed line may have: JSONSerialization recurses per level and a line
+    /// a few hundred deep overflows a background thread's 512 KB stack (the watch runs on one). Nothing real comes
+    /// near this deep.
+    static let maxLineDepth = 100
+
+    /// Whether `data`'s arrays and objects nest no deeper than `limit` (strings, with their escapes, skipped).
+    static func nestingWithin(_ data: Data, limit: Int) -> Bool {
+        var depth = 0, inString = false, escaped = false
+        for b in data {
+            if inString {
+                if escaped { escaped = false } else if b == 0x5C { escaped = true } else if b == 0x22 { inString = false }
+                continue
+            }
+            switch b {
+            case 0x22: inString = true
+            case 0x5B, 0x7B: depth += 1; if depth > limit { return false }
+            case 0x5D, 0x7D: depth -= 1
+            default: break
+            }
+        }
+        return true
+    }
+
+    /// One streamed line as a JSON object; nil when it is not one, or nests deeper than `maxLineDepth`.
+    static func lineObject(_ data: Data) -> [String: Any]? {
+        guard nestingWithin(data, limit: maxLineDepth) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
     /// Send one request and hand every line of the reply to `onLine` until the helper closes the connection.
     /// Returns false when the helper is not listening.
     @discardableResult
@@ -98,7 +127,7 @@ extension DeskMindIPC {
             while let nl = pending.firstIndex(of: 0x0A) {
                 let line = pending[pending.startIndex..<nl]
                 pending.removeSubrange(pending.startIndex...nl)
-                if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any], !onLine(obj) { break reading }
+                if let obj = lineObject(Data(line)), !onLine(obj) { break reading }
             }
         }
         return true

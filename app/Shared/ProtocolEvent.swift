@@ -21,8 +21,13 @@ enum JSONValue: Codable, Equatable {
     case array([JSONValue])
     case object([String: JSONValue])
 
+    /// Deeper than this, a value is kept as null: a line nested hundreds deep must not exhaust a background thread's
+    /// stack (the watch runs on one); nothing the app reads is nested near this deep.
+    static let maxDepth = 64
+
     init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
+        if decoder.codingPath.count > Self.maxDepth { self = .null; return }
         if c.decodeNil() { self = .null }
         else if let b = try? c.decode(Bool.self) { self = .bool(b) }
         else if let n = try? c.decode(Double.self) { self = .number(n) }
@@ -690,7 +695,8 @@ struct ProtocolLine: Codable, Equatable {
     /// One line of the stream; nil when it is not a JSON object (the session ignores such lines too).
     static func parse(_ line: String) -> ProtocolLine? { parse(Data(line.utf8)) }
     static func parse(_ data: Data) -> ProtocolLine? {
-        guard let first = data.first(where: { !($0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D) }), first == UInt8(ascii: "{") else { return nil }
+        guard let first = data.first(where: { !($0 == 0x20 || $0 == 0x09 || $0 == 0x0A || $0 == 0x0D) }), first == UInt8(ascii: "{"),
+              DeskMindIPC.nestingWithin(data, limit: DeskMindIPC.maxLineDepth) else { return nil }
         return try? JSONDecoder().decode(ProtocolLine.self, from: data)
     }
     /// A line the helper already parsed (JSONSerialization).

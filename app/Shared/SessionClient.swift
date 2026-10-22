@@ -199,17 +199,38 @@ final class SessionClient {
         }
         var r = transport.request(Request.send(sessionId: sessionId, line: control.line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
-        // open it again once, unless the app ended it
+        // the session reads as exited here too; it is opened again once and the line sent again — unless the app ended
+        // it, or the line is a stop (a stop never opens a session: there is nothing to stop)
         if r?["code"] as? String == "not_open" {
+            if state(sessionId).exited == nil { feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil)))) }
+            if case .stop = control { return .refused("the session is not running") }
             lock.lock()
             let ended = endedByApp.contains(sessionId), how = opened[sessionId]
             lock.unlock()
-            if !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil {
-                r = transport.request(Request.send(sessionId: sessionId, line: control.line))
-            }
+            guard !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil else { return .unavailable }
+            r = transport.request(Request.send(sessionId: sessionId, line: control.line))
         }
         guard let r, r["ok"] as? Bool != false else { return .unavailable }
         return .sent
+    }
+
+    /// Sends again what was queued when the session's process ended (SessionState.unsent), as a new message; it leaves
+    /// the unsent list once sent.
+    func resend(_ itemId: String, in sessionId: String) -> SendResult {
+        guard let item = state(sessionId).unsent.first(where: { $0.id == itemId }) else { return .refused("no such unsent message") }
+        let r = send(.say(item.text), to: sessionId)
+        if r == .sent { dropUnsent(itemId, in: sessionId) }
+        return r
+    }
+
+    /// The user lets an unsent message go.
+    func dropUnsent(_ itemId: String, in sessionId: String) {
+        lock.lock()
+        var s = states[sessionId] ?? SessionState(sessionId: sessionId)
+        s.unsent.removeAll { $0.id == itemId }
+        states[sessionId] = s
+        lock.unlock()
+        onChange?(sessionId, s)
     }
 
     /// Answers a card (or the result card): sent only if that card can still be answered.
