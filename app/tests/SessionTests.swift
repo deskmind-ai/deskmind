@@ -1611,6 +1611,31 @@ enum SessionTests {
         ch.feed(se(2, #""kind":"session.message","msg_id":"m","role":"user","text":"z""#))
         ch.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":2,"start_seq":1,"last_seq":2}"#))
         check(ch.state("s").exited == 1 && ch.state("s").unsent.map(\.id) == ["h1"], "no pid in the reply: it stored past its start, so the exit is its own")
+        // the new process's start heard between the send's look and its hold: the word is that process's, and a later
+        // process that replaces it without an exit heard makes it unsent
+        let pi = MockTransport()
+        pi.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 2], SessionClient.Op.send: ["ok": true]]
+        let ci = SessionClient(transport: pi)
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { ci.feed($0) }
+        ci.newClientId = { ci.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#)); return "i1" }
+        _ = ci.send(.say("x"), to: "s")
+        ci.newClientId = { "i2" }
+        check(ci.state("s").outbox.first?.toNextProcess == false, "held after the start: the current process's")
+        ci.feed(se(nil, #""kind":"session.start","last_seq":2,"resumed":true"#))
+        check(ci.state("s").unsent.map(\.id) == ["i1"], "replaced without an exit: unsent")
+        // two sends after a reopen answered already_open, the found process's start not heard yet: both its own
+        let pj = MockTransport()
+        pj.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 2, "already_open": true], SessionClient.Op.send: ["ok": true]]
+        let cj = SessionClient(transport: pj)
+        var kj = 0
+        cj.newClientId = { kj += 1; return "j\(kj)" }
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { cj.feed($0) }
+        _ = cj.send(.say("one"), to: "s")
+        _ = cj.send(.say("two"), to: "s")
+        cj.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
+        check(cj.state("s").outbox.allSatisfy { $0.sending } && cj.resend("j2", in: "s") != .sent, "both the found process's: sending, not sent twice")
         queueInterleavingTests()
     }
 

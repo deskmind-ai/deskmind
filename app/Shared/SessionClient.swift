@@ -190,6 +190,7 @@ final class SessionClient {
     /// Opens a session (a new one when `sessionId` is nil); its id, or nil when the helper could not.
     func open(sessionId: String? = nil, config: String? = nil, lang: String? = nil) -> String? {
         let startsBefore = sessionId.map { state($0).starts } ?? 0
+        let wasExited = sessionId.map { state($0).exited != nil } ?? false
         guard let r = transport.request(Request.open(sessionId: sessionId, config: config, lang: lang)), r["ok"] as? Bool != false,
               let id = r["session_id"] as? String ?? sessionId else { return nil }
         lock.lock()
@@ -202,6 +203,11 @@ final class SessionClient {
         // (or a newer process than this one has started already: two opens, the other's reply handled first)
         let heard = ((states[id]?.starts ?? 0) != startsBefore && (want == nil || states[id]?.processStart == want))
             || (want != nil && (states[id]?.processStart ?? Int.min) > want!)
+        // a process found running (another open started it) after the one the app knew had exited, its start not
+        // heard yet: awaited too (its start seq unknown: any start is it)
+        if r["already_open"] as? Bool == true && wasExited && (states[id]?.starts ?? 0) == startsBefore && states[id]?.awaitingStart != true {
+            states[id]?.awaitingStart = true; states[id]?.awaitedStart = nil; states[id]?.awaitedPid = (r["pid"] as? NSNumber)?.intValue
+        }
         if r["already_open"] as? Bool != true && !heard {
             let pid = (r["pid"] as? NSNumber)?.intValue
             // two opens whose replies come back in reverse order: the newer process (the higher seq) is the one awaited
@@ -246,7 +252,7 @@ final class SessionClient {
         // the user's words: held in the outbox from here until the session says what became of them
         var line = control.line
         var words: String? = nil
-        var startsAtHold = 0
+        var startsAtHold = 0, heldNext = false
         if let w = control.words {
             // the session answers nothing for empty words (harness docs): never sent, so never held
             if w.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}"))).isEmpty { return .refused("empty") }
@@ -258,6 +264,7 @@ final class SessionClient {
                 // words are the next process's (decided on the state as it is now, not as it was read above)
                 startsAtHold = st.starts
                 let next = st.exited != nil || st.awaitingStart
+                heldNext = next
                 if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = next }
                 else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true, toNextProcess: next)) }
             }
@@ -273,8 +280,9 @@ final class SessionClient {
         }
         if s.exited != nil {
             guard reopenIfExited(sessionId) else { return notSent(.unavailable) }
-            // (an exit heard while the open request was out may have made the word unsent: it is the new process's)
-            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || st.starts == startsAtHold } } }
+            // (an exit heard while the open request was out may have made the word unsent: it is the new process's —
+            // the next one's, if it was held so and no start was heard since)
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || (heldNext && st.starts == startsAtHold) } } }
         }
         var r = transport.request(Request.send(sessionId: sessionId, line: line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
