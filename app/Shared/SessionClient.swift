@@ -546,7 +546,7 @@ final class SessionClient {
         }
         guard task.resultCard != nil else { return "no result card" }
         if task.closed != nil { return "the result card is closed" }
-        if task.resultResponse != nil { return "the result card was answered" }
+        if task.resultResponse != nil || task.respond != nil { return "the result card was answered" }
         return nil
     }
 }
