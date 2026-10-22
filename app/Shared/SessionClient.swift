@@ -225,6 +225,12 @@ final class SessionClient {
         return Array(states.keys)
     }
 
+    /// The sessions this client has lines of (none deleted).
+    private func knownIds() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        return Set(states.filter { $0.value.lastSeq > 0 }.keys).subtracting(deleted)
+    }
+
     // MARK: ops
 
     func list() -> [SessionSummary]? {
@@ -434,13 +440,13 @@ final class SessionClient {
         return true
     }
 
-    /// The settings changed: every session this client knows opens again with these (`config`, `lang`), whenever its
-    /// next process starts — whether or not its process now can end (#107 review: a busy or exited session kept the old
-    /// ones).
+    /// The settings changed (either field: the model configuration or the language): every session this client
+    /// knows opens again with these, whenever its next process starts — whether or not its process now can end (#107
+    /// review: a busy or exited session kept the old ones; a language switch reached only the defaults).
     func adoptSettings(config: String?, lang: String?) {
         lock.lock()
         defaults = (config, lang)
-        for id in Set(opened.keys).union(states.keys) { reopenWith[id] = (config, lang) }
+        for id in Set(opened.keys).union(states.keys).union(reopenWith.keys) { reopenWith[id] = (config, lang) }
         lock.unlock()
     }
 
@@ -464,14 +470,14 @@ final class SessionClient {
     /// Reads a session's history from the helper's stored log (session.history): no process is started. A session
     /// with no process running there reads as exited (its tasks that never ended were cut off). False when the helper
     /// could not (an older helper without the op: open it instead).
-    func history(_ sessionId: String) -> Bool {
+    func history(_ sessionId: String, markExit: Bool = true) -> Bool {
         let s = state(sessionId)
         var runs: [String: Int] = [:]
         for t in s.tasks { runs[t.runId] = t.lastSeq }
         guard let r = transport.request(Request.history(sessionId: sessionId, after: s.lastSeq, runs: runs)), r["ok"] as? Bool == true,
               let lines = r["lines"] as? [[String: Any]] else { return false }
         for l in lines { feed(l) }
-        if r["open"] as? Bool == false, state(sessionId).exited == nil {
+        if markExit, r["open"] as? Bool == false, state(sessionId).exited == nil {
             lock.lock(); idleClosed.insert(sessionId); lock.unlock()
             feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: (r["last_seq"] as? NSNumber)?.intValue))))
         }
@@ -538,6 +544,10 @@ final class SessionClient {
             let ok = transport.stream(Request.watch(after: c.after, runs: c.runs), onLine: { [weak self] obj in
                 guard let self else { return false }
                 if obj["kind"] as? String == "helper.watching", let open = obj["open"] as? [String] {
+                    // a session with no process now gets no replay from the watch: what it stored while this app was
+                    // away (a reply finished, a task ended) is read from its log after the cursor, through the reducer
+                    // (#107 review: the cache is never taken as whole). An older helper without the op: nothing read.
+                    for id in self.knownIds().subtracting(open) { _ = self.history(id, markExit: false) }
                     self.notRunning(openedBefore.subtracting(open), idle: Set(obj["idle"] as? [String] ?? []))
                 } else {
                     self.feed(obj)

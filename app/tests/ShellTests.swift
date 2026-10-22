@@ -31,6 +31,8 @@ enum ShellTests {
         cardWordsTests()
         settingsReopenTests()
         endRefusedTests()
+        backfillTests()
+        languageTests()
         textTests()
     }
 
@@ -708,6 +710,77 @@ enum ShellTests {
         check(!c.reopenIfExited("ses_t", onlyOpenedHere: true) && mock.requests.isEmpty, "ended by the app: not opened again by itself")
     }
 
+    /// #107 external review (P2 1): a reply that finished while the window was closed (its first words seen, then the
+    /// session reclaimed idle) is read back whole — on the watch's reconnect and on a select — never left as its first
+    /// words marked interrupted. The stored message outranks the provisional cut-off, whichever comes first.
+    static func backfillTests() {
+        let all = SessionTests.lines("chat")
+        let cut = SessionTests.raw("chat").firstIndex { $0.contains(#""text":"第1句。","offset":4"#) }!
+        let stored = SessionTests.raw("chat").compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+            .filter { ($0["seq"] as? Int) == 6 }.prefix(1)
+        func partial(_ mock: Mock) -> ShellModel {
+            let m = model(mock)
+            _ = m.client.open(sessionId: "ses_t", config: "c", lang: "zh")
+            for l in all[...cut] { m.client.feed(l) }
+            check(m.states["ses_t"]?.messages.last?.text == "第0句。第1句。", "the reply's first words came: \(m.states["ses_t"]?.messages.last?.text ?? "")")
+            return m
+        }
+        let whole = "第0句。第1句。第2句。第3句。第4句。"
+        // the watch reconnects (the window opened again): the session was closed idle meanwhile
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"],
+                        SessionClient.Op.history: ["ok": true, "open": false, "last_seq": 6, "lines": Array(stored)]]
+        let m = partial(mock)
+        mock.requests = []
+        mock.streamLines = [["kind": "helper.watching", "open": [Any](), "idle": ["ses_t"]]]
+        _ = m.client.watch()
+        let h = mock.requests.first { $0["op"] as? String == SessionClient.Op.history }
+        check(h?["after_seq"] as? Int == 5, "the reconnect reads what was stored after its cursor: \(String(describing: h))")
+        let r = m.states["ses_t"]!.messages.last!
+        check(r.text == whole && !r.interrupted && !r.streaming, "the reply whole, not interrupted: \(r.text.count) chars, interrupted \(r.interrupted)")
+        check(m.states["ses_t"]!.status != .error("interrupted"), "the dot: not an interruption (\(m.states["ses_t"]!.status))")
+        // the exit heard first (its first words marked interrupted), then the user opens it: the select reads the rest
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"],
+                         SessionClient.Op.history: ["ok": true, "open": false, "last_seq": 6, "lines": Array(stored)]]
+        let m2 = partial(mock2)
+        m2.client.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0])
+        check(m2.states["ses_t"]!.messages.last!.interrupted, "its process gone unheard-from: provisionally interrupted")
+        m2.select("ses_t")
+        let r2 = m2.states["ses_t"]!.messages.last!
+        check(r2.text == whole && !r2.interrupted, "selected: the stored reply outranks the cut-off: \(r2.text.count) chars, interrupted \(r2.interrupted)")
+        // a delta of it coming after the stored message changes nothing
+        m2.client.feed(all[cut])
+        check(m2.states["ses_t"]!.messages.last!.text == whole, "a late delta after the stored message: nothing")
+    }
+
+    /// #107 external review (P2 2): the language is a session setting like the model's: one value for both. A switch
+    /// reaches every session's next process (as a key does), whatever was remembered for it before.
+    static func languageTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_x"], SessionClient.Op.send: ["ok": true],
+                        SessionClient.Op.end: ["ok": true, "deferred": true]]
+        var config = "provider-a", lang = ResolvedLang.zhHans
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { config }, lang: { lang },
+                           work: { $0() }, deliver: { $0() })
+        m.newConversation(); m.draft = "你好"; m.submit()
+        m.client.feed(["kind": "session.start", "session_id": "ses_x", "resumed": false, "last_seq": 0])
+        config = "provider-b"
+        m.settingsChanged()                     // remembered for ses_x: provider-b, zh
+        lang = .en
+        m.applySettings()                       // what the window as it was did on a language switch
+        m.client.feed(["kind": "helper.session_exit", "session_id": "ses_x", "code": 0, "idle": true])
+        mock.requests = []
+        m.selected = "ses_x"; m.draft = "again"; m.submit()
+        let reopen = mock.requests.first { $0["op"] as? String == SessionClient.Op.open }
+        check(reopen?["lang"] as? String == "en" && reopen?["config"] as? String == "provider-b",
+              "after a language switch, the reclaimed session reopens in it: \(String(describing: reopen?["lang"])) \(String(describing: reopen?["config"]))")
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let main = (try? String(contentsOf: dir.appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
+        check(main.contains(".onChange(of: lang) { _, _ in shell.settingsChanged() }") && main.contains("+ \"|\" + ResolvedLang.current.rawValue"),
+              "the window: a language switch goes the settings' way; the language is in the settings' fingerprint")
+    }
+
     /// #107 review (item 3): reading a session needs no process — its history from the helper's stored log.
     static func historyTests() {
         let mock = Mock()
@@ -718,8 +791,10 @@ enum ShellTests {
         check(mock.requests.map { $0["op"] as? String ?? "" } == [SessionClient.Op.history], "opened to read: history only, no process: \(mock.requests.map { $0["op"] ?? "" })")
         check(m.states["ses_t"]?.messages.isEmpty == false && m.states["ses_t"]?.exited != nil, "its messages are here; it reads as not running")
         mock.requests = []
+        mock.replies[SessionClient.Op.history] = ["ok": true, "open": false, "last_seq": 6, "lines": [Any]()]
         m.select("ses_t")
-        check(mock.requests.isEmpty, "known: opened again without asking anything")
+        check(mock.requests.map { $0["op"] as? String ?? "" } == [SessionClient.Op.history] && mock.requests.first?["after_seq"] as? Int == 6,
+              "known: opened again, what came after its cursor read (never the cache as whole), no process: \(mock.requests)")
         // an older helper without the op: opened (the reclaim closes it once idle)
         let old = Mock()
         old.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_o"]]

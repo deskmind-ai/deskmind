@@ -47,7 +47,7 @@ struct MainSplitView: View {
             shell.refreshSettings()
             shell.start()
         }
-        .onChange(of: lang) { _, _ in shell.applySettings() }
+        .onChange(of: lang) { _, _ in shell.settingsChanged() }     // (the language is a session setting like the model's)
     }
 
     /// The model settings as saved now (the key file, the configuration, the service, and cloud models on or off), to
@@ -55,7 +55,7 @@ struct MainSplitView: View {
     static func settingsFingerprint() -> String {
         let env = CloudModelSettings.read().sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
         return env + "|" + (UserDefaults.standard.string(forKey: "engine.config") ?? "") + "|" + CloudModelSettings.provider.id
-            + "|" + (UserDefaults.standard.string(forKey: "engine") ?? "")
+            + "|" + (UserDefaults.standard.string(forKey: "engine") ?? "") + "|" + ResolvedLang.current.rawValue
     }
 
     private func openSettings() {

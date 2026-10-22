@@ -315,11 +315,16 @@ final class ShellModel: ObservableObject {
 
     static func langCode(_ l: ResolvedLang) -> String { l == .zhHans ? "zh" : "en" }
 
-    /// The client opens sessions it did not open (one from an earlier launch) with these: the app's model settings and
-    /// UI language, as they are now. Called before each open and send, and when the settings change.
+    /// Everything a session opens with — the model configuration and the language — as one value, from the app's
+    /// settings as they are now (#107 review: one rule for both fields).
+    func sessionSettings() -> (config: String?, lang: String) { (config(), Self.langCode(lang())) }
+
+    /// Sessions open with the settings as they are now: when either field changed (a key saved, the UI language
+    /// switched), every session's next process opens with the new value (SessionClient.adoptSettings), not only those
+    /// this client never opened. Called before each open and send, and when the settings change.
     func applySettings() {
-        client.defaultConfig = config()
-        client.defaultLang = Self.langCode(lang())
+        let now = sessionSettings()
+        if client.defaultConfig != now.config || client.defaultLang != now.lang { client.adoptSettings(config: now.config, lang: now.lang) }
     }
 
     /// The settings as the window shows them (on the main thread): cloud models on or off.
@@ -439,25 +444,27 @@ final class ShellModel: ObservableObject {
         notice = nil
     }
 
-    /// The user opened a session: its error dot clears. Reading it needs no process (#107 review): a session this app
-    /// has the history of is shown as it is (the watch keeps a running one current; one whose process ended — the
-    /// helper's idle reclaim, say — starts again on the next message); another one's history is read from the stored
-    /// log (session.history). Only an older helper without that op has it opened (and closes it once idle).
+    /// The user opened a session: its error dot clears. Reading it needs no process (#107 review): what is stored after
+    /// the app's cursor is read from the log (session.history) and goes through the reducer, whether or not the app has
+    /// some of it (one whose process ended starts again on the next message). Only an older helper without that op
+    /// has an unknown session opened (and closes it once idle).
     func select(_ id: String) {
         selected = id
         notice = nil
         client.markSeen(id)
         let known = (states[id]?.lastSeq ?? 0) > 0 || client.state(id).lastSeq > 0
-        guard !known else { return }
         applySettings()
-        let config = self.config(), lang = Self.langCode(self.lang()), cloud = cloudOn()
+        let (config, lang) = sessionSettings(), cloud = cloudOn()
         work { [weak self] in
             guard let self else { return }
+            // what this app has is never taken as the whole of it (#107 review: a reply finished while the window was
+            // closed showed as its first words, interrupted): what is stored after its cursor is read, every time
             if self.client.history(id) {
                 // (what it showed when opened is seen)
                 self.deliver { if self.selected == id { self.client.markSeen(id) } }
                 return
             }
+            guard !known else { return }    // (an older helper without session.history: the watch keeps it current)
             guard cloud else { return }     // (cloud models off: no process for it)
             let ok = self.client.open(sessionId: id, config: config, lang: lang) != nil
             if !ok { self.deliver { self.notice = L("Couldn't open this conversation. Is DeskMind's helper running?", lang: self.lang()) } }
@@ -538,7 +545,7 @@ final class ShellModel: ObservableObject {
         guard !opening else { return }
         opening = true
         drafts[""] = ""
-        let config = self.config(), lang = Self.langCode(self.lang())
+        let (config, lang) = sessionSettings()
         work { [weak self] in
             guard let self else { return }
             guard let id = self.client.open(config: config, lang: lang) else {
@@ -673,10 +680,11 @@ final class ShellModel: ObservableObject {
     /// its next process starts; and each one with a process asks the helper for a new one. The helper decides when
     /// (SessionHost.closeIfIdle: at once if the session is idle, else once what runs — a task, a reply, a queue, an open
     /// undo, a line just sent — is over); this app never decides that from its own view of the session.
+    /// The UI language goes the same way (MainSplitView: on a language change).
     func settingsChanged() {
         applySettings()
         refreshSettings()
-        let config = self.config(), lang = Self.langCode(self.lang())
+        let (config, lang) = sessionSettings()
         client.adoptSettings(config: config, lang: lang)
         let live = states.filter { $0.value.exited == nil }.map(\.key).sorted()
         work { [weak self] in
