@@ -46,7 +46,10 @@ protocol SessionTransport: AnyObject {
 }
 
 final class HelperSessionTransport: SessionTransport {
-    func request(_ body: [String: Any]) -> [String: Any]? { DeskMindIPC.request(body) }
+    /// (session.open waits for a process still closing, then for the new one's first line: up to about 40 s)
+    func request(_ body: [String: Any]) -> [String: Any]? {
+        DeskMindIPC.request(body, timeout: body["op"] as? String == SessionClient.Op.open ? 60 : 20)
+    }
     func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
         DeskMindIPC.streamWhile(body, idle: SessionClient.idleTick, onIdle: onIdle, onLine)
     }
@@ -157,6 +160,10 @@ final class SessionClient {
     private let transport: SessionTransport
     private let lock = NSLock()
     private var states: [String: SessionState] = [:]
+    /// What a session this client did not open (one from an earlier launch) is opened again with: the app's current
+    /// model config and language (the harness keeps no session's config: without one it would take its own default).
+    var defaultConfig: String? = nil
+    var defaultLang: String? = nil
     /// What each session was opened with, to open it again the same way after its process ended.
     private var opened: [String: (config: String?, lang: String?)] = [:]
     /// Sessions the app ended (`end`): their process's exit is expected, and they are not opened again by themselves.
@@ -234,7 +241,7 @@ final class SessionClient {
         lock.unlock()
         guard exited else { return true }
         if ended || (onlyOpenedHere && how == nil) { return false }
-        return open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil
+        return open(sessionId: sessionId, config: how?.config ?? defaultConfig, lang: how?.lang ?? defaultLang) != nil
     }
 
     /// The id the app gives the user's words it sends (say, cua, steer): the session gives it back on what became of
@@ -304,7 +311,7 @@ final class SessionClient {
             lock.lock()
             let ended = endedByApp.contains(sessionId), how = opened[sessionId]
             lock.unlock()
-            guard !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil else { return notSent(.unavailable) }
+            guard !ended, open(sessionId: sessionId, config: how?.config ?? defaultConfig, lang: how?.lang ?? defaultLang) != nil else { return notSent(.unavailable) }
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || st.starts == startsAtHold } } }
             r = transport.request(Request.send(sessionId: sessionId, line: line))
         }

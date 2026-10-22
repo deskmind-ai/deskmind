@@ -1661,6 +1661,16 @@ enum SessionTests {
         _ = cl.send(.say("w"), to: "s")
         cl.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":7,"start_seq":0,"last_seq":1}"#))
         check(cl.state("s").outbox.first?.sending == true && cl.state("s").exited == nil && cl.state("s").awaitingStart, "the older start's exit with a reused pid: ignored")
+        // a session this client did not open (an earlier launch's), reopened on not_open: with the app's config
+        let pm = MockTransport()
+        pm.replies = [SessionClient.Op.open: ["ok": true, "session_id": "old", "last_seq": 1, "pid": 9], SessionClient.Op.send: ["ok": true]]
+        let cm = SessionClient(transport: pm)
+        cm.defaultConfig = "openai:local|fake"; cm.defaultLang = "zh"
+        cm.feed(L(#"{"seq":1,"session_id":"old","kind":"session.message","msg_id":"u","role":"user","text":"a"}"#))
+        pm.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
+        _ = cm.send(.say("x"), to: "old")
+        let openReq = pm.requests.first { $0["op"] as? String == SessionClient.Op.open }
+        check(openReq?["config"] as? String == "openai:local|fake" && openReq?["lang"] as? String == "zh", "reopened with the app's config: \(String(describing: openReq))")
         queueInterleavingTests()
     }
 
