@@ -44,6 +44,19 @@ struct ChatMessage: Equatable {
     var interrupted = false
 }
 
+/// The user's words the app holds (SessionState.outbox).
+struct Outgoing: Equatable {
+    /// The client_id it is sent with (a queue entry's own id when it had none).
+    var id: String
+    var text: String
+    /// say | cua | steer: what it is sent as.
+    var control: String = "say"
+    /// Sent, and the session has not said yet what became of it.
+    var sending = false
+    /// Why it is not sent: the session's refusal code, or "exited" (its process ended first).
+    var refused: String? = nil
+}
+
 struct StoredError: Equatable {
     var seq: Int
     var error: SessionErrorEvent
@@ -218,9 +231,14 @@ struct SessionState: Equatable {
     /// Where each run's task is in `tasks` (a long session has many; looking one up must not scan them all).
     var taskPos: [String: Int] = [:]
     var queue: [QueueItem] = []
-    /// What was queued when the session's process ended: never sent, and no longer in any queue. Shown with
-    /// 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent); never as pending.
-    var unsent: [QueueItem] = []
+    /// The user's words the app holds, by client_id: sent and not yet taken (`sending`), or not sent — refused by the
+    /// session, or queued when its process ended. Each piece of text has one owner at a time: here, the session's
+    /// queue, or the history. It leaves here only when the session says it took it (the stored user message, the
+    /// session.steer, a queue entry with its client_id), comes back (not sending) on a refusal naming it, and is never
+    /// dropped on the helper's ack (SessionClient.send / resend; dropUnsent is the user's choice).
+    var outbox: [Outgoing] = []
+    /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
+    var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
     var lastRefusal: SessionErrorEvent? = nil
@@ -404,8 +422,14 @@ enum SessionReducer {
             s.messages[i].interrupted = true
             if let a = s.messages[i].anchor { placeInterrupted(&s, s.messages[i].id, anchor: a) }
         }
-        s.unsent += s.queue
+        for q in s.queue {
+            let id = q.clientId ?? q.id
+            if !s.outbox.contains(where: { $0.id == id }) { s.outbox.append(Outgoing(id: id, text: q.text, control: "say")) }
+        }
         s.queue = []
+        // sent and never taken: the process is gone, so it is not sent (should its stored message still come in a
+        // replay, that takes it out again)
+        for i in s.outbox.indices where s.outbox[i].sending { s.outbox[i].sending = false; s.outbox[i].refused = "exited" }
     }
 
     // MARK: session events
@@ -449,6 +473,11 @@ enum SessionReducer {
                 processGone(&s)
             }
         case .message(let m):
+            // the session took the app's words: they leave the outbox, and the queue entry they waited in
+            if let c = m.clientId, m.role == "user" {
+                s.outbox.removeAll { $0.id == c }
+                if s.queue.contains(where: { $0.clientId == c }) { s.queue.removeAll { $0.clientId == c } }
+            }
             if let i = s.messages.lastIndex(where: { $0.id == m.msgId }) {
                 s.messages[i].text = m.text
                 s.messages[i].role = m.role
@@ -483,6 +512,12 @@ enum SessionReducer {
                 place(&s, .error(seq), seq: seq)
             } else {
                 s.lastRefusal = e
+                // a refusal of the app's words: they are the app's again, not sent (a queue entry's refusal leaves it
+                // in the queue, the session's: nothing here then)
+                if let c = e.clientId, let i = s.outbox.firstIndex(where: { $0.id == c }) {
+                    s.outbox[i].sending = false
+                    s.outbox[i].refused = e.code
+                }
             }
         case .task(let e):
             dropEmptyStreaming(&s)
@@ -508,6 +543,7 @@ enum SessionReducer {
             let i = taskIndex(&s, e.runId)
             s.tasks[i].sessionUndo = .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
         case .steer(let e):
+            if let c = e.clientId { s.outbox.removeAll { $0.id == c } }
             let i = taskIndex(&s, e.runId)
             s.tasks[i].steersSent.append(e.text)
         case .retry(let e):
@@ -515,7 +551,11 @@ enum SessionReducer {
                 s.messages[i].retracted = true
             }
         case .queue(let q):
+            // the whole queue, as the session has it (attach sends it, empty included): it replaces the app's; words of
+            // the app's that wait in it are the queue's now
             s.queue = q.items
+            let queued = Set(q.items.compactMap(\.clientId))
+            if !queued.isEmpty { s.outbox.removeAll { queued.contains($0.id) } }
         case .unknown(let k, _):
             s.unknownKinds.insert(k)
         default:

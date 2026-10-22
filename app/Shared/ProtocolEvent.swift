@@ -188,7 +188,9 @@ struct SessionMessage: Codable, Equatable {
     var stopped: Bool?
     var truncated: Bool?
     var via: String?                // cua | queue
-    enum CodingKeys: String, CodingKey { case msgId = "msg_id", role, text, replyTo = "reply_to", model, stopped, truncated, via }
+    /// The app's id for a user message it sent (say / cua, or queued by a say), given back (harness#57).
+    var clientId: String?
+    enum CodingKeys: String, CodingKey { case msgId = "msg_id", role, text, replyTo = "reply_to", model, stopped, truncated, via, clientId = "client_id" }
 }
 
 struct SessionDelta: Codable, Equatable {
@@ -205,7 +207,9 @@ struct SessionErrorEvent: Codable, Equatable {
     var msgId: String?
     var replyTo: String?
     var control: String?
-    enum CodingKeys: String, CodingKey { case code, text, msgId = "msg_id", replyTo = "reply_to", control }
+    /// A refusal of a line that carried a client_id: that id.
+    var clientId: String?
+    enum CodingKeys: String, CodingKey { case code, text, msgId = "msg_id", replyTo = "reply_to", control, clientId = "client_id" }
 }
 
 struct SessionTaskEvent: Codable, Equatable {
@@ -262,7 +266,8 @@ struct SessionTaskUndo: Codable, Equatable {
 struct SessionSteer: Codable, Equatable {
     @LStr var runId: String = ""
     @LStr var text: String = ""
-    enum CodingKeys: String, CodingKey { case runId = "run_id", text }
+    var clientId: String?
+    enum CodingKeys: String, CodingKey { case runId = "run_id", text, clientId = "client_id" }
 }
 
 struct SessionRetry: Codable, Equatable {
@@ -275,6 +280,9 @@ struct QueueItem: Codable, Equatable {
     @LStr var text: String = ""
     var held: Bool?
     var note: String?
+    /// The client_id of the say that queued it.
+    var clientId: String?
+    enum CodingKeys: String, CodingKey { case id, text, held, note, clientId = "client_id" }
 }
 
 struct SessionQueue: Codable, Equatable {

@@ -24,6 +24,12 @@
 // last_seq / pid (an older helper, or the app's own inference below), an exit is taken for the latest process and the
 // runs the app has seen tied to it; a run whose session.task has not come stays provisional.
 //
+// The user's words have one owner at a time (harness#57). say / cua / steer carry a client_id; the words stay in
+// SessionState.outbox (sending) until the session says what became of them: the stored user message or session.steer
+// with that client_id, or a session.queue entry with it, takes them; a refusal naming it gives them back (unsent,
+// 「重新发送」). The helper's ok only says the line was written, so nothing is dropped on it. A session.queue is the whole
+// queue (attach sends it, empty included) and replaces the app's.
+//
 // A session whose process ended without the app asking (helper.session_exit, or missing from helper.watching's `open`
 // though this client opened it) is opened again (session.open with its id) on the next send to it, and — if this client
 // opened it — on the next watch. A session the app ended (`end`) is not.
@@ -71,6 +77,17 @@ enum SessionControl: Equatable {
         case .queueCancel(let id): return ["type": "queue_cancel", "id": id]
         case .queueSendNow(let id): return ["type": "queue_send_now", "id": id]
         case .attach(let n, let r): return ["type": "attach", "after_seq": n].merging(r.map { ["run_id": $0] } ?? [:]) { a, _ in a }
+        }
+    }
+
+    /// The user's own words this line carries, and what it is sent as (say / cua / steer): they get a client_id and
+    /// stay the app's until the session takes them.
+    var words: (text: String, control: String)? {
+        switch self {
+        case .say(let t): return (t, "say")
+        case .cua(let t, _): return (t, "cua")
+        case .steer(let t, _): return (t, "steer")
+        default: return nil
         }
     }
 
@@ -199,28 +216,56 @@ final class SessionClient {
         return open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil
     }
 
-    func send(_ control: SessionControl, to sessionId: String) -> SendResult {
+    /// The id the app gives the user's words it sends (say, cua, steer): the session gives it back on what became of
+    /// them (harness#57). Tests set their own.
+    var newClientId: () -> String = { "c_" + UUID().uuidString.prefix(12).lowercased() }
+
+    func send(_ control: SessionControl, to sessionId: String) -> SendResult { send(control, to: sessionId, clientId: nil) }
+
+    /// `clientId`: the words' id when they are sent again (resend); new words get one.
+    private func send(_ control: SessionControl, to sessionId: String, clientId: String?) -> SendResult {
         let s = state(sessionId)
         if control.isTyping && !s.composerEnabled { return .refused("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
-        if s.exited != nil {
-            if let why = Self.goneWithProcess(control, in: s) { return .refused(why) }
-            guard reopenIfExited(sessionId) else { return .unavailable }
+        if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return .refused(why) }
+        // the user's words: held in the outbox from here until the session says what became of them
+        var line = control.line
+        var words: String? = nil
+        if let w = control.words {
+            let id = clientId ?? newClientId()
+            words = id
+            line["client_id"] = id
+            mutate(sessionId) { st in
+                if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil }
+                else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true)) }
+            }
         }
-        var r = transport.request(Request.send(sessionId: sessionId, line: control.line))
+        // not sent after all: the words are the app's, not sent (never lost)
+        let notSent = { [self] (r: SendResult) -> SendResult in
+            if let id = words {
+                mutate(sessionId) { st in
+                    if let i = st.outbox.firstIndex(where: { $0.id == id }), st.outbox[i].sending { st.outbox[i].sending = false; st.outbox[i].refused = "unavailable" }
+                }
+            }
+            return r
+        }
+        if s.exited != nil, !reopenIfExited(sessionId) { return notSent(.unavailable) }
+        var r = transport.request(Request.send(sessionId: sessionId, line: line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
         // the session reads as exited here too; it is opened again once and the line sent again — unless the app ended
         // it, or the line was for what went with the process (a stop, a steer, a card's answer: never opens a session)
         if r?["code"] as? String == "not_open" {
             if state(sessionId).exited == nil { feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil)))) }
-            if let why = Self.goneWithProcess(control, in: state(sessionId)) { return .refused(why) }
+            if let why = Self.goneWithProcess(control, in: state(sessionId)) { return notSent(.refused(why)) }
             lock.lock()
             let ended = endedByApp.contains(sessionId), how = opened[sessionId]
             lock.unlock()
-            guard !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil else { return .unavailable }
-            r = transport.request(Request.send(sessionId: sessionId, line: control.line))
+            guard !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil else { return notSent(.unavailable) }
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil } } }
+            r = transport.request(Request.send(sessionId: sessionId, line: line))
         }
-        guard let r, r["ok"] as? Bool != false else { return .unavailable }
+        guard let r, r["ok"] as? Bool != false else { return notSent(.unavailable) }
+        // (sent: the words stay in the outbox, sending, until the session takes or refuses them)
         return .sent
     }
 
@@ -235,20 +280,28 @@ final class SessionClient {
         }
     }
 
-    /// Sends again what was queued when the session's process ended (SessionState.unsent), as a new message; it leaves
-    /// the unsent list once sent.
-    func resend(_ itemId: String, in sessionId: String) -> SendResult {
-        guard let item = state(sessionId).unsent.first(where: { $0.id == itemId }) else { return .refused("no such unsent message") }
-        let r = send(.say(item.text), to: sessionId)
-        if r == .sent { dropUnsent(itemId, in: sessionId) }
-        return r
+    /// Sends again words the app holds, not sent (SessionState.unsent: refused, or queued when the process ended), as
+    /// they were sent (say / cua / steer) with their client_id. They stay in the outbox until the session takes them.
+    func resend(_ id: String, in sessionId: String) -> SendResult {
+        guard let item = state(sessionId).unsent.first(where: { $0.id == id }) else { return .refused("no such unsent message") }
+        let control: SessionControl
+        switch item.control {
+        case "cua": control = .cua(item.text)
+        case "steer": control = .steer(item.text)
+        default: control = .say(item.text)
+        }
+        return send(control, to: sessionId, clientId: item.id)
     }
 
     /// The user lets an unsent message go.
-    func dropUnsent(_ itemId: String, in sessionId: String) {
+    func dropUnsent(_ id: String, in sessionId: String) {
+        mutate(sessionId) { st in st.outbox.removeAll { $0.id == id && !$0.sending } }
+    }
+
+    private func mutate(_ sessionId: String, _ f: (inout SessionState) -> Void) {
         lock.lock()
         var s = states[sessionId] ?? SessionState(sessionId: sessionId)
-        s.unsent.removeAll { $0.id == itemId }
+        f(&s)
         states[sessionId] = s
         lock.unlock()
         onChange?(sessionId, s)

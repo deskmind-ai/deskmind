@@ -40,6 +40,7 @@ enum SessionTests {
         interleavingPropertyTests()
         rereviewTests()
         processInterleavingTests()
+        ownershipTests()
     }
 
     // MARK: fixtures
@@ -527,8 +528,10 @@ enum SessionTests {
         let watch = mock.requests.last!
         check((watch["after"] as? [String: Int])?["ses_t"] == 2 && (watch["runs"] as? [String: Int])?[runId] == 7, "watch says what the app has: \(watch)")
         check(client.state("ses_t") == final("task-card"), "the whole stream: the reducer's final state")
+        client.newClientId = { "c_fixed" }
         check(client.send(.say("好"), to: "ses_t") == .sent, "no card: say is sent")
-        check(mock.requests.last as NSDictionary? == ["op": "session.send", "session_id": "ses_t", "line": ["type": "say", "text": "好"]] as NSDictionary, "say line")
+        check(mock.requests.last as NSDictionary? == ["op": "session.send", "session_id": "ses_t", "line": ["type": "say", "text": "好", "client_id": "c_fixed"]] as NSDictionary, "say line, with its client_id")
+        check(client.state("ses_t").outbox == [Outgoing(id: "c_fixed", text: "好", control: "say", sending: true)] && client.state("ses_t").unsent.isEmpty, "sent: held as sending, not unsent")
         // a line from another session goes to that session; one with none is left
         client.feed(["kind": "session.queue", "session_id": "ses_2", "items": [["id": "q1", "text": "x"]]])
         client.feed(["kind": "session.queue", "items": [["id": "q1", "text": "x"]]])
@@ -990,8 +993,19 @@ enum SessionTests {
         mock.requests = []
         check(client.resend("q1", in: "s") == .sent, "重新发送: sent")
         check(mock.requests.map { $0["op"] as? String ?? "" } == ["session.open", "session.send"]
-              && (mock.requests.last?["line"] as? [String: Any]).map { $0 as NSDictionary } == ["type": "say", "text": "一"] as NSDictionary, "opened again, said")
-        check(client.state("s").unsent.map(\.id) == ["q2"], "q1 left the unsent list")
+              && (mock.requests.last?["line"] as? [String: Any]).map { $0 as NSDictionary } == ["type": "say", "text": "一", "client_id": "q1"] as NSDictionary, "opened again, said with its id")
+        check(client.state("s").unsent.map(\.id) == ["q2"] && client.state("s").outbox.first { $0.id == "q1" }?.sending == true, "q1 sending: not unsent, still held")
+        // two resends in a row: the first taken (its stored message), the second refused busy → back in unsent
+        check(client.resend("q2", in: "s") == .sent, "the second sent too")
+        client.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
+        client.feed(se(2, #""kind":"session.message","msg_id":"x1","role":"user","text":"一","client_id":"q1""#))
+        client.feed(se(nil, #""kind":"session.error","code":"busy","text":"a reply is still coming","control":"say","client_id":"q2""#))
+        let after2 = client.state("s")
+        check(after2.outbox.map(\.id) == ["q2"] && after2.unsent.first?.refused == "busy" && after2.messages.filter { $0.text == "一" }.count == 1, "q1 taken once, q2 back in unsent: \(after2.outbox)")
+        // a transport failure never loses words
+        mock.replies[SessionClient.Op.send] = ["ok": false]
+        check(client.resend("q2", in: "s") == .unavailable && client.state("s").unsent.map(\.id) == ["q2"], "not sent: still unsent")
+        mock.replies[SessionClient.Op.send] = ["ok": true]
         client.dropUnsent("q2", in: "s")
         check(client.state("s").unsent.isEmpty, "dropped")
         // 5: not_open on a stop: nothing opened, the session reads as exited
@@ -1376,5 +1390,104 @@ enum SessionTests {
         // a session.start fed twice (a replay of the whole stream) is the same process
         let twice = SessionReducer.reduce(SessionState(), [live[0], live[1], live[6], live[0]])
         check(twice.queue.map(\.id) == ["q1"] && twice.unsent.isEmpty, "the same start again: nothing gone")
+    }
+
+    // MARK: one owner for the user's words (review of 8b7f77d)
+
+    static func ownershipTests() {
+        // a reconnect after the queue was sent to the model (task-steer): the replay brings the stored messages and the
+        // whole queue, empty (harness#57 attach); nothing stays queued, a later exit leaves nothing unsent
+        let ls = lines("task-steer")
+        let cut = ls.firstIndex { if case .queue(let q) = $0.event { return q.items.count == 2 }; return false }! + 2   // both queued, the edit in
+        var app = SessionReducer.reduce(SessionState(), Array(ls[..<cut]))
+        check(app.queue.map(\.text) == ["一", "二改"], "queued while connected: \(app.queue.map(\.text))")
+        let replay = ls[cut...].filter { $0.seq != nil }                       // what attach replays: the stored lines
+        app = SessionReducer.reduce(app, Array(replay) + [L(#"{"session_id":"ses_t","kind":"session.queue","items":[]}"#)])
+        check(app.queue.isEmpty && app.messages.filter { $0.text == "一" || $0.text == "二改" }.count == 2, "after the reconnect: the queue empty, each message once")
+        app = SessionReducer.reduce(app, L(#"{"kind":"helper.session_exit","session_id":"ses_t","code":0}"#))
+        check(app.unsent.isEmpty && app.queue.isEmpty, "a later exit: nothing unsent, nothing sent twice")
+        // without the snapshot (an older harness) but with client_ids: the stored message takes its entry out of the queue
+        let q = se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"一","client_id":"k1"},{"id":"q2","text":"二","client_id":"k2"}]"#)
+        let st = SessionReducer.reduce(SessionState(), [q, se(1, #""kind":"session.message","msg_id":"m1","role":"user","text":"一","via":"queue","client_id":"k1""#),
+                                                         L(#"{"kind":"helper.session_exit","session_id":"s","code":0}"#)])
+        check(st.queue.isEmpty && st.unsent.map(\.id) == ["k2"], "k1 stored: out of the queue; k2 unsent at the exit: \(st.unsent.map(\.id))")
+        // the composer's words: sending until taken; queued by the session: the queue's; refused: back
+        let mock = MockTransport()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let c = SessionClient(transport: mock)
+        var n = 0
+        c.newClientId = { n += 1; return "k\(n)" }
+        _ = c.send(.say("先"), to: "s")
+        c.feed(se(nil, #""kind":"session.queue","items":[{"id":"q9","text":"先","client_id":"k1"}]"#))
+        check(c.state("s").outbox.isEmpty && c.state("s").queue.first?.clientId == "k1", "queued: the queue's, not the outbox's")
+        _ = c.send(.cua("开个文件"), to: "s")
+        c.feed(se(nil, #""kind":"session.error","code":"computer_busy","text":"x","control":"cua","client_id":"k2""#))
+        check(c.state("s").unsent.map { [$0.id, $0.control, $0.refused ?? ""] } == [["k2", "cua", "computer_busy"]], "a refused /cua: back, as a /cua")
+        check(c.resend("k2", in: "s") == .sent && (mock.requests.last?["line"] as? [String: Any])?["type"] as? String == "cua", "resent as a /cua")
+        c.feed(se(1, #""kind":"session.message","msg_id":"m","role":"user","text":"开个文件","via":"cua","client_id":"k2""#))
+        check(c.state("s").outbox.isEmpty, "taken: gone from the outbox")
+        // a refusal of a queue entry (queue_send_now) leaves the outbox alone: the entry is the queue's
+        c.feed(se(nil, #""kind":"session.error","code":"busy","text":"x","control":"queue_send_now","client_id":"k1""#))
+        check(c.state("s").outbox.isEmpty && c.state("s").queue.count == 1, "the queue keeps it")
+        queueInterleavingTests()
+    }
+
+    /// The queue in the interleavings: entries with client_ids, consumed into stored messages (one delayed), a reply
+    /// cut off by the exit, and the next process's empty snapshot (attach) — the same final state in every order.
+    static func queueInterleavingTests() {
+        let live: [ProtocolLine] = [
+            se(nil, #""kind":"session.start","last_seq":0,"resumed":false"#),                                     // 0  A
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"新建 a.txt""#),                  // 1
+            se(2, #""kind":"session.task","msg_id":"m0","run_id":"r1","raw":"a","by":"model""#),                 // 2
+            ex(1, #""kind":"start","raw":"a""#),                                                                   // 3
+            se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"一","client_id":"k1"}]"#),                 // 4
+            se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"一","client_id":"k1"},{"id":"q2","text":"二","client_id":"k2"}]"#), // 5
+            ex(2, #""kind":"step","text":"x","step_id":"s1""#), ex(3, #""kind":"step_result","step_id":"s1","status":"ok""#), // 6 7
+            ex(4, #""kind":"task_done","status":"succeeded","reason":"","summary":"""#),                            // 8
+            se(3, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"","undo":"none""#),  // 9
+            se(nil, #""kind":"session.queue","items":[]"#),                                                         // 10 drained
+            se(4, #""kind":"session.message","msg_id":"m1","role":"user","text":"一","via":"queue","client_id":"k1""#), // 11
+            se(nil, #""kind":"session.delta","msg_id":"a1","text":"","offset":0"#),                                 // 12
+            se(nil, #""kind":"session.delta","msg_id":"a1","text":"收到","offset":0"#),                             // 13 A's last live-only
+            se(5, #""kind":"session.message","msg_id":"m2","role":"user","text":"二","via":"queue","client_id":"k2""#), // 14 (late)
+            L(#"{"kind":"helper.session_exit","session_id":"s","code":9,"pid":100,"start_seq":0,"last_seq":5}"#),   // 15
+            se(nil, #""kind":"session.start","last_seq":5,"resumed":true"#),                                        // 16 B
+            se(nil, #""kind":"session.queue","items":[]"#),                                                         // 17 attach's snapshot
+        ]
+        let exitAt = 15, aLastLive = 13
+        let late: [Int: Int] = [14: -1]                 // delayed; no live-only line of A after it
+        var streams: [[Int]] = [live.indices.filter { live[$0].event.isSessionEvent && $0 != exitAt && late[$0] == nil },
+                                live.indices.filter { !live[$0].event.isSessionEvent }, [14], [exitAt]]
+        streams.removeAll { $0.isEmpty }
+        func allowed(_ i: Int, _ done: Set<Int>) -> Bool {
+            if i == exitAt { return done.contains(aLastLive) }
+            if !live[i].event.isSessionEvent { return done.contains(0) }
+            for (l, before) in late where i == before && !done.contains(l) { return false }
+            if late[i] != nil { return live[..<i].indices.allSatisfy { live[$0].seq != nil || !live[$0].event.isSessionEvent || $0 == exitAt || done.contains($0) } }
+            return true
+        }
+        struct RNG { var x: UInt64; mutating func next(_ n: Int) -> Int { x = x &* 6364136223846793005 &+ 1442695040888963407; return Int((x >> 33) % UInt64(n)) } }
+        func merge(_ pick: ([Int]) -> Int) -> [Int] {
+            var idx = Array(repeating: 0, count: streams.count), out: [Int] = [], done: Set<Int> = []
+            while out.count < live.count {
+                let ready = streams.indices.filter { idx[$0] < streams[$0].count && allowed(streams[$0][idx[$0]], done) }
+                guard !ready.isEmpty else { return [] }
+                let k = pick(ready); let i = streams[k][idx[k]]; idx[k] += 1; out.append(i); done.insert(i)
+            }
+            return out
+        }
+        let want = SessionReducer.reduce(SessionState(), live)
+        check(want.queue.isEmpty && want.unsent.isEmpty && want.messages.filter { $0.role == "user" }.map(\.text) == ["新建 a.txt", "一", "二"] && want.message("a1")?.interrupted == true,
+              "live: the queue consumed, nothing unsent: \(want.unsent)")
+        var orders: [[Int]] = [merge { $0[0] }, merge { $0.last! }]
+        for seed in 1...40 { var g = RNG(x: UInt64(seed)); orders.append(merge { $0[g.next($0.count)] }) }
+        var tried = 0
+        for o in orders where o.count == live.count {
+            tried += 1
+            let got = SessionReducer.reduce(SessionState(), o.map { live[$0] })
+            if got != want { check(false, "queue order \(o): differs"); dumpDiff(got, want) }
+        }
+        check(tried == orders.count && orders.contains { ($0.firstIndex(of: exitAt) ?? 0) < ($0.firstIndex(of: 14) ?? 0) }
+              && orders.contains { ($0.firstIndex(of: 14) ?? 0) < ($0.firstIndex(of: exitAt) ?? 0) }, "orders: \(tried), the exit before and after the delayed message")
     }
 }
