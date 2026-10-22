@@ -1308,6 +1308,20 @@ enum SessionTests {
         check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":7,"start_seq":2,"last_seq":4}"#) == nil, "another start_seq: an older one")
         check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":7,"start_seq":4,"last_seq":4}"#) == nil, "same start, nothing stored: ambiguous, older")
         check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":5}"#) == 1, "no start_seq: last_seq past the start: the latest")
+        check(exitOf(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":8,"start_seq":6,"last_seq":7}"#) == 1, "a later start_seq: a process whose start was missed: the latest")
+        // the reopened process's session.start was missed (the watch was not connected when it started): its exit still counts
+        let reopen = MockTransport()
+        reopen.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"]]
+        let mc = SessionClient(transport: reopen)
+        [st4, se(5, #""kind":"session.message","msg_id":"u5","role":"user","text":"x""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":9,"pid":101,"start_seq":4,"last_seq":5}"#)].forEach { mc.feed($0) }
+        _ = mc.open(sessionId: "s")                            // the new process; its session.start is not seen
+        check(mc.state("s").exited == nil, "reopened")
+        [se(6, #""kind":"session.message","msg_id":"u6","role":"user","text":"y""#), se(nil, #""kind":"session.delta","msg_id":"a6","text":"嗯","offset":0"#),
+         se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"z"}]"#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":7,"pid":102,"start_seq":5,"last_seq":6}"#)].forEach { mc.feed($0) }
+        let missed = mc.state("s")
+        check(missed.exited == 7 && missed.unsent.map(\.id) == ["q1"] && missed.message("a6")?.interrupted == true && missed.status != .thinking, "a missed start: the exit still counts: \(missed.status)")
         let stale = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":6"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":4}"#)])
         check(stale.exited == nil && stale.goneUpTo == 6, "no pid: an exit below the latest start is an older process's")
         // a finished task is never "cut off"
