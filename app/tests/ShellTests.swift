@@ -26,6 +26,11 @@ enum ShellTests {
         focusTests()
         idleReclaimTests()
         historyTests()
+        cloudOffNoModelTests()
+        modelChoiceTests()
+        cardWordsTests()
+        settingsReopenTests()
+        endRefusedTests()
         textTests()
     }
 
@@ -280,6 +285,7 @@ enum ShellTests {
         let (qrun, qopen) = q.states["ses_t"]!.openCard!
         let qcard = CardModel(card: qopen.card, runId: qrun, askId: qopen.askId)
         check(qcard.allowsFreeText, "the missing card takes words")
+        q.cardBody(qcard, contentHeight: 40, visibleHeight: 40, offset: 0)   // (it has "you decide": words wait for its body)
         q.answer(qcard, text: "  明天下午三点  ")
         check(sent(mock2) as NSDictionary? == ["type": "answer", "run_id": qrun, "ask_id": qopen.askId, "text": "明天下午三点"] as NSDictionary, "its words: answer.text: \(String(describing: sent(mock2)))")
         // the result card: respond with the option's index
@@ -541,6 +547,165 @@ enum ShellTests {
         _ = c.watch()
         let opens = mock2.requests.filter { $0["op"] as? String == SessionClient.Op.open }.count
         check(c.state("ses_t").exited != nil && opens == 1, "closed idle while away: exited, not opened again by the watch (\(opens) opens)")
+    }
+
+    /// #107 re-review (1): cloud models off holds back only what reaches a model. Undo (the session runs it from its
+    /// receipts), the way out, Stop and a queue cancel always go; an approve, words, a retry do not.
+    static func cloudOffNoModelTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let client = SessionClient(transport: mock)
+        let u = ShellModel(client: client, defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                           cloudOn: { false }, work: { $0() }, deliver: { $0() })
+        feed(u, "task-undo", upTo: SessionTests.isKind("session.task_end"))
+        u.selected = "ses_t"
+        let t = u.states["ses_t"]!.tasks.last!
+        let rc = CardModel(resultCard: t.resultCard!, runId: t.runId)
+        u.click(rc.buttons.first { $0.role == .undo }!)
+        check(sent(mock)?["type"] as? String == "respond" && sent(mock)?["option"] as? Int == rc.buttons.first { $0.role == .undo }!.index,
+              "cloud off: the result card's undo goes (no model): \(String(describing: sent(mock)))")
+        // an ask card: its way out goes, its approve does not
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.send: ["ok": true]]
+        let m = ShellModel(client: SessionClient(transport: mock2), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                           cloudOn: { false }, work: { $0() }, deliver: { $0() })
+        feed(m, "task-card", upTo: SessionTests.isKind("ask"))
+        m.selected = "ses_t"
+        let s = m.states["ses_t"]!
+        let (run, open) = s.openCard!
+        let card = CardModel(card: open.card, runId: run, askId: open.askId)
+        m.cardBody(card, contentHeight: 10, visibleHeight: 10, offset: 0)
+        m.click(card.buttons.first { $0.role == .approve }!)
+        check(sends(mock2) == 0, "cloud off: an approve (the task goes on, the model with it) is held back")
+        m.stop()
+        check(sent(mock2)?["type"] as? String == "stop", "cloud off: Stop goes: \(String(describing: sent(mock2)))")
+        m.queueCancel("q1")
+        check(sent(mock2)?["type"] as? String == "queue_cancel", "cloud off: a queue cancel goes: \(String(describing: sent(mock2)))")
+        let n = sends(mock2)
+        m.retry()
+        check(sends(mock2) == n, "cloud off: a retry is held back")
+        m.click(card.buttons.first { $0.role == .cancel }!)
+        check(sent(mock2)?["type"] as? String == "answer" && sent(mock2)?["option"] as? Int == card.buttons.first { $0.role == .cancel }!.index,
+              "cloud off: the way out goes")
+        check(CardModel.Role.undo.reachesNoModel && CardModel.Role.cancel.reachesNoModel && !CardModel.Role.approve.reachesNoModel
+              && !CardModel.Role.choice.reachesNoModel && !CardModel.Role.delegate.reachesNoModel && !CardModel.Role.skipStep.reachesNoModel,
+              "what reaches no model: the way out and undo")
+    }
+
+    /// #107 re-review (2): 0.5.0 has no local-only mode. The 0.5 window's model settings show the cloud switch on and
+    /// fixed (with a line why); the window as it was keeps its choice.
+    static func modelChoiceTests() {
+        check(!ModelChoice.offersLocalOnly(inShell: true) && ModelChoice.offersLocalOnly(inShell: false), "local-only offered only outside the 0.5 window")
+        check(ModelChoice.startsCloud(inShell: true, saved: false) && ModelChoice.startsCloud(inShell: false, saved: true)
+              && !ModelChoice.startsCloud(inShell: false, saved: false), "the 0.5 window's settings start on, even when the old window turned it off")
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        func code(_ f: String) -> String {
+            let t = (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? ""
+            return t.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        }
+        let main = code("Main/MainSplitView.swift"), sheet = code("Main/CloudModel.swift")
+        check(main.contains("CloudModelSheet(inShell: true)") && !main.contains("CloudModelSheet()"), "the 0.5 window opens the settings as its own")
+        check(sheet.contains(".disabled(!ModelChoice.offersLocalOnly(inShell: inShell))")
+              && sheet.contains("useCloud = ModelChoice.startsCloud(inShell: inShell, saved: CloudModelSettings.engineIsCloud)")
+              && sheet.contains("Conversations in DeskMind 0.5 need a cloud model."),
+              "the sheet: the switch fixed in the 0.5 window, on, with its line")
+    }
+
+    /// #107 re-review (4): on a card with an approve-type option, the card's own words wait for its whole body as its
+    /// approve does (words can approve: 「好的」); never read. A card without one takes words at once.
+    static func cardWordsTests() {
+        let card: [String: Any] = ["kind": "action", "text": "这会把内容发出去：在 Mail 里点「发送」", "blocking": true, "free_text": true,
+                                   "options": [["kind": "approve", "text": "可以"], ["kind": "cancel", "text": "先别做了"]]]
+        let lines: [[String: Any]] = [
+            ["kind": "session.message", "session_id": "ses_w", "seq": 1, "msg_id": "u1", "role": "user", "text": "/cua 发周报", "via": "cua"],
+            ["kind": "session.task", "session_id": "ses_w", "seq": 2, "msg_id": "u1", "run_id": "r1", "raw": "发周报", "by": "slash"],
+            ["kind": "start", "session_id": "ses_w", "run_id": "r1", "seq": 1, "raw": "发周报"],
+            ["kind": "ask", "session_id": "ses_w", "run_id": "r1", "seq": 2, "ask_id": "a1", "card": card]]
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let m = model(mock)
+        for l in lines { m.client.feed(l) }
+        m.selected = "ses_w"
+        guard let (run, open) = m.states["ses_w"]?.openCard else { check(false, "the card is open"); return }
+        let c = CardModel(card: open.card, runId: run, askId: open.askId)
+        check(c.allowsFreeText && c.buttons.contains { $0.role == .approve }, "a card with an approve and its own field")
+        check(!m.wordsEnabled(c, in: m.states["ses_w"]!), "its field: off before the body was seen")
+        m.answer(c, text: "好的")
+        check(sends(mock) == 0, "words before the body was seen: not sent")
+        m.cardBody(c, contentHeight: 50, visibleHeight: 50, offset: 0)
+        check(m.wordsEnabled(c, in: m.states["ses_w"]!), "its field: on once the body was on screen")
+        m.answer(c, text: "好的")
+        check(sent(mock)?["text"] as? String == "好的", "then sent: \(String(describing: sent(mock)))")
+        // a card with no approve-type option takes words at once
+        var plain = card
+        plain["options"] = [["kind": "choice", "text": "周一"], ["kind": "cancel", "text": "先别做了"]]
+        var pl = lines
+        pl[3]["card"] = plain
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.send: ["ok": true]]
+        let q = model(mock2)
+        for l in pl { q.client.feed(l) }
+        q.selected = "ses_w"
+        guard let (run2, open2) = q.states["ses_w"]?.openCard else { check(false, "the plain card is open"); return }
+        let c2 = CardModel(card: open2.card, runId: run2, askId: open2.askId)
+        q.answer(c2, text: "周二")
+        check(sent(mock2)?["text"] as? String == "周二" && q.wordsEnabled(c2, in: q.states["ses_w"]!) == false,
+              "no approve-type option: words go at once (\(sends(mock2)) sent)")
+        let card2 = CardModel(card: open2.card, runId: run2, askId: open2.askId)
+        check(!ShellModel.wordsWaitForBody(card2) && ShellModel.wordsWaitForBody(c), "which cards' words wait")
+    }
+
+    /// #107 re-review (3): remembered settings never mark a session opened here. After a settings save and a helper
+    /// restart, a reconnecting watch reopens only the sessions this client opened (with the new settings).
+    static func settingsReopenTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_a"], SessionClient.Op.end: ["ok": true, "deferred": true]]
+        var config = "provider-a"
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { config }, lang: { .zhHans },
+                           work: { $0() }, deliver: { $0() })
+        _ = m.client.open(sessionId: "ses_a", config: "provider-a", lang: "zh")
+        m.client.feed(["kind": "session.start", "session_id": "ses_a", "resumed": false, "last_seq": 0])
+        // two sessions this client only saw (the list, a watch): one running, one read from its history
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.client.feed(["kind": "session.message", "session_id": "ses_r", "seq": 1, "msg_id": "u", "role": "user", "text": "旧的"])
+        m.client.feed(["kind": "helper.session_exit", "session_id": "ses_r", "code": 0])
+        config = "provider-b"
+        m.settingsChanged()
+        // the helper restarts: every process gone
+        for id in ["ses_a", "ses_t"] { m.client.feed(["kind": "helper.session_exit", "session_id": id, "code": 0]) }
+        mock.requests = []
+        mock.streamLines = [["kind": "helper.watching", "open": [Any]()]]
+        _ = m.client.watch()
+        let opens = mock.requests.filter { $0["op"] as? String == SessionClient.Op.open }
+        check(opens.compactMap { $0["session_id"] as? String } == ["ses_a"],
+              "the watch reopens only the session opened here: \(opens.compactMap { $0["session_id"] as? String })")
+        check(opens.first?["config"] as? String == "provider-b", "with the saved settings: \(String(describing: opens.first?["config"]))")
+        // and a send to one only seen opens it with them too
+        mock.requests = []
+        mock.replies[SessionClient.Op.open] = ["ok": true, "session_id": "ses_r"]
+        mock.replies[SessionClient.Op.send] = ["ok": true]
+        m.selected = "ses_r"; m.draft = "再问"; m.submit()
+        check(mock.requests.first { $0["op"] as? String == SessionClient.Op.open }?["config"] as? String == "provider-b", "a send opens a seen one with the new settings")
+    }
+
+    /// #107 re-review (5): an end the helper refused (not_idle) leaves the session free to open again; one it did end
+    /// is not opened again by itself.
+    static func endRefusedTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.end: ["ok": false, "code": "not_idle"]]
+        let c = SessionClient(transport: mock)
+        _ = c.open(sessionId: "ses_t")
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        check(!c.end("ses_t"), "not idle: the end refused")
+        c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 1])
+        mock.requests = []
+        check(c.reopenIfExited("ses_t", onlyOpenedHere: true) && mock.requests.contains { $0["op"] as? String == SessionClient.Op.open },
+              "its process gone later: opened again (the refused end left no mark)")
+        mock.replies[SessionClient.Op.end] = ["ok": true]
+        check(c.end("ses_t"), "idle: ended")
+        c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0])
+        mock.requests = []
+        check(!c.reopenIfExited("ses_t", onlyOpenedHere: true) && mock.requests.isEmpty, "ended by the app: not opened again by itself")
     }
 
     /// #107 review (item 3): reading a session needs no process — its history from the helper's stored log.

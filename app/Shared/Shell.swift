@@ -588,15 +588,26 @@ final class ShellModel: ObservableObject {
         guard let id = selected else { return }
         // an approve-type option only once the card's whole body has been on screen (never approve what was not seen)
         if button.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: button.runId, askId: button.askId)) { return }
-        // the way out stays open with cloud models off; anything else would make the model go on
-        if button.role != .cancel && !cloudAllows() { return }
+        // cloud models off: only what reaches no model is held back — the way out and undo (the session undoes from
+        // its receipts, no model) always go; an answer that resumes the task would make the model go on
+        if !button.role.reachesNoModel && !cloudAllows() { return }
         send(CardModel.answer(button), in: id)
     }
 
-    /// The user's own words on a card that takes them (its own field).
+    /// The user's own words on a card that takes them (its own field): on a card with an approve-type option, only once
+    /// its whole body has been on screen, as its approve (words can approve too; they are never read).
     func answer(_ card: CardModel, text: String) {
-        guard let id = selected, let a = card.answer(text: text), cloudAllows() else { return }
+        guard let id = selected, !Self.wordsWaitForBody(card) || bodySeen.contains(Self.cardKey(card)),
+              let a = card.answer(text: text), cloudAllows() else { return }
         send(a, in: id)
+    }
+
+    /// A card whose own words wait for its whole body: one with an approve-type option (#107 re-review).
+    static func wordsWaitForBody(_ card: CardModel) -> Bool { card.buttons.contains { $0.role.needsWholeBody } }
+
+    /// Whether the card's own field (and its Send) takes words now: as `answer` sends them.
+    func wordsEnabled(_ card: CardModel, in s: SessionState) -> Bool {
+        answerable(card, in: s) && (!Self.wordsWaitForBody(card) || bodySeen.contains(Self.cardKey(card)))
     }
 
     static func cardKey(runId: String, askId: String?) -> String { askId.map { "\(runId)/\($0)" } ?? runId }
@@ -686,6 +697,18 @@ extension CardModel.Role {
     /// whole body has been on screen (owner: never approve what you can't fully see). The way out, a pick, a skip and
     /// undo are not.
     var needsWholeBody: Bool { self == .approve || self == .delegate }
+    /// An answer that resumes no model work (the way out; undo, which the session runs from its receipts): it goes
+    /// with cloud models off too (#107 re-review: holding back an undo for its 600 s would break the gate).
+    var reachesNoModel: Bool { self == .cancel || self == .undo }
+}
+
+/// The model settings as the 0.5 window offers them (#107 re-review, owner: 0.5.0 has no local-only mode — a
+/// conversation needs a cloud model). The window as it was (flag off) keeps its choice.
+enum ModelChoice {
+    /// Whether the settings offer turning the cloud model off.
+    static func offersLocalOnly(inShell: Bool) -> Bool { !inShell }
+    /// What the settings start with: in the 0.5 window, on (saving there turns it on, if the old window turned it off).
+    static func startsCloud(inShell: Bool, saved: Bool) -> Bool { inShell || saved }
 }
 
 /// A card's body on screen (MainSplitView.CardView: the body scrolls inside a bounded height, its header and buttons

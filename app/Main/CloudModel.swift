@@ -90,6 +90,9 @@ struct CloudModelRow: View {
 /// Provider, key, (custom) URL and model; Test asks the helper to reach the model once; Save writes models.env and
 /// switches the engine.
 struct CloudModelSheet: View {
+    /// Opened from the 0.5 window: its conversations need a cloud model (0.5.0 has no local-only mode), so the switch
+    /// is shown on and cannot be turned off (ModelChoice). The window as it was keeps its choice.
+    var inShell = false
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @Environment(\.dismiss) private var dismiss
@@ -106,6 +109,11 @@ struct CloudModelSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(L("Which model thinks", lang: lang)).font(.system(size: 16, weight: .semibold, design: .rounded))
             Toggle(L("Use a cloud model (the harness engine)", lang: lang), isOn: $useCloud)
+                .disabled(!ModelChoice.offersLocalOnly(inShell: inShell))
+            if !ModelChoice.offersLocalOnly(inShell: inShell) {
+                Text(L("Conversations in DeskMind 0.5 need a cloud model.", lang: lang))
+                    .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
+            }
             if useCloud {
                 Picker(L("Service", lang: lang), selection: $provider) {
                     ForEach(CloudProvider.all) { p in Text(p.title).tag(p) }
@@ -135,7 +143,10 @@ struct CloudModelSheet: View {
             }
         }
         .padding(22).frame(width: 440)
-        .onAppear { load(provider) }
+        .onAppear {
+            useCloud = ModelChoice.startsCloud(inShell: inShell, saved: CloudModelSettings.engineIsCloud)
+            load(provider)
+        }
     }
 
     private func load(_ p: CloudProvider) {

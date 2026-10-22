@@ -498,6 +498,7 @@ enum L10n {
         "A conversation needs a cloud model. Turn it on in the model settings.": "对话要用云端模型。请在模型设置里打开它。",
         "Cloud models are off. Conversations need one: nothing is sent until it is on.": "云端模型已关闭。对话要用云端模型：打开之前，什么都不会发出去。",
         "Scroll to the end of the card to approve": "滚到卡片末尾才能同意",
+        "Conversations in DeskMind 0.5 need a cloud model.": "DeskMind 0.5 的对话需要云端模型。",
         "Read the whole card first: scroll to its end": "先看完整张卡：滚到它的末尾",
         "Couldn't start a conversation. Is DeskMind's helper running?": "没能开始对话。DeskMind 的后台助手在运行吗？",
         "DeskMind's helper didn't answer. Your message is back in the box.": "后台助手没有回应，你的消息放回输入框了。",

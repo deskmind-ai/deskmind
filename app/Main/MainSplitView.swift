@@ -40,7 +40,7 @@ struct MainSplitView: View {
         .frame(minWidth: 980, idealWidth: 1180, minHeight: 600, idealHeight: 760)
         .background(Brand.paper)
         .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
-            CloudModelSheet().environmentObject(model).environment(\.lang, lang)
+            CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
         }
         .onAppear {
             ShellModel.shared = shell
@@ -631,6 +631,7 @@ struct CardView: View {
     @State private var offset: Double = 0
 
     private var enabled: Bool { shell.answerable(card, in: session) }
+    private var wordsEnabled: Bool { shell.wordsEnabled(card, in: session) }
     private var seen: Bool { shell.bodySeen.contains(ShellModel.cardKey(card)) }
 
     var body: some View {
@@ -676,11 +677,13 @@ struct CardView: View {
             }
             if card.allowsFreeText {
                 HStack(spacing: 8) {
+                    // (on a card with an approve-type option, words wait for the whole body as its approve does)
                     TextField(L("Or answer in your own words", lang: lang), text: $words, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(sendWords)
+                        .disabled(!wordsEnabled)
                     Button(L("Send", lang: lang), action: sendWords).buttonStyle(InkButtonStyle(prominent: false))
-                        .disabled(!enabled || words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!wordsEnabled || words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -720,7 +723,7 @@ struct CardView: View {
     }
 
     private func sendWords() {
-        guard enabled else { return }
+        guard wordsEnabled else { return }
         shell.answer(card, text: words)
         words = ""
     }

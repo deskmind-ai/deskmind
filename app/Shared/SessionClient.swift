@@ -181,12 +181,17 @@ final class SessionClient {
     }
     private var defaults: (config: String?, lang: String?) = (nil, nil)
 
-    /// How a session is opened again: as this client opened it, else with the defaults (read under the lock).
+    /// How a session is opened again: with the settings saved since (adoptSettings, restart), else as this client
+    /// opened it, else with the defaults (read under the lock).
     private func reopenSettings(_ sessionId: String) -> (config: String?, lang: String?) {
-        opened[sessionId] ?? defaults
+        reopenWith[sessionId] ?? opened[sessionId] ?? defaults
     }
-    /// What each session was opened with, to open it again the same way after its process ended.
+    /// What each session was opened with, to open it again the same way after its process ended. Only sessions this
+    /// client opened: a watch reopens these (and no others).
     private var opened: [String: (config: String?, lang: String?)] = [:]
+    /// Settings saved after a session was opened, for its next process (never marks it opened here: #107 re-review,
+    /// a settings save then a helper restart reopened every known session, ~80 MB each).
+    private var reopenWith: [String: (config: String?, lang: String?)] = [:]
     /// Sessions the app ended (`end`): their process's exit is expected, and they are not opened again by themselves.
     private var endedByApp: Set<String> = []
     /// Sessions the user deleted (`delete`): whatever still comes of them is left.
@@ -256,6 +261,7 @@ final class SessionClient {
             states[id]?.awaitingStart = true
         }
         opened[id] = (config, lang)
+        reopenWith[id] = nil                // opened with these now: they are what it opens again with
         endedByApp.remove(id)
         idleClosed.remove(id)
         lock.unlock()
@@ -418,12 +424,14 @@ final class SessionClient {
     /// card, however alike their options.
     func click(_ button: CardModel.Button, in sessionId: String) -> SendResult { answer(CardModel.answer(button), in: sessionId) }
 
+    /// Ends the session's process, if the helper finds it idle (else `not_idle`, and nothing changes here). Marked
+    /// ended by the app only once the helper says it ended it: a refused end must not keep it from opening again.
     func end(_ sessionId: String) -> Bool {
+        guard let r = transport.request(Request.end(sessionId: sessionId)), r["ok"] as? Bool != false else { return false }
         lock.lock()
-        endedByApp.insert(sessionId)        // before the request: its exit line may come first
+        endedByApp.insert(sessionId)
         lock.unlock()
-        guard let r = transport.request(Request.end(sessionId: sessionId)) else { return false }
-        return r["ok"] as? Bool != false
+        return true
     }
 
     /// The settings changed: every session this client knows opens again with these (`config`, `lang`), whenever its
@@ -432,7 +440,7 @@ final class SessionClient {
     func adoptSettings(config: String?, lang: String?) {
         lock.lock()
         defaults = (config, lang)
-        for id in Set(opened.keys).union(states.keys) { opened[id] = (config, lang) }
+        for id in Set(opened.keys).union(states.keys) { reopenWith[id] = (config, lang) }
         lock.unlock()
     }
 
@@ -446,7 +454,7 @@ final class SessionClient {
         let serial = sessionLock(sessionId)
         serial.lock(); defer { serial.unlock() }
         lock.lock()
-        opened[sessionId] = (config, lang)
+        reopenWith[sessionId] = (config, lang)
         endedByApp.remove(sessionId)
         lock.unlock()
         guard let r = transport.request(Request.restart(sessionId: sessionId)) else { return false }
@@ -489,6 +497,7 @@ final class SessionClient {
         deleted.insert(sessionId)
         states[sessionId] = nil
         opened[sessionId] = nil
+        reopenWith[sessionId] = nil
         lock.unlock()
         return nil
     }
