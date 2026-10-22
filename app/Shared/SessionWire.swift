@@ -19,9 +19,6 @@ enum SessionWire {
     /// runaway write off the session's stdin).
     static let maxLineBytes = 1 << 20
 
-    /// `session.send`'s `line` (a JSON object, or its text) → the object to write, or why it is refused. Only a JSON
-    /// object whose `type` the session knows, with the fields that type needs, is passed on: anything else the
-    /// session would drop without a word, and the app would wait for an answer that never comes.
     /// A line's own stored seq, or nil when it has none. `session.duplicate` (harness#59) is never stored: its `seq` is
     /// the stored line it points at, so it must not move a cursor or be taken for that line's repeat.
     static func ownSeq(_ e: [String: Any]) -> Int? {
@@ -29,6 +26,9 @@ enum SessionWire {
         return (e["seq"] as? NSNumber)?.intValue
     }
 
+    /// `session.send`'s `line` (a JSON object, or its text) → the object to write, or why it is refused. Only a JSON
+    /// object whose `type` the session knows, with the fields that type needs, is passed on: anything else the
+    /// session would drop without a word, and the app would wait for an answer that never comes.
     static func validate(_ line: Any?) -> (line: [String: Any]?, error: String?) {
         var object: Any? = line
         if let text = line as? String {
