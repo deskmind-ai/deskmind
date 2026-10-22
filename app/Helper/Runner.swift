@@ -872,11 +872,12 @@ enum Runner {
         // task has the Mac by now (then nothing of it is touched)
         if let acquired { ComputerLock.linger(acquired) }
         ComputerLock.free(runID: runID, pgid: p.processIdentifier)
-        if case .ok(let r?) = ComputerLock.reserve(runID: runID + "-cleanup", by: "hands") {
-            cleanUp(quitTextEdit: !textEditWasRunning)
-            ComputerLock.cancel(r)
-        } else {
-            NSLog("DeskMind Hands: another task has the Mac; the run's windows are left as they are")
+        switch ComputerLock.reserve(runID: runID + "-cleanup", by: "hands") {
+        case .ok(let r?): cleanUp(quitTextEdit: !textEditWasRunning); ComputerLock.cancel(r)
+        case .busy(let h): NSLog("DeskMind Hands: \(h.runID) (\(h.by)) has the Mac; the run's windows are left as they are")
+        case .alive: NSLog("DeskMind Hands: what the run left would not end; its windows are left as they are")
+        case .failed(let why): NSLog("DeskMind Hands: the machine lock (\(why)); the run's windows are left as they are")
+        case .ok(nil): break
         }
         pruneRuns(keep: 10)
         // hands says some refusals on stdout ("refused: … is your home directory"): its tail too, when stderr is quiet.
