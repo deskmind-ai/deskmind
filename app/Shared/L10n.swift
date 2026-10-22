@@ -196,6 +196,8 @@ enum L10n {
             "本地模型没有及时回应。确认首页的「本地模型」已就绪，再跑一次。",
         "The last task is still running. Wait for it to finish, or click “Stop” first.":
             "上一个任务还在进行，等它结束或先点「停止」。",
+        "The last task's process hasn't ended yet (it may still be undoing), so this task didn't start. Wait a moment and run it again.":
+            "上一个任务的进程还没结束（可能还在撤销），这个任务没有开始。稍等一下再跑一次。",
 
         // MARK: Results of the user's own instruction (Main/RunView.swift FreeResult)
         // The file example names the sample files the helper seeds in each language.
@@ -311,7 +313,6 @@ enum L10n {
         "Vision": "加载视觉",
         "Looking": "观察屏幕",
         "%ds": "%d 秒",
-        "Keep DeskMind Open While a Task Runs": "运行任务时保持 DeskMind 窗口打开",
         "Show a Live View of the Task": "显示任务窗口的实时画面",
         // The live view (Helper/LiveCard.swift).
         "DeskMind live view": "DeskMind 实时画面",
@@ -331,6 +332,9 @@ enum L10n {
         "Show What It Did": "查看这次运行",
         "Show Recording in Finder": "在访达中显示录像",
         "Clear the recent tasks?": "清除最近的任务？",
+        "A task is still running, so nothing was cleared. Clear again once it has finished.":
+            "还有任务在进行，什么都没有清除。等它结束后再清除一次。",
+        "OK": "好",
         "Answer: %@": "答案：%@",
         "Open NetEase Cloud Music, search 张悬 宝贝 and play it": "打开网易云音乐，搜索张悬的《宝贝》并播放",
         "In NetEase Cloud Music, search 夜空中最亮的星 — who sings the first song?":
@@ -399,6 +403,9 @@ enum L10n {
         "Waiting for your answer in DeskMind": "在 DeskMind 窗口里等你回答",
         "Waiting for your approval in DeskMind": "在 DeskMind 窗口里等你批准",
         "Got your answer. Carrying on…": "收到回复，继续…",
+        "The question was withdrawn. Carrying on…": "这个问题已收回，继续…",
+        "This question was updated": "这个问题已更新",
+        "Open DeskMind": "打开 DeskMind",
         "Asked for your approval": "请你批准",
 
         // MARK: Run overlay and notifications (Main/RunOverlay.swift)

@@ -523,7 +523,6 @@ struct DeskMindApp: App {
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
     @AppStorage(RunRecorder.wholeScreenKey) private var recordWholeScreen = false
     @AppStorage(RunRecorder.smoothKey) private var recordSmooth = false
-    @AppStorage(MainWindow.keepOpenKey) private var keepOpen = false
     @AppStorage(LiveView.enabledKey) private var liveView = true
     var body: some Scene {
         WindowGroup(L("DeskMind", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
@@ -547,9 +546,6 @@ struct DeskMindApp: App {
                 // 30 fps for footage where motion matters; the default 10 fps barely slows the run.
                 Toggle(L("Smooth Recordings (30 fps, Slows Tasks About 10%)", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
                        isOn: $recordSmooth)
-                // By default the window steps aside while a task works in other apps (the status stays at the top).
-                Toggle(L("Keep DeskMind Open While a Task Runs", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
-                       isOn: $keepOpen)
                 // A corner card with the window the task works in, live, and the step it is taking.
                 Toggle(L("Show a Live View of the Task", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
                        isOn: $liveView)

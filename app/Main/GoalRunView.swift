@@ -89,7 +89,7 @@ struct GoalRunView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
             if let ask = run.ask {
-                AskCard(ask: ask) { reply, approve in run.answer(reply, approve: approve) }
+                AskCard(ask: ask) { button in run.answer(button) }
                     .padding(.horizontal, 28).padding(.bottom, 10)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
@@ -252,7 +252,8 @@ struct RunScope: View {
 /// (sending a message, paying, deleting, publishing). It waits up to ten minutes, then carries on without an answer.
 struct AskCard: View {
     let ask: PendingAsk
-    let send: (String, Bool) -> Void
+    /// Which button was used: each sends itself (HarnessEvents.CardButton), whatever the card's kind.
+    let send: (HarnessEvents.CardButton) -> Void
     @State private var reply = ""
     @FocusState private var focused: Bool
     @Environment(\.lang) private var lang
@@ -266,26 +267,30 @@ struct AskCard: View {
             }
             Text(ask.question).font(.system(size: 14, design: .rounded)).foregroundStyle(Brand.ink)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            let buttons = HarnessEvents.buttons(approval: ask.approval, options: ask.options)
             if ask.approval {
                 HStack {
                     Spacer()
                     // No words with a verdict: hands tells the planner "approved" or "denied" itself.
-                    Button(L("Deny", lang: lang)) { send("", false) }
-                        .buttonStyle(InkButtonStyle(prominent: false))
-                    Button(L("Approve", lang: lang)) { send("", true) }
-                        .buttonStyle(InkButtonStyle())
+                    ForEach(buttons, id: \.self) { b in
+                        Button(b == .approve ? L("Approve", lang: lang) : L("Deny", lang: lang)) { send(b) }
+                            .buttonStyle(InkButtonStyle(prominent: b == .approve))
+                    }
                 }
             } else {
                 // The alternatives the question lists, one click each: the D4 shoot had the answer typed out in full.
-                ForEach(ask.options, id: \.self) { option in
-                    Button { send(option, true) } label: {
-                        Text(option).font(.system(size: 13, design: .monospaced)).foregroundStyle(Brand.ink)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Brand.paper))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Brand.line, lineWidth: 1))
+                // Each sends its own option (deskmind#102: they all used to be sent as "approve").
+                ForEach(buttons, id: \.self) { b in
+                    if case .option(_, let option) = b {
+                        Button { send(b) } label: {
+                            Text(option).font(.system(size: 13, design: .monospaced)).foregroundStyle(Brand.ink)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 7)
+                                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Brand.paper))
+                                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Brand.line, lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(L("Use %@", option, lang: lang))
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(L("Use %@", option, lang: lang))
                 }
                 HStack(spacing: 8) {
                     TextField(L(ask.options.isEmpty ? "Your answer" : "Or type an answer", lang: lang), text: $reply)
@@ -313,7 +318,7 @@ struct AskCard: View {
     private func submit() {
         let r = reply.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !r.isEmpty else { return }
-        send(r, true)
+        send(.words(r))
         reply = ""
     }
 }

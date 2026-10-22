@@ -59,12 +59,17 @@ struct PendingAsk: Equatable {
     let approval: Bool
     /// Answers to pick from: the alternatives the question lists (two orders for one customer). Typing stays open.
     var options: [String] = []
+    /// The card's id (the harness engine's ask_id; "" from `hands do`): every answer names it, and the helper sends
+    /// it only while this card is still the open one.
+    var askID = ""
 }
 
 @MainActor
 final class RunModel: ObservableObject {
     enum Phase { case idle, running, done, failed }
-    @Published var phase: Phase = .idle
+    /// While a run is running the window cannot be closed (only minimised): its card questions are answered there,
+    /// and a closed window took this model, and the run's events, with it.
+    @Published var phase: Phase = .idle { didSet { if phase != oldValue { MainWindow.setClosable(phase != .running) } } }
     @Published var tasks: [RunTask] = []
     @Published var summary = ""
     @Published var elapsed: TimeInterval = 0
@@ -114,8 +119,8 @@ final class RunModel: ObservableObject {
     @Published var waitingForUser = false
     /// What the paused step will do once the user stops ("type '张悬 宝贝' into '搜索框'").
     @Published var waitingWhat = ""
-    /// The question the task is waiting on, if any (see AskCard).
-    @Published var ask: PendingAsk?
+    /// The question the task is waiting on, if any (see AskCard). The island offers "Open DeskMind" meanwhile.
+    @Published var ask: PendingAsk? { didSet { if real || ask == nil { RunOverlay.shared.setAsking(ask != nil) } } }
     /// Set while the helper loads something before the run can start ("eyes": the vision model).
     @Published var preparing = ""
     /// What the run is doing before its first step, and since when (see RunStage); nil once steps come.
@@ -141,14 +146,14 @@ final class RunModel: ObservableObject {
         movie = nil
         recording = req["record"] as? Bool ?? false
         if real {
-            // The run is in the island from the moment it is started, recording and preparing included; DeskMind's
-            // own window steps aside at once (it stayed in the middle of the screen while the helper started).
+            // The run is in the island from the moment it is started, recording and preparing included. DeskMind's own
+            // window is not moved: the app neither sends it away nor brings it forward on its own (M1 S0, focus
+            // theft) -- the island's "Show Details" and the Dock icon bring it back when the user asks.
             RunOverlay.requestNotificationPermission()
             RunOverlay.shared.onStop = { [weak self] in self?.stop() }
             let title = goal.map { $0.count > 40 ? String($0.prefix(39)) + "…" : $0 }
             RunOverlay.shared.show(title: title ?? (req["task"] as? String) ?? L("Task", lang: ResolvedLang.current),
                                    line: goal == nil ? nil : L("Getting ready…", lang: ResolvedLang.current))
-            MainWindow.stepAside()
         }
         guard recording else { go(req); return }
         // The recording starts first and the run once it is going: started together, the first steps went by
@@ -279,13 +284,23 @@ final class RunModel: ObservableObject {
         Task.detached { _ = DeskMindIPC.request(["op": "stop"]) }
     }
 
-    /// The user's reply (or verdict, for an approval) to the waiting question, written to the task's stdin by the
-    /// helper. The card goes away at once; if the helper had nothing waiting, the next step says what happened.
-    func answer(_ reply: String, approve: Bool) {
+    /// The button the user used on the waiting card (an option, their words, or a verdict on an approval), written
+    /// to the task's stdin by the helper. The card goes away at once; if the helper had nothing waiting, the next step
+    /// says what happened.
+    /// A card that is no longer open (voided by a steer, replaced) is refused by the helper: it is gone from the window
+    /// already, and the open card comes as its own ask.
+    func answer(_ button: HarnessEvents.CardButton) {
+        let askID = ask?.askID ?? ""
         ask = nil
-        let lang = ResolvedLang.current
-        if real { RunOverlay.shared.say(L("Got your answer. Carrying on…", lang: lang)); MainWindow.stepAside() }
-        Task.detached { _ = DeskMindIPC.request(["op": "answer", "reply": reply, "approve": approve]) }
+        let request = button.request(askID: askID)
+        Task { @MainActor [weak self] in
+            // the helper refuses an answer to a card that is no longer open (stale_card): no "got your answer" then --
+            // the question was updated, and the new card comes as its own ask
+            let stale = await Task.detached { DeskMindIPC.request(request)?["code"] as? String == "stale_card" }.value
+            guard let self, self.real, self.ask == nil else { return }   // a newer card says what it needs itself
+            let lang = ResolvedLang.current
+            RunOverlay.shared.say(stale ? L("This question was updated", lang: lang) : L("Got your answer. Carrying on…", lang: lang))
+        }
     }
 
     /// Show a past run as it ended (from the recent runs list): its steps, answer and changes, nothing running.
@@ -355,12 +370,11 @@ final class RunModel: ObservableObject {
             waitingForUser = false
         case "ask":
             let q = PendingAsk(question: e["question"] as? String ?? "", approval: e["approval"] as? Bool ?? false,
-                               options: e["options"] as? [String] ?? [])
+                               options: e["options"] as? [String] ?? [], askID: e["ask_id"] as? String ?? "")
             withAnimation(.easeOut(duration: 0.2)) { ask = q }
-            // The answer is typed in DeskMind's window: it comes back for it. Not as the key window while the user is
-            // typing in another app -- their next keys, Return included, would land in the answer and send it.
+            // The card is in DeskMind's window, which is not brought forward for it (M1 S0: no focus theft): the island
+            // says so, and a notification when DeskMind is not the active app or the user is typing elsewhere.
             let typing = MainWindow.userTypedRecently()
-            if real { MainWindow.comeBack(activate: !typing) }
             let lang = ResolvedLang.current
             if real {
                 RunOverlay.shared.say(q.approval ? L("Waiting for your approval in DeskMind", lang: lang)
@@ -369,6 +383,13 @@ final class RunModel: ObservableObject {
             if !NSApp.isActive || typing {
                 RunOverlay.notify(title: q.approval ? L("DeskMind needs your approval", lang: lang)
                                                     : L("DeskMind has a question", lang: lang), body: q.question)
+            }
+        case "ask_closed":
+            // The harness let the card go (the user changed the request, stopped) or took its answer: it leaves the
+            // window, if that is the card shown.
+            if let a = ask, !a.askID.isEmpty, a.askID == e["ask_id"] as? String {
+                withAnimation(.easeOut(duration: 0.2)) { ask = nil }
+                if real && e["why"] as? String == "steer" { RunOverlay.shared.say(L("The question was withdrawn. Carrying on…", lang: ResolvedLang.current)) }
             }
         case "step":
             let id = e["task"] as? String ?? "?"
@@ -431,16 +452,10 @@ final class RunModel: ObservableObject {
                            ? L("Got stuck: the same step kept failing, so DeskMind stopped.", lang: lang)
                            : L("Stopped before finishing.", lang: lang))
                 }
+                // The result is in the island; the window stays where the user left it (no bringing forward).
                 RunOverlay.shared.finish(passed: completed, summary: summary)
-                // The window stays aside after a run, the result in the island -- which shrinks after a few
-                // seconds. An answer, and the first task that finishes, bring it back (not as the active window).
-                if MainWindow.isAside && (!answer.isEmpty || (completed && !UserDefaults.standard.bool(forKey: "starNudge.seen"))) {
-                    MainWindow.comeBack(activate: false)
-                }
             } else if real {
-                // A Self-test run: the window comes back (not as the active window), on the screen where the next task
-                // is picked -- it stayed aside, and the way back to the list was not obvious.
-                if MainWindow.isAside { MainWindow.comeBack(activate: false) }
+                // A Self-test run: the result in the island; the window stays where the user left it.
                 let passed = exit == 0 && (e["passed"] as? Int ?? 0) == (e["total"] as? Int ?? -1)
                 RunOverlay.shared.finish(passed: passed,
                                          summary: passed ? L("Task done, and the result checks out", lang: lang) : summary)
@@ -734,8 +749,7 @@ struct FreeResult: View {
             if showStar { star.transition(.opacity) }
         }
         .onAppear {
-            // Not while the window is aside: the line was used up by a result nobody saw.
-            if task.strict == true && !starSeen && !MainWindow.isAside { starSeen = true; showStar = true }
+            if task.strict == true && !starSeen { starSeen = true; showStar = true }
         }
     }
 

@@ -175,7 +175,10 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true]
     case "clear_runs":
         // "Clear all" in Recent: the list, and with it what the runs left on disk.
-        guard let n = Runner.clearRunData() else { return ["ok": false, "error": "a task is running"] }
+        // refused while a task runs, or while the last one's process would not end: the app keeps its list then
+        guard let n = Runner.clearRunData() else {
+            return ["ok": false, "error": Runner.busy ? "a task is running" : "the last task's process has not ended"]
+        }
         return ["ok": true, "removed": n]
     case "save_log":
         // "Save Full Log…" after a failed run: the run's folder and the model servers' logs, zipped where the user chose.
@@ -216,8 +219,15 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return HarnessRun.modelCheck(config: req["config"] as? String ?? "ds-flash", extra: req["env"] as? [String: String] ?? [:])
     case "answer":
         // The user's reply to the question the running task asked (a HANDS_ASK line), or their approval.
-        let ok = Runner.answer(reply: req["reply"] as? String ?? "", approve: req["approve"] as? Bool ?? false)
-        return ["ok": ok] as [String: Any]
+        // {ask_id, reply, approve, option?}: `option` is the clicked option button's place among the options shown;
+        // `ask_id` the card the window showed (a harness run refuses an answer to a card that is no longer open).
+        if HarnessRun.input != nil { return HarnessRun.answer(req) }
+        return ["ok": Runner.answer(req)] as [String: Any]
+    case "respond":
+        // The answer to a finished harness run's result card (e.g. undo), while its process lingers:
+        // {run_id, option, wait?} → {ok, run_id, result?} (result: the harness's result_response, if it came in `wait` s).
+        guard let option = req["option"] as? Int else { return ["ok": false, "error": "respond needs an option"] }
+        return HarnessRun.respond(runID: req["run_id"] as? String ?? "", option: option, wait: (req["wait"] as? NSNumber)?.doubleValue ?? 0)
     case "stop":
         let running = Runner.current != nil
         Runner.requestStop()
@@ -271,7 +281,8 @@ func serve() {
             if let lang = (req["lang"] as? String).flatMap(ResolvedLang.init(rawValue:)) { ResolvedLang.current = lang }
             if req["op"] as? String == "run" {
                 // A run streams: one line per event until it ends, on this connection.
-                guard Runner.current == nil && !Runner.busy else {
+                // taken (busy, the last stop flags cleared) in one step with the check: a stop from now on is this run's
+                guard Runner.accept() else {
                     var busy = (try? JSONSerialization.data(withJSONObject: ["event": "error", "error": "a run is already in progress"])) ?? Data()
                     busy.append(0x0A)
                     _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
