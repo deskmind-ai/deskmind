@@ -429,15 +429,16 @@ enum SessionReducer {
                 s.goneUpTo = max(s.goneUpTo, e.lastSeq ?? 0)
             }
         case .sessionExit(let e):
-            // the latest process, or one before it (an exit that comes after the next process's start)? By pid when
-            // both have it; else by the stored seq it started at (start_seq): an earlier start is an older process; a
+            // the latest process, or one before it (an exit that comes after the next process's start)? By the stored
+            // seq it started at (start_seq) first, then by pid when both have it: an earlier start is an older process; a
             // later one is newer than the latest start seen (its session.start was missed: it started while no watch
             // was connected), so the latest; the same start is the latest if it stored anything (a later process starts
             // past it), and ambiguous if not — taken for an older one, which loses nothing (a process that stored
             // nothing queued and streamed nothing; a send to it finds it not_open and recovers).
             let latest: Bool
-            if let p = e.pid, let cur = s.processPid { latest = p == cur }
-            else if let st = s.processStart, let es = e.startSeq { latest = es > st || (es == st && (e.lastSeq ?? st) > st) }
+            if let st = s.processStart, let es = e.startSeq, es != st { latest = es > st }      // (a start missed, or an older one)
+            else if let p = e.pid, let cur = s.processPid { latest = p == cur }
+            else if let st = s.processStart, let es = e.startSeq { latest = (e.lastSeq ?? es) > st }
             else if let st = s.processStart, let l = e.lastSeq { latest = l > st }
             else { latest = true }
             // its runs are gone whenever this comes; without last_seq, those the app has seen of the latest process

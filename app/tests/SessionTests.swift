@@ -1321,6 +1321,10 @@ enum SessionTests {
          se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"z"}]"#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":7,"pid":102,"start_seq":5,"last_seq":6}"#)].forEach { mc.feed($0) }
         let missed = mc.state("s")
+        // the same with pids on the starts (should the helper add them): a missed start's exit has another pid but a later start_seq
+        let pidStart = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":0,"pid":1"#), se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"a""#),
+            se(nil, #""kind":"session.queue","items":[{"id":"q9","text":"z"}]"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":3,"pid":2,"start_seq":1,"last_seq":1}"#)])
+        check(pidStart.exited == 3 && pidStart.unsent.map(\.id) == ["q9"], "another pid, a later start_seq: the latest")
         check(missed.exited == 7 && missed.unsent.map(\.id) == ["q1"] && missed.message("a6")?.interrupted == true && missed.status != .thinking, "a missed start: the exit still counts: \(missed.status)")
         let stale = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":6"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"last_seq":4}"#)])
         check(stale.exited == nil && stale.goneUpTo == 6, "no pid: an exit below the latest start is an older process's")
