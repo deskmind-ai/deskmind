@@ -468,11 +468,33 @@ enum Runner {
         }
     }
 
-    /// Stop the run: the main app's Stop, or the live view's.
+    /// Taken by a stop and by a run's launch together (`cancelled`, `stopRequested`, `current`): a stop comes either
+    /// before the launch (it does not happen) or after `current` is set (it stops that process), never between.
+    private static let stopLock = NSLock()
+
+    /// Start a run's process -- every run's, `hands do` and harness alike -- unless a stop came since the run was
+    /// accepted (false: nothing started; a stop while the last run's process was waited for, or a model loaded, ends
+    /// the run here). Started, it is `current` and recorded (HarnessRun.record) before a stop can look.
+    /// `started`: a test's moment between the start and `current` (a stop then must not be lost).
+    static func launch(_ p: Process, started: () -> Void = {}) throws -> Bool {
+        stopLock.lock(); defer { stopLock.unlock() }
+        if cancelled { return false }
+        try p.run()
+        started()
+        HarnessRun.record(p)
+        current = p
+        return true
+    }
+
+    /// Stop the run: the main app's Stop, or the live view's. A stop before the run's process is started keeps it
+    /// from starting (`cancelled`, read by `launch`); after, it stops that process.
     static func requestStop() {
+        stopLock.lock()
         if busy { cancelled = true }
         stopRequested = true
-        if let p = current, HarnessRun.input != nil { HarnessRun.stop(p) } else { current?.terminate() }
+        let p = current
+        stopLock.unlock()
+        if let p, HarnessRun.input != nil { HarnessRun.stop(p) } else { p?.terminate() }
     }
 
     /// Hand the user's answer (the main app's `answer` request) to the question the running `hands do` asked (a harness
@@ -494,7 +516,7 @@ enum Runner {
         // lines must not interleave on the one socket.
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
-        busy = true; cancelled = false
+        busy = true; cancelled = false; stopRequested = false   // a stop from before this run is not this run's
         defer { busy = false }
         // a finished harness run still waiting for its result card's answer is let go first (after busy is set, so
         // no second run starts meanwhile); a run is not started beside one that would not end
@@ -626,11 +648,16 @@ enum Runner {
         let errURL = DeskMindIPC.supportDir.appendingPathComponent("work/last-run.stderr")
         fm.createFile(atPath: errURL.path, contents: nil)
         p.standardError = try? FileHandle(forWritingTo: errURL)
-        do { try p.run() } catch {
+        // what it leaves running (a Peekaboo server) is ended before the next run, as for a harness run (launch records
+        // it); stopRequested stands until the run has ended
+        do {
+            guard try launch(p) else {
+                stopRequested = false
+                _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
+            }
+        } catch {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
-        current = p; Runner.stopRequested = false
-        HarnessRun.record(p)    // what it leaves running (a Peekaboo server) is ended before the next run, as for a harness run
         answerLock.lock(); answers = inPipe.fileHandleForWriting; asking = false; answerLock.unlock()
         _ = emit(["event": "start", "set": set, "real": spec.real, "pid": Int(p.processIdentifier)])
         // The live view, for the user's own instructions: until the run ends, however it ends.

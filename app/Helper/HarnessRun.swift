@@ -309,22 +309,22 @@ enum HarnessRun {
         fm.createFile(atPath: outURL.path, contents: nil)
         let outLog = try? FileHandle(forWritingTo: outURL)
         pruneLogs()    // after this run's files are made, so they count among the ones kept
-        // Stop pressed while the lingering run was waited for (up to 5 s) or the run was being prepared: no process
-        // to stop yet, only `cancelled` -- the run does not start.
-        if Runner.cancelled {
-            Runner.stopRequested = false
-            _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
-        }
-        do { try p.run() } catch {
+        // Stop pressed while the last runs were waited for or the run was being prepared: no process to stop yet,
+        // only `cancelled` -- the run does not start (Runner.launch, under the stop's lock). stopRequested is not
+        // cleared once it has: a stop since then stands.
+        do {
+            guard try Runner.launch(p) else {
+                Runner.stopRequested = false
+                _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
+            }
+        } catch {
             _ = emit(["event": "error", "error": "launch: \(error.localizedDescription)"]); return
         }
-        Runner.current = p   // stopRequested is not cleared here: a stop since the check above stands
-        record(p)
         // once task_done is passed on (`linger.over`), the run's lines go to `linger` (result_response), not to this
         // run's connection, and the state is the next run's
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
         lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
-        // a stop between the check above and here found no stdin to write to: it is sent now
+        // a stop between the launch and here found no stdin to write to (it terminated the process): the stop line too
         if Runner.cancelled { Runner.stopRequested = true; stop(p) }
 
         // The request: one JSON line, then stdin stays open for answers.

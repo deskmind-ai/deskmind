@@ -224,6 +224,7 @@ enum HelperE2E {
         let script = """
             #!/bin/sh
             D='\(d.path)'
+            echo x >> "$D/launched"
             read req
             if [ -f "$D/second" ]; then
               for f in same own; do kill -0 "$(cat "$D/$f.pid")" 2>/dev/null && echo "$f" >> "$D/alive-at-start"; done
@@ -269,6 +270,37 @@ enum HelperE2E {
         check(!second.contains { $0["event"] as? String == "error" } && second.contains { $0["event"] as? String == "task_done" },
               "linger (full run): the next run itself ran: \(second.map { $0["event"] as? String ?? "?" })")
         for p in [same, own] where HarnessProcess.member(p) != nil { kill(p, SIGKILL) }
+
+        // Stop while the next run waits for the last one's process to end (a harness deaf to stdin and SIGTERM: about
+        // 5 s): the run is cancelled, and its harness is never started (deskmind #103 external review, P2)
+        let launched = { (try? String(contentsOf: d.appendingPathComponent("launched"), encoding: .utf8))?.count ?? 0 }
+        let before = launched()
+        let deaf = fakeLingering(#"trap "" TERM; sleep 30"#)
+        HarnessRun.lingering = deaf
+        Thread.detachNewThread { Thread.sleep(forTimeInterval: 0.5); Runner.requestStop() }
+        let stopped = run()
+        check(stopped.last?["reason"] as? String == "cancelled" && !stopped.contains { $0["event"] as? String == "task_done" }
+              && launched() == before && !deaf.process.isRunning,
+              "linger (stop): a stop while the last run's process is ended: no launch (\(stopped.map { $0["event"] as? String ?? "?" }))")
+        check(!Runner.stopRequested && !Runner.busy && Runner.current == nil, "linger (stop): nothing of it left for the next run")
+
+        // A stop between the start and `current` (the launch's own moment, held open here): it waits for the
+        // launch, then stops the process it started -- not lost
+        Runner.busy = true; Runner.cancelled = false; Runner.stopRequested = false
+        let sleeper = Process()
+        sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep"); sleeper.arguments = ["30"]
+        let started = (try? Runner.launch(sleeper, started: {
+            Thread.detachNewThread { Runner.requestStop() }
+            Thread.sleep(forTimeInterval: 0.3)
+        })) ?? false
+        let until = Date().addingTimeInterval(3)
+        while sleeper.isRunning && Date() < until { Thread.sleep(forTimeInterval: 0.05) }
+        check(started && !sleeper.isRunning && Runner.stopRequested, "linger (stop): a stop during the launch stops the process started")
+        // ...and one before it: nothing started
+        let never = Process()
+        never.executableURL = URL(fileURLWithPath: "/bin/sleep"); never.arguments = ["30"]
+        check((try? Runner.launch(never)) == false && !never.isRunning, "linger (stop): a stop before the launch: nothing started")
+        Runner.busy = false; Runner.cancelled = false; Runner.stopRequested = false; Runner.current = nil
     }
 
     // MARK: Save Full Log
