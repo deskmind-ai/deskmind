@@ -242,6 +242,7 @@ enum HelperE2E {
         fm.createFile(atPath: node.path, contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
         func run() -> [[String: Any]] {
             var events: [[String: Any]] = []
+            guard Runner.accept() else { return [["event": "error", "error": "not accepted"]] }
             HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { events.append($0); return true }
             return events
         }
@@ -284,9 +285,19 @@ enum HelperE2E {
               "linger (stop): a stop while the last run's process is ended: no launch (\(stopped.map { $0["event"] as? String ?? "?" }))")
         check(!Runner.stopRequested && !Runner.busy && Runner.current == nil, "linger (stop): nothing of it left for the next run")
 
+        // A stop the moment the request is taken, before the run function has begun: honoured (the run function no
+        // longer clears the flags), and a second request meanwhile is refused
+        let before2 = launched()
+        check(Runner.accept() && !Runner.accept(), "linger (stop): one request taken at a time")
+        Runner.requestStop()
+        var early: [[String: Any]] = []
+        HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { early.append($0); return true }
+        check(early.last?["reason"] as? String == "cancelled" && launched() == before2 && !Runner.busy && !Runner.stopRequested,
+              "linger (stop): a stop right after the request is taken: no launch (\(early.map { $0["event"] as? String ?? "?" }))")
+
         // A stop between the start and `current` (the launch's own moment, held open here): it waits for the
         // launch, then stops the process it started -- not lost
-        Runner.busy = true; Runner.cancelled = false; Runner.stopRequested = false
+        check(Runner.accept(), "linger (stop): taken")
         let sleeper = Process()
         sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep"); sleeper.arguments = ["30"]
         let started = (try? Runner.launch(sleeper, started: {
@@ -300,7 +311,7 @@ enum HelperE2E {
         let never = Process()
         never.executableURL = URL(fileURLWithPath: "/bin/sleep"); never.arguments = ["30"]
         check((try? Runner.launch(never)) == false && !never.isRunning, "linger (stop): a stop before the launch: nothing started")
-        Runner.busy = false; Runner.cancelled = false; Runner.stopRequested = false; Runner.current = nil
+        _ = Runner.release(); Runner.busy = false; Runner.cancelled = false
     }
 
     // MARK: Save Full Log

@@ -472,6 +472,26 @@ enum Runner {
     /// before the launch (it does not happen) or after `current` is set (it stops that process), never between.
     private static let stopLock = NSLock()
 
+    /// Take a run request: none going (no process, not busy), and the last run's stop flags cleared -- in one step under
+    /// the stop's lock, so a stop from the moment it is taken is this run's (it was lost when it came before the run
+    /// function cleared the flags). False: a run is already going. The run function sets `busy` false when it returns.
+    static func accept() -> Bool {
+        stopLock.lock(); defer { stopLock.unlock() }
+        guard current == nil && !busy else { return false }
+        busy = true; cancelled = false; stopRequested = false
+        return true
+    }
+
+    /// The run's process is no longer the run's (it ended, or its run is over and it lingers for the result card):
+    /// not `current`, so a stop from now on does not touch it. Whether a stop came for this run (taken: cleared).
+    static func release() -> Bool {
+        stopLock.lock(); defer { stopLock.unlock() }
+        current = nil
+        let stopped = stopRequested
+        stopRequested = false
+        return stopped
+    }
+
     /// Start a run's process -- every run's, `hands do` and harness alike -- unless a stop came since the run was
     /// accepted (false: nothing started; a stop while the last run's process was waited for, or a model loaded, ends
     /// the run here). Started, it is `current` and recorded (HarnessRun.record) before a stop can look.
@@ -516,8 +536,7 @@ enum Runner {
         // lines must not interleave on the one socket.
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
-        busy = true; cancelled = false; stopRequested = false   // a stop from before this run is not this run's
-        defer { busy = false }
+        defer { busy = false }    // set, with the stop flags cleared, when the request was taken (accept)
         // a finished harness run still waiting for its result card's answer is let go first (after busy is set, so
         // no second run starts meanwhile); a run is not started beside one that would not end
         guard HarnessRun.closeLingering() else { _ = emit(HarnessRun.stillRunning); return }
@@ -652,7 +671,7 @@ enum Runner {
         // it); stopRequested stands until the run has ended
         do {
             guard try launch(p) else {
-                stopRequested = false
+                _ = release()
                 _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
             }
         } catch {
@@ -812,6 +831,8 @@ enum Runner {
             poll()
             Thread.sleep(forTimeInterval: 0.25)
         }
+        // whether this run was stopped, read once as its process ends (a stop after this is not this run's)
+        let stopped = release()
         poll()
         // Bounded: a grandchild that inherited stdout (Peekaboo's server) could hold the pipe open past hands' exit.
         _ = reader.wait(timeout: .now() + 3)
@@ -820,10 +841,9 @@ enum Runner {
         try? inPipe.fileHandleForWriting.close()
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
         // Before the clean-up closes the run's windows: how it ended, for a moment, on its last picture.
-        LiveCard.finish(Runner.stopRequested ? .stopped : freeState == "completed" ? .done : .failed)
+        LiveCard.finish(stopped ? .stopped : freeState == "completed" ? .done : .failed)
         cleanUp(quitTextEdit: !textEditWasRunning)
         pruneRuns(keep: 10)
-        current = nil
         // hands says some refusals on stdout ("refused: … is your home directory"): its tail too, when stderr is quiet.
         let errTail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         let tail = errTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -835,8 +855,7 @@ enum Runner {
         // on the task, not the run breaking: the user needs "it got stuck", not "send us the details".
         let ranToAnEnd = ["completed", "gave_up", "budget_exhausted", "cancelled"].contains(freeState)
             || (freeState == "errored" && freeFailure == "no_progress_loop")
-        if Runner.stopRequested { freeState = "cancelled" }
-        Runner.stopRequested = false
+        if stopped { freeState = "cancelled" }
         let exitCode = spec.goal != nil && (ranToAnEnd || freeState == "cancelled") ? 0 : Int(p.terminationStatus)
         _ = emit(["event": "done", "exit": exitCode, "reason": freeFailure, "passed": passed, "total": total,
                   "answer": answer,

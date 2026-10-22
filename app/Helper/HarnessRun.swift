@@ -229,9 +229,8 @@ enum HarnessRun {
     static func run(_ spec: Runner.Spec, emit unlocked: @escaping ([String: Any]) -> Bool) {
         let emitLock = NSLock()
         let emit: ([String: Any]) -> Bool = { e in emitLock.lock(); defer { emitLock.unlock() }; return unlocked(e) }
-        Runner.busy = true; Runner.cancelled = false; Runner.stopRequested = false
-        // Busy until task_done (this function returns then), not until the process exits: it lingers for the result
-        // card's answer, and the next run may start meanwhile.
+        // Busy (since the request was taken: Runner.accept) until task_done (this function returns then), not until the
+        // process exits: it lingers for the result card's answer, and the next run may start meanwhile.
         defer { Runner.busy = false }
         // after busy is set: no second run starts while it is waited for
         guard closeLingering() else { _ = emit(stillRunning); return }
@@ -314,7 +313,7 @@ enum HarnessRun {
         // cleared once it has: a stop since then stands.
         do {
             guard try Runner.launch(p) else {
-                Runner.stopRequested = false
+                _ = Runner.release()
                 _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]); return
             }
         } catch {
@@ -394,6 +393,9 @@ enum HarnessRun {
         let isOver = { lock.lock(); defer { lock.unlock() }; return linger.over }
         while p.isRunning && !isOver() { Thread.sleep(forTimeInterval: 0.25) }
         if !isOver() { _ = reader.wait(timeout: .now() + 3) }
+        // no longer the run's process before its stdin is let go: a stop from now on would find no stdin and kill a
+        // process kept up for the result card (its undo with it); whether this run was stopped, read once
+        let stopped = Runner.release()
         lock.lock()
         linger.over = true; input = nil
         let lingers = p.isRunning
@@ -412,9 +414,6 @@ enum HarnessRun {
             _ = reader.wait(timeout: .now() + 3)    // the last lines into the log (at once when they are read already)
             try? outLog?.close()
         }
-        let stopped = Runner.stopRequested
-        Runner.stopRequested = false
-        Runner.current = nil
         LiveCard.finish(stopped ? .stopped : state.finished?["harness_status"] as? String == "succeeded" ? .done : .failed)
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept

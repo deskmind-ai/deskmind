@@ -281,7 +281,8 @@ func serve() {
             if let lang = (req["lang"] as? String).flatMap(ResolvedLang.init(rawValue:)) { ResolvedLang.current = lang }
             if req["op"] as? String == "run" {
                 // A run streams: one line per event until it ends, on this connection.
-                guard Runner.current == nil && !Runner.busy else {
+                // taken (busy, the last stop flags cleared) in one step with the check: a stop from now on is this run's
+                guard Runner.accept() else {
                     var busy = (try? JSONSerialization.data(withJSONObject: ["event": "error", "error": "a run is already in progress"])) ?? Data()
                     busy.append(0x0A)
                     _ = busy.withUnsafeBytes { write(c, $0.baseAddress, busy.count) }
