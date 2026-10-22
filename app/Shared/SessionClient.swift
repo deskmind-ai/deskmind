@@ -233,13 +233,14 @@ final class SessionClient {
         var words: String? = nil
         if let w = control.words {
             // the session answers nothing for empty words (harness docs): never sent, so never held
-            if w.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .refused("empty") }
+            if w.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}"))).isEmpty { return .refused("empty") }
             let id = clientId ?? newClientId()
             words = id
             line["client_id"] = id
+            let next = s.exited != nil      // the send opens the session again: the words are the next process's
             mutate(sessionId) { st in
-                if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil }
-                else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true)) }
+                if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = next }
+                else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true, toNextProcess: next)) }
             }
         }
         // not sent after all: the words are the app's, not sent (never lost)
@@ -263,7 +264,7 @@ final class SessionClient {
             let ended = endedByApp.contains(sessionId), how = opened[sessionId]
             lock.unlock()
             guard !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil else { return notSent(.unavailable) }
-            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil } } }
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = true } } }
             r = transport.request(Request.send(sessionId: sessionId, line: line))
         }
         guard let r, r["ok"] as? Bool != false else { return notSent(.unavailable) }

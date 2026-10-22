@@ -1460,6 +1460,27 @@ enum SessionTests {
         check(w.queue.map(\.clientId) == ["w1"] && w.deferredQueue == [], "the empty snapshot waits; the entry is still the queue's")
         w = SessionReducer.reduce(w, se(2, #""kind":"session.retry","reply_to":"u""#))
         check(w.queue.isEmpty && w.deferredQueue == nil && w.messages.filter { $0.text == "一" }.count == 1, "the gap filled: stored once, the queue empty")
+        // words sent to a process another one replaced before any exit was heard: the new start makes them unsent
+        let e1 = MockTransport()
+        e1.replies = [SessionClient.Op.send: ["ok": true]]
+        let ec = SessionClient(transport: e1)
+        ec.newClientId = { "e1" }
+        [se(nil, #""kind":"session.start","last_seq":0,"pid":100"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { ec.feed($0) }
+        _ = ec.send(.say("hello"), to: "s")
+        [se(nil, #""kind":"session.start","last_seq":1,"pid":200,"resumed":true"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":100,"start_seq":0,"last_seq":1}"#),
+         se(nil, #""kind":"session.queue","items":[]"#)].forEach { ec.feed($0) }
+        check(ec.state("s").unsent.map(\.id) == ["e1"] && ec.resend("e1", in: "s") == .sent, "sent to A, B started: unsent, can be sent again")
+        check(ec.send(.say("\u{FEFF}"), to: "s") == .refused("empty"), "a BOM alone is empty, as the session trims it")
+        // a held snapshot applies right after the stored lines before it, not after later ones
+        let d1 = SessionReducer.reduce(SessionState(), [se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+            se(3, #""kind":"session.retry","reply_to":"u""#), se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"X","client_id":"cX"}]"#),
+            se(4, #""kind":"session.message","msg_id":"mx","role":"user","text":"X","via":"queue","client_id":"cX""#),
+            se(2, #""kind":"session.retry","reply_to":"u""#)])
+        let d1live = SessionReducer.reduce(SessionState(), [se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+            se(2, #""kind":"session.retry","reply_to":"u""#), se(3, #""kind":"session.retry","reply_to":"u""#),
+            se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"X","client_id":"cX"}]"#),
+            se(4, #""kind":"session.message","msg_id":"mx","role":"user","text":"X","via":"queue","client_id":"cX""#)])
+        check(d1.queue.isEmpty && d1.queue == d1live.queue && d1.deferredQueue == nil, "the held snapshot, then the stored message after it: the queue empty, as live")
         queueInterleavingTests()
     }
 

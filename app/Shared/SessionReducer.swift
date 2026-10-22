@@ -55,6 +55,10 @@ struct Outgoing: Equatable {
     var sending = false
     /// Why it is not sent: the session's refusal code, or "exited" (its process ended first).
     var refused: String? = nil
+    /// Sent after the app knew the latest process had ended (the send opened the session again): for the next
+    /// process, so that process's session.start leaves it alone; words sent to a process that a new one replaced
+    /// without an exit heard are made unsent by that start.
+    var toNextProcess = false
 }
 
 struct StoredError: Equatable {
@@ -239,6 +243,8 @@ struct SessionState: Equatable {
     var outbox: [Outgoing] = []
     /// A queue snapshot held back while stored session lines before it wait behind a gap (applied when they are in).
     var deferredQueue: [QueueItem]? = nil
+    /// The newest stored seq received when it was held: it applies once the stored lines up to there are in.
+    var deferredMark = 0
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
@@ -308,9 +314,11 @@ enum SessionReducer {
             if seq <= s.lastSeq { return .duplicate }               // a replay of a stored event
             if seq > s.lastSeq + 1 { s.pendingSession[seq] = line; return .held }
             applySession(&s, line)
-            while let next = s.pendingSession.removeValue(forKey: s.lastSeq + 1) { applySession(&s, next) }
+            // a held queue snapshot applies right after the stored lines that came before it (not after later ones)
+            func deferred() { if let d = s.deferredQueue, s.lastSeq >= s.deferredMark { applyQueue(&s, d); s.deferredQueue = nil } }
+            deferred()
+            while let next = s.pendingSession.removeValue(forKey: s.lastSeq + 1) { applySession(&s, next); deferred() }
             s.pendingSession = s.pendingSession.filter { $0.key > s.lastSeq }
-            if s.pendingSession.isEmpty, let d = s.deferredQueue { applyQueue(&s, d); s.deferredQueue = nil }
             return .applied
         } else {
             if case .unknown(let k, _) = ev { s.unknownKinds.insert(k) }
@@ -438,9 +446,11 @@ enum SessionReducer {
         s.queue = []
         // sent and never taken: the process is gone, so it is not sent (should its stored message still come in a
         // replay, that takes it out again)
-        if exited {
-            for i in s.outbox.indices where s.outbox[i].sending && !held.contains(s.outbox[i].id) { s.outbox[i].sending = false; s.outbox[i].refused = "exited" }
+        // (at a new process's start: words sent to the one before it — not those sent for the new one, which are its own)
+        for i in s.outbox.indices where s.outbox[i].sending && !held.contains(s.outbox[i].id) && (exited || !s.outbox[i].toNextProcess) {
+            s.outbox[i].sending = false; s.outbox[i].refused = "exited"
         }
+        if !exited { for i in s.outbox.indices where s.outbox[i].toNextProcess { s.outbox[i].toNextProcess = false } }
     }
 
     /// The client_ids of the user's words whose stored line (session.message / session.steer) is held behind a gap.
@@ -585,7 +595,8 @@ enum SessionReducer {
             // the whole queue, as the session has it (attach sends it, empty included): it replaces the app's — once
             // the stored lines before it are in (the session stores queued words before it sends the queue without
             // them: applied while their stored line is held behind a gap, the words would be in neither place)
-            if s.pendingSession.isEmpty { applyQueue(&s, q.items); s.deferredQueue = nil } else { s.deferredQueue = q.items }
+            if s.pendingSession.isEmpty { applyQueue(&s, q.items); s.deferredQueue = nil }
+            else { s.deferredQueue = q.items; s.deferredMark = max(s.lastSeq, s.pendingSession.keys.max() ?? 0) }
         case .unknown(let k, _):
             s.unknownKinds.insert(k)
         default:
