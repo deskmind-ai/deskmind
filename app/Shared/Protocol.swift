@@ -60,10 +60,46 @@ enum DeskMindIPC {
 }
 
 extension DeskMindIPC {
+    /// Deepest nesting of arrays and objects a streamed line may have: JSONSerialization recurses per level and a line
+    /// a few hundred deep overflows a background thread's 512 KB stack (the watch runs on one). Nothing real comes
+    /// near this deep.
+    static let maxLineDepth = 100
+
+    /// Whether `data`'s arrays and objects nest no deeper than `limit` (strings, with their escapes, skipped).
+    static func nestingWithin(_ data: Data, limit: Int) -> Bool {
+        var depth = 0, inString = false, escaped = false
+        for b in data {
+            if inString {
+                if escaped { escaped = false } else if b == 0x5C { escaped = true } else if b == 0x22 { inString = false }
+                continue
+            }
+            switch b {
+            case 0x22: inString = true
+            case 0x5B, 0x7B: depth += 1; if depth > limit { return false }
+            case 0x5D, 0x7D: depth -= 1
+            default: break
+            }
+        }
+        return true
+    }
+
+    /// One streamed line as a JSON object; nil when it is not one, or nests deeper than `maxLineDepth`.
+    static func lineObject(_ data: Data) -> [String: Any]? {
+        guard nestingWithin(data, limit: maxLineDepth) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
     /// Send one request and hand every line of the reply to `onLine` until the helper closes the connection.
     /// Returns false when the helper is not listening.
     @discardableResult
     static func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Void) -> Bool {
+        streamWhile(body) { onLine($0); return true }
+    }
+
+    /// The same, until the helper closes the connection or `onLine` returns false (the caller is done with it). With
+    /// `idle`, `onIdle` is asked each time nothing came for that long; false ends the stream too.
+    static func streamWhile(_ body: [String: Any], idle: TimeInterval? = nil, onIdle: (() -> Bool)? = nil,
+                            _ onLine: @escaping ([String: Any]) -> Bool) -> Bool {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return false }
         defer { close(fd) }
@@ -83,14 +119,19 @@ extension DeskMindIPC {
         _ = data.withUnsafeBytes { write(fd, $0.baseAddress, data.count) }
         var pending = Data()
         var buf = [UInt8](repeating: 0, count: 8192)
-        while true {
+        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let wait: Int32 = idle.map { Int32(max(1, $0 * 1000)) } ?? -1
+        reading: while true {
+            let r = poll(&pfd, 1, wait)
+            if r < 0 { if errno == EINTR { continue }; break }
+            if r == 0 { if let onIdle, !onIdle() { break reading }; continue }
             let n = read(fd, &buf, buf.count)
             if n <= 0 { break }
             pending.append(buf, count: n)
             while let nl = pending.firstIndex(of: 0x0A) {
                 let line = pending[pending.startIndex..<nl]
                 pending.removeSubrange(pending.startIndex...nl)
-                if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] { onLine(obj) }
+                if let obj = lineObject(Data(line)), !onLine(obj) { break reading }
             }
         }
         return true

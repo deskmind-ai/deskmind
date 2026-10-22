@@ -218,6 +218,7 @@ enum DecisionTests {
         helperLocationTests()
         harnessEventsTests()
         cardButtonTests()
+        SessionTests.run()
         sessionWireTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
@@ -909,6 +910,12 @@ enum DecisionTests {
         check(g.admit(["kind": "session.delta", "msg_id": "m", "text": "x", "offset": 0]).count == 1
               && g.admit(["kind": "session.start", "last_seq": 5]).count == 1, "lines without seq: always")
         check(g.admit(["kind": "helper.session_exit", "session_id": "s"]).count == 1, "the helper's own lines: always")
+        // session.duplicate (harness#59) points at a stored line by its seq; it is not that line: always passed, the
+        // cursor unmoved, and the stored line it points at still comes after it
+        var gd = W.Gate(after: 1)
+        let dup: [String: Any] = ["kind": "session.duplicate", "client_id": "c", "control": "say", "seq": 2, "session_id": "s"]
+        check(gd.admit(dup).count == 1 && gd.after == 1, "a duplicate ahead: passed, the cursor unmoved")
+        check(seqs(gd.admit(msg(2))) == [2] && gd.admit(dup).count == 1 && gd.after == 2, "its stored line still comes; a duplicate behind: passed too")
         // a task's lines: replay first, then live, contiguous — a live line ahead of the replay waits for it
         let ev = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_1", "seq": n] }
         var order: [Int] = []
@@ -953,6 +960,7 @@ enum DecisionTests {
         check(!live.note(task(3, "run_old")) && !live.show(["kind": "start", "run_id": "run_old", "seq": 1]),
               "a replayed task (stored before this process): not live, its start drives nothing")
         check(live.note(["kind": "session.queue", "items": [Any]()]), "a line that is never stored: new")
+        check(live.note(["kind": "session.duplicate", "client_id": "c", "seq": 99]) && live.lastSeq == 6, "a duplicate: never stored, the last seq unmoved")
         check(live.note(task(7, "run_a")) && live.runs == ["run_a"] && live.lastSeq == 7, "a new task: live")
         check(!live.note(task(7, "run_a")) && !live.note(msg(5)), "its replay: not new")
         check(live.show(["kind": "start", "run_id": "run_a", "seq": 1]) && live.show(["kind": "step", "run_id": "run_a", "seq": 2]), "its lines drive")

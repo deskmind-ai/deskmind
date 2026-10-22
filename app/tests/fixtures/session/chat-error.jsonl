@@ -1,0 +1,3 @@
+{"t":1792655286.906,"session_id":"ses_t","kind":"session.start","protocol":{"session":1},"last_seq":0,"resumed":false}
+{"seq":1,"t":1792655286.906,"session_id":"ses_t","kind":"session.message","msg_id":"msg_e039e611","role":"user","text":"在吗"}
+{"seq":2,"t":1792655286.912,"session_id":"ses_t","kind":"session.error","code":"no_key","text":"CUSTOM_API_KEY is not set","reply_to":"msg_e039e611"}

@@ -1,0 +1,12 @@
+{"t":1792655290.83,"session_id":"ses_t","kind":"session.start","protocol":{"session":1},"last_seq":0,"resumed":false}
+{"seq":1,"t":1792655290.83,"session_id":"ses_t","kind":"session.message","msg_id":"msg_b2d9be03","role":"user","text":"把笔记的正文改成「新的」"}
+{"t":1792655290.837,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_d18a60cd","text":"","offset":0}
+{"seq":2,"t":1792655290.857,"session_id":"ses_t","kind":"session.task","msg_id":"msg_86ba63ea","run_id":"run_a0f41b57","raw":"把笔记的正文改成「新的」","goal":"改笔记","by":"model","reply_to":"msg_b2d9be03"}
+{"seq":1,"t":1792655290.842,"run_id":"run_a0f41b57","kind":"start","raw":"把笔记的正文改成「新的」","lang":"zh","engine":"runtime","config":"ds-flash","protocol":{"events":1},"session_id":"ses_t"}
+{"seq":2,"t":1792655290.85,"run_id":"run_a0f41b57","kind":"preparing","session_id":"ses_t"}
+{"seq":3,"t":1792655290.865,"run_id":"run_a0f41b57","kind":"task_done","status":"environment","reason":"the screen is locked","cause":"screen_locked","summary":"","result_card":null,"answer":null,"changes":{"created":[],"modified":[],"deleted":[],"external":[],"unconfirmed":[]},"usage":{"calls":0,"tokens_in":0,"tokens_out":0,"cost_usd":0,"by_role":{}},"session_id":"ses_t"}
+{"seq":3,"t":1792655290.871,"session_id":"ses_t","kind":"session.task_end","run_id":"run_a0f41b57","status":"environment","summary":"","undo":"none","reason":"the screen is locked","cause":"screen_locked","changes":{"created":[],"modified":[],"deleted":[],"external":[]}}
+{"seq":4,"t":1792655290.876,"session_id":"ses_t","kind":"session.task_closed","run_id":"run_a0f41b57","why":"linger"}
+{"t":1792655290.881,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_4bfdd303","text":"","offset":0}
+{"t":1792655290.883,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_4bfdd303","text":"屏幕锁着","offset":0}
+{"seq":5,"t":1792655290.883,"session_id":"ses_t","kind":"session.message","msg_id":"msg_4bfdd303","role":"assistant","text":"屏幕锁着","reply_to":"msg_b2d9be03","model":"test|scripted"}

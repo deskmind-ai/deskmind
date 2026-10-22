@@ -1,0 +1,28 @@
+{"t":1792655287.442,"session_id":"ses_t","kind":"session.start","protocol":{"session":1},"last_seq":0,"resumed":false}
+{"seq":1,"t":1792655287.442,"session_id":"ses_t","kind":"session.message","msg_id":"msg_e0b63e17","role":"user","text":"把笔记的正文改成「新的」"}
+{"t":1792655287.447,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_003f4dc5","text":"","offset":0}
+{"seq":2,"t":1792655287.456,"session_id":"ses_t","kind":"session.task","msg_id":"msg_b578b3e1","run_id":"run_9628d42f","raw":"把笔记的正文改成「新的」","goal":"改笔记","by":"model","reply_to":"msg_e0b63e17"}
+{"seq":1,"t":1792655287.448,"run_id":"run_9628d42f","kind":"start","raw":"把笔记的正文改成「新的」","lang":"zh","engine":"runtime","config":"ds-flash","protocol":{"events":1},"session_id":"ses_t"}
+{"seq":2,"t":1792655287.452,"run_id":"run_9628d42f","kind":"preparing","session_id":"ses_t"}
+{"t":1792655287.461,"session_id":"ses_t","kind":"session.queue","items":[{"id":"q_940deb3f","text":"三"}]}
+{"seq":3,"t":1792655287.764,"run_id":"run_9628d42f","kind":"model_call","call_id":"mc_36189a1f","role":"loop","model":"test|scripted","outcome":"answered","tokens_in":1,"tokens_out":1,"cost_usd":0,"latency_ms":302,"cache_read":0,"session_id":"ses_t"}
+{"seq":4,"t":1792655287.77,"run_id":"run_9628d42f","kind":"model_call","call_id":"mc_3815591c","role":"loop","model":"test|scripted","outcome":"answered","tokens_in":1,"tokens_out":1,"cost_usd":0,"latency_ms":0,"cache_read":0,"session_id":"ses_t"}
+{"seq":5,"t":1792655287.775,"run_id":"run_9628d42f","kind":"model_call","call_id":"mc_7b37147c","role":"loop","model":"test|scripted","outcome":"answered","tokens_in":1,"tokens_out":1,"cost_usd":0,"latency_ms":1,"cache_read":0,"session_id":"ses_t"}
+{"seq":6,"t":1792655287.779,"run_id":"run_9628d42f","kind":"model_call","call_id":"mc_3a3dea40","role":"loop","model":"test|scripted","outcome":"answered","tokens_in":1,"tokens_out":1,"cost_usd":0,"latency_ms":0,"cache_read":0,"session_id":"ses_t"}
+{"seq":7,"t":1792655287.784,"run_id":"run_9628d42f","kind":"plan","steps":[{"purpose":"把正文改成「新的」","objects":["window:editor-1"],"consequence":"modify_user"}],"session_id":"ses_t"}
+{"seq":8,"t":1792655287.788,"run_id":"run_9628d42f","kind":"ask","ask_id":"ask_f71bfc1d","card":{"kind":"plan","text":"我打算这样做：\n1. 把正文改成「新的」（编辑器「笔记.txt」）——改你的东西\n可以吗？","options":[{"kind":"approve","text":"可以，就这样做"},{"kind":"cancel","text":"先别做了"}],"free_text":true,"blocking":true,"plan":{"steps":[{"purpose":"把正文改成「新的」","class":"modify_user","objects":[{"ref":"window:editor-1","label":"编辑器「笔记.txt」","owner":"user","marks":["changes"]}],"sites":[]}],"foreground":null}},"session_id":"ses_t"}
+{"seq":9,"t":1792655287.791,"run_id":"run_9628d42f","kind":"waiting","ask_id":"ask_f71bfc1d","session_id":"ses_t"}
+{"seq":10,"t":1792655287.812,"run_id":"run_9628d42f","kind":"refused","what":"the task","why":"stopped by the app","by":"user","session_id":"ses_t"}
+{"seq":11,"t":1792655287.816,"run_id":"run_9628d42f","kind":"ask_void","ask_id":"ask_f71bfc1d","why":"stop","session_id":"ses_t"}
+{"seq":12,"t":1792655287.82,"run_id":"run_9628d42f","kind":"task_done","status":"stopped","reason":"stopped by the app","cause":"user_stopped","summary":"","result_card":null,"answer":null,"changes":{"created":[],"modified":[],"deleted":[],"external":[],"unconfirmed":[]},"usage":{"calls":4,"tokens_in":4,"tokens_out":4,"cost_usd":0,"by_role":{"loop":{"calls":4,"tokens_in":4,"tokens_out":4,"cost_usd":0,"latency_ms":303}}},"session_id":"ses_t"}
+{"seq":3,"t":1792655287.825,"session_id":"ses_t","kind":"session.task_end","run_id":"run_9628d42f","status":"stopped","summary":"","undo":"none","reason":"stopped by the app","cause":"user_stopped","changes":{"created":[],"modified":[],"deleted":[],"external":[]}}
+{"t":1792655287.829,"session_id":"ses_t","kind":"session.queue","items":[{"id":"q_940deb3f","text":"三","held":true,"note":"任务已停，要发吗？"}]}
+{"seq":4,"t":1792655287.829,"session_id":"ses_t","kind":"session.task_closed","run_id":"run_9628d42f","why":"linger"}
+{"t":1792655287.832,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_7ab695e5","text":"","offset":0}
+{"t":1792655287.833,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_7ab695e5","text":"停下了","offset":0}
+{"seq":5,"t":1792655287.833,"session_id":"ses_t","kind":"session.message","msg_id":"msg_7ab695e5","role":"assistant","text":"停下了","reply_to":"msg_e0b63e17","model":"test|scripted"}
+{"seq":6,"t":1792655287.836,"session_id":"ses_t","kind":"session.message","msg_id":"msg_ab008043","role":"user","text":"三"}
+{"t":1792655287.839,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_9007ed24","text":"","offset":0}
+{"t":1792655287.839,"session_id":"ses_t","kind":"session.queue","items":[]}
+{"t":1792655287.84,"session_id":"ses_t","kind":"session.delta","msg_id":"msg_9007ed24","text":"好的，三","offset":0}
+{"seq":7,"t":1792655287.84,"session_id":"ses_t","kind":"session.message","msg_id":"msg_9007ed24","role":"assistant","text":"好的，三","reply_to":"msg_ab008043","model":"test|scripted"}
