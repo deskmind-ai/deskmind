@@ -1429,6 +1429,37 @@ enum SessionTests {
         // a refusal of a queue entry (queue_send_now) leaves the outbox alone: the entry is the queue's
         c.feed(se(nil, #""kind":"session.error","code":"busy","text":"x","control":"queue_send_now","client_id":"k1""#))
         check(c.state("s").outbox.isEmpty && c.state("s").queue.count == 1, "the queue keeps it")
+        // a send to an exited session reopens it: the new process's session.start does not make those words unsent
+        let reopen = MockTransport()
+        reopen.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
+        let rc = SessionClient(transport: reopen)
+        rc.newClientId = { "h1" }
+        _ = rc.open(sessionId: "s")
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { rc.feed($0) }
+        check(rc.send(.say("hello"), to: "s") == .sent, "sent after a reopen")
+        rc.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
+        check(rc.state("s").outbox.map { [$0.id, "\($0.sending)"] } == [["h1", "true"]] && rc.state("s").unsent.isEmpty, "the new process's start: still sending, not unsent")
+        check(rc.resend("h1", in: "s") != .sent, "so it cannot be sent twice")
+        check(rc.send(.say("  "), to: "s") == .refused("empty") && rc.state("s").outbox.count == 1, "empty words: not sent, not held")
+        rc.feed(se(2, #""kind":"session.message","msg_id":"m","role":"user","text":"hello","client_id":"h1""#))
+        check(rc.state("s").outbox.isEmpty && rc.state("s").messages.filter { $0.text == "hello" }.count == 1, "taken once")
+        // an exit while the words' stored line is held behind a gap: they stay sending, the gap fill takes them
+        var g = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)])
+        g.outbox = [Outgoing(id: "g1", text: "b", control: "say", sending: true)]
+        g = SessionReducer.reduce(g, [se(3, #""kind":"session.message","msg_id":"m3","role":"user","text":"b","client_id":"g1""#),
+                                      L(#"{"kind":"helper.session_exit","session_id":"s","code":9,"pid":1,"start_seq":0,"last_seq":3}"#)])
+        check(g.outbox.first?.sending == true && g.unsent.isEmpty, "held stored line: still sending at the exit")
+        g = SessionReducer.reduce(g, se(2, #""kind":"session.retry","reply_to":"u""#))
+        check(g.outbox.isEmpty && g.messages.filter { $0.text == "b" }.count == 1, "the gap filled: taken once")
+        // a queue snapshot behind a gap waits for the stored lines before it: the words are never in neither place
+        var w = SessionReducer.reduce(SessionState(), [se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+                                                       se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"一","client_id":"w1"}]"#)])
+        w = SessionReducer.reduce(w, [se(3, #""kind":"session.message","msg_id":"m3","role":"user","text":"一","via":"queue","client_id":"w1""#),
+                                      se(nil, #""kind":"session.queue","items":[]"#)])
+        check(w.queue.map(\.clientId) == ["w1"] && w.deferredQueue == [], "the empty snapshot waits; the entry is still the queue's")
+        w = SessionReducer.reduce(w, se(2, #""kind":"session.retry","reply_to":"u""#))
+        check(w.queue.isEmpty && w.deferredQueue == nil && w.messages.filter { $0.text == "一" }.count == 1, "the gap filled: stored once, the queue empty")
         queueInterleavingTests()
     }
 

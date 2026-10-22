@@ -232,6 +232,8 @@ final class SessionClient {
         var line = control.line
         var words: String? = nil
         if let w = control.words {
+            // the session answers nothing for empty words (harness docs): never sent, so never held
+            if w.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .refused("empty") }
             let id = clientId ?? newClientId()
             words = id
             line["client_id"] = id

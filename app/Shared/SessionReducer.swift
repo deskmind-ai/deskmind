@@ -237,6 +237,8 @@ struct SessionState: Equatable {
     /// session.steer, a queue entry with its client_id), comes back (not sending) on a refusal naming it, and is never
     /// dropped on the helper's ack (SessionClient.send / resend; dropUnsent is the user's choice).
     var outbox: [Outgoing] = []
+    /// A queue snapshot held back while stored session lines before it wait behind a gap (applied when they are in).
+    var deferredQueue: [QueueItem]? = nil
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
@@ -308,6 +310,7 @@ enum SessionReducer {
             applySession(&s, line)
             while let next = s.pendingSession.removeValue(forKey: s.lastSeq + 1) { applySession(&s, next) }
             s.pendingSession = s.pendingSession.filter { $0.key > s.lastSeq }
+            if s.pendingSession.isEmpty, let d = s.deferredQueue { applyQueue(&s, d); s.deferredQueue = nil }
             return .applied
         } else {
             if case .unknown(let k, _) = ev { s.unknownKinds.insert(k) }
@@ -415,21 +418,49 @@ enum SessionReducer {
 
     /// The latest process went away: a reply it was streaming is cut off (kept, interrupted, at its place); what it
     /// had queued was never sent (SessionState.unsent).
-    private static func processGone(_ s: inout SessionState) {
+    /// `exited`: an exit (helper.session_exit, or the app's own inference), not a new process's session.start — words
+    /// sent to the new process (a send reopens the session first) are not the old one's.
+    private static func processGone(_ s: inout SessionState, exited: Bool) {
         dropEmptyStreaming(&s)
         for i in s.messages.indices where s.messages[i].streaming {
             s.messages[i].streaming = false
             s.messages[i].interrupted = true
             if let a = s.messages[i].anchor { placeInterrupted(&s, s.messages[i].id, anchor: a) }
         }
+        // the latest queue it said it had (one held back behind a gap included); words whose stored line is held
+        // behind a gap were taken already, and stay the history's
+        if let d = s.deferredQueue { applyQueue(&s, d); s.deferredQueue = nil }
+        let held = heldClientIds(s)
         for q in s.queue {
             let id = q.clientId ?? q.id
-            if !s.outbox.contains(where: { $0.id == id }) { s.outbox.append(Outgoing(id: id, text: q.text, control: "say")) }
+            if !held.contains(id) && !s.outbox.contains(where: { $0.id == id }) { s.outbox.append(Outgoing(id: id, text: q.text, control: "say")) }
         }
         s.queue = []
         // sent and never taken: the process is gone, so it is not sent (should its stored message still come in a
         // replay, that takes it out again)
-        for i in s.outbox.indices where s.outbox[i].sending { s.outbox[i].sending = false; s.outbox[i].refused = "exited" }
+        if exited {
+            for i in s.outbox.indices where s.outbox[i].sending && !held.contains(s.outbox[i].id) { s.outbox[i].sending = false; s.outbox[i].refused = "exited" }
+        }
+    }
+
+    /// The client_ids of the user's words whose stored line (session.message / session.steer) is held behind a gap.
+    private static func heldClientIds(_ s: SessionState) -> Set<String> {
+        var ids: Set<String> = []
+        for l in s.pendingSession.values {
+            switch l.event {
+            case .message(let m): if let c = m.clientId { ids.insert(c) }
+            case .steer(let e): if let c = e.clientId { ids.insert(c) }
+            default: break
+            }
+        }
+        return ids
+    }
+
+    /// A queue snapshot in its place: the whole queue; the app's words in it are the queue's now.
+    private static func applyQueue(_ s: inout SessionState, _ items: [QueueItem]) {
+        s.queue = items
+        let queued = Set(items.compactMap(\.clientId))
+        if !queued.isEmpty { s.outbox.removeAll { queued.contains($0.id) } }
     }
 
     // MARK: session events
@@ -446,7 +477,7 @@ enum SessionReducer {
             else { same = s.exited == nil && s.processStart != nil && e.lastSeq == s.processStart }
             if !same {
                 // a new process: the one before is gone, with what lived only in it (whether or not its exit came first)
-                processGone(&s)
+                processGone(&s, exited: false)
                 s.exited = nil
                 s.processPid = e.pid
                 s.processStart = e.lastSeq
@@ -470,7 +501,7 @@ enum SessionReducer {
             else if latest { s.goneUpTo = max(s.goneUpTo, s.lastSeq, s.pendingSession.keys.max() ?? 0) }
             if latest {
                 s.exited = e.code ?? -1
-                processGone(&s)
+                processGone(&s, exited: true)
             }
         case .message(let m):
             // the session took the app's words: they leave the outbox, and the queue entry they waited in
@@ -551,11 +582,10 @@ enum SessionReducer {
                 s.messages[i].retracted = true
             }
         case .queue(let q):
-            // the whole queue, as the session has it (attach sends it, empty included): it replaces the app's; words of
-            // the app's that wait in it are the queue's now
-            s.queue = q.items
-            let queued = Set(q.items.compactMap(\.clientId))
-            if !queued.isEmpty { s.outbox.removeAll { queued.contains($0.id) } }
+            // the whole queue, as the session has it (attach sends it, empty included): it replaces the app's — once
+            // the stored lines before it are in (the session stores queued words before it sends the queue without
+            // them: applied while their stored line is held behind a gap, the words would be in neither place)
+            if s.pendingSession.isEmpty { applyQueue(&s, q.items); s.deferredQueue = nil } else { s.deferredQueue = q.items }
         case .unknown(let k, _):
             s.unknownKinds.insert(k)
         default:
