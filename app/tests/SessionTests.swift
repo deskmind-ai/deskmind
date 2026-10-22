@@ -467,9 +467,12 @@ enum SessionTests {
         var streamLines: [[String: Any]] = []
         /// Replies given once each, before `replies`, per op.
         var queued: [String: [[String: Any]]] = [:]
+        /// Called with each request's op before it is answered (a line the helper streams meanwhile).
+        var onRequest: ((String) -> Void)? = nil
         func request(_ body: [String: Any]) -> [String: Any]? {
             requests.append(body)
             let op = body["op"] as? String ?? ""
+            onRequest?(op)
             if var q = queued[op], !q.isEmpty { let r = q.removeFirst(); queued[op] = q; return r }
             return replies[op]
         }
@@ -1481,6 +1484,44 @@ enum SessionTests {
             se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"X","client_id":"cX"}]"#),
             se(4, #""kind":"session.message","msg_id":"mx","role":"user","text":"X","via":"queue","client_id":"cX""#)])
         check(d1.queue.isEmpty && d1.queue == d1live.queue && d1.deferredQueue == nil, "the held snapshot, then the stored message after it: the queue empty, as live")
+        // a second word sent after the reopen, before the new process's start is heard, is the new process's too
+        let p1 = MockTransport()
+        p1.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
+        let c1 = SessionClient(transport: p1)
+        var k = 0
+        c1.newClientId = { k += 1; return "w\(k)" }
+        _ = c1.open(sessionId: "s")
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { c1.feed($0) }
+        _ = c1.send(.say("one"), to: "s")
+        _ = c1.send(.say("two"), to: "s")
+        c1.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
+        check(c1.state("s").outbox.allSatisfy { $0.sending } && c1.resend("w2", in: "s") != .sent, "both the new process's: still sending, no second send")
+        // not_open, the new process's start heard while the open request is out: the word is that process's; a later
+        // process that replaces it without an exit heard makes it unsent
+        let p2 = MockTransport()
+        p2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
+        let c2 = SessionClient(transport: p2)
+        c2.newClientId = { "v" }
+        _ = c2.open(sessionId: "s")
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { c2.feed($0) }
+        p2.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
+        p2.onRequest = { op in if op == SessionClient.Op.open { c2.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#)) } }
+        _ = c2.send(.say("x"), to: "s")
+        p2.onRequest = nil
+        c2.feed(se(nil, #""kind":"session.start","last_seq":2,"resumed":true"#))
+        check(c2.state("s").unsent.map(\.id) == ["v"], "replaced without an exit: unsent: \(c2.state("s").outbox)")
+        // not_open, then the old process's real exit arrives after the reopen: the new process's word stays sending
+        let p3 = MockTransport()
+        p3.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
+        let c3 = SessionClient(transport: p3)
+        c3.newClientId = { "z" }
+        _ = c3.open(sessionId: "s")
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { c3.feed($0) }
+        p3.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
+        _ = c3.send(.say("y"), to: "s")
+        c3.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":1,"start_seq":0,"last_seq":1}"#))
+        check(c3.state("s").outbox.first?.sending == true && c3.state("s").exited == nil, "the old exit, late: the new process's word untouched, not exited")
         queueInterleavingTests()
     }
 

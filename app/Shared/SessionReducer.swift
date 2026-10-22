@@ -245,6 +245,11 @@ struct SessionState: Equatable {
     var deferredQueue: [QueueItem]? = nil
     /// The newest stored seq received when it was held: it applies once the stored lines up to there are in.
     var deferredMark = 0
+    /// The app opened the session (SessionClient.open started a process) and has not heard that process's start yet:
+    /// words sent meanwhile are the new process's (Outgoing.toNextProcess).
+    var awaitingStart = false
+    /// How many new processes' starts were heard (SessionClient.open tells whether its process's start came already).
+    var starts = 0
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
@@ -489,6 +494,8 @@ enum SessionReducer {
                 // a new process: the one before is gone, with what lived only in it (whether or not its exit came first)
                 processGone(&s, exited: false)
                 s.exited = nil
+                s.awaitingStart = false
+                s.starts += 1
                 s.processPid = e.pid
                 s.processStart = e.lastSeq
                 s.goneUpTo = max(s.goneUpTo, e.lastSeq ?? 0)
@@ -500,12 +507,15 @@ enum SessionReducer {
             // was connected), so the latest; the same start is the latest if it stored anything (a later process starts
             // past it), and ambiguous if not — taken for an older one, which loses nothing (a process that stored
             // nothing queued and streamed nothing; a send to it finds it not_open and recovers).
-            let latest: Bool
+            var latest: Bool
             if let st = s.processStart, let es = e.startSeq, es != st { latest = es > st }      // (a start missed, or an older one)
             else if let p = e.pid, let cur = s.processPid { latest = p == cur }
             else if let st = s.processStart, let es = e.startSeq { latest = (e.lastSeq ?? es) > st }
             else if let st = s.processStart, let l = e.lastSeq { latest = l > st }
             else { latest = true }
+            // the app opened the session again and waits for the new process's start: an exit of a process that started
+            // no later than the latest start seen is the one before (the app already took it for gone), not the new one
+            if s.awaitingStart, let es = e.startSeq, es <= (s.processStart ?? es) { latest = false }
             // its runs are gone whenever this comes; without last_seq, those the app has seen of the latest process
             if let l = e.lastSeq { s.goneUpTo = max(s.goneUpTo, l) }
             else if latest { s.goneUpTo = max(s.goneUpTo, s.lastSeq, s.pendingSession.keys.max() ?? 0) }

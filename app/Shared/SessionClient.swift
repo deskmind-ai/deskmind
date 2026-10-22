@@ -189,11 +189,15 @@ final class SessionClient {
 
     /// Opens a session (a new one when `sessionId` is nil); its id, or nil when the helper could not.
     func open(sessionId: String? = nil, config: String? = nil, lang: String? = nil) -> String? {
+        let startsBefore = sessionId.map { state($0).starts } ?? 0
         guard let r = transport.request(Request.open(sessionId: sessionId, config: config, lang: lang)), r["ok"] as? Bool != false,
               let id = r["session_id"] as? String ?? sessionId else { return nil }
         lock.lock()
         if states[id] == nil { states[id] = SessionState(sessionId: id) }
         states[id]?.exited = nil
+        // a process was started (not one found running): words sent until its start is heard are its own
+        // (unless that start came in while the request was out)
+        if r["already_open"] as? Bool != true && (states[id]?.starts ?? 0) == startsBefore { states[id]?.awaitingStart = true }
         opened[id] = (config, lang)
         endedByApp.remove(id)
         lock.unlock()
@@ -237,8 +241,10 @@ final class SessionClient {
             let id = clientId ?? newClientId()
             words = id
             line["client_id"] = id
-            let next = s.exited != nil      // the send opens the session again: the words are the next process's
             mutate(sessionId) { st in
+                // the send opens the session again, or it was opened and its process's start not heard yet: the
+                // words are the next process's (decided on the state as it is now, not as it was read above)
+                let next = st.exited != nil || st.awaitingStart
                 if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = next }
                 else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: true, toNextProcess: next)) }
             }
@@ -264,7 +270,7 @@ final class SessionClient {
             let ended = endedByApp.contains(sessionId), how = opened[sessionId]
             lock.unlock()
             guard !ended, open(sessionId: sessionId, config: how?.config, lang: how?.lang) != nil else { return notSent(.unavailable) }
-            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = true } } }
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart } } }
             r = transport.request(Request.send(sessionId: sessionId, line: line))
         }
         guard let r, r["ok"] as? Bool != false else { return notSent(.unavailable) }
