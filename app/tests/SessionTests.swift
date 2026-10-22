@@ -1648,6 +1648,16 @@ enum SessionTests {
         _ = ck.send(.say("x"), to: "s")
         ck.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":2,"start_seq":1,"last_seq":1}"#))
         check(ck.state("s").exited == 1 && ck.state("s").unsent.map(\.id) == ["k1"] && !ck.state("s").awaitingStart, "its exit by pid: exited, the word unsent, nothing awaited")
+        // a reused pid on an older process's late exit (its start seq before the awaited one): not the awaited process
+        let pl = MockTransport()
+        pl.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 7], SessionClient.Op.send: ["ok": true]]
+        let cl = SessionClient(transport: pl)
+        cl.newClientId = { "l1" }
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { cl.feed($0) }
+        pl.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
+        _ = cl.send(.say("w"), to: "s")
+        cl.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":7,"start_seq":0,"last_seq":1}"#))
+        check(cl.state("s").outbox.first?.sending == true && cl.state("s").exited == nil && cl.state("s").awaitingStart, "the older start's exit with a reused pid: ignored")
         queueInterleavingTests()
     }
 
