@@ -680,6 +680,7 @@ enum Runner {
         }) {
         case .busy: _ = release(); _ = emit(ComputerLock.busy); return
         case .alive: _ = release(); _ = emit(HarnessRun.stillRunning); return
+        case .failed(let why): _ = release(); _ = emit(["event": "error", "error": why]); return
         case .ok(nil):
             _ = release()
             if stoppedFirst { _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]) }

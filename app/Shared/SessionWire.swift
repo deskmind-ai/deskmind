@@ -73,8 +73,9 @@ enum SessionWire {
     ///   that comes before the replay of what is below it (`attach{run_id}` is answered from the run's events.jsonl,
     ///   which the executor writes before it sends) is held until the replay has filled the gap, then passed on behind
     ///   it; a gap not filled within `holdLimit` (a replay that never came) lets the held lines go, in order
-    ///   (`expire`). Any other run (one that started while it watched: from seq 1, in order; or a replay another
-    ///   connection or the app asked for) is passed on at once, each line once.
+    ///   (`expire`). Any other run (one that started while it watched; or a replay another connection or the app asked
+    ///   for) is passed on only in order from its cursor: a line past a gap is dropped, never held and never passed
+    ///   with the gap (a stray last line of a task closed before this connection came is not its stream).
     /// - Lines with no seq: always, at once.
     struct Gate {
         /// The last stored event passed on.
@@ -86,8 +87,6 @@ enum SessionWire {
         private(set) var heldSince: [String: Date] = [:]
         /// The runs whose replay this connection asked for.
         private(set) var expected: Set<String> = []
-        /// Per run not expected: seqs above `runs[run]` passed on out of order.
-        private var above: [String: Set<Int>] = [:]
         static let holdLimit: TimeInterval = 10
 
         init(after: Int, runs: [String: Int] = [:]) {
@@ -114,20 +113,15 @@ enum SessionWire {
             }
             guard let run = e["run_id"] as? String, let seq else { return [e] }
             let upTo = runs[run] ?? 0
-            if seq <= upTo || held[run]?[seq] != nil || above[run]?.contains(seq) == true { return [] }
+            if seq <= upTo || held[run]?[seq] != nil { return [] }
             if seq > upTo + 1 {
-                guard expected.contains(run) else { above[run, default: []].insert(seq); return [e] }
+                guard expected.contains(run) else { return [] }
                 held[run, default: [:]][seq] = e
                 if heldSince[run] == nil { heldSince[run] = now }
                 return []
             }
             var out = [e], n = seq
-            while true {
-                if let next = held[run]?.removeValue(forKey: n + 1) { out.append(next); n += 1 }
-                else if above[run]?.remove(n + 1) != nil { n += 1 }
-                else { break }
-            }
-            if above[run]?.isEmpty == true { above[run] = nil }
+            while let next = held[run]?.removeValue(forKey: n + 1) { out.append(next); n += 1 }
             runs[run] = n
             if held[run]?.isEmpty ?? true { held[run] = nil; heldSince[run] = nil } else if n > seq { heldSince[run] = now }
             return out
@@ -239,6 +233,9 @@ enum SessionWire {
         var by: String
         var owner: Int32
         var t: Double
+        /// When a task first found it orphaned (acting, its owner and leader gone, a process of its group up): the
+        /// next task ends it `orphanSeconds` later.
+        var orphanSince: Double? = nil
 
         var acting: Bool { state == "acting" }
 
@@ -247,17 +244,23 @@ enum SessionWire {
         static func parse(_ text: String?, alive: (Int32) -> Bool) -> Holder? {
             guard let t = text, let o = (try? JSONSerialization.jsonObject(with: Data(t.utf8))) as? [String: Any] else { return nil }
             func int(_ k: String) -> Int? {
-                guard let n = o[k] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue == n.doubleValue.rounded() else { return nil }
+                guard let n = o[k] as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(), n.doubleValue == n.doubleValue.rounded(),
+                      abs(n.doubleValue) < 1e15 else { return nil }
                 return n.intValue
             }
-            if int("v") == 2, let state = o["state"] as? String, state == "acting" || state == "lingering",
-               let pgid = int("pgid"), let owner = int("owner") {
-                return Holder(state: state, pgid: Int32(pgid), pid: Int32(int("pid") ?? pgid), start: int("start") ?? 0,
+            /// a pid: only a value that fits (a lock written by anyone must not crash the helper)
+            func pid(_ k: String) -> Int32? { int(k).flatMap { Int32(exactly: $0) } }
+            if o["v"] != nil {
+                guard int("v") == 2, let state = o["state"] as? String, state == "acting" || state == "lingering",
+                      let pgid = pid("pgid"), let owner = pid("owner") else { return nil }
+                return Holder(state: state, pgid: pgid, pid: pid("pid") ?? pgid, start: int("start") ?? 0,
                               runID: o["run_id"] as? String ?? "", sessionID: o["session_id"] as? String ?? "",
-                              by: o["by"] as? String ?? "", owner: Int32(owner), t: (o["t"] as? NSNumber)?.doubleValue ?? 0)
+                              by: o["by"] as? String ?? "", owner: owner, t: (o["t"] as? NSNumber)?.doubleValue ?? 0,
+                              orphanSince: (o["orphan_since"] as? NSNumber)?.doubleValue)
             }
-            if let pid = int("pid") {
-                let up = [pid, int("executor_pid") ?? 0].map { Int32(truncatingIfNeeded: $0) }.first { $0 > 0 && alive($0) }
+            // an earlier format, with no version
+            if let p = pid("pid") {
+                let up = [p, pid("executor_pid") ?? 0].first { $0 > 0 && alive($0) }
                 return Holder(state: "acting", pgid: 0, pid: 0, start: 0, runID: o["run_id"] as? String ?? "",
                               sessionID: o["session_id"] as? String ?? "", by: "old", owner: up ?? 0, t: 0)
             }
@@ -265,8 +268,9 @@ enum SessionWire {
         }
 
         var json: Data {
-            let o: [String: Any] = ["v": 2, "state": state, "pgid": Int(pgid), "pid": Int(pid), "start": start, "run_id": runID,
+            var o: [String: Any] = ["v": 2, "state": state, "pgid": Int(pgid), "pid": Int(pid), "start": start, "run_id": runID,
                                     "session_id": sessionID, "by": by, "owner": Int(owner), "t": t]
+            if let orphanSince { o["orphan_since"] = orphanSince }
             return (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data()
         }
     }

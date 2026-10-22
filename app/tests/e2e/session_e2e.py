@@ -361,6 +361,9 @@ def run(env, helper):
     pid = o.get("pid")
     check(request({"op": "session.end", "session_id": sid}).get("ok") is True, "session.end")
     check(until(lambda: w2.kinds("helper.session_exit", sid), 20) is not None, "the watch hears the process end")
+    ex = w2.kinds("helper.session_exit", sid)[-1] if w2.kinds("helper.session_exit", sid) else {}
+    check(ex.get("pid") == pid and ex.get("start_seq") == 0 and ex.get("last_seq") == session_lines(sid)[-1]["seq"],
+          f"session_exit names the process: pid, start_seq, last_seq ({ex})")
     check(until(lambda: not alive(pid), 5) is not None, "the process is gone")
     r = request({"op": "sessions.list"})
     check([s.get("open") for s in r.get("sessions", []) if s.get("session_id") == sid] == [False], "listed, not open")

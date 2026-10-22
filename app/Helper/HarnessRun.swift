@@ -98,6 +98,12 @@ enum HarnessRun {
     /// acts again until its result_response (ComputerLock.undo). Another task started on this Mac since ended it
     /// (owner 10-21): `undo_expired`.
     static func respond(runID: String, option: Int, wait: Double = 0) -> [String: Any] {
+        guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
+            return ["ok": false, "error": "bad option"]
+        }
+        line.append(0x0A)
+        // which run, under `lock`; the machine lock is asked outside it (its flock may wait on another process, and a
+        // stop or an answer must not wait behind that), then the run is looked at again
         lock.lock()
         guard let l = lingering, !l.closed, l.process.isRunning else {
             let expired = expiredRun.map { runID.isEmpty || runID == $0 } ?? false
@@ -110,26 +116,28 @@ enum HarnessRun {
         if l.responded {
             lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
         }
-        guard var line = try? JSONSerialization.data(withJSONObject: ["type": "respond", "option": option]) else {
-            lock.unlock(); return ["ok": false, "error": "bad option"]
-        }
-        line.append(0x0A)
+        l.responded = true    // this answer's: a second one waits for nothing
+        lock.unlock()
         switch ComputerLock.undo(runID: l.runID, pgid: l.pgid) {
         case .ok: break
         case .busy:
-            lock.unlock(); return ["ok": false, "code": "busy", "error": "this result card was answered already"]
+            return ["ok": false, "code": "busy", "error": "this result card was answered already"]
         case .expired:
-            l.close(); lingering = nil; expiredRun = l.runID
-            lock.unlock()
+            lock.lock(); l.close(); if lingering === l { lingering = nil }; expiredRun = l.runID; lock.unlock()
             NSLog("DeskMind Hands: respond refused: another computer task started on this Mac since \(l.runID)")
             return undoExpired
         }
-        do { try l.input.write(contentsOf: line) } catch {
-            ComputerLock.linger(runID: l.runID, pgid: l.pgid)
-            lock.unlock(); return ["ok": false, "error": "write: \(error.localizedDescription)"]
+        lock.lock()
+        let gone = l.closed || !l.process.isRunning
+        if !gone {
+            do { try l.input.write(contentsOf: line) } catch {
+                lock.unlock()
+                ComputerLock.linger(runID: l.runID, pgid: l.pgid)
+                return ["ok": false, "error": "write: \(error.localizedDescription)"]
+            }
         }
-        l.responded = true
         lock.unlock()
+        if gone { ComputerLock.linger(runID: l.runID, pgid: l.pgid); return undoExpired }
         let until = Date().addingTimeInterval(min(max(wait, 0), 15))
         while Date() < until {
             lock.lock(); let r = l.response; lock.unlock()
@@ -336,6 +344,9 @@ enum HarnessRun {
         case .alive(let h):
             NSLog("DeskMind Hands: run refused: the lingering run \(h.runID) would not end")
             _ = Runner.release(); _ = emit(stillRunning); return
+        case .failed(let why):
+            NSLog("DeskMind Hands: run refused: \(why)")
+            _ = Runner.release(); _ = emit(["event": "error", "error": why]); return
         case .ok(nil):
             _ = Runner.release()
             if stoppedFirst { _ = emit(["event": "done", "exit": 0, "reason": "cancelled", "passed": 0, "total": 0, "stderr_tail": ""]) }

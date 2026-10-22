@@ -19,7 +19,9 @@
 //                 the live lines, with contiguous seqs: a live task line that overtakes its replay is held until the
 //                 replay below it has been sent (SessionWire.Gate). The
 //                 first line is {"kind":"helper.watching","open":[…]}; a process that ends says
-//                 {"kind":"helper.session_exit","session_id":…,"code":…}.
+//                 {"kind":"helper.session_exit","session_id":…,"code":…,"pid":…,"start_seq":…,"last_seq":…}: which
+//                 process (pid), the stored seq it began after (its session.start's last_seq) and the last stored
+//                 seq it sent.
 //
 // Tasks of a session drive the live card and the recording as the helper's own runs do (HarnessRun.show), from the
 // executor events the session forwards: only a task that runs in this helper now (SessionWire.Live), never a replay.
@@ -99,6 +101,8 @@ enum SessionHost {
         var liveView = true
         /// Which lines are new in this process and which tasks are live in it (SessionWire.Live).
         var live = SessionWire.Live()
+        /// Its session.start's `last_seq`: the stored seq this process began after.
+        var startSeq = 0
         /// session.start came: from then on its lines go to the watching connections (before it, a refusal is the
         /// opener's: busy, bad_config).
         var started = false
@@ -416,7 +420,11 @@ enum SessionHost {
         if sessions[s.id] === s { sessions[s.id] = nil }
         let wasStarted = s.started
         if s.first == nil { s.first = ["kind": "session.error", "code": "exited", "text": "the session process exited (\(code))"] }
-        let line = wasStarted ? lineData(["kind": "helper.session_exit", "session_id": s.id, "code": code]) : nil
+        // which process ended: its pid, the stored seq it began after (start_seq) and the last it sent (last_seq), so the
+        // app tells this process's runs from a newer one's whatever order lines arrive in
+        let line = wasStarted ? lineData(["kind": "helper.session_exit", "session_id": s.id, "code": code,
+                                          "pid": Int(s.process.processIdentifier), "start_seq": s.startSeq,
+                                          "last_seq": s.live.lastSeq]) : nil
         if let line { for w in watchers { w.send(line) } }
         lock.unlock()
         s.firstLine.signal()
@@ -439,7 +447,8 @@ enum SessionHost {
             if first { s.first = e }
             if kind == "session.start" {
                 s.started = true
-                s.live = SessionWire.Live(lastSeq: (e["last_seq"] as? NSNumber)?.intValue ?? 0)
+                s.startSeq = (e["last_seq"] as? NSNumber)?.intValue ?? 0
+                s.live = SessionWire.Live(lastSeq: s.startSeq)
             }
             lock.unlock()
             if first { s.firstLine.signal() }

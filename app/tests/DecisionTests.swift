@@ -933,9 +933,10 @@ enum DecisionTests {
         var other = W.Gate(after: 0)
         other.expect("run_1")
         let ev2 = { (n: Int) -> [String: Any] in ["kind": "step", "run_id": "run_2", "seq": n] }
-        check(seqs(other.admit(ev2(5))) == [5] && seqs(other.admit(ev2(6))) == [6] && other.admit(ev2(5)).isEmpty && !other.holding,
-              "another connection's replay of a run not asked for: passed on at once, once")
-        check(seqs(other.admit(ev2(1))) == [1] && other.admit(ev2(6)).isEmpty && seqs(other.admit(ev2(2))) == [2], "its other lines still once each")
+        check(other.admit(ev2(5)).isEmpty && other.admit(ev2(6)).isEmpty && !other.holding,
+              "a run not asked for, past a gap (another connection's replay, a stray last line): dropped, not held")
+        check(seqs(other.admit(ev2(1))) == [1] && seqs(other.admit(ev2(2))) == [2] && other.admit(ev2(2)).isEmpty,
+              "from its start, in order: passed on at once, once each")
         check(other.admit(ev(3)).isEmpty && other.holding, "a run asked for: held")
 
         // what drives the live card: only new lines of tasks live in this process, each once — never a replay
@@ -985,6 +986,10 @@ enum DecisionTests {
         check(W.Holder.parse(#"{"v":2,"state":"done","pgid":1,"owner":1}"#, alive: { _ in true }) == nil
               && W.Holder.parse(#"{"v":2,"state":"acting","pgid":"1","owner":1}"#, alive: { _ in true }) == nil
               && W.Holder.parse("x", alive: { _ in true }) == nil && W.Holder.parse(nil, alive: { _ in true }) == nil, "no lock")
+        check(W.Holder.parse(#"{"v":2,"state":"acting","pgid":99999999999,"pid":1,"owner":1}"#, alive: { _ in true }) == nil
+              && W.Holder.parse(#"{"v":2,"state":"acting","pgid":1e300,"owner":1}"#, alive: { _ in true }) == nil, "an id out of range: no lock (no crash)")
+        var marked = h; marked?.orphanSince = 12.5
+        check(marked.map { W.Holder.parse(String(decoding: $0.json, as: UTF8.self), alive: { _ in false })?.orphanSince == 12.5 } == true, "orphan_since kept")
         let old = W.Holder.parse(#"{"pid":12,"session_id":"s","run_id":"r","executor_pid":34}"#, alive: { $0 == 34 })
         check(old?.acting == true && old?.pgid == 0 && old?.owner == 34, "an earlier lock: acting, held by whichever of its pids lives")
         if let h {

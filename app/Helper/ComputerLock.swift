@@ -20,15 +20,21 @@ enum ComputerLock {
     static var file: URL { sessions.appendingPathComponent("computer.lock") }
     static var guardFile: URL { sessions.appendingPathComponent("computer.guard") }
 
-    /// `f` with the guard's flock held.
-    static func guarded<T>(_ f: () -> T) -> T {
+    /// `f` with the guard's flock held; `otherwise` when the guard cannot be opened (nothing decided unguarded).
+    static func guarded<T>(otherwise: T, _ f: () -> T) -> T {
         try? FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let fd = open(guardFile.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
-        if fd < 0 { NSLog("DeskMind Hands: computer lock: cannot open its guard (\(String(cString: strerror(errno))))") }
-        else { while flock(fd, LOCK_EX) != 0 && errno == EINTR {} }
-        defer { if fd >= 0 { close(fd) } }
+        guard fd >= 0 else {
+            NSLog("DeskMind Hands: computer lock: cannot open its guard (\(String(cString: strerror(errno))))")
+            return otherwise
+        }
+        defer { close(fd) }
+        while flock(fd, LOCK_EX) != 0 && errno == EINTR {}
         return f()
     }
+
+    /// How long an orphaned acting holder keeps the Mac before the next task ends it (as long as a stop is waited for).
+    static let orphanSeconds: Double = 12
 
     // MARK: the system
 
@@ -60,12 +66,14 @@ enum ComputerLock {
         SessionWire.held(h, groupAlive: groupAlive, alive: alive, startOf: startOf)
     }
 
-    private static func write(_ h: SessionWire.Holder) {
+    @discardableResult
+    private static func write(_ h: SessionWire.Holder) -> Bool {
         let tmp = "\(file.path).\(getpid()).\(UUID().uuidString.lowercased().prefix(8))"
         guard FileManager.default.createFile(atPath: tmp, contents: h.json, attributes: [.posixPermissions: 0o600]) else {
-            NSLog("DeskMind Hands: computer lock: cannot write \(tmp)"); return
+            NSLog("DeskMind Hands: computer lock: cannot write \(tmp)"); return false
         }
-        if rename(tmp, file.path) != 0 { unlink(tmp) }
+        if rename(tmp, file.path) != 0 { unlink(tmp); return false }
+        return true
     }
 
     /// End a lingering holder's tree: SIGTERM to its group, then SIGKILL. True once it is gone.
@@ -85,23 +93,37 @@ enum ComputerLock {
 
     // MARK: the protocol
 
-    enum Acquired { case ok(SessionWire.Holder?), busy(SessionWire.Holder), alive(SessionWire.Holder) }
+    /// `failed`: the lock could not be kept (its guard, or its file, could not be written): nothing runs.
+    enum Acquired { case ok(SessionWire.Holder?), busy(SessionWire.Holder), alive(SessionWire.Holder), failed(String) }
 
     /// Take the Mac for a new task, in one guarded step: a holder acting → busy; lingering → its tree ended (its undo
     /// expires; `alive` when it will not end); then `spawn` starts the executor (nil: it could not start, nothing is
     /// written) and the lock names its group, acting. The executor is sent its task only after this returns.
-    static func acquire(runID: String, by: String, term: Double = 1.5, kill: Double = 1,
+    static func acquire(runID: String, by: String, term: Double = 1.5, kill: Double = 1, now: Double? = nil,
                         signal: (Int32, Int32) -> Int32 = { Darwin.kill($0, $1) }, spawn: () -> pid_t?) -> Acquired {
-        guarded {
-            if let h = read(), held(h) {
-                if h.acting { return .busy(h) }
-                NSLog("DeskMind Hands: a new task on this Mac: ending the lingering run \(h.runID) (its undo expires)")
+        guarded(otherwise: .failed("the machine lock's guard cannot be opened")) {
+            if var h = read(), held(h) {
+                if h.acting {
+                    // orphaned (its owner and its leader gone, a process of its group still up): refused for
+                    // `orphanSeconds`, then ended -- it must not hold the Mac for good
+                    guard h.pgid > 0, !alive(h.owner), startOf(h.pid) == nil else { return .busy(h) }
+                    let t = now ?? Date().timeIntervalSince1970
+                    guard let since = h.orphanSince else { h.orphanSince = t; write(h); return .busy(h) }
+                    if t - since < orphanSeconds { return .busy(h) }
+                    NSLog("DeskMind Hands: run \(h.runID)'s owner and leader are gone, its group still up: ending it")
+                } else {
+                    NSLog("DeskMind Hands: a new task on this Mac: ending the lingering run \(h.runID) (its undo expires)")
+                }
                 if !endTree(h, term: term, kill: kill, signal: signal) { return .alive(h) }
             }
             guard let pid = spawn() else { return .ok(nil) }
             let h = SessionWire.Holder(state: "acting", pgid: pid, pid: pid, start: startOf(pid) ?? 0, runID: runID, sessionID: "",
                                        by: by, owner: getpid(), t: Date().timeIntervalSince1970)
-            write(h)
+            guard write(h) else {
+                // not recorded: it must not act unrecorded (`hands do` has its task in its arguments): its group ended
+                _ = signal(-pid, SIGKILL)
+                return .failed("the machine lock could not be written")
+            }
             return .ok(h)
         }
     }
@@ -114,7 +136,7 @@ enum ComputerLock {
     /// Its task_done (or its run's end): it acts no more; its result card may be answered, and a new task may end it.
     @discardableResult
     static func linger(runID: String, pgid: Int32) -> Bool {
-        guarded {
+        guarded(otherwise: false) {
             guard var h = mine(read(), runID, pgid), h.acting else { return false }
             h.state = "lingering"; h.t = Date().timeIntervalSince1970
             write(h)
@@ -127,7 +149,7 @@ enum ComputerLock {
     /// An answer to `runID`'s result card: only while it is the lingering holder; it acts again. `expired`: another
     /// task started since (or its tree is gone); `busy`: an answer of it is being carried out.
     static func undo(runID: String, pgid: Int32) -> Undo {
-        guarded {
+        guarded(otherwise: .expired) {
             guard var h = mine(read(), runID, pgid), held(h) else { return .expired }
             if h.acting { return .busy }
             h.state = "acting"; h.t = Date().timeIntervalSince1970
@@ -139,7 +161,7 @@ enum ComputerLock {
     /// Its executor has exited: the lock goes if it still names that run and its group is gone (a child still up keeps
     /// it, in the state it had).
     static func free(runID: String, pgid: Int32) {
-        guarded {
+        guarded(otherwise: ()) {
             if mine(read(), runID, pgid) != nil, !groupAlive(pgid) { unlink(file.path) }
         }
     }
@@ -147,8 +169,8 @@ enum ComputerLock {
     /// 「清除全部」: this helper's own last run lets go of its files -- a lingering one is ended. False while one of
     /// this helper's acts, or when it will not end.
     static func endOwnLingering() -> Bool {
-        guarded {
-            guard let h = read(), h.owner == getpid() || h.by == "helper" || h.by == "hands", held(h) else { return true }
+        guarded(otherwise: false) {
+            guard let h = read(), h.by == "helper" || h.by == "hands", held(h) else { return true }
             return !h.acting && endTree(h)
         }
     }
@@ -166,7 +188,7 @@ enum ComputerLock {
     /// is given `grace` s to end by itself, then ended -- an orphaned tree must not hold the Mac for good.
     static func reapLeftovers(runID: String, pgid: Int32, grace: Double = 12) {
         DispatchQueue.global().asyncAfter(deadline: .now() + grace) {
-            let left: SessionWire.Holder? = guarded {
+            let left: SessionWire.Holder? = guarded(otherwise: nil) {
                 guard let h = mine(read(), runID, pgid), held(h) else { return nil }
                 return h
             }

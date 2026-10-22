@@ -68,6 +68,7 @@ enum SessionE2E {
             case .ok: p.waitUntilExit(); ComputerLock.free(runID: run, pgid: p.processIdentifier); return ["ok": true]
             case .busy(let h): return ["ok": false, "code": "computer_busy", "held_by": h.runID]
             case .alive(let h): return ["ok": false, "code": "previous_run_alive", "held_by": h.runID]
+            case .failed(let why): return ["ok": false, "error": why]
             }
         default: return nil
         }
@@ -195,6 +196,36 @@ enum SessionE2E {
         check(!ComputerLock.held(stale) && ComputerLock.held(ComputerLock.read()!), "a reused id (another start time) holds nothing")
         killGroup(g.processIdentifier); g.waitUntilExit()
 
+        // orphaned: acting, its owner (a killed helper) and its leader gone, a child of its group up -- refused for
+        // orphanSeconds (the first look marks it), then ended by the next task
+        try? fm.removeItem(at: ComputerLock.file)
+        let orphanLeader = executor("sleep 30 & exit 0")
+        try? orphanLeader.run(); orphanLeader.waitUntilExit()
+        let og = orphanLeader.processIdentifier
+        let orphan = SessionWire.Holder(state: "acting", pgid: og, pid: og, start: 0, runID: "run_orphan", sessionID: "", by: "helper", owner: 99_999_99, t: 0)
+        try? orphan.json.write(to: ComputerLock.file)
+        let t0 = Date().timeIntervalSince1970
+        let firstLook = ComputerLock.acquire(runID: "run_o1", by: "helper", now: t0, spawn: { nil })
+        if case .busy = firstLook, ComputerLock.read()?.orphanSince == t0 { check(true, "an orphaned holder: refused at first, marked") }
+        else { check(false, "an orphaned holder: refused at first, marked (\(String(describing: ComputerLock.read())))") }
+        if case .busy = ComputerLock.acquire(runID: "run_o2", by: "helper", now: t0 + ComputerLock.orphanSeconds - 1, spawn: { nil }) { check(true, "still refused within the grace") }
+        else { check(false, "still refused within the grace") }
+        let after = executor("sleep 30")
+        if case .ok(let ha?) = ComputerLock.acquire(runID: "run_o3", by: "helper", term: 0.5, kill: 1, now: t0 + ComputerLock.orphanSeconds,
+                                                    spawn: { try? after.run(); return after.processIdentifier }) {
+            check(ha.runID == "run_o3" && !ComputerLock.groupAlive(og), "after the grace the next task ends it and takes the Mac")
+        } else { check(false, "after the grace the next task ends it and takes the Mac") }
+        killGroup(after.processIdentifier); after.waitUntilExit()
+
+        // the lock cannot be written (a folder in its place): the task is refused and what it started is ended
+        try? fm.removeItem(at: ComputerLock.file)
+        try? fm.createDirectory(at: ComputerLock.file.appendingPathComponent("x"), withIntermediateDirectories: true)
+        let unrecorded = executor("sleep 30")
+        if case .failed = start("run_w", unrecorded) {
+            check(until { !unrecorded.isRunning }, "an unwritable lock: refused, and the started process ended (it must not act unrecorded)")
+        } else { check(false, "an unwritable lock: refused") }
+        try? fm.removeItem(at: ComputerLock.file)
+
         // two op runs at once (forced interleaving): B asks while A is inside the guard, its executor started and not
         // yet written. B waits for the guard, then finds A acting: busy -- nothing of A's is ended.
         try? fm.removeItem(at: ComputerLock.file)
@@ -277,6 +308,7 @@ enum SessionE2E {
         case .ok: print("ok")
         case .busy(let h): print("busy \(h.runID)")
         case .alive(let h): print("alive \(h.runID)")
+        case .failed(let why): print("failed \(why)")
         }
         exit(0)
     }
