@@ -1857,11 +1857,23 @@ enum SessionTests {
             check(r == .refused("taken") && sends == (viaNotOpen ? 1 : 0), "\(viaNotOpen ? "not_open" : "reopen"): the replay took it while the open blocked: no send after the open (\(r), \(sends) sends)")
             check(c.state("s").outbox.isEmpty && c.state("s").messages.filter { $0.text == "开个文件" }.count == 1, "taken once, nothing held")
         }
-        // the session's own answer to a repeat (harness#59): session.duplicate takes the words
+        // the session's own answer to a repeat (harness#59): session.duplicate takes the words; its seq is the stored
+        // line it points at, not its own (not stored): it neither moves the cursor nor fills or opens a gap
+        let dup = L(#"{"session_id":"s","kind":"session.duplicate","client_id":"d1","control":"say","seq":2}"#)
+        check(dup.seq == nil, "the duplicate has no seq of its own")
+        let msg2 = se(2, #""kind":"session.message","msg_id":"m2","role":"user","text":"b","client_id":"d1""#)
         var st = SessionReducer.reduce(SessionState(), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#))
         st.outbox = [Outgoing(id: "d1", text: "b", sending: true, original: .say("b"))]
-        st = SessionReducer.reduce(st, L(#"{"session_id":"s","kind":"session.duplicate","client_id":"d1","control":"say","seq":2}"#))
-        check(st.outbox.isEmpty && st.taken.contains("d1"), "session.duplicate: taken")
+        st = SessionReducer.reduce(st, dup)
+        check(st.outbox.isEmpty && st.taken.contains("d1") && st.lastSeq == 1 && !st.hasGap, "session.duplicate before its line: taken, cursor unmoved")
+        st = SessionReducer.reduce(st, msg2)
+        check(st.lastSeq == 2 && st.messages.map(\.text) == ["a", "b"], "then the stored line itself: in the history")
+        // the stored line held behind a gap, the duplicate after it: the line is not replaced
+        var g = SessionReducer.reduce(SessionState(), [se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+                                                       se(4, #""kind":"session.message","msg_id":"m4","role":"user","text":"d","client_id":"d4""#),
+                                                       L(#"{"session_id":"s","kind":"session.duplicate","client_id":"d4","control":"say","seq":4}"#)])
+        g = SessionReducer.reduce(g, [se(2, #""kind":"session.retry","reply_to":"u""#), se(3, #""kind":"session.retry","reply_to":"u""#)])
+        check(g.messages.map(\.text) == ["a", "d"] && g.lastSeq == 4 && !g.hasGap, "the held line applies, the duplicate did not replace it")
         check(ProtocolLine.parse(#"{"session_id":"s","kind":"session.duplicate","client_id":"d1","control":"say","seq":2}"#)?.event.kind == "session.duplicate", "decoded")
     }
 }

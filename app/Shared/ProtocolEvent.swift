@@ -728,6 +728,8 @@ struct ProtocolLine: Codable, Equatable {
         runId = try? c.decodeIfPresent(String.self, forKey: .runId)
         sessionId = try? c.decodeIfPresent(String.self, forKey: .sessionId)
         event = try ProtocolEvent(from: decoder)
+        // session.duplicate is not stored: its `seq` is the stored line it points at (in the event), not its own
+        if case .duplicate = event { seq = nil }
     }
 
     func encode(to encoder: Encoder) throws {
