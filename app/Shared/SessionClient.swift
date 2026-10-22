@@ -55,6 +55,40 @@ final class HelperSessionTransport: SessionTransport {
     }
 }
 
+/// The helper's "cloud models off" bit kept equal to the app's switch (#107 review: a lost models.off left the helper
+/// off and the app on for good). Every assertion goes through one serial queue, in order — two quick toggles reach the
+/// helper as they were made — and is sent again with backoff until the helper acks it; a newer one supersedes it.
+final class ModelsOffSync {
+    static let shared = ModelsOffSync(transport: HelperSessionTransport())
+    private let transport: SessionTransport
+    private let queue = DispatchQueue(label: "ai.deskmind.models-off")
+    private let lock = NSLock()
+    private var wanted: Bool?
+    private var gen = 0
+    /// The first wait before a try again (doubling, up to 30 s).
+    var firstDelay = 0.25
+    init(transport: SessionTransport) { self.transport = transport }
+
+    /// The switch as it is now: off or not. `then`: once the helper has it (not if a newer one came first).
+    func assert(_ off: Bool, then: (() -> Void)? = nil) {
+        lock.lock(); wanted = off; gen += 1; let g = gen; lock.unlock()
+        queue.async { [weak self] in self?.push(off, g, delay: self?.firstDelay ?? 0.25, then: then) }
+    }
+
+    /// One try, on the queue; not acked: tried again later on the same queue (a newer assertion supersedes it).
+    private func push(_ off: Bool, _ g: Int, delay: Double, then: (() -> Void)?) {
+        lock.lock(); let current = g == gen; lock.unlock()
+        guard current else { return }
+        if SessionClient.setModelsOff(off, via: transport) { then?(); return }
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.push(off, g, delay: min(delay * 2, 30), then: then) }
+    }
+
+    /// The last switch asserted (nil: none yet).
+    var asserted: Bool? { lock.lock(); defer { lock.unlock() }; return wanted }
+    /// Waits until what was asserted before has been sent (bounded).
+    func settle(timeout: Double = 3) { let s = DispatchSemaphore(value: 0); queue.async { s.signal() }; _ = s.wait(timeout: .now() + timeout) }
+}
+
 /// What the user does in a session, as the session's control lines (docs/protocol.md 「会话（第 1 版）」, 控制).
 enum SessionControl: Equatable {
     case say(String)
@@ -207,6 +241,21 @@ final class SessionClient {
     private var off = false
     /// Sessions whose open request is out (a reconcile reaches them too).
     private var opening: Set<String> = []
+    /// Keeps the helper's models-off bit equal to `modelOff` (the app's switch): the app's one for the helper's own
+    /// transport, else one of this client's.
+    lazy var modelsSync: ModelsOffSync = transport is HelperSessionTransport ? .shared : ModelsOffSync(transport: transport)
+
+    /// The helper says whether it holds cloud models off (helper.watching's `models_off`, a `no_model` refusal): when
+    /// that is not the app's switch, the switch is asserted again (until acked), then every session reconciled.
+    func helperSays(modelsOff theirs: Bool) {
+        let mine = modelOff
+        guard theirs != mine else { return }
+        modelsSync.assert(mine) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); let d = self.defaults; self.lock.unlock()
+            self.reconcile(config: d.config, lang: d.lang, off: mine)
+        }
+    }
     /// What each session's current process is known to run with: the last set_config sent to it (or acked), else what
     /// its open line carried; forgotten when the process goes (an unknown with the model off is reconciled to null).
     private var runsWith: [String: (config: String?, lang: String?)] = [:]
@@ -310,6 +359,7 @@ final class SessionClient {
         let wasExited = sessionId.map { state($0).exited != nil } ?? false
         // cloud models off: no configuration on the open line (it would outrank the session's stored null), and no
         // model from its first control on (set_config null, before anything else is written)
+        modelsSync.settle()                 // (the switch the helper holds, asserted before, is there first)
         let noModel = modelOff
         if let sessionId { lock.lock(); opening.insert(sessionId); lock.unlock() }
         defer { if let sessionId { lock.lock(); opening.remove(sessionId); lock.unlock() } }
@@ -321,11 +371,12 @@ final class SessionClient {
         generation[id, default: 0] += 1
         if r["already_open"] as? Bool != true { if noModel { runsWith[id] = nil } else { runsWith[id] = (config, lang) } }  // (none on the line: unknown)
         lock.unlock()
+        // opened with the settings now (a configuration, or null): a "not stored" banner from before is past — cleared
+        // before its set_config goes, so a refusal of that one stays shown
+        mutate(id) { $0.settingsRefused = nil }
         let offNow = modelOff
         if offNow { _ = sendConfig(id, config: nil, lang: lang, attempt: 1) }
         else if noModel { _ = sendConfig(id, config: config ?? defaultConfig, lang: lang, attempt: 1) }
-        // opened with the settings now (a configuration, or null): a "not stored" banner from before is past
-        mutate(id) { $0.settingsRefused = nil }
         lock.lock()
         if states[id] == nil { states[id] = SessionState(sessionId: id) }
         states[id]?.exited = nil
@@ -444,11 +495,15 @@ final class SessionClient {
             if let r = modelGone() { return r }
         }
         var r = requestLine(sessionId, line)
-        // the helper holds cloud models off (from another window, another app): refused, the words stay the app's
-        if r?["code"] as? String == "no_model" {
+        // the helper holds cloud models off (from another window, another app, or a lost "on"): refused, the words
+        // stay the app's; and if that is not the app's switch, the helper is told again
+        let helperNoModel = { [self] () -> SendResult? in
+            guard r?["code"] as? String == "no_model" else { return nil }
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = false; st.outbox[i].refused = "no_model" } } }
+            helperSays(modelsOff: true)
             return .refused("no_model")
         }
+        if let n = helperNoModel() { return n }
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
         // the session reads as exited here too; it is opened again once and the line sent again — unless the app ended
         // it, or the line was for what went with the process (a stop, a steer, a card's answer: never opens a session)
@@ -464,6 +519,7 @@ final class SessionClient {
             if let id = words, stillOurs(id, in: sessionId) == false { return .refused("taken") }
             if let r = modelGone() { return r }
             r = requestLine(sessionId, line)
+            if let n = helperNoModel() { return n }
         }
         guard let r, r["ok"] as? Bool != false else { return notSent(.unavailable) }
         // (sent: the words stay in the outbox, sending, until the session takes or refuses them)
@@ -583,7 +639,7 @@ final class SessionClient {
         let how = reopenSettings(id), noModel = off
         let have = runsWith[id] ?? states[id]?.settings.map { (config: $0.config, lang: $0.lang) }
         let wantNow: String? = noModel ? nil : how.config
-        let underWay = pendingConfigs.values.contains { $0.sessionId == id && $0.config == wantNow }
+        let underWay = pendingConfigs.values.contains { $0.sessionId == id && $0.config == wantNow && $0.lang == how.lang }
         lock.unlock()
         if underWay { return }                                               // (its answer will say)
         guard live else { return }
@@ -625,6 +681,7 @@ final class SessionClient {
         line["client_id"] = cid
         let r = requestLine(sessionId, line)
         if r?["ok"] as? Bool != false && r != nil { return true }
+        if r?["code"] as? String == "no_model" { helperSays(modelsOff: true) }
         // not written (no answer, not open, refused): what it runs with is unknown — the next reconcile sends again
         lock.lock(); pendingConfigs[cid] = nil; runsWith[sessionId] = nil; lock.unlock()
         return r?["code"] as? String == "not_open"
@@ -765,6 +822,7 @@ final class SessionClient {
                 guard let self else { return false }
                 if obj["kind"] as? String == "helper.watching", let open = obj["open"] as? [String] {
                     self.lock.lock(); self.watchDown = false; self.lock.unlock()
+                    if let theirs = obj["models_off"] as? Bool { self.helperSays(modelsOff: theirs) }
                     // a session with no process now gets no replay from the watch: what it stored while this app was
                     // away (a reply finished, a task ended) is read from its log after the cursor, through the reducer
                     // (#107 review: the cache is never taken as whole) — off this thread, so the live lines go on
@@ -890,8 +948,11 @@ final class SessionClient {
         // a process's start or end: what it runs with is its own (a start: a new process, reconciled)
         var started = false
         switch line.event {
-        case .sessionStart: generation[id, default: 0] += 1; started = true
-        case .sessionExit: if after.exited != nil { runsWith[id] = nil }
+        case .sessionStart:
+            generation[id, default: 0] += 1; started = true
+            pendingConfigs = pendingConfigs.filter { $0.value.sessionId != id }    // (sent to a process that is gone)
+        case .sessionExit:
+            if after.exited != nil { runsWith[id] = nil; pendingConfigs = pendingConfigs.filter { $0.value.sessionId != id } }
         case .sessionConfig(let e): runsWith[id] = (e.config, e.lang)
         default: break
         }

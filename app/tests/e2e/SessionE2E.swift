@@ -11,7 +11,7 @@
 //
 // `serve` adds test ops beside the session ops: `e2e.ui` (what the live card and the recording were driven with, by
 // run), `e2e.state` (SessionHost.taskRunning), `e2e.acquire {run_id}` (an op run that starts on the lock and is over
-// at once: ok, or computer_busy).
+// at once: ok, or computer_busy), `e2e.run` (an op run's request: refused no_model by the models-off bit, or would run).
 // `lock` and `linger` print PASS or FAIL per check; their exit status is the number of failures.
 
 import AppKit
@@ -61,6 +61,9 @@ enum SessionE2E {
             return ["ok": true, "ui": ui]
         case "e2e.state":
             return ["ok": true, "task_running": SessionHost.taskRunning]
+        case "e2e.run":
+            // the helper's op run as far as the models-off bit goes (HandsHelper: refused before anything starts)
+            return SessionHost.refusesRun(req) ?? ["ok": true, "would_run": true]
         case "e2e.acquire":
             let run = req["run_id"] as? String ?? "run_e2e"
             let p = executor("true")

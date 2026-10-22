@@ -112,32 +112,50 @@ enum SessionHost {
     /// The last stored seq of each session whose process ended in this helper (helper.watching's `last_seq`): a
     /// watch that comes later reads the stored log of only those it has not all of.
     nonisolated(unsafe) private static var exitedLastSeq: [String: Int] = [:]
-    /// Cloud models off (models.off), read from its file the first time it is needed (under lock).
+    /// Cloud models off (models.off), read from its file the first time it is needed (under lock). The file says "0"
+    /// (on) or "1" (off); missing or unreadable: off — the safe side — until a client asserts the bit (the app does on
+    /// every connect, and wherever the engine setting is written).
     nonisolated(unsafe) private static var offLoaded = false
-    nonisolated(unsafe) private static var offBit = false
+    nonisolated(unsafe) private static var offBit = true
     private static var offFile: URL { setup.dir.appendingPathComponent("models-off") }
     private static var modelsAreOff: Bool {     // under lock
-        if !offLoaded { offBit = FileManager.default.fileExists(atPath: offFile.path); offLoaded = true }
+        if !offLoaded {
+            let text = (try? String(contentsOf: offFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+            offBit = text != "0"
+            offLoaded = true
+        }
         return offBit
+    }
+    /// The bit, for the helper's status and its op run (HandsHelper).
+    static var modelsOffNow: Bool { lock.lock(); defer { lock.unlock() }; return modelsAreOff }
+    /// One models.off at a time: the bit in memory and its file never disagree.
+    private static let offSerial = NSLock()
+
+    /// An op run the bit refuses (the old window's run with the cloud engine): its error event, else nil. Local-engine
+    /// runs are not the cloud's and go on.
+    static func refusesRun(_ req: [String: Any]) -> [String: Any]? {
+        guard req["engine"] as? String == "harness", req["goal"] is String, modelsOffNow else { return nil }
+        return ["event": "error", "code": "no_model",
+                "error": L("The cloud model is off. Turn it on in the model settings to run this task.", lang: ResolvedLang.current)]
     }
     private static let nullConfig: [String: Any] = ["type": "set_config", "config": NSNull()]
 
     /// models.off {off}: holds the bit for every session this helper runs (and persists it), and with the models off
     /// writes set_config null to every running session process now.
+    /// One at a time (`offSerial`); off: the running sessions are nulled first, then the bit is written down, and the
+    /// reply comes only after both.
     static func modelsOff(_ req: [String: Any]) -> [String: Any] {
         guard let off = req["off"] as? Bool else { return ["ok": false, "code": "bad_request", "error": "models.off needs off (true or false)"] }
+        offSerial.lock(); defer { offSerial.unlock() }
         lock.lock()
         _ = modelsAreOff
         offBit = off
         let running = sessions.values.filter { $0.started && !$0.closing }
         lock.unlock()
-        do {
-            if off { try Data("1\n".utf8).write(to: offFile, options: .atomic) }
-            else if FileManager.default.fileExists(atPath: offFile.path) { try FileManager.default.removeItem(at: offFile) }
-        } catch {
-            return ["ok": false, "error": "models.off: \(error.localizedDescription)"]
-        }
         if off { for s in running { s.writeGate.lock(); _ = s.write(nullConfig); s.writeGate.unlock() } }
+        do { try Data((off ? "1" : "0").utf8 + [0x0A]).write(to: offFile, options: .atomic) } catch {
+            return ["ok": false, "off": off, "error": "models.off: \(error.localizedDescription)"]
+        }
         return ["ok": true, "off": off]
     }
     /// How long `session.end` waits for the session's answer to its end_if_idle (it answers in order, at once: this

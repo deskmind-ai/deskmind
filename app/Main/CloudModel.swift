@@ -69,8 +69,7 @@ enum CloudModelSettings {
             UserDefaults.standard.set(newValue ? "harness" : "hands", forKey: "engine")
             // the helper holds "cloud models off" for every session it runs (models.off): told wherever the setting
             // is written — either window's sheet, any path — so no session keeps the cloud behind it
-            let off = !newValue
-            DispatchQueue.global().async { SessionClient.setModelsOff(off) }
+            ModelsOffSync.shared.assert(!newValue)      // (in order, sent again until the helper has it)
         }
     }
 }

@@ -167,12 +167,15 @@ def main():
                 if p.poll() is None:
                     p.kill(); p.wait()
             helpers.append(start_helper(env))
+            request({"op": "models.off", "off": False})      # (the app asserts its switch as it connects)
             r = subprocess.run([CLIENT, SOCK, CONFIG], capture_output=True, text=True, timeout=240)
             print(r.stdout, end="")
             check(r.returncode == 0, f"the app's session client against the helper ({r.returncode} failures){r.stderr[-400:]}")
         if SHELL:
             # the 0.5 window's model: a conversation, then the app quits and the helper restarts (the sessions' processes
-            # go with it), then the app again; defaults in a suite of their own (removed at the end), a folder of its own
+            # go with it), then the app again; defaults in a suite of their own (removed at the end), a folder of its own.
+            # Nothing asserts the models-off switch here but the shell's own start: phase a is a first run on a fresh
+            # helper (off until told)
             os.makedirs(SHELL_DIR, exist_ok=True)
             suite = f"ai.deskmind.e2e.shell.{os.getpid()}"
             state = os.path.join(OUT, "shell-state")
@@ -205,6 +208,10 @@ def run(env, helper):
 
     w1 = Watch()
     check(until(lambda: w1.kinds("helper.watching")) is not None, "the watch says it is watching")
+    # a fresh helper (no models-off file): off, the safe side, until a client asserts the switch — as the app does on
+    # every connect
+    check(w1.kinds("helper.watching")[0].get("models_off") is True, f"a fresh helper holds cloud models off until told: {w1.kinds('helper.watching')[0]}")
+    check(request({"op": "models.off", "off": False}).get("off") is False, "the app's switch asserted: on")
 
     o = request({"op": "session.open", "config": CONFIG, "lang": "zh", "driver": "sim"})
     sid = o.get("session_id", "")
@@ -529,6 +536,8 @@ def run(env, helper):
     # a new helper: the session reopens and its story is whole
     helper2 = start_helper(env)
     try:
+        r = request({"op": "models.off", "off": False})     # (the app asserts its switch as it connects)
+        check(r.get("ok") is True, f"a new helper told the switch: {r}")
         o4 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
         check(o4.get("ok") is True and o4.get("resumed") is True, "reopened under a new helper")
         w6 = Watch(runs={run_id: 0, run1: 0, run2: 0})
@@ -587,7 +596,15 @@ def run(env, helper):
         check(bool(first) and first[0].get("config") is None, f"after a helper restart (the bit kept): a new session's first settings are null ({first and first[0]}; {o5})")
         r = send(s5, {"type": "say", "text": "你好"})
         check(r.get("code") == "no_model" and model_calls() == calls, f"and what needs a model is refused there, no model call ({r})")
+        # the old window's run with the cloud engine, confirmed after cloud was turned off: refused before anything
+        # starts, no model call; a local-engine run is not the cloud's
+        r = request({"op": "e2e.run", "engine": "harness", "goal": "给笔记换个颜色", "config": CONFIG})
+        check(r.get("event") == "error" and r.get("code") == "no_model" and model_calls() == calls, f"models off: an op run with the cloud engine is refused ({r})")
+        r = request({"op": "e2e.run", "engine": "hands", "goal": "给笔记换个颜色"})
+        check(r.get("would_run") is True, f"models off: a local-engine run is not refused ({r})")
         check(request({"op": "models.off", "off": False}).get("ok") is True, "models on again")
+        r = request({"op": "e2e.run", "engine": "harness", "goal": "给笔记换个颜色", "config": CONFIG})
+        check(r.get("would_run") is True, f"models on: the cloud engine's run goes ({r})")
         check(send(s5, {"type": "set_config", "config": CONFIG, "lang": "zh"}).get("ok") is True, "models on: a configuration passes")
         check(send(s5, {"type": "say", "text": "你好"}).get("ok") is True, "models on: a say passes")
         check(until(lambda: [m for m in session_lines(s5) if m.get("role") == "assistant"], 30) is not None, "and is answered")

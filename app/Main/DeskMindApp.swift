@@ -111,9 +111,10 @@ final class HelperModel: ObservableObject {
                 self.connected = reply?["ok"] as? Bool == true
                 if let reply { self.status = reply }
                 // connected (the app's start, a helper restarted): the helper hears whether cloud models are off
-                if self.connected && !was {
-                    let off = !CloudModelSettings.engineIsCloud
-                    Task.detached { SessionClient.setModelsOff(off) }
+                // and whenever it says otherwise (a lost assertion): the app's switch is the truth
+                let off = !CloudModelSettings.engineIsCloud
+                if self.connected && (!was || (reply?["models_off"] as? Bool).map({ $0 != off }) == true) {
+                    ModelsOffSync.shared.assert(off)
                 }
                 if was != self.connected {
                     let lang = ResolvedLang.current

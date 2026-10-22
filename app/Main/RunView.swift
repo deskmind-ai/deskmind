@@ -465,7 +465,8 @@ final class RunModel: ObservableObject {
             phase = .failed
             ask = nil; preparing = ""
             rawError = e["error"] as? String ?? L("Something went wrong", lang: ResolvedLang.current)
-            summary = e["code"] as? String == "brain_not_ready" ? rawError : Self.friendly(rawError)
+            // (said as it is: the local model not ready yet; the cloud model off — the helper refused the run)
+            summary = ["brain_not_ready", "no_model"].contains(e["code"] as? String ?? "") ? rawError : Self.friendly(rawError)
             if real { RunOverlay.shared.finish(passed: false, summary: summary) }
         default:
             break

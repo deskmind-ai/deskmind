@@ -140,6 +140,7 @@ func status(probe: Bool) -> [String: Any] {
         "eyes": EyesServer.status()["state"] ?? "stopped",
     ]
     if let a = perms.automation { s["automation"] = a }
+    s["models_off"] = SessionHost.modelsOffNow      // (the app asserts its switch when this is not it)
     return s
 }
 
@@ -286,6 +287,13 @@ func serve() {
             // Chat sessions (session.open / send / end, sessions.list / watch): SessionHost.
             if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {
+                // cloud models off (the helper's bit): a run with the cloud engine is refused before anything starts
+                if let refusal = SessionHost.refusesRun(req) {
+                    var line = (try? JSONSerialization.data(withJSONObject: refusal)) ?? Data()
+                    line.append(0x0A)
+                    _ = line.withUnsafeBytes { write(c, $0.baseAddress, line.count) }
+                    return
+                }
                 // A run streams: one line per event until it ends, on this connection.
                 // taken (busy, the last stop flags cleared) in one step with the check: a stop from now on is this run's
                 guard Runner.accept() else {

@@ -370,6 +370,10 @@ final class ShellModel: ObservableObject {
 
     /// Starts watching the helper's sessions (on its own thread, until `stopWatching`), and reads the list.
     func start() {
+        // the helper holds whether cloud models are off: told the switch as the app starts its watch (and again
+        // whenever the helper says otherwise)
+        applySettings(reconcileIfModelChanged: false)
+        client.modelsSync.assert(!cloudOn())
         runLock.lock()
         stopWatch = false
         let already = watching
