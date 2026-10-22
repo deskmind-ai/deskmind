@@ -672,7 +672,8 @@ struct CardView: View {
             }
             .fixedSize(horizontal: false, vertical: true)
             if !seen && card.buttons.contains(where: { $0.role.needsWholeBody }) {
-                Text(L("Scroll to the end of the card to approve", lang: lang))
+                // (neutral: it holds the card's own field too, for someone who wants to type)
+                Text(L("Read the whole card first: scroll to its end", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
             }
             if card.allowsFreeText {
@@ -682,6 +683,8 @@ struct CardView: View {
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(sendWords)
                         .disabled(!wordsEnabled)
+                        .accessibilityHint(!wordsEnabled && ShellModel.wordsWaitForBody(card) && !seen
+                                           ? L("Read the whole card first: scroll to its end", lang: lang) : "")
                     Button(L("Send", lang: lang), action: sendWords).buttonStyle(InkButtonStyle(prominent: false))
                         .disabled(!wordsEnabled || words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }

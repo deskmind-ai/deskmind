@@ -431,12 +431,17 @@ final class SessionClient {
     func click(_ button: CardModel.Button, in sessionId: String) -> SendResult { answer(CardModel.answer(button), in: sessionId) }
 
     /// Ends the session's process, if the helper finds it idle (else `not_idle`, and nothing changes here). Marked
-    /// ended by the app only once the helper says it ended it: a refused end must not keep it from opening again.
+    /// ended by the app before the request (its exit line may come before the reply: a watch must not reopen it then),
+    /// and unmarked when the helper did not end it (a refused end must not keep it from opening again) — as `delete`.
     func end(_ sessionId: String) -> Bool {
-        guard let r = transport.request(Request.end(sessionId: sessionId)), r["ok"] as? Bool != false else { return false }
         lock.lock()
+        let was = endedByApp.contains(sessionId)
         endedByApp.insert(sessionId)
         lock.unlock()
+        guard let r = transport.request(Request.end(sessionId: sessionId)), r["ok"] as? Bool != false else {
+            if !was { lock.lock(); endedByApp.remove(sessionId); lock.unlock() }
+            return false
+        }
         return true
     }
 

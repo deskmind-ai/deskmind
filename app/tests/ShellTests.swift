@@ -31,6 +31,9 @@ enum ShellTests {
         cardWordsTests()
         settingsReopenTests()
         endRefusedTests()
+        privacySwitchTests()
+        cardHintTests()
+        endMarkTests()
         backfillTests()
         languageTests()
         textTests()
@@ -598,8 +601,8 @@ enum ShellTests {
     /// fixed (with a line why); the window as it was keeps its choice.
     static func modelChoiceTests() {
         check(!ModelChoice.offersLocalOnly(inShell: true) && ModelChoice.offersLocalOnly(inShell: false), "local-only offered only outside the 0.5 window")
-        check(ModelChoice.startsCloud(inShell: true, saved: false) && ModelChoice.startsCloud(inShell: false, saved: true)
-              && !ModelChoice.startsCloud(inShell: false, saved: false), "the 0.5 window's settings start on, even when the old window turned it off")
+        check(ModelChoice.startsCloud(inShell: false, saved: true) && !ModelChoice.startsCloud(inShell: false, saved: false),
+              "the old window's settings show what is stored")
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         func code(_ f: String) -> String {
             let t = (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? ""
@@ -607,10 +610,7 @@ enum ShellTests {
         }
         let main = code("Main/MainSplitView.swift"), sheet = code("Main/CloudModel.swift")
         check(main.contains("CloudModelSheet(inShell: true)") && !main.contains("CloudModelSheet()"), "the 0.5 window opens the settings as its own")
-        check(sheet.contains(".disabled(!ModelChoice.offersLocalOnly(inShell: inShell))")
-              && sheet.contains("useCloud = ModelChoice.startsCloud(inShell: inShell, saved: CloudModelSettings.engineIsCloud)")
-              && sheet.contains("Conversations in DeskMind 0.5 need a cloud model."),
-              "the sheet: the switch fixed in the 0.5 window, on, with its line")
+        check(sheet.contains("Conversations in DeskMind 0.5 need a cloud model."), "the sheet: the 0.5 window's line why")
     }
 
     /// #107 re-review (4): on a card with an approve-type option, the card's own words wait for its whole body as its
@@ -708,6 +708,68 @@ enum ShellTests {
         c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0])
         mock.requests = []
         check(!c.reopenIfExited("ses_t", onlyOpenedHere: true) && mock.requests.isEmpty, "ended by the app: not opened again by itself")
+    }
+
+    /// #107 re-review (bug A): the cloud switch is a privacy setting. It shows what is stored (in the 0.5 window too);
+    /// there it can only go from off to on; Save writes the engine only if the user moved it (Enter on a sheet left as
+    /// it opened, or a key edited, writes none). The 0.5 sheet does not point to a local model it does not offer.
+    static func privacySwitchTests() {
+        check(!ModelChoice.startsCloud(inShell: true, saved: false), "the 0.5 window: a stored off shows off")
+        check(ModelChoice.startsCloud(inShell: true, saved: true), "and a stored on, on")
+        check(!ModelChoice.switchLocked(inShell: true, saved: false) && ModelChoice.switchLocked(inShell: true, saved: true)
+              && !ModelChoice.switchLocked(inShell: false, saved: true), "the 0.5 window: movable only while off (to turn it on); the old window: always")
+        check(ModelChoice.engineToWrite(saved: false, shown: false) == nil && ModelChoice.engineToWrite(saved: true, shown: true) == nil,
+              "Save with the switch as it opened: the engine not written")
+        check(ModelChoice.engineToWrite(saved: false, shown: true) == true && ModelChoice.engineToWrite(saved: true, shown: false) == false,
+              "Save after the user moved it: written as moved")
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let raw = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
+        let sheet = raw.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        check(sheet.contains("if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }")
+              && !sheet.contains("CloudModelSettings.engineIsCloud = useCloud"), "the sheet's Save writes the engine through engineToWrite only")
+        check(sheet.contains(".disabled(ModelChoice.switchLocked(inShell: inShell, saved: savedCloud))")
+              && sheet.contains("useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)"), "the sheet's switch: stored state, locked as ModelChoice says")
+        let note = sheet.components(separatedBy: "Text(inShell").dropFirst().first ?? ""
+        check(!note.isEmpty && !(note.components(separatedBy: ":").first ?? "").contains("local model"),
+              "the 0.5 sheet's note does not send sensitive tasks to a local model it does not offer")
+        // the row stays while cloud is off (the switch never turned on behind the user's back)
+        let m = ShellModel(client: SessionClient(transport: Mock()), defaults: scratchDefaults(), config: { "c" }, lang: { .zhHans },
+                           cloudOn: { false }, work: { $0() }, deliver: { $0() })
+        m.refreshSettings()
+        check(m.cloudOff, "cloud off: the chat's row stays")
+    }
+
+    /// #107 re-review (effect): the hint under a card whose approve (and own field) wait for the body is neutral, and
+    /// the field says why it is off to VoiceOver.
+    static func cardHintTests() {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let card = text.components(separatedBy: "struct CardView").dropFirst().first ?? ""
+        check(!card.contains("Scroll to the end of the card to approve"), "no approve-only hint under the card")
+        check(card.contains("Text(L(\"Read the whole card first: scroll to its end\""), "the neutral hint under it")
+        let field = card.components(separatedBy: "TextField(L(\"Or answer in your own words\"").dropFirst().first?.components(separatedBy: "Button(L(\"Send\"").first ?? ""
+        check(field.contains(".accessibilityHint(") && field.contains("Read the whole card first: scroll to its end"), "the field's own accessibility hint")
+        check(L("Read the whole card first: scroll to its end", lang: .zhHans) != "Read the whole card first: scroll to its end", "translated")
+    }
+
+    /// #107 re-review (effect): an end's exit line can come before its reply: the session is marked ended by the app
+    /// before the request (a watch then does not reopen it), and unmarked if the helper refused.
+    static func endMarkTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.end: ["ok": true]]
+        let c = SessionClient(transport: mock)
+        _ = c.open(sessionId: "ses_t")
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        var reopenedMeanwhile: Bool? = nil
+        mock.onRequest = { op in
+            guard op == SessionClient.Op.end else { return }
+            c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0])     // the exit first
+            reopenedMeanwhile = c.reopenIfExited("ses_t", onlyOpenedHere: true)            // a watch's reconnect then
+        }
+        check(c.end("ses_t"), "ended")
+        mock.onRequest = nil
+        check(reopenedMeanwhile == false && mock.requests.filter { $0["op"] as? String == SessionClient.Op.open }.count == 1,
+              "its exit before the reply: not reopened by a watch (\(String(describing: reopenedMeanwhile)))")
     }
 
     /// #107 external review (P2 1): a reply that finished while the window was closed (its first words seen, then the

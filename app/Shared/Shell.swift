@@ -711,12 +711,18 @@ extension CardModel.Role {
 }
 
 /// The model settings as the 0.5 window offers them (#107 re-review, owner: 0.5.0 has no local-only mode — a
-/// conversation needs a cloud model). The window as it was (flag off) keeps its choice.
+/// conversation needs a cloud model). The window as it was (flag off) keeps its choice. The switch is a privacy
+/// setting: it shows what is stored, and only the user moving it changes it (#107 re-review, bug A: the sheet showed it
+/// on over a stored "off", and its default Save turned the cloud model on for the old window too).
 enum ModelChoice {
     /// Whether the settings offer turning the cloud model off.
     static func offersLocalOnly(inShell: Bool) -> Bool { !inShell }
-    /// What the settings start with: in the 0.5 window, on (saving there turns it on, if the old window turned it off).
-    static func startsCloud(inShell: Bool, saved: Bool) -> Bool { inShell || saved }
+    /// What the switch shows when the settings open: what is stored, in either window.
+    static func startsCloud(inShell: Bool, saved: Bool) -> Bool { saved }
+    /// Whether the switch can be moved: in the 0.5 window only from off to on (once stored on, nothing to move).
+    static func switchLocked(inShell: Bool, saved: Bool) -> Bool { inShell && saved }
+    /// What Save writes for the engine: nothing unless the user moved the switch (shown differs from stored).
+    static func engineToWrite(saved: Bool, shown: Bool) -> Bool? { shown == saved ? nil : shown }
 }
 
 /// A card's body on screen (MainSplitView.CardView: the body scrolls inside a bounded height, its header and buttons

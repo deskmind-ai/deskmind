@@ -91,12 +91,15 @@ struct CloudModelRow: View {
 /// switches the engine.
 struct CloudModelSheet: View {
     /// Opened from the 0.5 window: its conversations need a cloud model (0.5.0 has no local-only mode), so the switch
-    /// is shown on and cannot be turned off (ModelChoice). The window as it was keeps its choice.
+    /// can only be turned on there; it shows what is stored, and Save writes it only if the user moved it
+    /// (ModelChoice). The window as it was keeps its choice.
     var inShell = false
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @Environment(\.dismiss) private var dismiss
     @State private var useCloud = CloudModelSettings.engineIsCloud
+    /// The engine as stored when the sheet opened: Save writes it only if the switch was moved from it.
+    @State private var savedCloud = CloudModelSettings.engineIsCloud
     @State private var provider = CloudModelSettings.provider
     @State private var key = ""
     @State private var url = ""
@@ -109,7 +112,7 @@ struct CloudModelSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(L("Which model thinks", lang: lang)).font(.system(size: 16, weight: .semibold, design: .rounded))
             Toggle(L("Use a cloud model (the harness engine)", lang: lang), isOn: $useCloud)
-                .disabled(!ModelChoice.offersLocalOnly(inShell: inShell))
+                .disabled(ModelChoice.switchLocked(inShell: inShell, saved: savedCloud))
             if !ModelChoice.offersLocalOnly(inShell: inShell) {
                 Text(L("Conversations in DeskMind 0.5 need a cloud model.", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
@@ -132,7 +135,10 @@ struct CloudModelSheet: View {
                             .lineLimit(3).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text(L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.", lang: lang))
+                // (the 0.5 window offers no local model: its note says what is sent, not to use one)
+                Text(inShell
+                     ? L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is stored in models.env in Application Support, readable by you only.", lang: lang)
+                     : L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -144,7 +150,8 @@ struct CloudModelSheet: View {
         }
         .padding(22).frame(width: 440)
         .onAppear {
-            useCloud = ModelChoice.startsCloud(inShell: inShell, saved: CloudModelSettings.engineIsCloud)
+            savedCloud = CloudModelSettings.engineIsCloud
+            useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)
             load(provider)
         }
     }
@@ -190,7 +197,8 @@ struct CloudModelSheet: View {
 
     private func save() {
         do { if useCloud { try persist() } } catch { result = error.localizedDescription; resultOK = false; return }
-        CloudModelSettings.engineIsCloud = useCloud
+        // the engine only if the user moved the switch (a privacy setting, shared with the window as it was)
+        if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }
         model.refreshCloud()
         dismiss()
     }

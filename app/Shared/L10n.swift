@@ -69,6 +69,8 @@ enum L10n {
         "No answer from the helper": "后台助手没有回应",
         "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.":
             "用云端模型时，每个任务的原话、它看过的窗口内容、文件夹列表和读过的文件内容都会发给该服务来想——涉及敏感内容的任务请用本地模型。密钥存在「应用程序支持」的 models.env 里，只有你能读",
+        "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is stored in models.env in Application Support, readable by you only.":
+            "用云端模型时，每个任务的原话、它看过的窗口内容、文件夹列表和读过的文件内容都会发给该服务来想。密钥存在「应用程序支持」的 models.env 里，只有你能读",
         "Tasks go to %@ to think; what it looks at leaves this Mac.": "任务由 %@ 来想，它看到的内容会离开这台 Mac",
         "%@ thinks for your tasks; what it looks at is sent to it.": "任务由 %@ 来想，它看到的内容会发给它",
         "DeskMind Brain is running on this Mac and judges first; the cloud model sees what the task looks at.": "DeskMind Brain 已在本机运行，先由它核对；云端模型会看到任务看过的内容",
