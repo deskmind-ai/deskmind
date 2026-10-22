@@ -53,6 +53,9 @@ enum ShellTests {
         configRetryLatestTests()
         restartCloudOffTests()
         backfillReopenTests()
+        lostNullTests()
+        helperRefusalTests()
+        modelsOffHookTests()
         textTests()
     }
 
@@ -1141,6 +1144,110 @@ enum ShellTests {
         m.settingsChanged(keyChanged: true)
         check(mock.requests.contains { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true },
               "a new key with cloud off: a new process asked for (when idle)")
+    }
+
+    /// Re-review of cb01397 (G1, the reviewer's probe): a set_config null that never arrived (no answer; not_open while
+    /// the process runs) is not taken as applied — the next reconcile sends it again. And a configuration decided
+    /// before the switch turned off goes as null (re-read under the session's lock).
+    static func lostNullTests() {
+        func nulls(_ m: Mock) -> Int {
+            m.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" && $0["config"] is NSNull }.count
+        }
+        // no answer
+        let mock = Mock()
+        let c = SessionClient(transport: mock)
+        c.adoptSettings(config: "ds-flash", lang: "zh"); c.modelOff = true
+        mock.streamLines = [["kind": "helper.watching", "open": ["ses_a"]],
+                            ["kind": "session.config", "session_id": "ses_a", "seq": 1, "config": "ds-flash", "lang": "zh", "by": "open"],
+                            ["kind": "session.message", "session_id": "ses_a", "seq": 2, "msg_id": "u1", "role": "user", "text": "/cua x", "via": "cua"],
+                            ["kind": "session.task", "session_id": "ses_a", "seq": 3, "msg_id": "u1", "run_id": "r1", "raw": "x", "by": "slash"]]
+        _ = c.watch(); c.reconciling.wait()
+        check(nulls(mock) >= 1, "a null was tried")
+        mock.replies[SessionClient.Op.send] = ["ok": true]
+        mock.requests = []
+        mock.streamLines = [["kind": "helper.watching", "open": ["ses_a"]]]
+        _ = c.watch(); c.reconciling.wait()
+        c.reconcile(config: "ds-flash", lang: "zh", off: true)
+        check(nulls(mock) >= 1, "no answer: not taken as applied, sent again (\(nulls(mock)))")
+        // not_open while the watch says it runs
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.send: ["ok": false, "code": "not_open"]]
+        let c2 = SessionClient(transport: mock2)
+        c2.adoptSettings(config: "ds-flash", lang: "zh"); c2.modelOff = true
+        mock2.streamLines = [["kind": "helper.watching", "open": ["ses_b"]],
+                             ["kind": "session.config", "session_id": "ses_b", "seq": 1, "config": "ds-flash", "lang": "zh", "by": "open"]]
+        _ = c2.watch(); c2.reconciling.wait()
+        mock2.replies[SessionClient.Op.send] = ["ok": true]
+        mock2.requests = []
+        mock2.streamLines = [["kind": "helper.watching", "open": ["ses_b"]],
+                             ["kind": "session.message", "session_id": "ses_b", "seq": 2, "msg_id": "a1", "role": "assistant", "text": "hi"]]
+        _ = c2.watch(); c2.reconciling.wait()
+        c2.reconcile(config: "ds-flash", lang: "zh", off: true)
+        check(nulls(mock2) >= 1 && c2.state("ses_b").exited == nil, "not_open on a running process's null: sent again (\(nulls(mock2)))")
+        // a configuration queued before the switch: null
+        let mock3 = Mock()
+        mock3.replies = [SessionClient.Op.send: ["ok": true]]
+        let c3 = SessionClient(transport: mock3)
+        c3.modelOff = true
+        c3.setConfig("ses_c", config: "ds-flash", lang: "zh")
+        check((mock3.requests.last?["line"] as? [String: Any])?["config"] is NSNull, "a configuration decided before the switch turned off: sent as null")
+        // acked: applied; a second reconcile sends nothing
+        let cid = (mock3.requests.last?["line"] as? [String: Any])?["client_id"] as? String ?? ""
+        c3.feed(["kind": "session.config", "session_id": "ses_c", "seq": 1, "config": NSNull(), "lang": "zh", "by": "set_config", "client_id": cid])
+        mock3.requests = []
+        c3.reconcile(config: "ds-flash", lang: "zh", off: true)
+        check(nulls(mock3) == 0, "acked: not sent again")
+    }
+
+    /// Re-review of cb01397: the helper's own answers. `busy_ending` (it is deciding whether the session ends, the process
+    /// is there) is sent again, never read as an exit; `no_model` (the helper holds cloud models off, from another
+    /// window or app) leaves the words the app's, not sent — and once cloud is on again they read plainly "not sent".
+    static func helperRefusalTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        mock.queued = [SessionClient.Op.send: [["ok": false, "code": "busy_ending"]]]
+        var on = true
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "c" }, lang: { .zhHans },
+                           cloudOn: { on }, work: { $0() }, deliver: { $0() })
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.selected = "ses_t"; m.draft = "你好"; m.submit()
+        check(sends(mock) == 2 && m.states["ses_t"]?.exited == nil && m.states["ses_t"]?.outbox.first?.sending == true,
+              "busy_ending: sent again, no exit (\(sends(mock)) sends)")
+        mock.queued = [SessionClient.Op.send: [["ok": false, "code": "no_model", "control": "say"]]]
+        m.draft = "在吗"; m.submit()
+        let item = m.states["ses_t"]?.outbox.last
+        check(item?.refused == "no_model" && item?.sending == false, "no_model from the helper: not sent, the app's")
+        on = false; m.refreshSettings()
+        check(m.unsentText(item?.refused) == "没发出去：云端模型关着", "while off: the cloud model is off")
+        on = true; m.refreshSettings()
+        check(m.unsentText(item?.refused) == ShellText.unsent(nil, lang: .zhHans), "on again: plainly not sent (\(m.unsentText(item?.refused)))")
+        // a reopen with cloud off clears a "not stored" banner too
+        let mock2 = Mock()
+        mock2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.send: ["ok": true]]
+        let c = SessionClient(transport: mock2)
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        c.setConfig("ses_t", config: "c", lang: "zh")
+        let cid = (mock2.requests.last?["line"] as? [String: Any])?["client_id"] as? String ?? ""
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "bad_config", "control": "set_config", "client_id": cid, "text": "x"])
+        c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0, "idle": true])
+        c.modelOff = true
+        _ = c.open(sessionId: "ses_t", config: "c", lang: "zh")
+        check(c.state("ses_t").settingsRefused == nil, "reopened with cloud off: the banner cleared")
+    }
+
+    /// Re-review of cb01397 (G2): the helper is told whether cloud models are off wherever the engine setting is
+    /// written (either window) and when the app connects to it.
+    static func modelsOffHookTests() {
+        check(SessionClient.Request.modelsOff(true) as NSDictionary == ["op": "models.off", "off": true] as NSDictionary, "the op")
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let sheet = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
+        let setter = sheet.components(separatedBy: "static var engineIsCloud: Bool {").dropFirst().first?.components(separatedBy: "\n    }\n").first ?? ""
+        check(setter.contains("forKey: \"engine\")") && setter.contains("SessionClient.setModelsOff(off)"), "the engine setter tells the helper")
+        let app = (try? String(contentsOf: dir.appendingPathComponent("Main/DeskMindApp.swift"), encoding: .utf8)) ?? ""
+        check(app.contains("if self.connected && !was {") && app.contains("SessionClient.setModelsOff(off)"), "connecting tells the helper")
+        let mock = Mock()
+        mock.replies = ["models.off": ["ok": true, "off": true]]
+        check(SessionClient.setModelsOff(true, via: mock) && mock.requests.first?["off"] as? Bool == true, "sent to the helper")
     }
 
     /// External review of 473fdac (P1): the app starts with cloud off while the helper runs a session whose task runs.

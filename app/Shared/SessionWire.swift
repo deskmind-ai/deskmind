@@ -16,6 +16,17 @@ enum SessionWire {
     static let knownTypes: Set<String> = ["say", "cua", "steer", "answer", "respond", "stop", "retry", "attach",
                                           "queue_edit", "queue_cancel", "queue_send_now", "end",
                                           "end_if_idle", "set_config"]     // (harness#62, #64)
+    /// A control line that makes the model work (harness `no_model` refuses these when the session has no model): say,
+    /// cua, retry, steer, queue_send_now, and a set_config that is not null. The helper refuses them while cloud models
+    /// are off (models.off), from any client.
+    static func needsModel(_ o: [String: Any]) -> Bool {
+        switch o["type"] as? String {
+        case "say", "cua", "retry", "steer", "queue_send_now": return true
+        case "set_config": return !(o["config"] is NSNull) && o["config"] != nil
+        default: return false
+        }
+    }
+
     /// A control line's longest JSON (the harness refuses a user message over 32k characters itself; this only keeps a
     /// runaway write off the session's stdin).
     static let maxLineBytes = 1 << 20

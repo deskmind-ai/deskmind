@@ -722,6 +722,11 @@ final class ShellModel: ObservableObject {
 
     /// The chat's "cloud model is off" row: the settings say so, or this session refused words for having no model
     /// (no_model: its stored settings say so, whatever this app's switch says).
+    /// An unsent bubble's line: "the cloud model is off" only while it is; after, plainly not sent (Send again works).
+    func unsentText(_ code: String?) -> String {
+        ShellText.unsent(code == "no_model" && !cloudOff ? nil : code, lang: lang())
+    }
+
     func showsCloudOff(_ s: SessionState?) -> Bool {
         if cloudOff { return true }
         // a session with a process now that runs with no model (its stored settings, its refusal): not one that exited

@@ -1011,6 +1011,11 @@ enum DecisionTests {
         check(!ok(["type": "set_config"]) && !ok(["type": "set_config", "config": 3]) && !ok(["type": "set_config", "config": "x", "lang": "fr"]),
               "set_config: config must be there; lang zh or en")
         check(ok(["type": "end_if_idle"]), "end_if_idle")
+        // what the helper refuses while cloud models are off (models.off): what needs a model, as harness no_model
+        check(["say", "cua", "retry", "steer", "queue_send_now"].allSatisfy { W.needsModel(["type": $0]) }
+              && W.needsModel(["type": "set_config", "config": "ds-flash"]) && !W.needsModel(["type": "set_config", "config": NSNull()])
+              && !["stop", "answer", "respond", "queue_cancel", "queue_edit", "attach", "end", "end_if_idle"].contains { W.needsModel(["type": $0]) },
+              "needsModel: say, cua, retry, steer, queue_send_now, a non-null set_config; never stop, answers, undo, queue cancel")
 
         // the machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2)
         let v2 = #"{"v":2,"state":"lingering","pgid":4100,"pid":4100,"start":1792600000,"run_id":"run_a","session_id":"ses_a","by":"session","owner":4000,"t":1.5}"#

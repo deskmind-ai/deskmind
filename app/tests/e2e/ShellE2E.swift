@@ -11,7 +11,9 @@
 //       with the app's settings (defaultConfig) and its history comes back; a conversation with no key for its model
 //       shows session.error no_key with the settings button, and after the settings change a retry is answered;
 //       cloud models off (set_config null): a running task stopped, Stop pressed, no model call after it and no
-//       model-bound control written; back on, a message answered; delete removes it from the list and from the disk
+//       model-bound control written; back on, a message answered; delete removes it from the list and from the disk;
+//       the window turned off while a task's card waits, cloud turned off from the old window (models.off): nulled,
+//       the task stopped, no model call
 //
 // No window, no real model, nothing driven on this Mac (the simulated computer). Prints PASS or FAIL per check; the
 // exit status is the number of failures. Built with PathTransport.swift.
@@ -237,7 +239,24 @@ enum ShellE2E {
         check(!FileManager.default.fileExists(atPath: dir + "/sessions/" + nokey), "and from the disk")
         on { m.refreshList() }
         check(until { on { m.rows.map(\.id) == [sid] } }, "the helper's list agrees: \(on { m.rows.map(\.id) })")
+
+        // the 0.5 window turned off (its model gone: no watch, no reconcile) while a session's task waits on its card;
+        // cloud models turned off in the window as it was: its sheet writes the engine setting, which tells the helper
+        // (models.off) — the session is nulled, its task stops, no model call after
+        on { m.selected = sid; m.draft = "/cua 给笔记换个颜色"; m.submit() }
+        check(until(60) { on { m.states[sid]?.openCard != nil } }, "flag off: a task's card waits first")
+        let g2Calls = modelCalls()
         quit(m)
+        let helper = PathTransport(path: socket)
+        check(SessionClient.setModelsOff(true, via: helper), "cloud off from the old window: the helper told (models.off)")
+        func stored() -> [[String: Any]] { helper.request(["op": SessionClient.Op.history, "session_id": sid, "after_seq": 0])?["lines"] as? [[String: Any]] ?? [] }
+        check(until { stored().last { $0["kind"] as? String == "session.config" }.map { $0["config"] is NSNull } ?? false },
+              "flag off: the session's settings stored null")
+        check(until(30) { stored().contains { $0["kind"] as? String == "session.task_end" && ($0["seq"] as? Int ?? 0) > 0 && stored().last { $0["kind"] as? String == "session.task" }?["run_id"] as? String == $0["run_id"] as? String } },
+              "flag off: its task stopped")
+        usleep(2_000_000)
+        check(g2Calls >= 0 && modelCalls() == g2Calls, "flag off: no model call after it (\(modelCalls() - g2Calls) made)")
+        check(SessionClient.setModelsOff(false, via: helper), "cloud on again (the helper told)")
         UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite)
     }
 }

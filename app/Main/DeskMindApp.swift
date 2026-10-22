@@ -110,6 +110,11 @@ final class HelperModel: ObservableObject {
                 let was = self.connected
                 self.connected = reply?["ok"] as? Bool == true
                 if let reply { self.status = reply }
+                // connected (the app's start, a helper restarted): the helper hears whether cloud models are off
+                if self.connected && !was {
+                    let off = !CloudModelSettings.engineIsCloud
+                    Task.detached { SessionClient.setModelsOff(off) }
+                }
                 if was != self.connected {
                     let lang = ResolvedLang.current
                     self.note(self.connected ? L("Helper connected (pid %@)", "\(reply?["pid"] ?? "?")", lang: lang)

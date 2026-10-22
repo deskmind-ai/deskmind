@@ -559,6 +559,38 @@ def run(env, helper):
         r = subprocess.run([BIN, "tryacquire", DIR], capture_output=True, text=True).stdout.strip()
         check(r == "ok", f"the group gone: the next run takes the Mac ({r})")
         w8.close()
+
+        # the helper holds "cloud models off" (models.off: the app's engine setting, written from either window): for
+        # every session it runs, whichever client — a running one nulled at once, what needs a model refused, a new
+        # one started with null — and it survives a helper restart
+        def cfgs(s):
+            try:
+                return [l for l in session_lines(s) if l.get("kind") == "session.config"]
+            except OSError:
+                return []
+        request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
+        r = request({"op": "models.off", "off": True})
+        check(r.get("ok") is True and r.get("off") is True, f"models.off: {r}")
+        check(until(lambda: cfgs(sid) and cfgs(sid)[-1].get("config") is None, 10) is not None, "models off: a running session nulled at once (stored)")
+        calls = model_calls()
+        r = send(sid, {"type": "say", "text": "你好", "client_id": "c_hoff"})
+        check(r.get("ok") is False and r.get("code") == "no_model" and r.get("client_id") == "c_hoff", f"models off: a say refused by the helper, no_model ({r})")
+        r = send(sid, {"type": "set_config", "config": CONFIG, "lang": "zh"})
+        check(r.get("ok") is False and r.get("code") == "no_model", f"models off: a client that still has cloud on cannot set a model back ({r})")
+        check(send(sid, {"type": "set_config", "config": None}).get("ok") is True, "models off: a null passes")
+        helper2.kill()
+        helper2.wait()
+        helper2 = start_helper(env)
+        o5 = request({"op": "session.open", "config": CONFIG, "lang": "zh", "driver": "sim"})
+        s5 = o5.get("session_id", "")
+        first = until(lambda: cfgs(s5), 10)
+        check(bool(first) and first[0].get("config") is None, f"after a helper restart (the bit kept): a new session's first settings are null ({first and first[0]}; {o5})")
+        r = send(s5, {"type": "say", "text": "你好"})
+        check(r.get("code") == "no_model" and model_calls() == calls, f"and what needs a model is refused there, no model call ({r})")
+        check(request({"op": "models.off", "off": False}).get("ok") is True, "models on again")
+        check(send(s5, {"type": "set_config", "config": CONFIG, "lang": "zh"}).get("ok") is True, "models on: a configuration passes")
+        check(send(s5, {"type": "say", "text": "你好"}).get("ok") is True, "models on: a say passes")
+        check(until(lambda: [m for m in session_lines(s5) if m.get("role") == "assistant"], 30) is not None, "and is answered")
     finally:
         helper2.kill()
         helper2.wait()

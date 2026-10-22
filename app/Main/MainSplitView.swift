@@ -557,7 +557,7 @@ struct OutgoingRow: View {
                     Text(L("Sending…", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
                 } else {
                     HStack(spacing: 8) {
-                        Text(ShellText.unsent(item.refused, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
+                        Text(shell.unsentText(item.refused)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
                         Button(L("Send again", lang: lang)) { shell.resend(item.id) }.buttonStyle(.link)
                         Button(L("Remove", lang: lang)) { shell.dropUnsent(item.id) }.buttonStyle(.link)
                     }

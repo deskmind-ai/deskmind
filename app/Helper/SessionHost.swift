@@ -21,6 +21,12 @@
 //                                        (`task_running`) while a task of it runs, and (`busy`) while it is opening or
 //                                        a process of it from an earlier helper still holds its lock
 //   sessions.list                        `harness.mjs sessions list`, each marked `open` when its process runs here
+//   models.off {off}                     cloud models off (the app's engine setting, from any window): this helper
+//                                        holds it for every session it runs, whichever client — persisted in its
+//                                        folder (`models-off`). While off: every running session process is written
+//                                        set_config null at once, and every one it starts gets it as its first control;
+//                                        a control that needs a model (say, cua, retry, steer, queue_send_now, a
+//                                        set_config that is not null) is refused `no_model`, as the session would
 //   sessions.watch {after: {session_id: after_seq}, runs?: {run_id: after_seq}}
 //                 one long-lived connection: every session's lines (each has its session_id), from the cursors on.
 //                 On connect each running session is sent `attach{after_seq}` and replays what is stored after it;
@@ -90,7 +96,8 @@ enum SessionHost {
                                  finish: { _, status in LiveCard.finish(status) })
     }
 
-    static let ops: Set<String> = ["session.open", "session.send", "session.end", "session.delete", "session.history", "sessions.list", "sessions.watch"]
+    static let ops: Set<String> = ["session.open", "session.send", "session.end", "session.delete", "session.history", "sessions.list", "sessions.watch",
+                                   "models.off"]
 
     // MARK: state (under `lock`)
 
@@ -105,6 +112,34 @@ enum SessionHost {
     /// The last stored seq of each session whose process ended in this helper (helper.watching's `last_seq`): a
     /// watch that comes later reads the stored log of only those it has not all of.
     nonisolated(unsafe) private static var exitedLastSeq: [String: Int] = [:]
+    /// Cloud models off (models.off), read from its file the first time it is needed (under lock).
+    nonisolated(unsafe) private static var offLoaded = false
+    nonisolated(unsafe) private static var offBit = false
+    private static var offFile: URL { setup.dir.appendingPathComponent("models-off") }
+    private static var modelsAreOff: Bool {     // under lock
+        if !offLoaded { offBit = FileManager.default.fileExists(atPath: offFile.path); offLoaded = true }
+        return offBit
+    }
+    private static let nullConfig: [String: Any] = ["type": "set_config", "config": NSNull()]
+
+    /// models.off {off}: holds the bit for every session this helper runs (and persists it), and with the models off
+    /// writes set_config null to every running session process now.
+    static func modelsOff(_ req: [String: Any]) -> [String: Any] {
+        guard let off = req["off"] as? Bool else { return ["ok": false, "code": "bad_request", "error": "models.off needs off (true or false)"] }
+        lock.lock()
+        _ = modelsAreOff
+        offBit = off
+        let running = sessions.values.filter { $0.started && !$0.closing }
+        lock.unlock()
+        do {
+            if off { try Data("1\n".utf8).write(to: offFile, options: .atomic) }
+            else if FileManager.default.fileExists(atPath: offFile.path) { try FileManager.default.removeItem(at: offFile) }
+        } catch {
+            return ["ok": false, "error": "models.off: \(error.localizedDescription)"]
+        }
+        if off { for s in running { s.writeGate.lock(); _ = s.write(nullConfig); s.writeGate.unlock() } }
+        return ["ok": true, "off": off]
+    }
     /// How long `session.end` waits for the session's answer to its end_if_idle (it answers in order, at once: this
     /// only bounds a session that hangs).
     static let endAnswerTimeout: Double = 15
@@ -233,6 +268,7 @@ enum SessionHost {
         case "session.end": reply = end(sessionID: req["session_id"] as? String ?? "", whenIdle: req["when_idle"] as? Bool == true)
         case "session.history": reply = history(req)
         case "session.delete": reply = delete(sessionID: req["session_id"] as? String ?? "")
+        case "models.off": reply = modelsOff(req)
         default: reply = list()
         }
         var out = (try? JSONSerialization.data(withJSONObject: reply)) ?? Data("{}".utf8)
@@ -368,8 +404,24 @@ enum SessionHost {
         lock.lock()
         while let ask = found.ask {
             lock.unlock(); found.writeGate.unlock()
-            if ask.answered.wait(timeout: .now() + endAskHold) == .timedOut { return notOpen }
+            // unanswered in time: the process is still there, its end undecided — not "not open" (the app would read
+            // it as exited): `busy_ending`, the app sends the line again
+            if ask.answered.wait(timeout: .now() + endAskHold) == .timedOut {
+                return ["ok": false, "code": "busy_ending", "error": "session \(sessionID) is deciding whether to end"]
+            }
             found.writeGate.lock(); lock.lock()
+        }
+        // cloud models off: what needs a model is refused, from any client, as the session refuses it (no_model) —
+        // the refusal goes to every watching connection too, with the line's client_id
+        if modelsAreOff && SessionWire.needsModel(o) {
+            var e: [String: Any] = ["kind": "session.error", "session_id": sessionID, "code": "no_model",
+                                    "control": o["type"] as? String ?? "", "text": "cloud models are off"]
+            if let c = o["client_id"] as? String { e["client_id"] = c }
+            for w in watchers { var g = w.gate(sessionID); for x in g.admit(e) { if let d = lineData(x) { w.send(d) } }; w.gates[sessionID] = g }
+            lock.unlock(); found.writeGate.unlock()
+            var r: [String: Any] = ["ok": false, "code": "no_model", "control": o["type"] as? String ?? "", "error": "cloud models are off"]
+            if let c = o["client_id"] as? String { r["client_id"] = c }
+            return r
         }
         guard let s = sessions[sessionID], s === found, s.started, !s.closing else {
             lock.unlock(); found.writeGate.unlock(); return notOpen
@@ -572,7 +624,7 @@ enum SessionHost {
         }
         let ended = exitedLastSeq.filter { !open.contains($0.key) }
         if let line = lineData(["kind": "helper.watching", "open": open.sorted(), "idle": idleClosed.subtracting(open).sorted(),
-                                "last_seq": ended]) { w.send(line) }
+                                "last_seq": ended, "models_off": modelsAreOff]) { w.send(line) }
         lock.unlock()
         for (s, a) in attach { _ = s.write(a) }
         // until the other side closes (or a write to it failed and shut it)
@@ -650,6 +702,9 @@ enum SessionHost {
             let first = s.first == nil
             if first { s.first = e }
             if kind == "session.start" {
+                // cloud models off: no model from its first control on, before any client's line can be written
+                // (a send waits for `started`)
+                if modelsAreOff { lock.unlock(); s.writeGate.lock(); _ = s.write(nullConfig); s.writeGate.unlock(); lock.lock() }
                 s.started = true
                 s.startSeq = (e["last_seq"] as? NSNumber)?.intValue ?? 0
                 s.live = SessionWire.Live(lastSeq: s.startSeq)
