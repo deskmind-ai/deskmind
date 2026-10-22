@@ -104,7 +104,8 @@ struct CardState: Equatable {
     enum Outcome: Equatable {
         case open
         case answered               // resumed{ask_id}: the answer took effect
-        case void(String)           // steer | stop | ended (ask_void / resumed{voided}), or task_done (the task ended first)
+        case void(String)           // steer | stop | ended (ask_void / resumed{voided}), or task_done (the task ended first),
+                                    // session_exit / executor_exit (its process / its executor went away before it ended)
     }
     var askId: String
     var card: CardEvent
@@ -203,8 +204,12 @@ struct TaskState: Equatable {
 
     /// Its result card is closed: session.task_closed, or its process is gone (and its executor with it).
     var closed: String? { closedWhy ?? (gone ? "session_exit" : nil) }
-    /// Its process went away before it ended (no task_done, no session.task_end): it is not running any more.
-    var cutOff: Bool { gone && done == nil && end == nil }
+    /// Its process went away, or its executor did (session.task_closed: the session writes it only once the task ended
+    /// or its executor exited — harness host.ts recordEnd / onExecutorExit, docs/protocol.md), before it ended (no
+    /// task_done, no session.task_end — one that could not be stored): it is not running any more. Its outcome is
+    /// unknown, never a success (no status, its last step unknown, no undo); a task_done or task_end that comes later
+    /// still wins, whichever order they came in.
+    var cutOff: Bool { (gone || closedWhy != nil) && done == nil && end == nil }
 
     var ended: Bool { done != nil || end != nil || cutOff }
     var running: Bool { !ended }
@@ -827,7 +832,7 @@ enum SessionReducer {
         let gone = task.sessionSeq.map { $0 <= goneUpTo } ?? false
         if task.gone != gone { task.gone = gone }
         let ended = task.ended
-        let endedWhy = (task.done == nil && task.end == nil) ? "session_exit" : "task_done"
+        let endedWhy = (task.done != nil || task.end != nil) ? "task_done" : task.gone ? "session_exit" : "executor_exit"
         // (written only where it changes: the arrays stay shared with the state before, which keeps feeding cheap)
         for i in task.cards.indices {
             let o = task.cards[i].explicit ?? (ended ? .void(endedWhy) : .open)

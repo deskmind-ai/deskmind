@@ -31,6 +31,7 @@ enum SessionTests {
         resentAskTests()
         causeTests()
         sessionExitTests()
+        closedWithoutEndTests()
         clientGapTests()
         cardIdentityTests()
         steerLookOnlyTests()
@@ -558,6 +559,51 @@ enum SessionTests {
         check(errClient.state("ses_t").status == .error("no_key"), "error via the client")
         errClient.markSeen("ses_t")
         check(errClient.state("ses_t").status == .idle, "seen via the client")
+    }
+
+    /// session.task_closed with no task_done and no session.task_end (harness 86854c2: the executor died and its
+    /// task_end could not be stored; the session process lives on): the run's executor is gone, so the task is not
+    /// running — cut off, never a success, no undo — and a steer has nothing to name.
+    static func closedWithoutEndTests() {
+        let start = ex(1, #""kind":"start","raw":"x""#), step = ex(2, #""kind":"step","text":"click","step_id":"s1""#)
+        let closed = se(2, #""kind":"session.task_closed","run_id":"r1","why":"linger""#)
+        let s = SessionReducer.reduce(SessionState(), [taskR1, start, step, closed])
+        let t = s.task("r1")
+        check(s.runningTask == nil && t?.ended == true && t?.cutOff == true && s.exited == nil, "closed, no end: not running, cut off (its process lives on)")
+        check(t?.status == nil && t?.done == nil && t?.undo == UndoState.none, "closed, no end: no status (never succeeded), no undo: \(String(describing: t?.undo))")
+        check(t?.steps.map(\.status) == [.unknown], "closed, no end: the step it began is unknown")
+        if case .acting = s.status { check(false, "closed, no end: the dot still acts") }
+        if case .done = s.status { check(false, "closed, no end: the dot says done") }
+        // a card it waited on goes with it
+        let asked = SessionReducer.reduce(SessionState(), [taskR1, start, ex(2, #""kind":"ask","ask_id":"a1","# + actionCard), closed])
+        check(asked.openCard == nil && asked.composerEnabled && asked.runningTask == nil && asked.task("r1")?.cards.first?.outcome == .void("executor_exit"),
+              "closed while a card waited: the card void, the composer on: \(String(describing: asked.task("r1")?.cards.first?.outcome))")
+        check(SessionClient.refusal(.option(runId: "r1", askId: "a1", option: 0), in: asked) != nil, "its card is not answered")
+        // explicit ends still win, whichever order they come in
+        let done = ex(3, #""kind":"task_done","status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#)
+        let a = SessionReducer.reduce(SessionState(), [taskR1, start, step, closed, done])
+        let b = SessionReducer.reduce(SessionState(), [taskR1, closed, start, step, done])
+        check(a.task("r1")?.status == "succeeded" && a.task("r1")?.cutOff == false && a.task("r1")?.undo == .expired("linger"), "task_done after task_closed: its end, undo expired")
+        check(a == b, "task_done and task_closed: either order, the same state")
+        let end = se(2, #""kind":"session.task_end","run_id":"r1","status":"failed","summary":"","undo":"none","cause":"last_step_unknown""#)
+        let e = SessionReducer.reduce(SessionState(), [taskR1, start, step, end, se(3, #""kind":"session.task_closed","run_id":"r1","why":"linger""#)])
+        check(e.task("r1")?.status == "failed" && e.task("r1")?.cutOff == false, "task_end and task_closed: task_end's status")
+        // a steer without a run_id is not sent to the dead run
+        let mock = MockTransport()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let client = SessionClient(transport: mock)
+        [taskR1, start, step, closed].forEach { client.feed($0) }
+        mock.requests = []
+        check(client.send(.steer("改一下"), to: "s") == .refused("no task is running") && mock.requests.isEmpty, "steer after task_closed: not sent")
+        // the helper's view of it: nothing runs, the live card lets it go
+        var act = SessionWire.Activity()
+        act.note(["kind": "session.task", "run_id": "r1", "raw": "x"])
+        act.note(["kind": "session.task_closed", "run_id": "r1", "why": "linger"])
+        check(act.running.isEmpty && act.idle && !act.holdsRestart, "helper: closed without task_end: not running")
+        var live = SessionWire.Live()
+        _ = live.note(["kind": "session.task", "seq": 1, "run_id": "r1"])
+        _ = live.note(["kind": "session.task_closed", "seq": 2, "run_id": "r1", "why": "linger"])
+        check(live.runs.isEmpty, "helper: the live card lets it go")
     }
 
     // MARK: order, gaps, duplicates (review of #104, B1–B5; #105's session_exit and replay order)
@@ -1114,9 +1160,23 @@ enum SessionTests {
             r("r2", 1, #""kind":"start","raw":"b""#), r("r2", 2, #""kind":"ask","ask_id":"a9","# + card),
             se(5, #""kind":"session.task_end","run_id":"r2","status":"interrupted","summary":"","undo":"none""#),
         ]
+        // session.task_closed with no session.task_end (it could not be stored): r1's executor died mid-step with a card
+        // answered; r2 said task_done, its card offered undo, then its executor closed
+        let closedNoEnd: [ProtocolLine] = [
+            se(1, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"a","by":"slash""#),
+            r("r1", 1, #""kind":"start","raw":"a""#), r("r1", 2, #""kind":"ask","ask_id":"a1","# + card), r("r1", 3, #""kind":"resumed","ask_id":"a1""#),
+            r("r1", 4, #""kind":"step","text":"x","step_id":"s1""#), r("r1", 5, #""kind":"step_result","step_id":"s1","status":"ok""#),
+            r("r1", 6, #""kind":"step","text":"y","step_id":"s2""#), r("r1", 7, #""kind":"ask","ask_id":"a2","# + card),
+            se(2, #""kind":"session.task_closed","run_id":"r1","why":"linger""#),
+            se(3, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"b","by":"slash""#),
+            r("r2", 1, #""kind":"start","raw":"b""#), r("r2", 2, #""kind":"step","text":"z","step_id":"s1""#), r("r2", 3, #""kind":"step_result","step_id":"s1","status":"ok""#),
+            r("r2", 4, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#),
+            se(4, #""kind":"session.task_closed","run_id":"r2","why":"linger""#),
+        ]
         var cases: [(String, [ProtocolLine])] = names.map { ($0, lines($0)) }
         cases.append(("multi", multi))
         cases.append(("interrupted", interrupted))
+        cases.append(("closed without end", closedNoEnd))
         var runs = 0
         for (name, ls) in cases {
             let live = SessionReducer.reduce(SessionState(), ls)
@@ -1139,6 +1199,10 @@ enum SessionTests {
         let i = SessionReducer.reduce(SessionState(), interrupted)
         check(i.task("r1")?.steps.map(\.status) == [.ok, .unknown] && i.task("r1")?.cards.map(\.outcome) == [.answered] && i.task("r2")?.cards.map(\.outcome) == [.void("task_done")]
               && i.composerEnabled, "interrupted: \(summary(i))")
+        let c = SessionReducer.reduce(SessionState(), closedNoEnd)
+        check(c.runningTask == nil && c.task("r1")?.cutOff == true && c.task("r1")?.status == nil && c.task("r1")?.steps.map(\.status) == [.ok, .unknown]
+              && c.task("r1")?.cards.map(\.outcome) == [.answered, .void("executor_exit")] && c.task("r1")?.undo == UndoState.none
+              && c.task("r2")?.status == "succeeded" && c.task("r2")?.undo == .expired("linger") && c.composerEnabled, "closed without end: \(summary(c))")
     }
 
     static func dumpDiff(_ a: SessionState, _ b: SessionState) {
