@@ -369,7 +369,8 @@ enum SessionReducer {
         let cur = Array(s.messages[i].text.utf16)
         let add = Array(d.text.utf16)
         let off = d.offset ?? cur.count
-        if off > cur.count { s.messages[i].gap = true; return }   // a gap: wait for the final text (or a full offset-0 delta)
+        // past the end: a gap, wait for the final text (or a full offset-0 delta); negative: a broken line, the same
+        if off < 0 || off > cur.count { s.messages[i].gap = true; return }
         if add.isEmpty { return }
         // already have exactly these units at this place: a duplicate, keep what follows
         if off + add.count <= cur.count && Array(cur[off..<(off + add.count)]) == add { return }
@@ -470,6 +471,9 @@ enum SessionReducer {
             if r.by == "user" && task.running { task.stopping = true }
         case .steered(let e):
             task.steered.append(e.text)
+            // the executor drops "only look for evidence" when it applies a steer (harness ed96440, applySteers;
+            // docs/protocol.md: until finish unconfirmed, or the user changed the request)
+            task.lookOnly = false
         case .verify(let v):
             task.verify = v
             task.lookOnly = v.verdict == "unknown" && v.missingKind == "evidence"

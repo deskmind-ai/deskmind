@@ -267,6 +267,12 @@ struct SessionQueue: Codable, Equatable {
 /// Not stored, no seq: whatever the process was doing is over, and the session must be opened again to go on.
 struct HelperSessionExit: Codable, Equatable {
     var code: Int?
+    init(code: Int?) { self.code = code }
+    /// A code of another type (or out of range) is no code: the exit itself must not be lost.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        code = (try? c.decodeIfPresent(Int.self, forKey: .code)) ?? nil
+    }
 }
 
 // MARK: - Executor events (docs/protocol.md section 2)

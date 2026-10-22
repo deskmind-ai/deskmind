@@ -61,6 +61,10 @@ struct CardModel: Equatable {
     enum Style: Equatable { case prominent, radio, bordered, destructive }
 
     struct Button: Equatable {
+        /// The card it belongs to: its run, and its ask_id (nil on the result card). A click answers that card and no
+        /// other, whatever the words: two cards may well offer the same 「可以／先别做了」.
+        var runId: String
+        var askId: String?
         /// The option's place in the card's options: what the click sends.
         var index: Int
         var kind: String
@@ -98,7 +102,7 @@ struct CardModel: Equatable {
         text = card.text
         // an option with no words cannot be shown, so it gets no button (its index stays the card's own)
         buttons = card.options.enumerated().compactMap { i, o in
-            o.text.isEmpty ? nil : Button(index: i, kind: o.kind, text: o.text, role: Self.role(o.kind), style: Self.style(o.kind))
+            o.text.isEmpty ? nil : Button(runId: runId, askId: askId, index: i, kind: o.kind, text: o.text, role: Self.role(o.kind), style: Self.style(o.kind))
         }
         allowsFreeText = askId != nil && card.freeText
         blocking = card.blocking
@@ -129,10 +133,17 @@ struct CardModel: Equatable {
 
     // MARK: answers
 
-    /// What a click on `button` sends; nil when the button is not one of this card's (another card's, or stale).
+    /// What a click on `button` sends; nil when the button is not one of this card's: another card's (its run or its
+    /// ask_id differ, even with the same words), or one it does not have.
     func answer(_ button: Button) -> CardAnswer? {
-        guard buttons.contains(button) else { return nil }
-        return answer(option: button.index)
+        guard button.runId == runId, button.askId == askId, buttons.contains(button) else { return nil }
+        return Self.answer(button)
+    }
+
+    /// What a click on `button` sends, from the button's own card (its run_id and ask_id): never another card's.
+    static func answer(_ button: Button) -> CardAnswer {
+        if let a = button.askId { return .option(runId: button.runId, askId: a, option: button.index) }
+        return .respond(runId: button.runId, option: button.index)
     }
 
     /// What picking the card's option `index` sends; nil when the card has no such option.

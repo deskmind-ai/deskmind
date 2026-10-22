@@ -215,6 +215,11 @@ final class SessionClient {
     /// Answers a card (or the result card): sent only if that card can still be answered.
     func answer(_ a: CardAnswer, in sessionId: String) -> SendResult { send(.answer(a), to: sessionId) }
 
+    /// A click on a card's button: it answers the button's own card (its run_id and ask_id), and is sent only while
+    /// that card is the open one (or that run's result card is answerable): a stale card's button never answers a new
+    /// card, however alike their options.
+    func click(_ button: CardModel.Button, in sessionId: String) -> SendResult { answer(CardModel.answer(button), in: sessionId) }
+
     func end(_ sessionId: String) -> Bool {
         lock.lock()
         endedByApp.insert(sessionId)        // before the request: its exit line may come first

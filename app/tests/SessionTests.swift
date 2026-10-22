@@ -32,6 +32,9 @@ enum SessionTests {
         causeTests()
         sessionExitTests()
         clientGapTests()
+        cardIdentityTests()
+        steerLookOnlyTests()
+        wireNeverCrashesTests()
     }
 
     // MARK: fixtures
@@ -837,5 +840,92 @@ enum SessionTests {
             client.watch()
             check(mock.watches == 1 && client.state("s1").lastSeq == 3 && client.state("s2").hasGap, "a later gap's own grace: \(mock.watches) watches")
         }
+    }
+
+    // MARK: external review of e1ea7fc
+
+    /// A stale card's button never answers a new card, even with the very same options.
+    static func cardIdentityTests() {
+        let same = [CardOption(kind: "approve", text: "可以"), CardOption(kind: "cancel", text: "先别做了")]
+        let ev = CardEvent(kind: "action", text: "?", options: same, freeText: false, blocking: true)
+        let old = CardModel(card: ev, runId: "r1", askId: "a1"), new = CardModel(card: ev, runId: "r1", askId: "a2")
+        check(old.buttons[0].askId == "a1" && old.buttons[0].runId == "r1" && old.buttons[0] != new.buttons[0], "a button carries its card")
+        check(new.answer(old.buttons[0]) == nil && new.answer(old.buttons[1]) == nil, "the old card's button on the new card: nothing")
+        check(new.answer(new.buttons[0]) == .option(runId: "r1", askId: "a2", option: 0), "its own button: its ask_id")
+        check(CardModel.answer(old.buttons[0]) == .option(runId: "r1", askId: "a1", option: 0), "a button answers its own card")
+        let otherRun = CardModel(card: ev, runId: "r2", askId: "a1")
+        check(otherRun.answer(old.buttons[0]) == nil, "same ask_id, another run: nothing")
+        let result = CardEvent(kind: "result", text: "r", options: [CardOption(kind: "approve", text: "好"), CardOption(kind: "undo", text: "撤回")])
+        let res1 = CardModel(resultCard: result, runId: "r1"), res2 = CardModel(resultCard: result, runId: "r2")
+        check(res2.answer(res1.buttons[1]) == nil && CardModel.answer(res1.buttons[1]) == .respond(runId: "r1", option: 1), "result cards: by run")
+        // through the client: a1 answered, a2 open with the same options; a click on a1's button is refused
+        let mock = MockTransport()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let client = SessionClient(transport: mock)
+        let card = #""card":{"kind":"action","text":"?","options":[{"kind":"approve","text":"可以"},{"kind":"cancel","text":"先别做了"}],"free_text":false,"blocking":true}"#
+        [taskR1, ex(1, #""kind":"start","raw":"x""#), ex(2, #""kind":"ask","ask_id":"a1","# + card), ex(3, #""kind":"resumed","ask_id":"a1""#),
+         ex(4, #""kind":"ask","ask_id":"a2","# + card)].forEach { client.feed($0) }
+        mock.requests = []
+        check(client.click(old.buttons[0], in: "s") == .refused("stale card: a1 is not the open card a2") && mock.requests.isEmpty, "the old card's approve: refused, not sent")
+        check(client.click(new.buttons[1], in: "s") == .sent, "the open card's button: sent")
+        check((mock.requests.last?["line"] as? [String: Any]).map { $0 as NSDictionary } == ["type": "answer", "run_id": "r1", "ask_id": "a2", "option": 1] as NSDictionary, "with its own ask_id")
+    }
+
+    /// The executor drops "only look for evidence" when it applies a steer (harness ed96440, applySteers).
+    static func steerLookOnlyTests() {
+        let s = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), ex(2, #""kind":"step","text":"x","step_id":"s1""#),
+                                                       ex(3, #""kind":"step_result","step_id":"s1","status":"ok""#),
+                                                       ex(4, #""kind":"verify","verdict":"unknown","reason":"r","missing_kind":"evidence""#)])
+        check(s.status == .lookOnly, "look only after the verdict")
+        let steered = SessionReducer.reduce(s, [se(2, #""kind":"session.steer","run_id":"r1","text":"改成 b""#), ex(5, #""kind":"steered","text":"改成 b""#)])
+        check(!steered.task("r1")!.lookOnly && steered.status == .acting(step: 1, of: nil), "a steer taken: acting again: \(steered.status)")
+        let sentOnly = SessionReducer.reduce(s, se(2, #""kind":"session.steer","run_id":"r1","text":"改成 b""#))
+        check(sentOnly.status == .lookOnly, "sent but not yet taken: still look only")
+    }
+
+    /// Whatever comes over the wire, the app does not crash.
+    static func wireNeverCrashesTests() {
+        // a negative delta offset: a gap, nothing sliced
+        var s = SessionReducer.reduce(SessionState(), [se(nil, #""kind":"session.delta","msg_id":"m","text":"abc","offset":0"#),
+                                                       se(nil, #""kind":"session.delta","msg_id":"m","text":"x","offset":-1"#)])
+        check(s.message("m")?.text == "abc" && s.message("m")?.gap == true, "offset -1: a gap, the text kept")
+        s = SessionReducer.reduce(SessionState(), se(nil, #""kind":"session.delta","msg_id":"n","text":"x","offset":-5"#))
+        check(s.message("n")?.text == "" && s.message("n")?.gap == true, "offset -5 on a new reply: a gap")
+        s = SessionReducer.reduce(s, se(nil, #""kind":"session.delta","msg_id":"n","text":"x","offset":9223372036854775807"#))
+        check(s.message("n")?.gap == true, "offset Int.max: a gap")
+        let huge = ProtocolLine.parse(#"{"session_id":"s","kind":"session.delta","msg_id":"n","text":"x","offset":1e30}"#)
+        check(huge != nil, "offset out of Int's range: still a line")
+        _ = SessionReducer.reduce(s, huge!)
+        // the helper's exit with an odd code is still an exit
+        check(ProtocolLine.parse(#"{"kind":"helper.session_exit","session_id":"s","code":"x"}"#)?.event == .sessionExit(HelperSessionExit(code: nil)), "exit with a code of another type")
+        // every recorded line with each number in it replaced by -1, 0, a huge value, a fraction, or a string: no crash
+        func mutate(_ v: Any, _ to: Any) -> Any {
+            if let o = v as? [String: Any] { return o.mapValues { mutate($0, to) } }
+            if let a = v as? [Any] { return a.map { mutate($0, to) } }
+            if let n = v as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() { return to }
+            return v
+        }
+        var fed = 0
+        for n in names {
+            // in place of the line, on the state just before it (a delta while its reply streams, …), and on the end state
+            let before = [SessionState()] + steps(n).map(\.state)
+            for (k, l) in raw(n).enumerated() {
+                guard let o = try? JSONSerialization.jsonObject(with: Data(l.utf8)) else { continue }
+                for to in [-1, 0, Int.max, Int.min, 1.5, 1e300, "7"] as [Any] {
+                    guard let m = mutate(o, to) as? [String: Any], let d = try? JSONSerialization.data(withJSONObject: m), let pl = ProtocolLine.parse(d) else { continue }
+                    var st = before[k]
+                    SessionReducer.apply(&st, pl)
+                    var end = before.last!
+                    SessionReducer.apply(&end, pl)
+                    _ = st.status; _ = st.composerEnabled
+                    if let (r, c) = st.openCard {
+                        let cm = CardModel(card: c.card, runId: r, askId: c.askId)
+                        _ = cm.answerableInFloat; cm.buttons.forEach { _ = cm.answer($0) }
+                    }
+                    fed += 1
+                }
+            }
+        }
+        check(fed > 100, "mutated lines fed: \(fed)")
     }
 }
