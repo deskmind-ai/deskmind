@@ -204,6 +204,12 @@ final class SessionClient {
     private var off = false
     /// Sessions whose open request is out (a reconcile reaches them too).
     private var opening: Set<String> = []
+    /// What each session's current process is known to run with: the last set_config sent to it (or acked), else what
+    /// its open line carried; forgotten when the process goes (an unknown with the model off is reconciled to null).
+    private var runsWith: [String: (config: String?, lang: String?)] = [:]
+    /// Bumped on every open of a session and every process start heard: a check made before (a backfill's exit)
+    /// applies only to the process it saw.
+    private var generation: [String: Int] = [:]
     /// set_config lines sent and not yet answered (by client_id): a `busy` refusal (it took effect, was not stored) is
     /// sent once more; a second one, or bad_config, is shown (SessionState.settingsRefused).
     private struct PendingConfig { var sessionId: String; var config: String?; var lang: String?; var attempt: Int }
@@ -264,21 +270,26 @@ final class SessionClient {
         return Set(states.filter { $0.value.lastSeq > 0 }.keys).subtracting(deleted)
     }
 
-    /// Reads these sessions' stored lines after their cursors (session.history), off the calling thread.
     /// Reads these sessions' stored lines after their cursors (session.history), off the calling thread, one serial
     /// queue; those of them that do not run (`exits`) are marked exited only once their stored lines are in, with the
     /// history's last stored seq as the exit's (#107 review: an exit applied before the lines a process stored while
     /// the watch was down left the task it had just started running).
     private let backfillQueue = DispatchQueue(label: "ai.deskmind.session.backfill")
+    /// The exit is marked only for the process the reconnect saw not running: the history says none runs now, and no
+    /// open or start since (`generation`; #107 review: a reopen during the read had its new task cut off).
     private func backfill(_ ids: Set<String>, exits: Set<String>, idle: Set<String>) {
         guard !ids.isEmpty else { return }
+        lock.lock(); let seen = generation; lock.unlock()
         backfilling.enter()
         backfillQueue.async { [weak self] in
             defer { self?.backfilling.leave() }
             for id in ids.sorted() {
                 guard let self else { return }
                 let read = self.readHistory(id, markExit: false)
-                if exits.contains(id) { self.notRunning([id], idle: idle, lastSeqs: read.lastSeq.map { [id: $0] } ?? [:]) }
+                self.lock.lock(); let same = self.generation[id] == seen[id]; self.lock.unlock()
+                if exits.contains(id), read.open != true, same {
+                    self.notRunning([id], idle: idle, lastSeqs: read.lastSeq.map { [id: $0] } ?? [:])
+                }
             }
         }
     }
@@ -303,6 +314,10 @@ final class SessionClient {
               let id = r["session_id"] as? String ?? sessionId else { return nil }
         // the model as it is now, not as it was when the request went out: off → null; turned on meanwhile → the
         // configuration (the open line carried none); before anything else is written to it
+        lock.lock()
+        generation[id, default: 0] += 1
+        if r["already_open"] as? Bool != true { if noModel { runsWith[id] = nil } else { runsWith[id] = (config, lang) } }  // (none on the line: unknown)
+        lock.unlock()
         let offNow = modelOff
         if offNow { _ = sendConfig(id, config: nil, lang: lang, attempt: 1) }
         else if noModel { _ = sendConfig(id, config: config ?? defaultConfig, lang: lang, attempt: 1) }
@@ -518,9 +533,6 @@ final class SessionClient {
         return true
     }
 
-    /// The settings changed (either field: the model configuration or the language): every session this client
-    /// knows opens again with these, whenever its next process starts — whether or not its process now can end (#107
-    /// review: a busy or exited session kept the old ones; a language switch reached only the defaults).
     /// The sessions this client knows to have a process, or one coming: running (no exit heard), awaiting a start,
     /// being opened.
     func liveIds() -> [String] {
@@ -535,7 +547,40 @@ final class SessionClient {
     func reconcile(config: String?, lang: String?, off: Bool) {
         adoptSettings(config: config, lang: lang)
         modelOff = off
-        for id in liveIds() { setConfig(id, config: off ? nil : config, lang: lang) }
+        for id in liveIds() { reconcileNow(id, settingsChanged: true) }
+    }
+
+    /// Reconciles one session to the settings now, whenever it comes into this client's view with a process (the
+    /// watch's running list, a process's start, its first line here) — off the calling thread, one serial queue
+    /// (`reconciling`). #107 review: after an app restart with cloud off, a session found running later never got
+    /// its null.
+    func reconcileSession(_ id: String) {
+        reconciling.enter()
+        reconcileQueue.async { [weak self] in
+            defer { self?.reconciling.leave() }
+            self?.reconcileNow(id, settingsChanged: false)
+        }
+    }
+    private let reconcileQueue = DispatchQueue(label: "ai.deskmind.session.reconcile")
+    /// Reconciles under way (tests wait on it).
+    let reconciling = DispatchGroup()
+
+    /// The one rule: a session with a process (or one coming) runs with the settings now — no model when off, else
+    /// its configuration — compared with what it is known to run with (`runsWith`: the last set_config sent to this
+    /// process or acked, else what its open line carried; else its stored session.config), never with an old switch.
+    /// Unknown with the model on: left (it opened with a configuration of the app's), unless the settings just changed.
+    private func reconcileNow(_ id: String, settingsChanged: Bool) {
+        lock.lock()
+        let live = !deleted.contains(id) && (opening.contains(id) || states[id].map { $0.exited == nil || $0.awaitingStart } ?? true)
+        let how = reopenSettings(id), noModel = off
+        let have = runsWith[id] ?? states[id]?.settings.map { (config: $0.config, lang: $0.lang) }
+        lock.unlock()
+        guard live else { return }
+        let want: (config: String?, lang: String?) = (noModel ? nil : how.config, how.lang)
+        if !noModel && want.config == nil { return }                         // (no configuration to send)
+        if let have, have.config == want.config && (want.lang == nil || have.lang == want.lang) { return }
+        if have == nil && !noModel && !settingsChanged { return }
+        setConfig(id, config: want.config, lang: want.lang)
     }
 
     /// Sends a live session its settings now (set_config, harness#64): applied in place to its next model turns, no
@@ -556,7 +601,10 @@ final class SessionClient {
     /// The set_config line itself (the session's serial lock held, or the session just opened).
     private func sendConfig(_ sessionId: String, config: String?, lang: String?, attempt: Int) -> Bool {
         let cid = newClientId()
-        lock.lock(); pendingConfigs[cid] = PendingConfig(sessionId: sessionId, config: config, lang: lang, attempt: attempt); lock.unlock()
+        lock.lock()
+        pendingConfigs[cid] = PendingConfig(sessionId: sessionId, config: config, lang: lang, attempt: attempt)
+        runsWith[sessionId] = (config, lang)       // (applied on arrival, in order: even a `busy` one is in effect)
+        lock.unlock()
         var line = SessionControl.setConfig(config: config, lang: lang).line
         line["client_id"] = cid
         let r = transport.request(Request.send(sessionId: sessionId, line: line))
@@ -565,6 +613,9 @@ final class SessionClient {
         return r?["code"] as? String == "not_open"
     }
 
+    /// The settings changed (either field: the model configuration or the language): every session this client
+    /// knows opens again with these, whenever its next process starts — whether or not its process now can end (#107
+    /// review: a busy or exited session kept the old ones; a language switch reached only the defaults).
     func adoptSettings(config: String?, lang: String?) {
         lock.lock()
         defaults = (config, lang)
@@ -594,13 +645,13 @@ final class SessionClient {
     /// could not (an older helper without the op: open it instead).
     func history(_ sessionId: String, markExit: Bool = true) -> Bool { readHistory(sessionId, markExit: markExit).ok }
 
-    /// session.history, and the last stored seq it says.
-    private func readHistory(_ sessionId: String, markExit: Bool) -> (ok: Bool, lastSeq: Int?) {
+    /// session.history, the last stored seq it says, and whether a process of it runs.
+    private func readHistory(_ sessionId: String, markExit: Bool) -> (ok: Bool, lastSeq: Int?, open: Bool?) {
         let s = state(sessionId)
         var runs: [String: Int] = [:]
         for t in s.tasks { runs[t.runId] = t.lastSeq }
         guard let r = transport.request(Request.history(sessionId: sessionId, after: s.lastSeq, runs: runs)), r["ok"] as? Bool == true,
-              let lines = r["lines"] as? [[String: Any]] else { return (false, nil) }
+              let lines = r["lines"] as? [[String: Any]] else { return (false, nil, nil) }
         for l in lines { feed(l) }
         // no process for it here: read as exited only while the watch is up (a helper restarting has none yet; the
         // watch's helper.watching says which ran when it is back)
@@ -609,7 +660,7 @@ final class SessionClient {
             lock.lock(); idleClosed.insert(sessionId); lock.unlock()
             feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: (r["last_seq"] as? NSNumber)?.intValue))))
         }
-        return (true, (r["last_seq"] as? NSNumber)?.intValue)
+        return (true, (r["last_seq"] as? NSNumber)?.intValue, r["open"] as? Bool)
     }
 
     /// Deletes the session: the helper ends its process and removes its history from this Mac (session.delete; it
@@ -688,6 +739,8 @@ final class SessionClient {
                     // at the last seq the helper says it stored, when it says
                     self.backfill(behind, exits: gone, idle: idle)
                     self.notRunning(gone.subtracting(behind), idle: idle, lastSeqs: stored)
+                    // each running session, known before or not: reconciled to the settings now
+                    for id in open { self.reconcileSession(id) }
                 } else {
                     self.feed(obj)
                 }
@@ -781,12 +834,23 @@ final class SessionClient {
             }
         default: break
         }
+        let first = states[id] == nil
         var after = states[id] ?? SessionState(sessionId: id)
         states[id] = nil                                    // the reducer works on the only copy (no copy-on-write)
         let applied = SessionReducer.apply(&after, line)
         if let notApplied { after.settingsRefused = notApplied.isEmpty ? "busy" : notApplied }
         states[id] = after
+        // a process's start or end: what it runs with is its own (a start: a new process, reconciled)
+        var started = false
+        switch line.event {
+        case .sessionStart: generation[id, default: 0] += 1; started = true
+        case .sessionExit: if after.exited != nil { runsWith[id] = nil }
+        case .sessionConfig(let e): runsWith[id] = (e.config, e.lang)
+        default: break
+        }
         lock.unlock()
+        // a session that comes into view with a process (its first line here, its process's start): the settings now
+        if started || (first && after.exited == nil) { reconcileSession(id) }
         if let p = again {
             DispatchQueue.global().async { [weak self] in
                 guard let self else { return }

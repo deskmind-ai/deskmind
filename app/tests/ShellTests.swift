@@ -51,6 +51,8 @@ enum ShellTests {
         cloudOffRowNowTests()
         keyChangeOffTests()
         configRetryLatestTests()
+        restartCloudOffTests()
+        backfillReopenTests()
         textTests()
     }
 
@@ -483,7 +485,10 @@ enum ShellTests {
         for l in SessionTests.lines("chat") { m.client.feed(l) }
         m.selected = "ses_t"; m.draft = "/cua 打开备忘录"; m.submit()
         m.retry()
-        check(mock.requests.isEmpty, "an open session: no say, no cua, no retry")
+        m.client.reconciling.wait()
+        let types = mock.requests.compactMap { ($0["line"] as? [String: Any])?["type"] as? String }
+        check(types.allSatisfy { $0 == "set_config" } && !mock.requests.contains { $0["op"] as? String == SessionClient.Op.open },
+              "an open session: no say, no cua, no retry (only its null, set_config): \(types)")
         on = true
         m.settingsChanged()
         mock.requests = []
@@ -586,6 +591,7 @@ enum ShellTests {
         let u = ShellModel(client: client, defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
                            cloudOn: { false }, work: { $0() }, deliver: { $0() })
         feed(u, "task-undo", upTo: SessionTests.isKind("session.task_end"))
+        u.client.reconciling.wait()         // (its null, set_config, first)
         u.selected = "ses_t"
         let t = u.states["ses_t"]!.tasks.last!
         let rc = CardModel(resultCard: t.resultCard!, runId: t.runId)
@@ -603,8 +609,10 @@ enum ShellTests {
         let (run, open) = s.openCard!
         let card = CardModel(card: open.card, runId: run, askId: open.askId)
         m.cardBody(card, contentHeight: 10, visibleHeight: 10, offset: 0)
+        m.client.reconciling.wait()
+        let before = sends(mock2)       // (the session's null, set_config)
         m.click(card.buttons.first { $0.role == .approve }!)
-        check(sends(mock2) == 0, "cloud off: an approve (the task goes on, the model with it) is held back")
+        check(sends(mock2) == before, "cloud off: an approve (the task goes on, the model with it) is held back")
         m.stop()
         check(sent(mock2)?["type"] as? String == "stop", "cloud off: Stop goes: \(String(describing: sent(mock2)))")
         m.queueCancel("q1")
@@ -849,6 +857,7 @@ enum ShellTests {
         let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
                            cloudOn: { on }, work: { $0() }, deliver: { $0() })
         for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.client.reconciling.wait()
         on = false
         m.settingsChanged()
         let lines = mock.requests.compactMap { $0["line"] as? [String: Any] }
@@ -1132,6 +1141,81 @@ enum ShellTests {
         m.settingsChanged(keyChanged: true)
         check(mock.requests.contains { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true },
               "a new key with cloud off: a new process asked for (when idle)")
+    }
+
+    /// External review of 473fdac (P1): the app starts with cloud off while the helper runs a session whose task runs.
+    /// The start's reconcile finds nothing; the session comes into view later (the watch's running list, its lines):
+    /// it is reconciled then — set_config null before any other control of the app's, Stop after it.
+    static func restartCloudOffTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                           cloudOn: { false }, work: { $0() }, deliver: { $0() })
+        m.client.reconciling.wait()
+        check(mock.requests.isEmpty, "(the start: nothing known yet, nothing sent)")
+        mock.streamLines = [["kind": "helper.watching", "open": ["ses_k"]],
+                            ["kind": "session.message", "session_id": "ses_k", "seq": 1, "msg_id": "u1", "role": "user", "text": "/cua 整理桌面", "via": "cua"],
+                            ["kind": "session.task", "session_id": "ses_k", "seq": 2, "msg_id": "u1", "run_id": "r1", "raw": "整理桌面", "by": "slash"],
+                            ["kind": "start", "session_id": "ses_k", "run_id": "r1", "seq": 1, "raw": "整理桌面"]]
+        _ = m.client.watch()
+        m.client.reconciling.wait()
+        m.selected = "ses_k"
+        check(m.states["ses_k"]?.runningTask?.runId == "r1", "its task runs")
+        m.stop()
+        let lines = mock.requests.compactMap { $0["line"] as? [String: Any] }
+        let types = lines.map { $0["type"] as? String ?? "" }
+        check(types.first == "set_config" && lines.first?["config"] is NSNull && types.contains("stop")
+              && !types.contains { ["say", "cua", "retry", "steer", "queue_send_now"].contains($0) },
+              "found running with cloud off: set_config null first, then Stop, nothing that needs the model: \(types)")
+        // reconciled once: the same running list again sends nothing more
+        mock.requests = []
+        mock.streamLines = [["kind": "helper.watching", "open": ["ses_k"]]]
+        _ = m.client.watch()
+        m.client.reconciling.wait()
+        check(!mock.requests.contains { ($0["line"] as? [String: Any])?["type"] as? String == "set_config" }, "idempotent: no second null")
+    }
+
+    /// External review of 473fdac (P2): a reconnect's backfill reads a session's log; meanwhile the user reopens it and
+    /// starts a task. The backfill's exit is not marked for that new process (the history says one runs; an open came
+    /// since): the task runs, Stop is there.
+    static func backfillReopenTests() {
+        final class T: SessionTransport {
+            let lock = NSLock()
+            var requests: [[String: Any]] = []
+            let release = DispatchSemaphore(value: 0), inHistory = DispatchSemaphore(value: 0)
+            var lines: [[String: Any]] = []
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                lock.lock(); requests.append(body); lock.unlock()
+                switch body["op"] as? String {
+                case SessionClient.Op.history?: inHistory.signal(); release.wait(); return ["ok": true, "open": true, "last_seq": 7, "lines": [Any]()]
+                case SessionClient.Op.open?: return ["ok": true, "session_id": "ses_t", "resumed": true, "last_seq": 6]
+                default: return ["ok": true]
+                }
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
+                for l in lines where !onLine(l) { return true }
+                return true
+            }
+        }
+        let t = T()
+        let m = ShellModel(client: SessionClient(transport: t), defaults: scratchDefaults(), config: { "c" }, lang: { .zhHans },
+                           work: { $0() }, deliver: { $0() })
+        _ = m.client.open(sessionId: "ses_t", config: "c", lang: "zh")
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        t.lines = [["kind": "helper.watching", "open": [Any]()]]
+        _ = m.client.watch()                                   // the backfill starts, and blocks in its read
+        t.inHistory.wait()
+        // meanwhile: opened again, a task started
+        _ = m.client.open(sessionId: "ses_t", config: "c", lang: "zh")
+        m.client.feed(["kind": "session.start", "session_id": "ses_t", "resumed": true, "last_seq": 6])
+        m.client.feed(["kind": "session.task", "session_id": "ses_t", "seq": 7, "msg_id": "m9", "run_id": "r10", "raw": "整理桌面", "by": "slash"])
+        m.client.feed(["kind": "start", "session_id": "ses_t", "run_id": "r10", "seq": 1, "raw": "整理桌面"])
+        t.release.signal()
+        m.client.backfilling.wait()
+        m.selected = "ses_t"
+        let s = m.states["ses_t"]!
+        check(s.exited == nil && s.runningTask?.runId == "r10" && m.composer.canStop,
+              "the new process's task runs, Stop is there (exited \(String(describing: s.exited)), running \(String(describing: s.runningTask?.runId)))")
     }
 
     /// #107 review of aa232eb (E7): a busy set_config is sent again with the settings as they are now, not as that line
