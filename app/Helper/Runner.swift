@@ -867,11 +867,18 @@ enum Runner {
         if eyesURL != nil { EyesServer.touch() }   // the idle clock starts when the run ends
         // Before the clean-up closes the run's windows: how it ended, for a moment, on its last picture.
         LiveCard.finish(stopped ? .stopped : freeState == "completed" ? .done : .failed)
-        cleanUp(quitTextEdit: !textEditWasRunning)
-        pruneRuns(keep: 10)
-        // it acts no more: what it leaves running in its group (a Peekaboo server) is ended by the next task
+        // it acts no more; the clean-up closes windows and may quit TextEdit -- the desktop, so under the machine lock
+        // too: reserved again for it (which ends what the run left in its group, a Peekaboo server), unless another
+        // task has the Mac by now (then nothing of it is touched)
         if let acquired { ComputerLock.linger(acquired) }
         ComputerLock.free(runID: runID, pgid: p.processIdentifier)
+        if case .ok(let r?) = ComputerLock.reserve(runID: runID + "-cleanup", by: "hands") {
+            cleanUp(quitTextEdit: !textEditWasRunning)
+            ComputerLock.cancel(r)
+        } else {
+            NSLog("DeskMind Hands: another task has the Mac; the run's windows are left as they are")
+        }
+        pruneRuns(keep: 10)
         // hands says some refusals on stdout ("refused: … is your home directory"): its tail too, when stderr is quiet.
         let errTail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         let tail = errTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

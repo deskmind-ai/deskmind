@@ -328,18 +328,24 @@ enum HelperE2E {
         fm.createFile(atPath: d.appendingPathComponent("undo").path, contents: Data())
         var undoEvents: [[String: Any]] = []
         var answered: [String: Any] = [:]
+        var harnessGoneFirst = false
         guard Runner.accept() else { check(false, "linger (undo exit): accepted"); return }
         HarnessRun.run(Runner.Spec(["op": "run", "engine": "harness", "goal": "e2e"])) { ev in
             undoEvents.append(ev)
             if ev["event"] as? String == "task_done" {
+                let harness = HarnessRun.lingering?.process
                 answered = HarnessRun.respond(runID: ev["run_id"] as? String ?? "", option: 1)
-                Thread.sleep(forTimeInterval: 0.8)   // the harness reads it, starts the child, exits: before the run's end
+                // the harness reads it, starts the child and exits -- before the run thread goes on (its end is the
+                // path under test): waited for, not assumed
+                let until = Date().addingTimeInterval(5)
+                while harness?.isRunning == true && Date() < until { Thread.sleep(forTimeInterval: 0.02) }
+                harnessGoneFirst = harness != nil && harness?.isRunning == false
             }
             return true
         }
         try? fm.removeItem(at: d.appendingPathComponent("undo"))
         let undoChild = pid("undochild.pid")
-        check(answered["ok"] as? Bool == true && undoChild > 0 && up(undoChild),
+        check(answered["ok"] as? Bool == true && undoChild > 0 && up(undoChild) && harnessGoneFirst,
               "linger (undo exit): the undo answered at task_done, its child up after the harness exited (\(answered))")
         check(ComputerLock.read()?.acting == true, "linger (undo exit): the lock still says acting (\(String(describing: ComputerLock.read())))")
         let beside = Process(); beside.executableURL = URL(fileURLWithPath: "/usr/bin/true")
