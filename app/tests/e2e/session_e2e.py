@@ -18,6 +18,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN, NODE, BUNDLE, OUT = sys.argv[1:5]
+CLIENT = sys.argv[5] if len(sys.argv) > 5 else None     # SessionClientE2E: the app's client, on a helper of its own
 DIR = os.path.join(OUT, "support")
 # a Unix socket's path is at most 103 bytes: beside the output when that is short enough, else in a folder of its own
 SOCK = os.path.join(OUT, "s.sock")
@@ -156,10 +157,19 @@ def main():
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "LOCAL_API_KEY": "test-key",
            "LOCAL_URL": f"http://127.0.0.1:{open(port_file).read().strip()}"}
     helper = start_helper(env)
+    helpers = [helper]
     try:
         run(env, helper)
+        if CLIENT:
+            for p in helpers:
+                if p.poll() is None:
+                    p.kill(); p.wait()
+            helpers.append(start_helper(env))
+            r = subprocess.run([CLIENT, SOCK, CONFIG], capture_output=True, text=True, timeout=240)
+            print(r.stdout, end="")
+            check(r.returncode == 0, f"the app's session client against the helper ({r.returncode} failures){r.stderr[-400:]}")
     finally:
-        for p in (helper, fake):
+        for p in helpers + [fake]:
             if p.poll() is None:
                 p.kill()
         # the session processes go when their helper does (stdin's end); any left are reported, then stopped
