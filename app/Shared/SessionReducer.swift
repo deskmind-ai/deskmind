@@ -250,6 +250,8 @@ struct SessionState: Equatable {
     var awaitingStart = false
     /// How many new processes' starts were heard (SessionClient.open tells whether its process's start came already).
     var starts = 0
+    /// The stored seq the awaited process starts at (the open reply's last_seq), when the helper said it.
+    var awaitedStart: Int? = nil
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
@@ -487,14 +489,20 @@ enum SessionReducer {
             s.resumed = e.resumed
             // the same process's start again (a replay fed twice): nothing new. By pid when the helper adds it; else
             // a start at the same stored seq while the latest process has not exited.
+            // While the app awaits the process it started (awaitingStart): a start at or past that process's stored seq
+            // (the open reply's last_seq) is it; one before it is an older process's, late (nothing to do).
             let same: Bool
-            if let p = e.pid, let cur = s.processPid { same = p == cur }
+            if s.awaitingStart {
+                if let want = s.awaitedStart, let l = e.lastSeq { same = l < want } else { same = false }
+            }
+            else if let p = e.pid, let cur = s.processPid { same = p == cur }
             else { same = s.exited == nil && s.processStart != nil && e.lastSeq == s.processStart }
             if !same {
                 // a new process: the one before is gone, with what lived only in it (whether or not its exit came first)
                 processGone(&s, exited: false)
                 s.exited = nil
                 s.awaitingStart = false
+                s.awaitedStart = nil
                 s.starts += 1
                 s.processPid = e.pid
                 s.processStart = e.lastSeq
@@ -515,7 +523,10 @@ enum SessionReducer {
             else { latest = true }
             // the app opened the session again and waits for the new process's start: an exit of a process that started
             // no later than the latest start seen is the one before (the app already took it for gone), not the new one
-            if s.awaitingStart, let es = e.startSeq, es <= (s.processStart ?? es) { latest = false }
+            if s.awaitingStart, let es = e.startSeq {
+                if let want = s.awaitedStart { latest = es >= want }        // the awaited process's own, or an older one's
+                else if let st = s.processStart, es <= st { latest = false }
+            }
             // its runs are gone whenever this comes; without last_seq, those the app has seen of the latest process
             if let l = e.lastSeq { s.goneUpTo = max(s.goneUpTo, l) }
             else if latest { s.goneUpTo = max(s.goneUpTo, s.lastSeq, s.pendingSession.keys.max() ?? 0) }

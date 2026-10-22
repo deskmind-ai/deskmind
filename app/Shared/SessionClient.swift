@@ -196,8 +196,11 @@ final class SessionClient {
         if states[id] == nil { states[id] = SessionState(sessionId: id) }
         states[id]?.exited = nil
         // a process was started (not one found running): words sent until its start is heard are its own
-        // (unless that start came in while the request was out)
-        if r["already_open"] as? Bool != true && (states[id]?.starts ?? 0) == startsBefore { states[id]?.awaitingStart = true }
+        // (unless that start came in while the request was out: a start heard since, at the stored seq the helper
+        // says the process starts at, when it says it)
+        let want = (r["last_seq"] as? NSNumber)?.intValue
+        let heard = (states[id]?.starts ?? 0) != startsBefore && (want == nil || states[id]?.processStart == want)
+        if r["already_open"] as? Bool != true && !heard { states[id]?.awaitingStart = true; states[id]?.awaitedStart = want }
         opened[id] = (config, lang)
         endedByApp.remove(id)
         lock.unlock()

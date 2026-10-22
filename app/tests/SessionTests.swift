@@ -1522,6 +1522,48 @@ enum SessionTests {
         _ = c3.send(.say("y"), to: "s")
         c3.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":1,"start_seq":0,"last_seq":1}"#))
         check(c3.state("s").outbox.first?.sending == true && c3.state("s").exited == nil, "the old exit, late: the new process's word untouched, not exited")
+        // A: the old process stored nothing, the reopened one starts at the same seq: still a new process; its exit counts
+        let pa = MockTransport()
+        pa.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0], SessionClient.Op.send: ["ok": true]]
+        let ca = SessionClient(transport: pa)
+        var ka = 0
+        ca.newClientId = { ka += 1; return "a\(ka)" }
+        _ = ca.open(sessionId: "s")
+        ca.feed(se(nil, #""kind":"session.start","last_seq":0"#))
+        pa.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
+        _ = ca.send(.say("one"), to: "s")
+        ca.feed(se(nil, #""kind":"session.start","last_seq":0"#))
+        check(!ca.state("s").awaitingStart && ca.state("s").starts == 2, "the reopened process's start at the same seq: a new process")
+        ca.feed(se(1, #""kind":"session.message","msg_id":"m","role":"user","text":"one","client_id":"a1""#))
+        _ = ca.send(.say("two"), to: "s")
+        ca.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":2,"start_seq":0,"last_seq":1}"#))
+        check(ca.state("s").exited == 1 && ca.state("s").unsent.map(\.id) == ["a2"], "its exit: exited, the sent word unsent")
+        // B: no start ever heard (missed): an exit with a start_seq still counts
+        let pb = MockTransport()
+        pb.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0], SessionClient.Op.send: ["ok": true]]
+        let cb = SessionClient(transport: pb)
+        cb.newClientId = { "b1" }
+        _ = cb.open(sessionId: "s")
+        _ = cb.send(.say("x"), to: "s")
+        cb.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":0}"#))
+        check(cb.state("s").exited == 1 && cb.state("s").unsent.map(\.id) == ["b1"], "a missed start: its exit counts")
+        // C: an older process's late start, line and exit during the reopen request: the new process's word stays its own
+        let pc = MockTransport()
+        pc.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0], SessionClient.Op.send: ["ok": true]]
+        let cc = SessionClient(transport: pc)
+        cc.newClientId = { "c1" }
+        _ = cc.open(sessionId: "s")
+        pc.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]], SessionClient.Op.open: [["ok": true, "session_id": "s", "last_seq": 1]]]
+        pc.onRequest = { op in
+            guard op == SessionClient.Op.open else { return }
+            [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+             L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { cc.feed($0) }
+        }
+        _ = cc.send(.say("w"), to: "s")
+        pc.onRequest = nil
+        check(cc.state("s").awaitingStart && cc.state("s").awaitedStart == 1, "awaiting the process that starts at 1")
+        cc.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
+        check(cc.state("s").outbox.first?.sending == true && cc.resend("c1", in: "s") != .sent, "its start: the word still sending, not sent twice")
         queueInterleavingTests()
     }
 
