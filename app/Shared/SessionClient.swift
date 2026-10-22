@@ -200,7 +200,13 @@ final class SessionClient {
         // says the process starts at, when it says it)
         let want = (r["last_seq"] as? NSNumber)?.intValue
         let heard = (states[id]?.starts ?? 0) != startsBefore && (want == nil || states[id]?.processStart == want)
-        if r["already_open"] as? Bool != true && !heard { states[id]?.awaitingStart = true; states[id]?.awaitedStart = want }
+        if r["already_open"] as? Bool != true && !heard {
+            let pid = (r["pid"] as? NSNumber)?.intValue
+            // two opens whose replies come back in reverse order: the newer process (the higher seq) is the one awaited
+            if states[id]?.awaitingStart == true, let old = states[id]?.awaitedStart, let w = want, w < old {}
+            else { states[id]?.awaitedStart = want; states[id]?.awaitedPid = pid }
+            states[id]?.awaitingStart = true
+        }
         opened[id] = (config, lang)
         endedByApp.remove(id)
         lock.unlock()
@@ -261,7 +267,11 @@ final class SessionClient {
             }
             return r
         }
-        if s.exited != nil, !reopenIfExited(sessionId) { return notSent(.unavailable) }
+        if s.exited != nil {
+            guard reopenIfExited(sessionId) else { return notSent(.unavailable) }
+            // (an exit heard while the open request was out may have made the word unsent: it is the new process's)
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart } } }
+        }
         var r = transport.request(Request.send(sessionId: sessionId, line: line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
         // the session reads as exited here too; it is opened again once and the line sent again — unless the app ended

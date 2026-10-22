@@ -1540,7 +1540,7 @@ enum SessionTests {
         check(ca.state("s").exited == 1 && ca.state("s").unsent.map(\.id) == ["a2"], "its exit: exited, the sent word unsent")
         // B: no start ever heard (missed): an exit with a start_seq still counts
         let pb = MockTransport()
-        pb.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0], SessionClient.Op.send: ["ok": true]]
+        pb.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0, "pid": 1], SessionClient.Op.send: ["ok": true]]
         let cb = SessionClient(transport: pb)
         cb.newClientId = { "b1" }
         _ = cb.open(sessionId: "s")
@@ -1564,6 +1564,31 @@ enum SessionTests {
         check(cc.state("s").awaitingStart && cc.state("s").awaitedStart == 1, "awaiting the process that starts at 1")
         cc.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
         check(cc.state("s").outbox.first?.sending == true && cc.resend("c1", in: "s") != .sent, "its start: the word still sending, not sent twice")
+        // an old process's late exit at the same seq as the awaited one: by pid, the old one's; the new one's word stays
+        let pe = MockTransport()
+        pe.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0, "pid": 1], SessionClient.Op.send: ["ok": true]]
+        let ce = SessionClient(transport: pe)
+        ce.newClientId = { "e1" }
+        _ = ce.open(sessionId: "s")
+        ce.feed(se(nil, #""kind":"session.start","last_seq":0"#))
+        pe.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]], SessionClient.Op.open: [["ok": true, "session_id": "s", "last_seq": 0, "pid": 2]]]
+        _ = ce.send(.say("w"), to: "s")
+        ce.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":0}"#))
+        check(ce.state("s").exited == nil && ce.state("s").outbox.first?.sending == true, "the old pid's exit: not the new process's")
+        ce.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":2,"start_seq":0,"last_seq":0}"#))
+        check(ce.state("s").exited == 1 && ce.state("s").unsent.map(\.id) == ["e1"], "the awaited pid's exit: its own")
+        // a reopen through reopenIfExited with the old exit heard during the open request: the word is the new process's
+        let pf = MockTransport()
+        pf.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 3], SessionClient.Op.send: ["ok": true]]
+        let cf = SessionClient(transport: pf)
+        cf.newClientId = { "f1" }
+        _ = cf.open(sessionId: "s")
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#)].forEach { cf.feed($0) }
+        pf.onRequest = { op in if op == SessionClient.Op.open { cf.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#)) } }
+        check(cf.send(.say("x"), to: "s") == .sent, "sent through a reopen")
+        pf.onRequest = nil
+        check(cf.state("s").outbox.first?.sending == true && cf.resend("f1", in: "s") != .sent, "still the new process's: sending, not sent twice")
         queueInterleavingTests()
     }
 

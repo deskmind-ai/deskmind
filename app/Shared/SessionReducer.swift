@@ -252,6 +252,8 @@ struct SessionState: Equatable {
     var starts = 0
     /// The stored seq the awaited process starts at (the open reply's last_seq), when the helper said it.
     var awaitedStart: Int? = nil
+    /// The awaited process's pid (the open reply's).
+    var awaitedPid: Int? = nil
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
@@ -503,6 +505,7 @@ enum SessionReducer {
                 s.exited = nil
                 s.awaitingStart = false
                 s.awaitedStart = nil
+                s.awaitedPid = nil
                 s.starts += 1
                 s.processPid = e.pid
                 s.processStart = e.lastSeq
@@ -524,7 +527,9 @@ enum SessionReducer {
             // the app opened the session again and waits for the new process's start: an exit of a process that started
             // no later than the latest start seen is the one before (the app already took it for gone), not the new one
             if s.awaitingStart, let es = e.startSeq {
-                if let want = s.awaitedStart { latest = es >= want }        // the awaited process's own, or an older one's
+                // past the seq the awaited process starts at: it (its start missed); before: an older one; at it: by pid
+                // (the open reply's), else taken for the older one (which loses nothing; a send recovers on not_open)
+                if let want = s.awaitedStart { latest = es > want || (es == want && e.pid != nil && e.pid == s.awaitedPid) }
                 else if let st = s.processStart, es <= st { latest = false }
             }
             // its runs are gone whenever this comes; without last_seq, those the app has seen of the latest process
