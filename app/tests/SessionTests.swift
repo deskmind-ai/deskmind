@@ -1636,6 +1636,18 @@ enum SessionTests {
         _ = cj.send(.say("two"), to: "s")
         cj.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#))
         check(cj.state("s").outbox.allSatisfy { $0.sending } && cj.resend("j2", in: "s") != .sent, "both the found process's: sending, not sent twice")
+        // awaiting a found process whose start was heard before (awaitedStart unknown): its own exit, by pid, counts
+        let pk = MockTransport()
+        pk.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 2, "already_open": true], SessionClient.Op.send: ["ok": true]]
+        let ck = SessionClient(transport: pk)
+        ck.newClientId = { "k1" }
+        [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
+         se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#)].forEach { ck.feed($0) }
+        _ = ck.open(sessionId: "s")
+        check(ck.state("s").awaitingStart && ck.state("s").awaitedPid == 2, "awaiting the found process (its start heard before the exit was recorded)")
+        _ = ck.send(.say("x"), to: "s")
+        ck.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":2,"start_seq":1,"last_seq":1}"#))
+        check(ck.state("s").exited == 1 && ck.state("s").unsent.map(\.id) == ["k1"] && !ck.state("s").awaitingStart, "its exit by pid: exited, the word unsent, nothing awaited")
         queueInterleavingTests()
     }
 

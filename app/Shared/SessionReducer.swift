@@ -526,7 +526,12 @@ enum SessionReducer {
             else { latest = true }
             // the app opened the session again and waits for the new process's start: an exit of a process that started
             // no later than the latest start seen is the one before (the app already took it for gone), not the new one
-            if s.awaitingStart, let es = e.startSeq {
+            if s.awaitingStart, let p = e.pid, p == s.awaitedPid {
+                // the awaited process's own exit, by the open reply's pid (its start missed, or already heard): it is
+                // the latest, and nothing is awaited any more
+                latest = true
+                s.awaitingStart = false; s.awaitedStart = nil; s.awaitedPid = nil
+            } else if s.awaitingStart, let es = e.startSeq {
                 // past the seq the awaited process starts at: it (its start missed); before: an older one; at it: by pid
                 // (the open reply's), else taken for the older one (which loses nothing; a send recovers on not_open)
                 if let want = s.awaitedStart { latest = es > want || (es == want && ((e.pid != nil && e.pid == s.awaitedPid) || (e.lastSeq ?? es) > want)) }
