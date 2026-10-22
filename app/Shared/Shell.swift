@@ -121,6 +121,14 @@ enum ShellText {
         }
     }
 
+    /// New settings a session did not store (set_config's refusal): busy — they apply in this process now, but its
+    /// next process may open with the ones before; bad_config — refused, nothing changed.
+    static func settingsRefused(_ code: String, lang: ResolvedLang) -> String {
+        code == "bad_config"
+            ? L("This conversation refused the new model settings. Check them in the model settings.", lang: lang)
+            : L("The new model settings apply now, but may not last if this conversation restarts.", lang: lang)
+    }
+
     /// Why the user's words were not sent (a refusal's code, or the process's end).
     static func unsent(_ code: String?, lang: ResolvedLang) -> String {
         switch code {
@@ -327,10 +335,17 @@ final class ShellModel: ObservableObject {
     /// Sessions open with the settings as they are now: when either field changed (a key saved, the UI language
     /// switched), every session's next process opens with the new value (SessionClient.adoptSettings), not only those
     /// this client never opened. Called before each open and send, and when the settings change.
-    func applySettings() {
+    func applySettings() { applySettings(reconcileIfModelChanged: true) }
+
+    /// `reconcileIfModelChanged`: the switch moved since the client last heard (turned in the window as it was, say):
+    /// the client takes it at once (an open from now on sees it) and every session it knows is told (`reconcile`).
+    private func applySettings(reconcileIfModelChanged: Bool) {
         let now = sessionSettings()
         if client.defaultConfig != now.config || client.defaultLang != now.lang { client.adoptSettings(config: now.config, lang: now.lang) }
-        client.modelOff = !cloudOn()
+        let off = !cloudOn()
+        guard client.modelOff != off else { return }
+        client.modelOff = off
+        if reconcileIfModelChanged { work { [weak self] in self?.client.reconcile(config: now.config, lang: now.lang, off: off) } }
     }
 
     /// The settings as the window shows them (on the main thread): cloud models on or off.
@@ -690,24 +705,29 @@ final class ShellModel: ObservableObject {
     /// new key needs a new process (a process reads its keys when it starts): `keyChanged` then asks the helper for one
     /// once the session is idle (end_if_idle; the helper and the session decide when).
     func settingsChanged(keyChanged: Bool = false) {
-        applySettings()
+        applySettings(reconcileIfModelChanged: false)
         refreshSettings()
         let (config, lang) = sessionSettings()
         let off = !cloudOn()
-        client.adoptSettings(config: config, lang: lang)
-        let live = states.filter { $0.value.exited == nil }.map(\.key).sorted()
         work { [weak self] in
             guard let self else { return }
-            for id in live { self.client.setConfig(id, config: off ? nil : config, lang: lang) }
-            if keyChanged && !off { for id in live { self.client.restart(id, config: config, lang: lang) } }
+            // every session the client knows with a process or one coming (live, opening, reopening, awaiting its
+            // start: the client's list, not this window's view of it)
+            self.client.reconcile(config: config, lang: lang, off: off)
+            // a new key reaches a process only when it starts: asked for whatever the switch says now (turned on
+            // later, a session must not run on the old key)
+            if keyChanged { for id in self.client.liveIds() { self.client.restart(id, config: config, lang: lang) } }
         }
     }
 
     /// The chat's "cloud model is off" row: the settings say so, or this session refused words for having no model
     /// (no_model: its stored settings say so, whatever this app's switch says).
     func showsCloudOff(_ s: SessionState?) -> Bool {
-        cloudOff || s?.outbox.contains { $0.refused == "no_model" } == true || s?.lastRefusal?.code == "no_model"
-            || (s?.settings.map { $0.config == nil } ?? false)
+        if cloudOff { return true }
+        // a session with a process now that runs with no model (its stored settings, its refusal): not one that exited
+        // (its next process opens with the settings now)
+        guard let s, s.exited == nil else { return false }
+        return s.lastRefusal?.code == "no_model" || (s.settings.map { $0.config == nil } ?? false)
     }
 
     /// A task runs in some session with no card waiting for the user (a reopen of the app then is not the user's:

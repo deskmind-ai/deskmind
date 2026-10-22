@@ -100,6 +100,12 @@ enum SessionControl: Equatable {
         }
     }
 
+    /// A control that makes the model work (say, cua, retry, steer, queue_send_now): never written while the model is
+    /// off (the client's `modelOff`; the session would refuse it no_model).
+    var needsModel: Bool {
+        switch self { case .say, .cua, .retry, .steer, .queueSendNow: return true; default: return false }
+    }
+
     /// Typing that the session refuses while a card waits (card_open): the composer is disabled then, and the client
     /// does not send it either.
     var isTyping: Bool {
@@ -186,14 +192,18 @@ final class SessionClient {
         set { lock.lock(); defaults.lang = newValue; lock.unlock() }
     }
     private var defaults: (config: String?, lang: String?) = (nil, nil)
-    /// Cloud models are off in the settings: every session runs with no model (set_config null, harness#64). An open
-    /// then never carries a configuration (one given on the open line outranks the stored null) and is followed at once
-    /// by set_config null, before any other control.
+    /// Cloud models are off in the settings: every session runs with no model (set_config null, harness#64). This
+    /// client owns it: every session it knows with a process — live, opening, reopening, awaiting its start — is
+    /// reconciled to it (`reconcile`), an open re-checks it once its reply is in (the switch may have moved meanwhile)
+    /// and sends the matching set_config before anything else, and a control that needs the model is never written
+    /// while it is off. An open then carries no configuration (one on the open line outranks the stored null).
     var modelOff: Bool {
         get { lock.lock(); defer { lock.unlock() }; return off }
         set { lock.lock(); off = newValue; lock.unlock() }
     }
     private var off = false
+    /// Sessions whose open request is out (a reconcile reaches them too).
+    private var opening: Set<String> = []
     /// set_config lines sent and not yet answered (by client_id): a `busy` refusal (it took effect, was not stored) is
     /// sent once more; a second one, or bad_config, is shown (SessionState.settingsRefused).
     private struct PendingConfig { var sessionId: String; var config: String?; var lang: String?; var attempt: Int }
@@ -255,12 +265,21 @@ final class SessionClient {
     }
 
     /// Reads these sessions' stored lines after their cursors (session.history), off the calling thread.
-    private func backfill(_ ids: Set<String>) {
+    /// Reads these sessions' stored lines after their cursors (session.history), off the calling thread, one serial
+    /// queue; those of them that do not run (`exits`) are marked exited only once their stored lines are in, with the
+    /// history's last stored seq as the exit's (#107 review: an exit applied before the lines a process stored while
+    /// the watch was down left the task it had just started running).
+    private let backfillQueue = DispatchQueue(label: "ai.deskmind.session.backfill")
+    private func backfill(_ ids: Set<String>, exits: Set<String>, idle: Set<String>) {
         guard !ids.isEmpty else { return }
         backfilling.enter()
-        DispatchQueue.global().async { [weak self] in
+        backfillQueue.async { [weak self] in
             defer { self?.backfilling.leave() }
-            for id in ids.sorted() { _ = self?.history(id, markExit: false) }
+            for id in ids.sorted() {
+                guard let self else { return }
+                let read = self.readHistory(id, markExit: false)
+                if exits.contains(id) { self.notRunning([id], idle: idle, lastSeqs: read.lastSeq.map { [id: $0] } ?? [:]) }
+            }
         }
     }
 
@@ -278,9 +297,17 @@ final class SessionClient {
         // cloud models off: no configuration on the open line (it would outrank the session's stored null), and no
         // model from its first control on (set_config null, before anything else is written)
         let noModel = modelOff
+        if let sessionId { lock.lock(); opening.insert(sessionId); lock.unlock() }
+        defer { if let sessionId { lock.lock(); opening.remove(sessionId); lock.unlock() } }
         guard let r = transport.request(Request.open(sessionId: sessionId, config: noModel ? nil : config, lang: lang)), r["ok"] as? Bool != false,
               let id = r["session_id"] as? String ?? sessionId else { return nil }
-        if noModel { _ = sendConfig(id, config: nil, lang: lang, attempt: 1) }
+        // the model as it is now, not as it was when the request went out: off → null; turned on meanwhile → the
+        // configuration (the open line carried none); before anything else is written to it
+        let offNow = modelOff
+        if offNow { _ = sendConfig(id, config: nil, lang: lang, attempt: 1) }
+        else if noModel { _ = sendConfig(id, config: config ?? defaultConfig, lang: lang, attempt: 1) }
+        // opened with the settings now: a "not stored" banner from before is past
+        if !offNow && !noModel { mutate(id) { $0.settingsRefused = nil } }
         lock.lock()
         if states[id] == nil { states[id] = SessionState(sessionId: id) }
         states[id]?.exited = nil
@@ -382,6 +409,13 @@ final class SessionClient {
             }
             return r
         }
+        // the model off (now, not when the send began): a control that needs it is not written; the words stay the app's
+        let modelGone = { [self] () -> SendResult? in
+            guard control.needsModel && modelOff else { return nil }
+            if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = false; st.outbox[i].refused = "no_model" } } }
+            return .refused("no_model")
+        }
+        if let r = modelGone() { return r }
         if s.exited != nil {
             guard reopenIfExited(sessionId) else { return notSent(.unavailable) }
             // (an exit heard while the open request was out may have made the word unsent: it is the new process's —
@@ -389,6 +423,7 @@ final class SessionClient {
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || (heldNext && st.starts == startsAtHold) } } }
             // taken while the open blocked (its stored line replayed meanwhile): nothing to send
             if let id = words, stillOurs(id, in: sessionId) == false { return .refused("taken") }
+            if let r = modelGone() { return r }
         }
         var r = transport.request(Request.send(sessionId: sessionId, line: line))
         // the process ended and the exit line never reached this app (it was not watching, or the helper restarted):
@@ -404,6 +439,7 @@ final class SessionClient {
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = true; st.outbox[i].refused = nil; st.outbox[i].toNextProcess = st.awaitingStart || st.starts == startsAtHold } } }
             // taken while the open blocked: nothing to send again
             if let id = words, stillOurs(id, in: sessionId) == false { return .refused("taken") }
+            if let r = modelGone() { return r }
             r = transport.request(Request.send(sessionId: sessionId, line: line))
         }
         guard let r, r["ok"] as? Bool != false else { return notSent(.unavailable) }
@@ -485,6 +521,23 @@ final class SessionClient {
     /// The settings changed (either field: the model configuration or the language): every session this client
     /// knows opens again with these, whenever its next process starts — whether or not its process now can end (#107
     /// review: a busy or exited session kept the old ones; a language switch reached only the defaults).
+    /// The sessions this client knows to have a process, or one coming: running (no exit heard), awaiting a start,
+    /// being opened.
+    func liveIds() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let live = states.filter { $0.value.exited == nil || $0.value.awaitingStart }.map(\.key)
+        return Set(live).union(opening).subtracting(deleted).sorted()
+    }
+
+    /// The settings as they are now, for every session: remembered for each one's next process (adoptSettings), the
+    /// model on or off (`modelOff`), and sent in place to every one with a process or one coming (`liveIds`): its
+    /// configuration, or null with the model off. Call it off the main thread (one request per session).
+    func reconcile(config: String?, lang: String?, off: Bool) {
+        adoptSettings(config: config, lang: lang)
+        modelOff = off
+        for id in liveIds() { setConfig(id, config: off ? nil : config, lang: lang) }
+    }
+
     /// Sends a live session its settings now (set_config, harness#64): applied in place to its next model turns, no
     /// restart; `config` nil (cloud models off): no model at all — the session stops its running task, and nothing that
     /// needs a model goes on. Remembered for its next process (reopenWith). Never taken as applied until its
@@ -539,12 +592,15 @@ final class SessionClient {
     /// Reads a session's history from the helper's stored log (session.history): no process is started. A session
     /// with no process running there reads as exited (its tasks that never ended were cut off). False when the helper
     /// could not (an older helper without the op: open it instead).
-    func history(_ sessionId: String, markExit: Bool = true) -> Bool {
+    func history(_ sessionId: String, markExit: Bool = true) -> Bool { readHistory(sessionId, markExit: markExit).ok }
+
+    /// session.history, and the last stored seq it says.
+    private func readHistory(_ sessionId: String, markExit: Bool) -> (ok: Bool, lastSeq: Int?) {
         let s = state(sessionId)
         var runs: [String: Int] = [:]
         for t in s.tasks { runs[t.runId] = t.lastSeq }
         guard let r = transport.request(Request.history(sessionId: sessionId, after: s.lastSeq, runs: runs)), r["ok"] as? Bool == true,
-              let lines = r["lines"] as? [[String: Any]] else { return false }
+              let lines = r["lines"] as? [[String: Any]] else { return (false, nil) }
         for l in lines { feed(l) }
         // no process for it here: read as exited only while the watch is up (a helper restarting has none yet; the
         // watch's helper.watching says which ran when it is back)
@@ -553,7 +609,7 @@ final class SessionClient {
             lock.lock(); idleClosed.insert(sessionId); lock.unlock()
             feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: (r["last_seq"] as? NSNumber)?.intValue))))
         }
-        return true
+        return (true, (r["last_seq"] as? NSNumber)?.intValue)
     }
 
     /// Deletes the session: the helper ends its process and removes its history from this Mac (session.delete; it
@@ -627,8 +683,11 @@ final class SessionClient {
                     // there) is the cursor already. An older helper without the op: nothing read.
                     let stored = (obj["last_seq"] as? [String: Any] ?? [:]).compactMapValues { ($0 as? NSNumber)?.intValue }
                     let behind = self.knownIds().subtracting(open).filter { stored[$0] == nil || stored[$0] != self.state($0).lastSeq }
-                    self.backfill(behind)
-                    self.notRunning(knownBefore.subtracting(open), idle: Set(obj["idle"] as? [String] ?? []))
+                    let gone = knownBefore.subtracting(open), idle = Set(obj["idle"] as? [String] ?? [])
+                    // the exit of one whose stored lines are being read comes after them (backfill); the others' now,
+                    // at the last seq the helper says it stored, when it says
+                    self.backfill(behind, exits: gone, idle: idle)
+                    self.notRunning(gone.subtracting(behind), idle: idle, lastSeqs: stored)
                 } else {
                     self.feed(obj)
                 }
@@ -668,13 +727,15 @@ final class SessionClient {
     /// Sessions this client knows that the helper does not run (helper.watching): their process, if any, ended unheard
     /// (the idle reclaim, a crash, a helper restart). They read as exited (a reply in progress interrupted, a running
     /// task cut off); those opened here are opened again on the next watch, any of them on the next send.
-    private func notRunning(_ ids: Set<String>, idle: Set<String> = []) {
+    private func notRunning(_ ids: Set<String>, idle: Set<String> = [], lastSeqs: [String: Int] = [:]) {
         for id in ids {
             lock.lock()
             let skip = endedByApp.contains(id) || states[id]?.exited != nil
             if idle.contains(id) { idleClosed.insert(id) }
             lock.unlock()
-            if !skip { feed(ProtocolLine(sessionId: id, event: .sessionExit(HelperSessionExit(code: nil, idle: idle.contains(id) ? true : nil)))) }
+            if !skip {
+                feed(ProtocolLine(sessionId: id, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: lastSeqs[id], idle: idle.contains(id) ? true : nil))))
+            }
         }
     }
 
@@ -731,7 +792,9 @@ final class SessionClient {
                 guard let self else { return }
                 let serial = self.sessionLock(p.sessionId)
                 serial.lock(); defer { serial.unlock() }
-                if !self.sendConfig(p.sessionId, config: p.config, lang: p.lang, attempt: p.attempt + 1) {
+                // (with the settings as they are now, not as that line had them)
+                self.lock.lock(); let how = self.reopenSettings(p.sessionId), noModel = self.off; self.lock.unlock()
+                if !self.sendConfig(p.sessionId, config: noModel ? nil : how.config, lang: how.lang, attempt: p.attempt + 1) {
                     self.mutate(p.sessionId) { $0.settingsRefused = "busy" }
                 }
             }

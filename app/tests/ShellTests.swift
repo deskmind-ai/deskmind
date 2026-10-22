@@ -45,6 +45,12 @@ enum ShellTests {
         historyWatchDownTests()
         hintOpenOnlyTests()
         historyOpenedCrashTests()
+        modelOffMidOpenTests()
+        exitAfterBackfillTests()
+        settingsBannerTests()
+        cloudOffRowNowTests()
+        keyChangeOffTests()
+        configRetryLatestTests()
         textTests()
     }
 
@@ -1021,6 +1027,129 @@ enum ShellTests {
         m.selected = "ses_t"; m.draft = "还在吗"; m.submit()
         let ops = mock.requests.map { $0["op"] as? String ?? "" }
         check(ops.contains(SessionClient.Op.open) && sent(mock)?["text"] as? String == "还在吗", "a send opens it again and goes: \(ops)")
+    }
+
+    /// #107 review of aa232eb (bug 1): cloud turned off while a session is being opened. The open went out with the
+    /// configuration; its reply is in after the switch: the client re-checks the model, sends set_config null before
+    /// anything else, and the first words are not written (no say, no task, no turn on the cloud). The reverse: turned
+    /// on while it opened without one — the configuration follows at once.
+    static func modelOffMidOpenTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_n"], SessionClient.Op.send: ["ok": true]]
+        var on = true
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                           cloudOn: { on }, work: { $0() }, deliver: { $0() })
+        mock.onRequest = { op in if op == SessionClient.Op.open && on { on = false; m.settingsChanged() } }
+        m.newConversation(); m.draft = "你好"; m.submit()
+        mock.onRequest = nil
+        let lines = mock.requests.compactMap { $0["line"] as? [String: Any] }
+        check(mock.requests.first?["config"] as? String == "ds-flash", "(the open went out with the configuration)")
+        check(lines.map { $0["type"] as? String ?? "" } == ["set_config"] && lines.first?["config"] is NSNull,
+              "turned off mid-open: set_config null after the reply, no say: \(lines.map { $0["type"] ?? "" })")
+        check(m.client.state("ses_n").outbox.first?.refused == "no_model", "the words: not sent (the cloud model is off)")
+        // a reopen while the switch turns: the client's list has the session being opened (a reconcile reaches it)
+        let c = SessionClient(transport: mock)
+        mock.requests = []
+        c.modelOff = true
+        mock.onRequest = { op in if op == SessionClient.Op.open { c.modelOff = false } }
+        _ = c.open(sessionId: "ses_n", config: "ds-flash", lang: "zh")
+        mock.onRequest = nil
+        let back = mock.requests.compactMap { $0["line"] as? [String: Any] }
+        check(mock.requests.first?["config"] == nil && back.first?["type"] as? String == "set_config" && back.first?["config"] as? String == "ds-flash",
+              "turned on mid-open (opened with none): its configuration at once: \(back)")
+        let gate = DispatchSemaphore(value: 0)
+        mock.onRequest = { op in if op == SessionClient.Op.open { gate.wait() } }
+        DispatchQueue.global().async { _ = c.open(sessionId: "ses_o", config: "ds-flash", lang: "zh") }
+        let deadline = Date().addingTimeInterval(2)
+        while !c.liveIds().contains("ses_o") && Date() < deadline { usleep(5_000) }
+        check(c.liveIds().contains("ses_o"), "a session being opened is in the client's list (a reconcile reaches it)")
+        gate.signal()
+        usleep(100_000)
+        mock.onRequest = nil
+    }
+
+    /// #107 review of aa232eb (bug 2): the helper restarted while a session had just started a task (its session.task
+    /// stored while the watch was down). Back, the helper runs none: the exit is marked only after the stored lines are
+    /// in, at the history's last seq — the task cut off, not running.
+    static func exitAfterBackfillTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"],
+                        SessionClient.Op.history: ["ok": true, "open": false, "last_seq": 7, "lines": [
+                            ["kind": "session.task", "session_id": "ses_t", "seq": 7, "msg_id": "m9", "run_id": "r9", "raw": "整理桌面", "by": "slash"],
+                            ["kind": "start", "session_id": "ses_t", "run_id": "r9", "seq": 1, "raw": "整理桌面"]]]]
+        let c = SessionClient(transport: mock)
+        _ = c.open(sessionId: "ses_t", config: "c", lang: "zh")
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        mock.streamLines = [["kind": "helper.watching", "open": [Any]()]]
+        _ = c.watch()
+        c.backfilling.wait()
+        let s = c.state("ses_t")
+        check(s.task("r9") != nil && s.runningTask == nil && s.task("r9")?.cutOff == true && s.exited != nil,
+              "the task its gone process had started: cut off, not running (\(String(describing: s.runningTask?.runId)))")
+    }
+
+    /// #107 review of aa232eb (E4): the "not stored" banner says what busy means (applied now, may not last), and
+    /// clears once the session opens again with the settings now.
+    static func settingsBannerTests() {
+        check(ShellText.settingsRefused("busy", lang: .zhHans).contains("已生效") && ShellText.settingsRefused("bad_config", lang: .zhHans).contains("没接受"),
+              "busy: applied now, may not last; bad_config: refused")
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.send: ["ok": true]]
+        let c = SessionClient(transport: mock)
+        _ = c.open(sessionId: "ses_t", config: "c", lang: "zh")
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        c.setConfig("ses_t", config: "c", lang: "zh")
+        let cid = (mock.requests.last?["line"] as? [String: Any])?["client_id"] as? String ?? ""
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "bad_config", "control": "set_config", "client_id": cid, "text": "x"])
+        check(c.state("ses_t").settingsRefused == "bad_config", "shown")
+        c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0, "idle": true])
+        _ = c.open(sessionId: "ses_t", config: "c", lang: "zh")
+        check(c.state("ses_t").settingsRefused == nil, "opened again with the settings now: cleared")
+    }
+
+    /// #107 review of aa232eb (E5): the cloud-off row follows the settings now: an exited session whose last stored
+    /// settings had no model does not show it once cloud is on (its next process opens with them); a live one does.
+    static func cloudOffRowNowTests() {
+        let mock = Mock()
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "c" }, lang: { .zhHans },
+                           cloudOn: { true }, work: { $0() }, deliver: { $0() })
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.client.feed(["kind": "session.config", "session_id": "ses_t", "seq": 7, "config": NSNull(), "lang": "zh", "by": "set_config"])
+        m.refreshSettings()
+        check(m.showsCloudOff(m.states["ses_t"]), "live, its process with no model: the row")
+        m.client.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0, "idle": true])
+        check(!m.showsCloudOff(m.states["ses_t"]), "exited, cloud on now: no row")
+    }
+
+    /// #107 review of aa232eb (E6): a new key asks for new processes whatever the switch says (turned on later, no
+    /// session may run on the old key).
+    static func keyChangeOffTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true], SessionClient.Op.end: ["ok": true, "deferred": true]]
+        let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "c" }, lang: { .zhHans },
+                           cloudOn: { false }, work: { $0() }, deliver: { $0() })
+        for l in SessionTests.lines("chat") { m.client.feed(l) }
+        m.settingsChanged(keyChanged: true)
+        check(mock.requests.contains { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true },
+              "a new key with cloud off: a new process asked for (when idle)")
+    }
+
+    /// #107 review of aa232eb (E7): a busy set_config is sent again with the settings as they are now, not as that line
+    /// had them.
+    static func configRetryLatestTests() {
+        let mock = Mock()
+        mock.replies = [SessionClient.Op.send: ["ok": true]]
+        let c = SessionClient(transport: mock)
+        for l in SessionTests.lines("chat") { c.feed(l) }
+        c.setConfig("ses_t", config: "openai:deepseek|a", lang: "zh")
+        let first = (mock.requests.last?["line"] as? [String: Any])?["client_id"] as? String ?? ""
+        c.setConfig("ses_t", config: "openai:deepseek|b", lang: "en")
+        c.feed(["kind": "session.error", "session_id": "ses_t", "code": "busy", "control": "set_config", "client_id": first, "text": "x"])
+        let deadline = Date().addingTimeInterval(2)
+        func configs() -> [[String: Any]] { mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" } }
+        while configs().count < 3 && Date() < deadline { usleep(10_000) }
+        check(configs().count == 3 && configs().last?["config"] as? String == "openai:deepseek|b" && configs().last?["lang"] as? String == "en",
+              "the retry carries the latest settings: \(configs().map { $0["config"] ?? "" })")
     }
 
     /// Final round (6): the "read the whole card first" hint only while the card is open.

@@ -252,8 +252,8 @@ struct ChatColumn: View {
             if shell.showsCloudOff(s) {
                 CloudOffRow(openSettings: openSettings)
             }
-            if s?.settingsRefused != nil {
-                Banner(text: L("The new model settings didn't reach this conversation. Open the settings and save them again.", lang: lang))
+            if let code = s?.settingsRefused {
+                Banner(text: ShellText.settingsRefused(code, lang: lang))
             }
             ScrollViewReader { proxy in
                 ScrollView {

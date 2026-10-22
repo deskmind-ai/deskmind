@@ -145,6 +145,10 @@ enum SessionHost {
         let firstLine = DispatchSemaphore(value: 0)
         /// The helper's end_if_idle under way, if any (one at a time).
         var ask: EndAsk?
+        /// Held while a control line is checked against an end_if_idle under way and written, and while an
+        /// end_if_idle is decided and written: neither slips between the other's check and its write (a line written
+        /// after an end_if_idle that ends the session would be lost after its ok).
+        let writeGate = NSLock()
         /// Closed by this helper's end_if_idle (it was idle): its exit says so (no run was cut).
         var closedIdle = false
         /// A restart the app asked for (session.end when_idle): asked again at its next idle moment.
@@ -355,14 +359,22 @@ enum SessionHost {
         guard let found = sessions[sessionID] else {
             lock.unlock(); return ["ok": false, "code": "not_open", "error": "session \(sessionID) is not open"]
         }
-        // an end_if_idle under way: wait for its answer (at once), so the line is not written to a session that ends
-        let ask = found.ask
         lock.unlock()
-        if let ask { _ = ask.answered.wait(timeout: .now() + endAskHold) }
+        let notOpen: [String: Any] = ["ok": false, "code": "not_open", "error": "session \(sessionID) is not open"]
+        // an end_if_idle under way: wait for its answer (at once) outside the gate, then check again under it, so the
+        // line is never written after an end_if_idle that ends the session. Unanswered in time: not written (not
+        // open: the app opens the session again and sends it there), never written blind
+        found.writeGate.lock()
         lock.lock()
-        guard let s = sessions[sessionID], s === found, s.started, !s.closing else {
-            lock.unlock(); return ["ok": false, "code": "not_open", "error": "session \(sessionID) is not open"]
+        while let ask = found.ask {
+            lock.unlock(); found.writeGate.unlock()
+            if ask.answered.wait(timeout: .now() + endAskHold) == .timedOut { return notOpen }
+            found.writeGate.lock(); lock.lock()
         }
+        guard let s = sessions[sessionID], s === found, s.started, !s.closing else {
+            lock.unlock(); found.writeGate.unlock(); return notOpen
+        }
+        defer { s.writeGate.unlock() }
         s.lastActive = Date()
         // a replay of a task the app asks for itself: the connections that have nothing of it take it from its cursor
         if o["type"] as? String == "attach", let run = o["run_id"] as? String {
@@ -399,17 +411,24 @@ enum SessionHost {
     /// handled as it comes. nil when it ended; else "not_open", "not_idle" (with the session's `why`), "asked" or
     /// "timeout".
     @discardableResult
-    static func endIfIdle(_ s: Session, wait: Bool) -> (code: String?, why: [String]) {
+    static func endIfIdle(_ s: Session, wait: Bool, quietOnly: Bool = false) -> (code: String?, why: [String]) {
+        s.writeGate.lock()
         lock.lock()
-        guard sessions[s.id] === s, s.started, !s.closing else { lock.unlock(); return ("not_open", []) }
+        guard sessions[s.id] === s, s.started, !s.closing else { lock.unlock(); s.writeGate.unlock(); return ("not_open", []) }
+        // the reaper's ask: only if still quiet, checked under the gate (a line sent since moved lastActive)
+        if quietOnly && !(s.ask == nil && s.activity.idle && (s.endWhenIdle || Date().timeIntervalSince(s.lastActive) > setup.idleSeconds)) {
+            lock.unlock(); s.writeGate.unlock(); return ("skipped", [])
+        }
         let ask: EndAsk
         var write = false
         if let a = s.ask { ask = a } else { ask = EndAsk(); s.ask = ask; write = true }
         lock.unlock()
         if write, s.write(ask.wire.line) != nil {
             lock.lock(); if s.ask === ask { s.ask = nil; ask.answered.leave() }; lock.unlock()
+            s.writeGate.unlock()
             return ("not_open", [])
         }
+        s.writeGate.unlock()
         guard wait else { return ("asked", []) }
         if ask.answered.wait(timeout: .now() + endAnswerTimeout) == .timedOut { return ("timeout", []) }
         lock.lock(); defer { lock.unlock() }
@@ -748,7 +767,7 @@ enum SessionHost {
                     due.append(s)
                 }
                 lock.unlock()
-                for s in due { endIfIdle(s, wait: false) }
+                for s in due { endIfIdle(s, wait: false, quietOnly: true) }
             }
         }
     }

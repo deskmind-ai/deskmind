@@ -669,6 +669,7 @@ enum SessionReducer {
         case .sessionConfig(let e):
             s.settings = e
             if e.by == "set_config" { s.settingsRefused = nil }
+            if e.config != nil, s.lastRefusal?.code == "no_model" { s.lastRefusal = nil }   // (a model again)
         case .steer(let e):
             if let c = e.clientId { taken(&s, c) }
             let i = taskIndex(&s, e.runId)
