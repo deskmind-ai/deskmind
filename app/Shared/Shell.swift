@@ -167,6 +167,10 @@ enum ShellText {
             let base = L("Undid %d of %d", n, m, lang: lang)
             return refused.map { base + " · " + $0 } ?? base
         case .expired: return L("Undo is no longer available", lang: lang)
+        case .undoing: return L("Undoing…", lang: lang)
+        case .unknown(let refused):
+            let base = L("The undo was cut off: some of it may not have been undone. Please check", lang: lang)
+            return refused.map { base + " · " + $0 } ?? base
         }
     }
 }

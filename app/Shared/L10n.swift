@@ -544,6 +544,8 @@ enum L10n {
         "Stopped. The last step may or may not have happened": "已停下。最后一步不确定做没做成",
         "Undid %d of %d": "撤回了 %d/%d 步",
         "Undo is no longer available": "已经不能撤回了",
+        "Undoing…": "正在撤销…",
+        "The undo was cut off: some of it may not have been undone. Please check": "撤销被打断了：可能有一部分没撤回，请检查一下",
         "Stop task": "停止任务",
         "Stop the task (⌘.)": "停止任务（⌘.）",
         "Stops the computer task; what it changed can be undone where the result offers it": "停止电脑任务；结果里有撤回时，它改过的东西可以撤回",
