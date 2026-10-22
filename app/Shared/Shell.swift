@@ -286,6 +286,8 @@ final class ShellModel: ObservableObject {
     @Published private(set) var answering: Set<String> = []
     /// The helper answers (its socket): the session list came back.
     @Published private(set) var reachable = true
+    /// An open waits for DeskMind's helper to take the cloud switch (at most a few seconds): said meanwhile.
+    @Published private(set) var waitingForHelper = false
     /// Cloud models are off in the settings: a session sends nothing (0.5 has no local-only session: it needs a cloud
     /// model, owner 10-22); the chat says so with a button to the settings.
     @Published private(set) var cloudOff = false
@@ -323,6 +325,7 @@ final class ShellModel: ObservableObject {
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
+        client.onWaitingForHelper = { [weak self] waiting in self?.deliver { self?.waitingForHelper = waiting } }
         applySettings()
     }
 

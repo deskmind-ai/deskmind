@@ -545,6 +545,8 @@ enum L10n {
         "Undid %d of %d": "撤回了 %d/%d 步",
         "Undo is no longer available": "已经不能撤回了",
         "Undoing…": "正在撤销…",
+        "The cloud model was turned off, so the task stopped.": "云端模型关了，任务停下了",
+        "Waiting for DeskMind's helper…": "正在等 DeskMind 的小助手…",
         "The cloud model is off. Turn it on in the model settings to run this task.": "云端模型关着。要运行这个任务，请在模型设置里打开它。",
         "Not sent: the cloud model is off": "没发出去：云端模型关着",
         "This conversation refused the new model settings. Check them in the model settings.": "这个对话没接受新的模型设置。请在模型设置里检查一下。",

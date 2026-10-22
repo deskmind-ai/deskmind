@@ -147,7 +147,8 @@ enum SessionHost {
     /// One at a time (`offSerial`). Off: the running sessions are nulled first, a harness op run going is stopped
     /// (`onModelsOff`), then the bit is written down, and the reply comes only after all of it. The bit in memory is
     /// the one that holds; a file that could not be written is said (`persisted: false`, still ok: the app does not
-    /// send it again for that) and read as off at the next start (the safe side) until the app asserts it.
+    /// send it again for that); for an off, the file is removed then, so the next start reads it missing — off, the
+    /// safe side — until the app asserts it.
     static func modelsOff(_ req: [String: Any]) -> [String: Any] {
         guard let off = req["off"] as? Bool else { return ["ok": false, "code": "bad_request", "error": "models.off needs off (true or false)"] }
         offSerial.lock(); defer { offSerial.unlock() }
@@ -164,6 +165,8 @@ enum SessionHost {
         do { try Data((off ? "1" : "0").utf8 + [0x0A]).write(to: offFile, options: .atomic) } catch {
             NSLog("DeskMind Hands: models.off not written down: \(error.localizedDescription)")
             persisted = false
+            // an "on" left in the file must not outlive an "off": no file reads as off at the next start
+            if off { try? FileManager.default.removeItem(at: offFile) }
         }
         return ["ok": true, "off": off, "persisted": persisted]
     }

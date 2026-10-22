@@ -65,6 +65,8 @@ enum ShellTests {
         oneOwnerTests()
         nulledRepairTests()
         runAnswerGateTests()
+        pingPongTests()
+        waitingForHelperTests()
         textTests()
     }
 
@@ -1340,12 +1342,13 @@ enum ShellTests {
     static func oneOwnerTests() {
         let mock = Mock()
         mock.replies = [SessionClient.Op.send: ["ok": true], "models.off": ["ok": true]]
-        var c: SessionClient!
-        let shared = ModelsOffSync(transport: mock, current: { c.modelOff })
-        c = SessionClient(transport: mock, modelsSync: shared)
+        let box = NSLock()
+        var engineOff = false                                // the engine setting: where the sync and the client read it
+        let shared = ModelsOffSync(transport: mock, current: { box.lock(); defer { box.unlock() }; return engineOff })
+        let c = SessionClient(transport: mock, modelsSync: shared)
         check(c.modelsSync === shared, "the client uses the app's one sync, as given")
         c.adoptSettings(config: "ds-flash", lang: "zh")
-        mock.onRequest = { op in if op == "models.off" { c.modelOff = true } }      // the switch turns off as it goes
+        mock.onRequest = { op in if op == "models.off" { box.lock(); engineOff = true; box.unlock() } }      // the switch turns off as it goes
         mock.streamLines = [["kind": "helper.watching", "open": ["ses_k"], "models_off": true],
                             ["kind": "session.config", "session_id": "ses_k", "seq": 1, "config": NSNull(), "lang": "zh", "by": "set_config"]]
         _ = c.watch()
@@ -1358,6 +1361,90 @@ enum ShellTests {
         let client = (try? String(contentsOf: dir.appendingPathComponent("Shared/SessionClient.swift"), encoding: .utf8)) ?? ""
         check(main.contains("SessionClient(transport: transport, modelsSync: .shared)") && !client.contains("is HelperSessionTransport ?"),
               "the shell's client is given the app's sync; never chosen by the transport's type")
+    }
+
+    /// Re-review of c6bc196 (E2, the reviewer's PingPong): cloud turned off in the sheet with a session running. The
+    /// engine setting changes at once; the window's settings catch up only when the sheet closes. With one source of
+    /// truth (the client reads the switch where the sync reads it) nothing ping-pongs meanwhile: one models.off, no
+    /// configuration sent to be refused.
+    static func pingPongTests() {
+        final class FakeHelper: SessionTransport {
+            let lock = NSLock()
+            var off = false
+            var counts: [String: Int] = [:]
+            weak var client: SessionClient?
+            private var seq = 100
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                let op = body["op"] as? String ?? ""
+                lock.lock()
+                var key = op
+                if op == "session.send", let l = body["line"] as? [String: Any] { key += ":" + (l["type"] as? String ?? "") + (l["config"] is NSNull ? "(null)" : "(cfg)") }
+                counts[key, default: 0] += 1
+                if op == "models.off" { off = body["off"] as? Bool ?? false }
+                let isOff = off
+                seq += 1
+                let n = seq
+                lock.unlock()
+                if op == "models.off" {
+                    // the helper nulls the running session: it stores and streams session.config null
+                    if isOff { DispatchQueue.global().async { [weak self] in self?.client?.feed(["kind": "session.config", "session_id": "ses_t", "seq": n, "config": NSNull(), "lang": "zh", "by": "set_config"]) } }
+                    return ["ok": true, "off": isOff, "persisted": true]
+                }
+                if op == "session.send", let l = body["line"] as? [String: Any], l["type"] as? String == "set_config", isOff, !(l["config"] is NSNull) {
+                    return ["ok": false, "code": "no_model", "control": "set_config", "error": "cloud models are off"]
+                }
+                return ["ok": true]
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+        }
+        let helper = FakeHelper()
+        let box = NSLock()
+        var engineOff = false
+        let sync = ModelsOffSync(transport: helper, current: { box.lock(); defer { box.unlock() }; return engineOff })
+        let c = SessionClient(transport: helper, modelsSync: sync)
+        helper.client = c
+        c.adoptSettings(config: "ds-flash", lang: "zh")
+        c.feed(["t": 1, "session_id": "ses_t", "kind": "session.start", "protocol": ["session": 1], "last_seq": 0, "resumed": false])
+        c.reconciling.wait()
+        _ = helper.request(["op": "models.off", "off": false])
+        helper.lock.lock(); helper.counts = [:]; helper.lock.unlock()
+        box.lock(); engineOff = true; box.unlock()             // the sheet saves "off": the engine setter pushes
+        sync.push()
+        Thread.sleep(forTimeInterval: 0.3)                     // the sheet not closed yet
+        helper.lock.lock(); let during = helper.counts; helper.lock.unlock()
+        c.modelOff = true                                      // its onDismiss: the window's settings catch up
+        Thread.sleep(forTimeInterval: 0.5)
+        c.reconciling.wait()
+        helper.lock.lock(); let after = helper.counts; helper.lock.unlock()
+        check(during["models.off", default: 0] == 1 && during["session.send:set_config(cfg)", default: 0] == 0,
+              "the switch flipped with a session running: one models.off, no configuration refused (\(during.sorted { $0.key < $1.key }))")
+        check(after["models.off", default: 0] == 1 && after["session.send:set_config(cfg)", default: 0] == 0, "and none after (\(after.sorted { $0.key < $1.key }))")
+    }
+
+    /// Re-review of c6bc196 (E7): an open that waits for the helper to take the switch says so meanwhile.
+    static func waitingForHelperTests() {
+        final class Slow: SessionTransport {
+            let release = DispatchSemaphore(value: 0)
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                if body["op"] as? String == "models.off" { _ = release.wait(timeout: .now() + 2); return ["ok": true] }
+                if body["op"] as? String == SessionClient.Op.open { return ["ok": true, "session_id": "ses_w"] }
+                return ["ok": true]
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+        }
+        let t = Slow()
+        let sync = ModelsOffSync(transport: t, current: { false })
+        var seen: [Bool] = []
+        let seenLock = NSLock()
+        let m = ShellModel(client: SessionClient(transport: t, modelsSync: sync), defaults: scratchDefaults(), config: { "c" }, lang: { .zhHans },
+                           work: { $0() }, deliver: { f in seenLock.lock(); f(); seenLock.unlock() })
+        sync.push()
+        let watch = Thread { var last = false; while true { let w = m.waitingForHelper; if w != last { seen.append(w); last = w }; if seen.count >= 2 { break }; usleep(1_000) } }
+        watch.start()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { t.release.signal() }
+        _ = m.client.open(sessionId: "ses_w", config: "c", lang: "zh")
+        usleep(100_000)
+        check(seen.first == true && !m.waitingForHelper, "the open said it waited for the helper, then stopped saying so (\(seen))")
     }
 
     /// Re-review of 62ff17a (effect 3): a session the helper nulled while the switch is on (unseen as a mismatch here), or
@@ -1389,12 +1476,22 @@ enum ShellTests {
     static func runAnswerGateTests() {
         var st = HarnessEvents.State()
         st.askID = "a1"
-        st.askOptions = [["kind": "approve", "text": "可以"], ["kind": "choice", "text": "红"], ["kind": "cancel", "text": "先别做了"], ["kind": "undo", "text": "撤销"]]
+        st.askOptions = [["kind": "approve", "text": "可以"], ["kind": "value", "text": "红"], ["kind": "cancel", "text": "先别做了"], ["kind": "undo", "text": "撤销"]]
         typealias B = HarnessEvents.CardButton
         check(HarnessEvents.needsNoModel(.deny, state: st) && HarnessEvents.needsNoModel(.option(2, "先别做了"), state: st)
               && HarnessEvents.needsNoModel(.option(3, "撤销"), state: st), "the way out and undo need no model")
         check(!HarnessEvents.needsNoModel(.approve, state: st) && !HarnessEvents.needsNoModel(.option(1, "红"), state: st)
               && !HarnessEvents.needsNoModel(.words("蓝"), state: st), "approve, a pick and words do")
+        // Deny is classified by what it resolves to: on a card with no cancel, its first option that is not approve —
+        // here a pick, which lets the run go on (#107 re-review of c6bc196)
+        var picks = HarnessEvents.State()
+        picks.askID = "a2"
+        picks.askOptions = [["kind": "approve", "text": "可以"], ["kind": "value", "text": "红"]]
+        check(!HarnessEvents.needsNoModel(.deny, state: picks), "Deny that resolves to a pick needs the model")
+        var only = HarnessEvents.State()
+        only.askID = "a3"
+        only.askOptions = [["kind": "approve", "text": "可以"]]
+        check(HarnessEvents.needsNoModel(.deny, state: only), "Deny on an approve-only card (answered with nothing: no) needs none")
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let run = (try? String(contentsOf: dir.appendingPathComponent("Helper/HarnessRun.swift"), encoding: .utf8)) ?? ""
         check(run.contains("if SessionHost.modelsOffNow && !HarnessEvents.needsNoModel(button, state: state)") && run.contains("static func stopForModelsOff()"),

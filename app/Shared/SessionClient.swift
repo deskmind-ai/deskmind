@@ -101,8 +101,23 @@ final class ModelsOffSync {
         queue.asyncAfter(deadline: .now() + next) { [weak self] in self?.attempt(g, delay: min(delay * 2, 30)) }
     }
 
+    /// The switch as it is now (where every path reads it).
+    func switchOff() -> Bool { current() }
+    /// A push not acked yet (a retry may be scheduled).
+    var isPending: Bool { lock.lock(); defer { lock.unlock() }; return pending }
+    /// A push unless one is under way already (it carries `then` too): repair paths, at most one per push.
+    func pushOnce(then: (() -> Void)? = nil) {
+        lock.lock()
+        if pending { if let then { waiting.append(then) }; lock.unlock(); return }
+        lock.unlock()
+        push(then: then)
+    }
+    /// How long an open waits for the helper's ack (settle's default).
+    var settleTimeout: Double = 3
+
     /// Waits (bounded) until the switch the helper holds is acked — a retry still scheduled is waited for too.
-    func settle(timeout: Double = 3) {
+    func settle(timeout: Double? = nil) {
+        let timeout = timeout ?? settleTimeout
         let until = Date().addingTimeInterval(timeout)
         while Date() < until {
             lock.lock(); let busy = pending; lock.unlock()
@@ -257,11 +272,16 @@ final class SessionClient {
     /// reconciled to it (`reconcile`), an open re-checks it once its reply is in (the switch may have moved meanwhile)
     /// and sends the matching set_config before anything else, and a control that needs the model is never written
     /// while it is off. An open then carries no configuration (one on the open line outranks the stored null).
+    ///
+    /// One source of truth: with the app's ModelsOffSync injected, the switch is read where it reads it (the engine
+    /// setting), never a copy (#107 review: a cached copy that caught up only when the sheet closed set off a storm of
+    /// models.off and refused set_configs). A client without one (a test) keeps its own.
     var modelOff: Bool {
         get { lock.lock(); defer { lock.unlock() }; return off }
-        set { lock.lock(); off = newValue; lock.unlock() }
+        set { lock.lock(); offStored = newValue; lock.unlock() }
     }
-    private var off = false
+    private var offStored = false
+    private var off: Bool { injectedSync?.switchOff() ?? offStored }
     /// Sessions whose open request is out (a reconcile reaches them too).
     private var opening: Set<String> = []
     /// Keeps the helper's models-off bit equal to `modelOff` (the app's switch): the app's one for the helper's own
@@ -276,7 +296,8 @@ final class SessionClient {
     /// switch as it is then, not as it was here.
     func helperSays(modelsOff theirs: Bool) {
         guard theirs != modelOff else { return }
-        modelsSync.push { [weak self] in
+        // at most once per push: while one is under way, it carries this too
+        modelsSync.pushOnce { [weak self] in
             guard let self else { return }
             self.lock.lock(); let d = self.defaults, now = self.off; self.lock.unlock()
             self.reconcile(config: d.config, lang: d.lang, off: now)
@@ -323,6 +344,8 @@ final class SessionClient {
         if let l = sessionLocks[id] { return l }
         let l = NSLock(); sessionLocks[id] = l; return l
     }
+    /// An open waits for the helper to take the switch (ModelsOffSync.settle): true while it does, then false.
+    var onWaitingForHelper: ((Bool) -> Void)?
     /// The clock the gap grace is measured by (tests set their own).
     var now: () -> Date = Date.init
     /// Called after a line changed a session's state (on the thread that fed it).
@@ -386,7 +409,12 @@ final class SessionClient {
         let wasExited = sessionId.map { state($0).exited != nil } ?? false
         // cloud models off: no configuration on the open line (it would outrank the session's stored null), and no
         // model from its first control on (set_config null, before anything else is written)
-        modelsSync.settle()                 // (the switch the helper holds, asserted before, is there first)
+        // (the switch the helper holds, asserted before, is there first: said while it is awaited)
+        if modelsSync.isPending {
+            onWaitingForHelper?(true)
+            modelsSync.settle()
+            onWaitingForHelper?(false)
+        }
         let noModel = modelOff
         if let sessionId { lock.lock(); opening.insert(sessionId); lock.unlock() }
         defer { if let sessionId { lock.lock(); opening.remove(sessionId); lock.unlock() } }

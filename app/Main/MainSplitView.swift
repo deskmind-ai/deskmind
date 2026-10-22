@@ -250,6 +250,9 @@ struct ChatColumn: View {
             if !shell.reachable {
                 Banner(text: L("DeskMind's helper isn't answering. Conversations come back when it does.", lang: lang))
             }
+            if shell.waitingForHelper {
+                Banner(text: L("Waiting for DeskMind's helper…", lang: lang))
+            }
             if shell.showsCloudOff(s) {
                 CloudOffRow(openSettings: openSettings)
             }

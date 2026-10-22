@@ -288,7 +288,7 @@ func serve() {
             if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {
                 // cloud models off (the helper's bit): a run with the cloud engine is refused before anything starts
-            if let refusal = SessionHost.refusesRun(req) {
+                if let refusal = SessionHost.refusesRun(req) {
                     var line = (try? JSONSerialization.data(withJSONObject: refusal)) ?? Data()
                     line.append(0x0A)
                     _ = line.withUnsafeBytes { write(c, $0.baseAddress, line.count) }

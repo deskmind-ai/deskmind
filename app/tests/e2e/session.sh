@@ -37,8 +37,37 @@ if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$
      tests/e2e/PathTransport.swift tests/e2e/ShellE2E.swift > "$OUT/build-shell.log" 2>&1; then
   cat "$OUT/build-shell.log"; exit 1
 fi
+# the helper's own op run (the old window's task, HarnessRun.run) against models.off, hermetic: its runtime is a node
+# wrapper (tests/e2e/node-wrapper.sh) that refuses anything but the helper's driver hands and runs it on sim, with a
+# clean environment and the fake model; a support folder of its own (DeskMindIPC.supportOverride)
+OPRUN="$OUT/oprun"
+mkdir -p "$OPRUN/bin/runtime/node/bin" "$OPRUN/bin/runtime/harness" "$OPRUN/logs" "$OPRUN/home" "$OPRUN/tmp"
+OPRUN_BIN="$OPRUN/bin/OpRunE2E"
+if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$OPRUN_BIN" $SOURCES tests/e2e/OpRunE2E.swift \
+     > "$OUT/build-oprun.log" 2>&1; then
+  cat "$OUT/build-oprun.log"; exit 1
+fi
+cp tests/e2e/node-wrapper.sh "$OPRUN/bin/runtime/node/bin/node"
+chmod +x "$OPRUN/bin/runtime/node/bin/node"
+ln -sf "$RUNTIME/harness/harness.mjs" "$OPRUN/bin/runtime/harness/harness.mjs"
+mkdir -p "$OPRUN/bin/runtime/hands"
+printf 'e2e' > "$OPRUN/bin/runtime/hands/.version"     # (the work copy OpRunE2E lays out says the same: nothing to copy)
+[ -e "$RUNTIME/bin" ] && ln -sfn "$RUNTIME/bin" "$OPRUN/bin/runtime/bin"
+oprun() {   # oprun <scenario> [fake model mode]
+  local port="$OPRUN/port-$1" fake pid code=0
+  rm -f "$port"
+  python3 -I tests/e2e/fake2.py "$port" ${2:-} & fake=$!
+  for _ in $(seq 100); do [ -s "$port" ] && break; sleep 0.05; done
+  printf 'REAL_NODE=%q\nLOGDIR=%q\nFAKE_HOME=%q\nFAKE_TMP=%q\nLOCAL_URL=%q\n' "$RUNTIME/node/bin/node" "$OPRUN/logs" "$OPRUN/home" \
+    "$OPRUN/tmp" "http://127.0.0.1:$(cat "$port")" > "$OPRUN/bin/runtime/wrapper.env"
+  "$OPRUN_BIN" "$1" "http://127.0.0.1:$(cat "$port")" || code=$?
+  kill "$fake" 2>/dev/null; wait "$fake" 2>/dev/null || true
+  return $code
+}
 status=0
-"$BIN" lock "$OUT/lock" || status=$?
+for scenario in stop gate race twice; do oprun "$scenario" || status=$((status + $?)); done
+oprun undo undo || status=$((status + $?))
+"$BIN" lock "$OUT/lock" || status=$((status + $?))
 "$BIN" linger "$OUT/linger" || status=$((status + $?))
 python3 -I tests/e2e/session_e2e.py "$BIN" "$RUNTIME/node/bin/node" "$RUNTIME/harness/harness.mjs" "$OUT" "$CLIENT" "$SHELL_BIN" || status=$((status + $?))
 [ -z "$KEEP" ] && [ "$status" = 0 ] && rm -rf "$OUT"

@@ -608,6 +608,16 @@ def run(env, helper):
         check(request({"op": "models.off", "off": False}).get("ok") is True, "models on again")
         r = request({"op": "e2e.run", "engine": "harness", "goal": "给笔记换个颜色", "config": CONFIG})
         check(r.get("would_run") is True, f"models on: the cloud engine's run goes ({r})")
+        # the bit's file cannot be written (a folder in its place): said, and an off leaves no "on" behind — the next
+        # start reads it missing, off
+        offp = os.path.join(DIR, "models-off")
+        if os.path.isfile(offp):
+            os.remove(offp)
+        os.makedirs(os.path.join(offp, "x"), exist_ok=True)
+        r = request({"op": "models.off", "off": True})
+        check(r.get("ok") is True and r.get("persisted") is False and not os.path.exists(offp),
+              f"models off not written down: said (persisted false), and the file gone, so a restart reads off ({r}, {os.path.exists(offp)})")
+        check(request({"op": "models.off", "off": False}).get("persisted") is True, "models on again, written down")
         check(send(s5, {"type": "set_config", "config": CONFIG, "lang": "zh"}).get("ok") is True, "models on: a configuration passes")
         check(send(s5, {"type": "say", "text": "你好"}).get("ok") is True, "models on: a say passes")
         check(until(lambda: [m for m in session_lines(s5) if m.get("role") == "assistant"], 30) is not None, "and is answered")
