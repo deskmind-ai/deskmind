@@ -10,42 +10,42 @@ enum SessionTests {
     }
 
     static func run() {
-        decodeTests()
-        chatTests()
-        chatErrorTests()
-        cardTaskTests()
-        undoTests()
-        stopTests()
-        steerQueueTests()
-        questionTests()
-        pausedLookOnlyTests()
-        lockedTests()
-        replayTests()
-        unknownTests()
-        deltaTests()
-        cardModelTests()
-        staleAnswerTests()
-        clientTests()
-        orderTests()
-        undoOrderTests()
-        resentAskTests()
-        causeTests()
-        sessionExitTests()
-        closedWithoutEndTests()
-        undoRecordTests()
-        clientGapTests()
-        cardIdentityTests()
-        steerLookOnlyTests()
-        wireNeverCrashesTests()
-        crossStreamTests()
-        exitLeftoversTests()
-        interleavingPropertyTests()
-        cutOffDotTests()
-        rereviewTests()
-        processInterleavingTests()
-        ownershipTests()
-        resendAndAcceptanceTests()
-        duplicateSendTests()
+        DecisionTests.group("session.decodeTests"); decodeTests()
+        DecisionTests.group("session.chatTests"); chatTests()
+        DecisionTests.group("session.chatErrorTests"); chatErrorTests()
+        DecisionTests.group("session.cardTaskTests"); cardTaskTests()
+        DecisionTests.group("session.undoTests"); undoTests()
+        DecisionTests.group("session.stopTests"); stopTests()
+        DecisionTests.group("session.steerQueueTests"); steerQueueTests()
+        DecisionTests.group("session.questionTests"); questionTests()
+        DecisionTests.group("session.pausedLookOnlyTests"); pausedLookOnlyTests()
+        DecisionTests.group("session.lockedTests"); lockedTests()
+        DecisionTests.group("session.replayTests"); replayTests()
+        DecisionTests.group("session.unknownTests"); unknownTests()
+        DecisionTests.group("session.deltaTests"); deltaTests()
+        DecisionTests.group("session.cardModelTests"); cardModelTests()
+        DecisionTests.group("session.staleAnswerTests"); staleAnswerTests()
+        DecisionTests.group("session.clientTests"); clientTests()
+        DecisionTests.group("session.orderTests"); orderTests()
+        DecisionTests.group("session.undoOrderTests"); undoOrderTests()
+        DecisionTests.group("session.resentAskTests"); resentAskTests()
+        DecisionTests.group("session.causeTests"); causeTests()
+        DecisionTests.group("session.sessionExitTests"); sessionExitTests()
+        DecisionTests.group("session.closedWithoutEndTests"); closedWithoutEndTests()
+        DecisionTests.group("session.undoRecordTests"); undoRecordTests()
+        DecisionTests.group("session.clientGapTests"); clientGapTests()
+        DecisionTests.group("session.cardIdentityTests"); cardIdentityTests()
+        DecisionTests.group("session.steerLookOnlyTests"); steerLookOnlyTests()
+        DecisionTests.group("session.wireNeverCrashesTests"); wireNeverCrashesTests()
+        DecisionTests.group("session.crossStreamTests"); crossStreamTests()
+        DecisionTests.group("session.exitLeftoversTests"); exitLeftoversTests()
+        DecisionTests.group("session.interleavingPropertyTests"); interleavingPropertyTests()
+        DecisionTests.group("session.cutOffDotTests"); cutOffDotTests()
+        DecisionTests.group("session.rereviewTests"); rereviewTests()
+        DecisionTests.group("session.processInterleavingTests"); processInterleavingTests()
+        DecisionTests.group("session.ownershipTests"); ownershipTests()
+        DecisionTests.group("session.resendAndAcceptanceTests"); resendAndAcceptanceTests()
+        DecisionTests.group("session.duplicateSendTests"); duplicateSendTests()
     }
 
     // MARK: fixtures
@@ -468,20 +468,43 @@ enum SessionTests {
 
     // MARK: the client
 
+    /// The helper, scripted. Thread-safe: the client also asks from its own queues (a reconcile runs on
+    /// `reconcileQueue`) while a test reads or resets what was asked — unguarded, two appends at once corrupted the
+    /// array and crashed the test binary on CI (#107 at c2997ba, a segmentation fault).
     final class MockTransport: SessionTransport {
-        var requests: [[String: Any]] = []
-        var replies: [String: [String: Any]] = [:]
+        private let lock = NSLock()
+        private var _requests: [[String: Any]] = []
+        private var _replies: [String: [String: Any]] = [:]
+        private var _queued: [String: [[String: Any]]] = [:]
+        private var _onRequest: ((String) -> Void)? = nil
+        private func locked<T>(_ f: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return f() }
+        var requests: [[String: Any]] {
+            get { locked { _requests } }
+            set { locked { _requests = newValue } }
+        }
+        var replies: [String: [String: Any]] {
+            get { locked { _replies } }
+            set { locked { _replies = newValue } }
+        }
         var streamLines: [[String: Any]] = []
         /// Replies given once each, before `replies`, per op.
-        var queued: [String: [[String: Any]]] = [:]
-        /// Called with each request's op before it is answered (a line the helper streams meanwhile).
-        var onRequest: ((String) -> Void)? = nil
+        var queued: [String: [[String: Any]]] {
+            get { locked { _queued } }
+            set { locked { _queued = newValue } }
+        }
+        /// Called with each request's op before it is answered (a line the helper streams meanwhile); outside the lock.
+        var onRequest: ((String) -> Void)? {
+            get { locked { _onRequest } }
+            set { locked { _onRequest = newValue } }
+        }
         func request(_ body: [String: Any]) -> [String: Any]? {
-            requests.append(body)
             let op = body["op"] as? String ?? ""
-            onRequest?(op)
-            if var q = queued[op], !q.isEmpty { let r = q.removeFirst(); queued[op] = q; return r }
-            return replies[op]
+            let hook: ((String) -> Void)? = locked { _requests.append(body); return _onRequest }
+            hook?(op)
+            return locked {
+                if var q = _queued[op], !q.isEmpty { let r = q.removeFirst(); _queued[op] = q; return r }
+                return _replies[op]
+            }
         }
         /// Each watch's lines from its number (1, 2, …), when set; a guard ends a run-away loop.
         var gen: ((Int) -> [[String: Any]])? = nil
@@ -492,7 +515,7 @@ enum SessionTests {
         var clock = Date(timeIntervalSince1970: 0)
         var quiet: TimeInterval = 5
         func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
-            requests.append(body)
+            locked { _requests.append(body) }
             watches += 1
             if watches > 50 { return true }
             let lines = gen.map { $0(watches) } ?? (nextStreams.isEmpty ? streamLines : nextStreams.removeFirst())
@@ -1124,6 +1147,7 @@ enum SessionTests {
         let deep = #"{"session_id":"s","kind":"session.queue","items":[],"x":"# + String(repeating: "[", count: 510) + "1" + String(repeating: "]", count: 510) + "}"
         let deepUnknown = #"{"session_id":"s","kind":"session.zzz","x":"# + String(repeating: #"{"a":"#, count: 500) + "1" + String(repeating: "}", count: 500) + "}"
         let fine = #"{"session_id":"s","kind":"session.zzz","x":"# + String(repeating: #"{"a":"#, count: 90) + "1" + String(repeating: "}", count: 90) + "}"
+        let finished = DispatchSemaphore(value: 0)
         let th = Thread {
             let c = SessionClient(transport: MockTransport())
             for text in [deep, deepUnknown] {
@@ -1134,12 +1158,11 @@ enum SessionTests {
             let tooDeep = c.state("s").unknownKinds.isEmpty && ProtocolLine.parse(deep) == nil
             if let o = DeskMindIPC.lineObject(Data(fine.utf8)) { c.feed(o) }
             ok = tooDeep && c.state("s").unknownKinds == ["session.zzz"]
+            finished.signal()            // (its result handed over through the semaphore, not by polling isFinished)
         }
         th.stackSize = 512 * 1024
-        let done = DispatchSemaphore(value: 0)
-        let wrapped = Thread { th.start(); while !th.isFinished { usleep(1000) }; done.signal() }
-        wrapped.start()
-        done.wait()
+        th.start()
+        finished.wait()
         check(ok, "lines nested 500 deep on a 512 KB stack: left, no crash; 90 deep: read")
         check(DeskMindIPC.nestingWithin(Data(#"{"a":"[[[[[[","b":"\"[[["}"#.utf8), limit: 1), "brackets in strings do not count")
     }

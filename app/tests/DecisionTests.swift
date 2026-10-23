@@ -8,6 +8,9 @@ import Foundation
 @main
 enum DecisionTests {
     static var failures = 0
+    /// The test group about to run, named on stderr (one line in all, no newline until the end): a crash in a group
+    /// (CI: a segmentation fault with nothing else said, #107 at c2997ba) shows which one it was.
+    static func group(_ name: String) { FileHandle.standardError.write(Data((name + " ").utf8)) }
 
     static func check(_ ok: Bool, _ what: String, file: StaticString = #file, line: UInt = #line) {
         if !ok { failures += 1; print("FAIL \(line): \(what)") }
@@ -206,21 +209,21 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
-        liveViewTests()
-        issueReportTests()
-        runErrorTests()
-        fileExampleTests()
-        selfTestTests()
-        notInstalledTests()
-        folderPolicyTests()
-        diagnosticsTests()
-        recordingCaptureTests()
-        helperLocationTests()
-        harnessEventsTests()
-        cardButtonTests()
+        group("liveViewTests"); liveViewTests()
+        group("issueReportTests"); issueReportTests()
+        group("runErrorTests"); runErrorTests()
+        group("fileExampleTests"); fileExampleTests()
+        group("selfTestTests"); selfTestTests()
+        group("notInstalledTests"); notInstalledTests()
+        group("folderPolicyTests"); folderPolicyTests()
+        group("diagnosticsTests"); diagnosticsTests()
+        group("recordingCaptureTests"); recordingCaptureTests()
+        group("helperLocationTests"); helperLocationTests()
+        group("harnessEventsTests"); harnessEventsTests()
+        group("cardButtonTests"); cardButtonTests()
         SessionTests.run()
         ShellTests.run()
-        sessionWireTests()
+        group("sessionWireTests"); sessionWireTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -238,6 +241,7 @@ enum DecisionTests {
         check(!AppWindow.shouldLaunch(bundle: "com.apple.TextEdit", running: false) && !AppWindow.shouldLaunch(bundle: "com.apple.finder", running: false),
               "TextEdit and Finder: hands opens their documents and folders")
 
+        FileHandle.standardError.write(Data("\n".utf8))
         print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }

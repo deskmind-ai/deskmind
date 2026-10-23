@@ -306,7 +306,9 @@ final class SessionClient {
     /// The one ModelsOffSync of the app (injected: `init(transport:modelsSync:)`); a client made without one (a test)
     /// has its own, on its own switch.
     private let injectedSync: ModelsOffSync?
-    lazy var modelsSync: ModelsOffSync = injectedSync ?? ModelsOffSync(transport: transport, current: { [weak self] in self?.modelOff ?? false })
+    /// Made in init, not lazily: it is read from the reconcile queue and the watch thread at once, and a lazy var's first
+    /// read is not thread-safe (ThreadSanitizer, #107 at c2997ba).
+    private(set) var modelsSync: ModelsOffSync!
 
     /// The helper says whether it holds cloud models off (helper.watching's `models_off`, a `no_model` refusal): when
     /// that is not the app's switch, the switch is pushed again (until acked), then every session reconciled — to the
@@ -371,6 +373,7 @@ final class SessionClient {
     init(transport: SessionTransport = HelperSessionTransport(), modelsSync: ModelsOffSync? = nil) {
         self.transport = transport
         self.injectedSync = modelsSync
+        self.modelsSync = modelsSync ?? ModelsOffSync(transport: transport, current: { [weak self] in self?.modelOff ?? false })
     }
 
     func state(_ sessionId: String) -> SessionState {
@@ -711,6 +714,9 @@ final class SessionClient {
     /// process or acked, else what its open line carried; else its stored session.config), never with an old switch.
     /// Unknown with the model on: left (it opened with a configuration of the app's), unless the settings just changed.
     private func reconcileNow(_ id: String, settingsChanged: Bool) {
+        // the switch the helper holds first, as an open does (a configuration sent before a models.off the helper has
+        // not taken yet is refused there, and taken as sent here: seen as a test flake under load at c2997ba)
+        if modelsSync.isPending { modelsSync.settle() }
         lock.lock()
         let live = !deleted.contains(id) && (opening.contains(id) || states[id].map { $0.exited == nil || $0.awaitingStart } ?? true)
         let how = reopenSettings(id), noModel = off
