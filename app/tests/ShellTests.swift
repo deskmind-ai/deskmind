@@ -2410,6 +2410,36 @@ enum ShellTests {
                 check(bubble == nil, "\(c.name): taken, no bubble")
             }
         }
+        // a steer (⌘Enter) refused for a card that came before it went: once the card is answered and the task still
+        // runs, send again goes to that task (#107 delta review of 7f09c1b: it said "task ended" for good)
+        do {
+            let mock = Mock()
+            mock.replies[SessionClient.Op.send] = ["ok": true]
+            var later: [() -> Void] = []
+            let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                               work: { later.append($0) }, deliver: { $0() })
+            let fixture = SessionTests.lines("task-card")
+            let askAt = fixture.firstIndex { $0.event.kind == "ask" } ?? 0
+            let resumedAt = fixture.firstIndex { $0.event.kind == "resumed" } ?? 0
+            for l in fixture.prefix(askAt) { m.client.feed(l) }
+            let run = m.client.state("ses_t").runningTask?.runId ?? ""
+            m.selected = "ses_t"
+            m.draft = "改成蓝色"
+            m.submit(sendNow: true)                                      // ⌘Enter: a steer of the running task
+            m.client.feed(fixture[askAt])                                // a card comes before it goes
+            for f in later { f() }; later = []
+            let bubble = m.client.state("ses_t").unsent.first
+            check(bubble?.refused == "card_open", "the steer: an unsent bubble, card_open")
+            for l in fixture[(askAt + 1)...resumedAt] { m.client.feed(l) }   // the card answered; the task goes on
+            check(m.client.state("ses_t").runningTask?.runId == run && m.composer.enabled, "(the task still runs, the composer takes words)")
+            mock.requests = []
+            m.resend(bubble?.id ?? "")
+            for f in later { f() }; later = []
+            let line = sent(mock)
+            check(line?["type"] as? String == "steer" && line?["run_id"] as? String == run && line?["text"] as? String == "改成蓝色",
+                  "send again: the steer goes to its task: \(String(describing: line))")
+        }
+
         // a card waits: the bubble's send again waits too (answered on the card first — M1 decision 1)
         do {
             let mock = Mock()

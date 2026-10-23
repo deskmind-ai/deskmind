@@ -540,6 +540,11 @@ final class SessionClient {
         let serial = sessionLock(sessionId)
         serial.lock(); defer { serial.unlock() }
         let s = state(sessionId)
+        // a steer names its task first — the one running now — so that, refused for a card, its bubble still goes to that
+        // task once the card is answered (#107 delta review of 7f09c1b: named after the card check, it was "task ended"
+        // for good); a resend never goes to another task
+        var control = control
+        if case .steer(let t, nil) = control, let r = s.runningTask?.runId { control = .steer(t, runId: r) }
         // Every message the user submits ends in exactly one place: taken by the session (outbox, queue, history), or
         // an unsent bubble in the outbox with its reason, to send again or remove — never dropped, never put back over
         // a newer draft (#107 review at c0dbe96: a card that came between Enter and the send refused the words before
@@ -559,12 +564,7 @@ final class SessionClient {
         if control.isTyping && !s.composerEnabled { return refusedBeforeHeld("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
         if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return refusedBeforeHeld(why == "no task is running" ? "task_ended" : why) }
-        // a steer names its task: the one running now, made explicit, so that a resend never goes to another one
-        var control = control
-        if case .steer(let t, nil) = control {
-            guard let r = s.runningTask?.runId else { return refusedBeforeHeld("task_ended") }    // nothing to name: not sent
-            control = .steer(t, runId: r)
-        }
+        if case .steer(_, nil) = control { return refusedBeforeHeld("task_ended") }    // no task to name: not sent
         // the user's words: held in the outbox from here until the session says what became of them
         var line = control.line
         var words: String? = nil
@@ -779,7 +779,7 @@ final class SessionClient {
     ///
     /// `version`: the settings' version the caller read `config` and `lang` at (nil: now). Older than the newest by the
     /// time it is written (compared and written under the lock): dropped, and the settings read again — the newest go,
-    /// to its next process and on the wire. Settings that change while it is sent: sent once more (at most twice).
+    /// to its next process and on the wire. Settings that change while it is sent: sent once more (two sends at most).
     @discardableResult
     func setConfig(_ sessionId: String, config: String?, lang: String?, version: Int? = nil) -> Bool {
         let serial = sessionLock(sessionId)
@@ -789,7 +789,7 @@ final class SessionClient {
         lock.lock(); var read = version ?? settingsVersion; lock.unlock()
         var want = (config: config, lang: lang)
         var ok = false
-        for _ in 0..<3 {
+        for _ in 0..<2 {
             lock.lock()
             // a write older than the newest settings: the newest, read now
             if read < settingsVersion { want = reopenSettings(sessionId); read = settingsVersion }
@@ -848,11 +848,15 @@ final class SessionClient {
     /// knows opens again with these, whenever its next process starts — whether or not its process now can end (#107
     /// review: a busy or exited session kept the old ones; a language switch reached only the defaults).
     func adoptSettings(config: String?, lang: String?) {
-        lock.lock()
+        lock.lock(); defer { lock.unlock() }
+        let ids = Set(opened.keys).union(states.keys).union(reopenWith.keys)
+        // a new version only for a real change (the same settings again would only send them again)
+        let same = defaults.config == config && defaults.lang == lang
+            && ids.allSatisfy { let h = reopenSettings($0); return h.config == config && h.lang == lang }
+        if same { return }
         settingsVersion += 1
         defaults = (config, lang)
-        for id in Set(opened.keys).union(states.keys).union(reopenWith.keys) { reopenWith[id] = (config, lang) }
-        lock.unlock()
+        for id in ids { reopenWith[id] = (config, lang) }
     }
 
     /// Asks the helper for a new process for the session, so that a new key reaches it: a process reads its keys when
