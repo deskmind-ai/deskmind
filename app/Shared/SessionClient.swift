@@ -714,9 +714,6 @@ final class SessionClient {
     /// process or acked, else what its open line carried; else its stored session.config), never with an old switch.
     /// Unknown with the model on: left (it opened with a configuration of the app's), unless the settings just changed.
     private func reconcileNow(_ id: String, settingsChanged: Bool) {
-        // the switch the helper holds first, as an open does (a configuration sent before a models.off the helper has
-        // not taken yet is refused there, and taken as sent here: seen as a test flake under load at c2997ba)
-        if modelsSync.isPending { modelsSync.settle() }
         lock.lock()
         let live = !deleted.contains(id) && (opening.contains(id) || states[id].map { $0.exited == nil || $0.awaitingStart } ?? true)
         let how = reopenSettings(id), noModel = off

@@ -69,6 +69,7 @@ enum ShellTests {
         DecisionTests.group("shell.waitingForHelperTests"); waitingForHelperTests()
         DecisionTests.group("shell.savedAnywhereTests"); savedAnywhereTests()
         DecisionTests.group("shell.keyAckTests"); keyAckTests()
+        DecisionTests.group("shell.reconcileNoWaitTests"); reconcileNoWaitTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -1270,14 +1271,46 @@ enum ShellTests {
     /// The client hears it (helper.watching's models_off, a no_model refusal), asserts its switch again, and once the
     /// helper has it reconciles every session — the one the helper nulled gets its configuration back.
     static func helperDisagreesTests() {
-        let mock = Mock()
+        // the helper as it is: holding models off, it refuses a configuration (no_model) until models.off false comes —
+        // a set_config the client's reconcile sends before its own push lands is refused, never taken as applied (the
+        // client then pushes and reconciles again). A mock that took it made this test depend on the order the two
+        // threads ran in (a flake under load at c2997ba).
+        final class OffHelper: SessionTransport {
+            let inner = Mock()
+            private let lock = NSLock()
+            private var off = true
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                let op = body["op"] as? String ?? ""
+                lock.lock()
+                if op == "models.off" { off = body["off"] as? Bool ?? off }
+                let refuse = off && op == SessionClient.Op.send && (body["line"] as? [String: Any])?["type"] as? String == "set_config"
+                    && !((body["line"] as? [String: Any])?["config"] is NSNull)
+                lock.unlock()
+                let r = inner.request(body)
+                return refuse ? ["ok": false, "code": "no_model", "control": "set_config"] : r
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
+                inner.stream(body, onLine: onLine, onIdle: onIdle)
+            }
+        }
+        let helper = OffHelper()
+        let mock = helper.inner
         mock.replies = [SessionClient.Op.send: ["ok": true], "models.off": ["ok": true, "off": false]]
-        let c = SessionClient(transport: mock)
+        let c = SessionClient(transport: helper)
         c.adoptSettings(config: "ds-flash", lang: "zh")
         mock.streamLines = [["kind": "helper.watching", "open": ["ses_k"], "models_off": true],
                             ["kind": "session.config", "session_id": "ses_k", "seq": 1, "config": NSNull(), "lang": "zh", "by": "set_config"]]
         _ = c.watch()
-        c.modelsSync.settle(); c.reconciling.wait()
+        // (until the helper has the switch and the session its configuration: the refused one is repaired by a push and a
+        // reconcile of its own)
+        let until = Date().addingTimeInterval(5)
+        while Date() < until {
+            c.modelsSync.settle(); c.reconciling.wait()
+            if mock.requests.compactMap({ $0["line"] as? [String: Any] }).last(where: { $0["type"] as? String == "set_config" })?["config"] as? String == "ds-flash"
+                && !c.modelsSync.isPending, (mock.requests.firstIndex { $0["op"] as? String == "models.off" } ?? Int.max)
+                < (mock.requests.lastIndex { ($0["line"] as? [String: Any])?["type"] as? String == "set_config" } ?? -1) { break }
+            usleep(20_000)
+        }
         let ops = mock.requests.map { r -> String in
             let t = (r["line"] as? [String: Any])?["type"] as? String
             return (r["op"] as? String ?? "") + (t.map { ":" + $0 } ?? "")
@@ -2229,6 +2262,46 @@ enum ShellTests {
               "spawn: listed before its single read of the keys; the environment and the digest from that read; unlisted on every way out")
         check(list.contains("for (id, k) in spawning where running[id] == nil") && list.contains("\"new\": true"),
               "sessions.list: a spawn in progress is starting (digest or unknown), new ones marked not rows")
+    }
+
+    /// Delta review of a09c632: a reconcile never waits for the switch's push. Run from ModelsOffSync's own callback
+    /// (helperSays → push → reconcile), a wait there waited on itself: each session's set_config went out after the
+    /// 3 s timeout, and a models.off(true) the user asked for meanwhile reached the helper seconds late. The first
+    /// set_config of that reconcile refused no_model (the helper went off again): the others still go out at once.
+    static func reconcileNoWaitTests() {
+        final class T: SessionTransport {
+            let lock = NSLock(), t0 = Date()
+            var sent: [(id: String, at: Double)] = []
+            var refuseFirst = false
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                let op = body["op"] as? String ?? ""
+                guard op == SessionClient.Op.send, (body["line"] as? [String: Any])?["type"] as? String == "set_config" else { return ["ok": true] }
+                lock.lock(); defer { lock.unlock() }
+                sent.append((body["session_id"] as? String ?? "", Date().timeIntervalSince(t0)))
+                if refuseFirst { refuseFirst = false; return ["ok": false, "code": "no_model", "control": "set_config"] }
+                return ["ok": true]
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+        }
+        let t = T()
+        let c = SessionClient(transport: t)
+        c.adoptSettings(config: "c", lang: "zh")
+        for id in ["s1", "s2", "s3"] { c.feed(["kind": "session.start", "session_id": id, "resumed": false, "last_seq": 0]) }
+        c.reconciling.wait()
+        t.lock.lock(); t.sent = []; t.refuseFirst = true; t.lock.unlock()
+        let start = Date()
+        c.helperSays(modelsOff: true)                       // (the app's switch is on: pushed, then every session reconciled)
+        let until = Date().addingTimeInterval(8)
+        while Date() < until {
+            t.lock.lock(); let ids = Set(t.sent.map(\.id)); t.lock.unlock()
+            if ids.isSuperset(of: ["s1", "s2", "s3"]) { break }
+            usleep(10_000)
+        }
+        t.lock.lock(); let sent = t.sent; t.lock.unlock()
+        let firstOf = { (id: String) in sent.first { $0.id == id }?.at }
+        let late = ["s1", "s2", "s3"].filter { (firstOf($0) ?? .infinity) - start.timeIntervalSince(t.t0) > 1 }
+        check(late.isEmpty, "the first set_config refused no_model: every session's still goes out within 1 s: \(sent.map { "\($0.id)@\(String(format: "%.2f", $0.at))" })")
+        c.modelsSync.settle(); c.reconciling.wait()
     }
 
     // MARK: words
