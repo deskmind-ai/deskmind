@@ -58,7 +58,8 @@ enum CloudModelSettings {
         set { UserDefaults.standard.set(newValue.id, forKey: "cloud.provider"); ModelSettingsSaved.post() }
     }
     /// The configuration saved (`engine.config`: the runs of the window as it was send it, History.swift; sessions
-    /// open with it, MainSplitView.modelConfig). Written here only.
+    /// open with it, MainSplitView.modelConfig). Read and written through here only (ShellTests checks no other file
+    /// names its key).
     static var engineConfig: String? {
         get { UserDefaults.standard.string(forKey: "engine.config") }
         set { UserDefaults.standard.set(newValue, forKey: "engine.config"); ModelSettingsSaved.post() }

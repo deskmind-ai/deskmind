@@ -324,6 +324,15 @@ final class ShellModel: ObservableObject {
     /// The settings this shell last gave its sessions (`settingsPrint`: configuration, language, cloud on or off), so
     /// that a save is acted on once however many paths report it (`syncSettings`).
     private var appliedSettings = ""
+    /// A new key's restarts (`askNewProcesses`): one round at a time (`keysRound`; asked meanwhile: `keysAgain`, run
+    /// once more after it); a round that did not finish is tried again after `keysRetryDelay` (2 s, doubling, at most
+    /// 60 s), by `retryAfter` — the app's: the main queue's clock; nil (a test's default): only the next syncSettings.
+    private let keysLock = NSLock()
+    private var keysRound = false
+    private var keysAgain = false
+    private var keysRetryDelay: TimeInterval = 0
+    private var keysRetryScheduled = false
+    let retryAfter: ((TimeInterval, @escaping () -> Void) -> Void)?
     private var savedObserver: (center: NotificationCenter, token: NSObjectProtocol)?
     private var summaries: [SessionSummary] = []
     private var deleted: Set<String> = []
@@ -339,6 +348,7 @@ final class ShellModel: ObservableObject {
     init(client: SessionClient, defaults: UserDefaults = .standard,
          config: @escaping () -> String?, lang: @escaping () -> ResolvedLang, cloudOn: @escaping () -> Bool = { true },
          keyFile: @escaping () -> String = { "" }, savedSettings: NotificationCenter? = nil,
+         retryAfter: ((TimeInterval, @escaping () -> Void) -> Void)? = nil,
          work: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.global(qos: .userInitiated).async(execute: f) },
          deliver: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) }) {
         self.client = client
@@ -348,6 +358,7 @@ final class ShellModel: ObservableObject {
         self.lang = lang
         self.cloudOn = cloudOn
         self.keyFile = keyFile
+        self.retryAfter = retryAfter
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
@@ -742,10 +753,15 @@ final class ShellModel: ObservableObject {
 
     // MARK: settings
 
-    /// The key file's digest as sessions last got it (a new key asked for: `settingsChanged(keyChanged: true)`), in
-    /// the app's defaults so that a change made while no shell was there — the 0.5 window never shown in this launch,
-    /// the app quit since — is still told on the next look. Only a digest: the keys stay in models.env.
+    /// The key file's digest once every session process has been asked for a new one and the helper took each ask
+    /// (`askNewProcesses`), in the app's defaults: a change made while no shell was there — the 0.5 window never shown
+    /// in this launch, the app quit since, or quit while the asks were still failing — is still told on the next look.
+    /// Never written before the helper acknowledged them all (#107 review at 0a5af02: written before the asks went, one
+    /// failed ask left a session on the old key for good). Only a digest: the keys stay in models.env.
     static let keysAppliedKey = "shell.keysApplied"
+    /// The asks the helper took for a key file not applied yet: {"digest": its digest, "sessions": [session ids]}. A
+    /// session here is not asked again for that digest (a retry asks only the ones still owed); it survives a quit.
+    static let keysAckedKey = "shell.keysAcked"
 
     /// What a live session takes in place (set_config): the configuration, the language, cloud models on or off.
     private func settingsPrint() -> String {
@@ -755,16 +771,22 @@ final class ShellModel: ObservableObject {
     private func keysPrint() -> String {
         SHA256.hash(data: Data(keyFile().utf8)).map { String(format: "%02x", $0) }.joined()
     }
+    /// A new key file not yet applied to every session process (its asks not all acknowledged).
+    var keysPending: Bool { keysPrint() != defaults.string(forKey: Self.keysAppliedKey) }
 
-    /// The settings as saved now, compared with what this shell last gave its sessions; changed → `settingsChanged`
-    /// (a new key file: a new process asked for each). One path for every way a save is learnt of, whichever window
-    /// saved (#107 review at 5999bd9): ModelSettingsSaved from any writer, this window appearing (a save while it was
-    /// not shown, or before this launch), its own sheet closing, a language switch. Each acts once: a save already
-    /// applied compares equal (the sheet's close after its own writes' notice restarts nothing twice). Main thread.
+    /// The settings as saved now, compared with what this shell last gave its sessions. One path for every way a save
+    /// is learnt of, whichever window saved (#107 review at 5999bd9): ModelSettingsSaved from any writer, this window
+    /// appearing (a save while it was not shown, or before this launch), its own sheet closing, a language switch, and
+    /// a key's retry. The settings that go in place (configuration, language, cloud on or off) are sent once per change:
+    /// a save already given compares equal (`appliedSettings`). A new key file is asked of every session process until
+    /// the helper has taken every ask (`keysPending`): each trigger asks again, only the sessions still owed — the sheet's
+    /// close after its own writes' notice restarts no session twice. Main thread.
     func syncSettings() {
-        let keysNew = keysPrint() != defaults.string(forKey: Self.keysAppliedKey)
-        guard keysNew || settingsPrint() != appliedSettings else { return }
-        settingsChanged(keyChanged: keysNew)
+        let keysNew = keysPending
+        if settingsPrint() != appliedSettings { settingsChanged(keyChanged: keysNew); return }
+        guard keysNew else { return }
+        let (config, lang) = sessionSettings()
+        work { [weak self] in self?.askNewProcesses(config: config, lang: lang) }
     }
 
     /// The model settings were saved (a key, a service, cloud on or off): every session opens again with them, whenever
@@ -773,14 +795,13 @@ final class ShellModel: ObservableObject {
     /// Each live session gets them in place (set_config, harness#64: no restart, nothing stopped); with cloud models
     /// off, no model at all (set_config null: it stops its running task, nothing that needs a model goes on). Only a
     /// new key needs a new process (a process reads its keys when it starts): `keyChanged` then asks the helper for one
-    /// once the session is idle (end_if_idle; the helper and the session decide when).
+    /// once the session is idle (end_if_idle; the helper and the session decide when): `askNewProcesses`.
     ///
-    /// What it gave is recorded (`syncSettings` compares with it): the settings, and with `keyChanged` the key file.
+    /// The settings given are recorded at once (`appliedSettings`); the key file only once the helper took every ask.
     func settingsChanged(keyChanged: Bool = false) {
         applySettings(reconcileIfModelChanged: false)
         refreshSettings()
         appliedSettings = settingsPrint()
-        if keyChanged { defaults.set(keysPrint(), forKey: Self.keysAppliedKey) }
         let (config, lang) = sessionSettings()
         let off = !cloudOn()
         work { [weak self] in
@@ -788,13 +809,78 @@ final class ShellModel: ObservableObject {
             // every session the client knows with a process or one coming (live, opening, reopening, awaiting its
             // start: the client's list, not this window's view of it)
             self.client.reconcile(config: config, lang: lang, off: off)
-            // a new key reaches a process only when it starts: asked for whatever the switch says now (turned on
-            // later, a session must not run on the old key) — of every process, the helper's list's too: one this
-            // client has not seen yet (the window not shown since the app started) runs on the key it started with
-            if keyChanged {
-                let helperOpen = self.client.list()?.filter(\.open).map(\.sessionId) ?? []
-                for id in Set(self.client.liveIds()).union(helperOpen).sorted() { self.client.restart(id, config: config, lang: lang) }
+            if keyChanged { self.askNewProcesses(config: config, lang: lang) }
+        }
+    }
+
+    /// A new key reaches a process only when it starts: each session process is asked for a new one (`restart`, when
+    /// idle), whatever the switch says now (turned on later, a session must not run on the old key) — every process:
+    /// the client's, and the helper's list's (`open`: one this client has not seen yet, the window not shown since the
+    /// app started, runs on the key it started with). The key file counts as applied (`keysAppliedKey`) only when the
+    /// list came back and the helper took every ask; a session whose ask it took is not asked again for that key file
+    /// (`keysAckedKey`), one whose ask failed (no answer, refused, the list not read) stays owed: asked again on the
+    /// next syncSettings, and after a backoff (`retryAfter`) with no user action (#107 review at 0a5af02). Off the main
+    /// thread. (A session opened while asks are owed reads the new file, but may be asked once too: a new process at
+    /// its next idle moment, harmless.)
+    private func askNewProcesses(config: String?, lang: String) {
+        keysLock.lock()
+        if keysRound { keysAgain = true; keysLock.unlock(); return }
+        keysRound = true
+        keysLock.unlock()
+        while true {
+            let digest = keysPrint()
+            var acked = ackedSessions(for: digest)
+            let listed = client.list()
+            let owed = Set(client.liveIds()).union(listed?.filter(\.open).map(\.sessionId) ?? []).subtracting(acked).sorted()
+            var all = listed != nil
+            for id in owed {
+                if client.restart(id, config: config, lang: lang) {
+                    acked.insert(id)
+                    defaults.set(["digest": digest, "sessions": acked.sorted()], forKey: Self.keysAckedKey)
+                } else {
+                    all = false
+                }
             }
+            // (the file changed again meanwhile: not this digest's to apply — the next round asks for the new one)
+            let done = all && keysPrint() == digest
+            if done {
+                defaults.set(digest, forKey: Self.keysAppliedKey)
+                defaults.removeObject(forKey: Self.keysAckedKey)
+            }
+            keysLock.lock()
+            let again = keysAgain
+            keysAgain = false
+            if !again { keysRound = false }
+            if done { keysRetryDelay = 0 }
+            keysLock.unlock()
+            // (asked meanwhile: once more, unless this round applied it — then nothing is owed, nothing asked twice)
+            if again && (!done || keysPending) { continue }
+            if again { keysLock.lock(); keysRound = false; keysLock.unlock() }
+            if !done { scheduleKeysRetry() }
+            return
+        }
+    }
+
+    /// The sessions whose ask the helper took for this key file (none when the record is of another).
+    private func ackedSessions(for digest: String) -> Set<String> {
+        guard let r = defaults.dictionary(forKey: Self.keysAckedKey), r["digest"] as? String == digest else { return [] }
+        return Set(r["sessions"] as? [String] ?? [])
+    }
+
+    /// Asks owed: tried again after a backoff (2 s, doubling to 60 s at most), one retry waiting at a time, for as
+    /// long as some are owed (each retry is a syncSettings: nothing when nothing is owed by then).
+    private func scheduleKeysRetry() {
+        guard let retryAfter else { return }
+        keysLock.lock()
+        guard !keysRetryScheduled else { keysLock.unlock(); return }
+        keysRetryScheduled = true
+        keysRetryDelay = min(60, max(2, keysRetryDelay * 2))
+        let delay = keysRetryDelay
+        keysLock.unlock()
+        retryAfter(delay) { [weak self] in
+            guard let self else { return }
+            self.keysLock.lock(); self.keysRetryScheduled = false; self.keysLock.unlock()
+            self.deliver { self.syncSettings() }
         }
     }
 

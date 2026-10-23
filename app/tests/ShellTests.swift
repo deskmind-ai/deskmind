@@ -68,6 +68,7 @@ enum ShellTests {
         pingPongTests()
         waitingForHelperTests()
         savedAnywhereTests()
+        keyAckTests()
         textTests()
     }
 
@@ -1762,7 +1763,7 @@ enum ShellTests {
         func helper() -> Mock {
             let mock = Mock()
             mock.replies = [SessionClient.Op.send: ["ok": true], SessionClient.Op.end: ["ok": true, "deferred": true],
-                            SessionClient.Op.open: ["ok": true, "session_id": "ses_t"]]
+                            SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.list: ["ok": true, "sessions": [Any]()]]
             return mock
         }
 
@@ -1840,6 +1841,25 @@ enum ShellTests {
             check(mock.requests.isEmpty, "the sheet's close after it: nothing again")
         }
 
+        // 5. the in-place settings' dedupe (re-review E2): a language switch reported twice (the window's onChange, a
+        // notice) is sent once; switched back, once more
+        do {
+            let mock = helper(), saved = Saved()
+            var lang = ResolvedLang.zhHans
+            let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { saved.config }, lang: { lang },
+                               keyFile: { saved.key }, work: { $0() }, deliver: { $0() })
+            for l in SessionTests.lines("chat") { m.client.feed(l) }
+            func langs() -> [String] {
+                mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }.compactMap { $0["lang"] as? String }
+            }
+            lang = .en
+            m.syncSettings(); m.syncSettings()
+            check(langs() == ["en"] && ends(mock).isEmpty, "a language switch told twice: one set_config, no restart: \(langs())")
+            lang = .zhHans
+            m.syncSettings(); m.syncSettings()
+            check(langs() == ["en", "zh"], "switched back: one more: \(langs())")
+        }
+
         // the app's writers post, and the app's one shell observes them; the window compares through the shell only
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let cloud = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
@@ -1851,20 +1871,181 @@ enum ShellTests {
         let others = ["Main", "Shared"].flatMap { d in
             ((try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent(d).path)) ?? []).filter { $0.hasSuffix(".swift") }.map { "\(d)/\($0)" }
         }
-        let rawWrites = others.filter { f in
+        // (re-review E4) any mention of their keys, read or written, outside CloudModelSettings: none
+        let others2 = others + ((try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent("Helper").path)) ?? [])
+            .filter { $0.hasSuffix(".swift") }.map { "Helper/\($0)" }
+        let rawMentions = others2.filter { f in
             let t = (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? ""
-            return f != "Main/CloudModel.swift" && t.split(separator: "\n").contains { l in
-                l.contains(".set(") && (l.contains("forKey: \"engine.config\")") || l.contains("forKey: \"cloud.provider\")"))
-            }
+            return f != "Main/CloudModel.swift" && (t.contains("\"engine.config\"") || t.contains("\"cloud.provider\""))
         }
-        check(rawWrites.isEmpty && cloud.components(separatedBy: "forKey: \"engine.config\")").count == 3,
-              "the configuration and the service are written through those setters only: \(rawWrites)")
+        check(others2.count > 10 && rawMentions.isEmpty && cloud.components(separatedBy: "forKey: \"engine.config\")").count == 3,
+              "the configuration and the service are named (read or written) through CloudModelSettings only: \(rawMentions)")
         let main = (try? String(contentsOf: dir.appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
         check(main.contains("keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default"), "the app's shell observes every save")
         let appear = main.components(separatedBy: ".onAppear {").dropFirst().first?.components(separatedBy: "}").first ?? ""
         let closed = main.components(separatedBy: "private func settingsClosed()").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
         check(appear.contains("shell.syncSettings()") && closed.contains("shell.syncSettings()") && !main.contains("shell.settingsChanged("),
               "the window shown and its sheet closed compare through the shell, never call settingsChanged itself")
+    }
+
+    /// #107 review at 0a5af02 (P2): a new key file counts as applied only once the helper took the ask of every session
+    /// process (the list read, each restart acknowledged). An ask that failed stays owed — asked again on the next
+    /// syncSettings and after a backoff with no user action, only the sessions still owed (one acknowledged is never
+    /// asked twice) — and survives a quit: the next launch asks the rest.
+    static func keyAckTests() {
+        /// The mock helper, with the next N requests of an op unanswered (an IPC error, a helper busy restarting).
+        final class Flaky: SessionTransport {
+            let inner: Mock
+            var failNext: [String: Int] = [:]
+            /// The next N asks (session.end) of a session unanswered.
+            var failEnd: [String: Int] = [:]
+            init(_ inner: Mock) { self.inner = inner }
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                let op = body["op"] as? String ?? ""
+                if let n = failNext[op], n > 0 { failNext[op] = n - 1; inner.requests.append(body); return nil }
+                if op == SessionClient.Op.end, let id = body["session_id"] as? String, let n = failEnd[id], n > 0 {
+                    failEnd[id] = n - 1; inner.requests.append(body); return nil
+                }
+                return inner.request(body)
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
+                inner.stream(body, onLine: onLine, onIdle: onIdle)
+            }
+        }
+        /// The retry clock, run by hand.
+        final class Clock {
+            var waiting: [(delay: TimeInterval, f: () -> Void)] = []
+            func fire() { let w = waiting; waiting = []; for x in w { x.f() } }
+        }
+        final class Key { var text = "DEEPSEEK_API_KEY=old" }
+        func ends(_ mock: Mock) -> [String] {
+            mock.requests.filter { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true }.compactMap { $0["session_id"] as? String }
+        }
+        func lists(_ mock: Mock) -> Int { mock.requests.filter { $0["op"] as? String == SessionClient.Op.list }.count }
+        func helper(open: [String] = []) -> Mock {
+            let mock = Mock()
+            mock.replies = [SessionClient.Op.send: ["ok": true], SessionClient.Op.end: ["ok": true, "deferred": true],
+                            SessionClient.Op.list: ["ok": true, "sessions": open.map { ["session_id": $0, "title": "", "open": true] }]]
+            return mock
+        }
+        func shell(_ t: SessionTransport, _ key: Key, defaults: UserDefaults, center: NotificationCenter?, clock: Clock?) -> ShellModel {
+            ShellModel(client: SessionClient(transport: t), defaults: defaults, config: { "ds-flash" }, lang: { .zhHans },
+                       keyFile: { key.text }, savedSettings: center,
+                       retryAfter: clock.map { c in { d, f in c.waiting.append((d, f)) } }, work: { $0() }, deliver: { $0() })
+        }
+        func live(_ m: ShellModel) {
+            for l in SessionTests.lines("chat") { m.client.feed(l) }                                 // ses_t
+            m.client.feed(["kind": "session.task", "session_id": "ses_busy", "seq": 1, "msg_id": "m", "run_id": "r9", "raw": "x", "by": "slash"])
+        }
+
+        // a restart unanswered: owed, retried by the clock (no user action) and by the next trigger; the one taken is not
+        // asked again; the key file applied only at the end
+        do {
+            let mock = helper(), flaky = Flaky(mock), key = Key(), clock = Clock(), center = NotificationCenter()
+            let m = shell(flaky, key, defaults: scratchDefaults(), center: center, clock: clock)
+            live(m)
+            flaky.failEnd["ses_busy"] = 2
+            key.text = "DEEPSEEK_API_KEY=new"
+            ModelSettingsSaved.post(center)
+            check(ends(mock) == ["ses_busy", "ses_t"] && m.keysPending, "one ask unanswered: the key file not applied: \(ends(mock)) pending=\(m.keysPending)")
+            check(clock.waiting.map(\.delay) == [2], "a retry after 2 s: \(clock.waiting.map(\.delay))")
+            clock.fire()
+            check(ends(mock) == ["ses_busy", "ses_t", "ses_busy"] && m.keysPending, "the retry asks only the one owed (unanswered again): \(ends(mock))")
+            check(clock.waiting.map(\.delay) == [4], "the next after 4 s: \(clock.waiting.map(\.delay))")
+            m.syncSettings()                                   // (the window shown, a save, the sheet's close)
+            check(ends(mock) == ["ses_busy", "ses_t", "ses_busy", "ses_busy"] && !m.keysPending, "the next trigger: taken; the key file applied: \(ends(mock))")
+            clock.fire(); m.syncSettings(); ModelSettingsSaved.post(center)
+            check(ends(mock).count == 4 && clock.waiting.isEmpty, "then nothing asked again: \(ends(mock))")
+            // the restarted session's next message opens a new process (it reads the new key file)
+            mock.replies[SessionClient.Op.open] = ["ok": true, "session_id": "ses_busy"]
+            m.client.feed(["kind": "helper.session_exit", "session_id": "ses_busy", "code": 0, "idle": true])
+            mock.requests = []
+            m.selected = "ses_busy"; m.draft = "again"; m.submit()
+            check(mock.requests.contains { $0["op"] as? String == SessionClient.Op.open && $0["session_id"] as? String == "ses_busy" },
+                  "its next message: a new process, on the new key")
+        }
+
+        // a refused ask counts as not taken too
+        do {
+            let mock = helper(), key = Key(), clock = Clock()
+            let m = shell(mock, key, defaults: scratchDefaults(), center: nil, clock: clock)
+            live(m)
+            mock.queued[SessionClient.Op.end] = [["ok": false, "code": "busy_ending"]]
+            key.text = "DEEPSEEK_API_KEY=new"
+            m.syncSettings()
+            check(m.keysPending && clock.waiting.count == 1, "a refused ask: owed")
+            clock.fire()
+            check(!m.keysPending && ends(mock) == ["ses_busy", "ses_t", "ses_busy"], "retried: applied: \(ends(mock))")
+        }
+
+        // the list unread: the helper's sessions this client has not seen are not known — owed until it is read
+        do {
+            let mock = helper(open: ["ses_bg", "ses_t"]), flaky = Flaky(mock), key = Key(), clock = Clock()
+            let m = shell(flaky, key, defaults: scratchDefaults(), center: nil, clock: clock)
+            for l in SessionTests.lines("chat") { m.client.feed(l) }
+            flaky.failNext[SessionClient.Op.list] = 1
+            key.text = "DEEPSEEK_API_KEY=new"
+            m.syncSettings()
+            check(ends(mock) == ["ses_t"] && m.keysPending && clock.waiting.count == 1, "the list unread: the known one asked, not applied: \(ends(mock))")
+            clock.fire()
+            check(ends(mock) == ["ses_t", "ses_bg"] && !m.keysPending && lists(mock) == 2, "retried: the helper's other session asked, ses_t not again; applied: \(ends(mock))")
+        }
+
+        // quit while owed: the next launch asks the rest (the ones taken are not asked again)
+        do {
+            let defaults = scratchDefaults(), key = Key()
+            let mock1 = helper(), flaky = Flaky(mock1)
+            do {
+                let m1 = shell(flaky, key, defaults: defaults, center: nil, clock: Clock())
+                live(m1)
+                flaky.failEnd["ses_busy"] = 1
+                key.text = "DEEPSEEK_API_KEY=new"
+                m1.syncSettings()
+                check(ends(mock1) == ["ses_busy", "ses_t"] && m1.keysPending, "before the quit: ses_busy owed")
+                m1.stopWatching()
+            }
+            let mock2 = helper(open: ["ses_busy", "ses_t"])
+            let m2 = shell(mock2, key, defaults: defaults, center: nil, clock: Clock())
+            check(m2.keysPending, "the next launch: still not applied")
+            m2.syncSettings()
+            check(ends(mock2) == ["ses_busy"] && !m2.keysPending, "it asks only the one owed, then applied: \(ends(mock2))")
+        }
+
+        // asked while a round is under way (a notice during the window's appear): one more round after it, never two at once
+        do {
+            final class Slow: SessionTransport {
+                let lock = NSLock()
+                var ends: [String] = []
+                var inEnd = 0, most = 0
+                let gate = DispatchSemaphore(value: 0)
+                var holdFirst = true
+                func request(_ body: [String: Any]) -> [String: Any]? {
+                    let op = body["op"] as? String ?? ""
+                    if op == SessionClient.Op.list { return ["ok": true, "sessions": [["session_id": "ses_q", "title": "", "open": true]]] }
+                    guard op == SessionClient.Op.end else { return ["ok": true] }
+                    lock.lock(); inEnd += 1; most = max(most, inEnd); ends.append(body["session_id"] as? String ?? ""); let hold = holdFirst; holdFirst = false; lock.unlock()
+                    if hold { gate.wait() }
+                    lock.lock(); inEnd -= 1; lock.unlock()
+                    return ["ok": true, "deferred": true]
+                }
+                func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+            }
+            let slow = Slow(), key = Key()
+            let m = ShellModel(client: SessionClient(transport: slow), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                               keyFile: { key.text }, work: { f in DispatchQueue.global().async(execute: f) }, deliver: { $0() })
+            key.text = "DEEPSEEK_API_KEY=new"
+            let done = DispatchGroup()
+            done.enter(); DispatchQueue.global().async { m.syncSettings(); done.leave() }
+            usleep(100_000)
+            m.syncSettings(); m.syncSettings()                 // (while the first ask waits on the helper)
+            usleep(100_000)
+            slow.gate.signal()
+            done.wait()
+            var ok = false
+            for _ in 0..<100 { if !m.keysPending { ok = true; break }; usleep(20_000) }
+            slow.lock.lock(); let e = slow.ends, most = slow.most; slow.lock.unlock()
+            check(ok && e == ["ses_q"] && most == 1, "asked meanwhile: no second ask of a session taken, never two at once: \(e) most=\(most)")
+        }
     }
 
     // MARK: words

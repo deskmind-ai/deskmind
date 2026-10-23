@@ -70,7 +70,7 @@ struct MainSplitView: View {
 
     /// The configuration sessions open with: the one the settings saved, else the chosen service's.
     static func modelConfig() -> String {
-        if let c = UserDefaults.standard.string(forKey: "engine.config"), !c.isEmpty { return c }
+        if let c = CloudModelSettings.engineConfig, !c.isEmpty { return c }
         let p = CloudModelSettings.provider
         return CloudModelSettings.config(for: p, model: CloudModelSettings.read()["CUSTOM_MODEL"] ?? "")
     }
@@ -86,7 +86,9 @@ extension ShellModel {
                            lang: { (AppLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue) ?? .en).resolved },
                            cloudOn: { CloudModelSettings.engineIsCloud },
                            // every save of the model settings, from whichever window (ModelSettingsSaved), while the app runs
-                           keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default)
+                           keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default,
+                           // a new key's asks the helper did not take: tried again on the main queue's clock
+                           retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) })
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         return m
     }()
