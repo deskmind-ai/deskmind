@@ -549,6 +549,10 @@ enum SessionTests {
         let n = mock.requests.count
         check(client.send(.say("顺便说一句"), to: "ses_t") == .refused("card_open") && mock.requests.count == n, "say while a card waits: not sent")
         check(client.send(.steer("改成别的"), to: "ses_t") == .refused("card_open"), "steer too")
+        // (never dropped: both kept as unsent bubbles, card_open — the user removes them here)
+        let held = client.state("ses_t").unsent
+        check(held.map(\.text) == ["顺便说一句", "改成别的"] && held.allSatisfy { $0.refused == "card_open" }, "both kept unsent: \(held.map(\.text))")
+        for o in held { client.dropUnsent(o.id, in: "ses_t") }
         check(client.send(.stop(), to: "ses_t") == .sent, "stop is always sent")
         let (runId, open) = client.state("ses_t").openCard!
         check(client.answer(.option(runId: runId, askId: "ask_old", option: 0), in: "ses_t") != .sent, "a stale answer: not sent")
@@ -619,7 +623,8 @@ enum SessionTests {
         let client = SessionClient(transport: mock)
         [taskR1, start, step, closed].forEach { client.feed($0) }
         mock.requests = []
-        check(client.send(.steer("改一下"), to: "s") == .refused("no task is running") && mock.requests.isEmpty, "steer after task_closed: not sent")
+        check(client.send(.steer("改一下"), to: "s") == .refused("task_ended") && mock.requests.isEmpty
+              && client.state("s").unsent.map(\.text) == ["改一下"], "steer after task_closed: not sent, kept as unsent (never dropped)")
         // the helper's view of it: nothing runs, the live card lets it go
         var act = SessionWire.Activity()
         act.note(["kind": "session.task", "run_id": "r1", "raw": "x"])
@@ -2014,7 +2019,8 @@ enum SessionTests {
         // a steer with no task running: not sent (nothing to name), never held
         let c3 = SessionClient(transport: m2)
         c3.feed(se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#))
-        check(c3.send(.steer("改"), to: "s") == .refused("no task is running") && c3.state("s").outbox.isEmpty, "no task: refused here")
+        check(c3.send(.steer("改"), to: "s") == .refused("task_ended") && c3.state("s").unsent.first?.refused == "task_ended",
+              "no task: refused here, the words kept unsent")
         // a resend after its stored line came: taken, not sent again (SessionClient.send also checks `taken` as it holds
         // the words, for a stored line that comes between a resend's look and its hold)
         let m4 = MockTransport()

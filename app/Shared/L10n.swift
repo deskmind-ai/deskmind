@@ -503,7 +503,7 @@ enum L10n {
         "Conversations in DeskMind 0.5 need a cloud model.": "DeskMind 0.5 的对话需要云端模型。",
         "Read the whole card first: scroll to its end": "先看完整张卡：滚到它的末尾",
         "Couldn't start a conversation. Is DeskMind's helper running?": "没能开始对话。DeskMind 的后台助手在运行吗？",
-        "DeskMind's helper didn't answer. Your message is back in the box.": "后台助手没有回应，你的消息放回输入框了。",
+        "DeskMind's helper didn't answer. Your message is kept below; send it again.": "后台助手没有回应，你的消息留在下面了，可以重新发送。",
         "DeskMind's helper isn't answering. Conversations come back when it does.": "后台助手没有回应。它恢复后，对话会回来。",
         "Waiting for you: %@": "等你：%@",
         "Stopped: the screen is locked": "已停下：屏幕锁上了",

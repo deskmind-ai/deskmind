@@ -516,13 +516,29 @@ final class SessionClient {
         let serial = sessionLock(sessionId)
         serial.lock(); defer { serial.unlock() }
         let s = state(sessionId)
-        if control.isTyping && !s.composerEnabled { return .refused("card_open") }
+        // Every message the user submits ends in exactly one place: taken by the session (outbox, queue, history), or
+        // an unsent bubble in the outbox with its reason, to send again or remove — never dropped, never put back over
+        // a newer draft (#107 review at c0dbe96: a card that came between Enter and the send refused the words before
+        // they were held, and the composer had a new draft: they were nowhere). A refusal before the words are
+        // written holds them unsent here; one after, `notSent` / the session's refusal does the same.
+        let refusedBeforeHeld = { [self] (why: String) -> SendResult in
+            if let w = control.words, !w.text.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}"))).isEmpty {
+                let id = clientId ?? newClientId()
+                mutate(sessionId) { st in
+                    if st.taken.contains(id) { return }
+                    if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = false; st.outbox[i].refused = why }
+                    else { st.outbox.append(Outgoing(id: id, text: w.text, control: w.control, sending: false, refused: why, original: control)) }
+                }
+            }
+            return .refused(why)
+        }
+        if control.isTyping && !s.composerEnabled { return refusedBeforeHeld("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
-        if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return .refused(why) }
+        if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return refusedBeforeHeld(why == "no task is running" ? "task_ended" : why) }
         // a steer names its task: the one running now, made explicit, so that a resend never goes to another one
         var control = control
         if case .steer(let t, nil) = control {
-            guard let r = s.runningTask?.runId else { return .refused("no task is running") }    // nothing to name: not sent
+            guard let r = s.runningTask?.runId else { return refusedBeforeHeld("task_ended") }    // nothing to name: not sent
             control = .steer(t, runId: r)
         }
         // the user's words: held in the outbox from here until the session says what became of them

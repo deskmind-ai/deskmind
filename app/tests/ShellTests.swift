@@ -70,6 +70,7 @@ enum ShellTests {
         DecisionTests.group("shell.savedAnywhereTests"); savedAnywhereTests()
         DecisionTests.group("shell.keyAckTests"); keyAckTests()
         DecisionTests.group("shell.reconcileNoWaitTests"); reconcileNoWaitTests()
+        DecisionTests.group("shell.messageNeverLostTests"); messageNeverLostTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -2343,6 +2344,85 @@ enum ShellTests {
         let late = ["s1", "s2", "s3"].filter { (firstOf($0) ?? .infinity) - start.timeIntervalSince(t.t0) > 1 }
         check(late.isEmpty, "the first set_config refused no_model: every session's still goes out within 1 s: \(sent.map { "\($0.id)@\(String(format: "%.2f", $0.at))" })")
         c.modelsSync.settle(); c.reconciling.wait()
+    }
+
+    /// #107 review at c0dbe96 — the invariant: every submitted message ends up in exactly one place, taken by the
+    /// session (outbox, queue, history) or an unsent bubble with its reason (send again or remove); never dropped, and
+    /// never put back over a newer draft. Each way a send can fail before the session takes it, with a new draft typed
+    /// between Enter and the send.
+    static func messageNeverLostTests() {
+        let msg = "把周报发给老板"
+        func places(_ s: SessionState) -> Int {
+            s.outbox.filter { $0.text == msg }.count + s.messages.filter { $0.role == "user" && $0.text == msg }.count
+                + s.queue.filter { $0.text == msg }.count
+        }
+        enum After { case none, card, refusal(String), accepted }
+        let cases: [(name: String, send: [String: Any]?, open: [String: Any]?, after: After, unsent: String?)] = [
+            ("a card came between Enter and the send", ["ok": true], nil, .card, "card_open"),
+            ("the session refused it busy", ["ok": true], nil, .refusal("busy"), "busy"),
+            ("the session refused it too_long", ["ok": true], nil, .refusal("too_long"), "too_long"),
+            ("the session refused it computer_busy", ["ok": true], nil, .refusal("computer_busy"), "computer_busy"),
+            ("the helper holds the model off", ["ok": false, "code": "no_model"], nil, .none, "no_model"),
+            ("not open, and the reopen failed", ["ok": false, "code": "not_open"], nil, .none, "exited"),
+            ("a transport error", ["ok": false, "error": "broken pipe"], nil, .none, "unavailable"),
+            ("no reply at all", nil, nil, .none, "unavailable"),
+            ("taken by the session", ["ok": true], nil, .accepted, nil),
+        ]
+        for c in cases {
+            let mock = Mock()
+            if let r = c.send { mock.replies[SessionClient.Op.send] = r }
+            if let r = c.open { mock.replies[SessionClient.Op.open] = r }
+            var later: [() -> Void] = []
+            let client = SessionClient(transport: mock)
+            client.newClientId = { "c_msg" }
+            let m = ShellModel(client: client, defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                               work: { later.append($0) }, deliver: { $0() })
+            let fixture = SessionTests.lines("task-card")
+            let askAt = fixture.firstIndex { $0.event.kind == "ask" } ?? 0
+            for l in fixture.prefix(askAt) { m.client.feed(l) }          // (a task runs; no card yet)
+            m.selected = "ses_t"
+            m.draft = msg
+            m.submit()                                                   // Enter: the send is under way (not run yet)
+            m.draft = "新的草稿"                                          // the user types the next one meanwhile
+            if case .card = c.after { m.client.feed(fixture[askAt]) }    // a card comes before the send goes
+            for f in later { f() }; later = []
+            switch c.after {
+            case .refusal(let code):
+                m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": code, "control": "say", "client_id": "c_msg", "text": "x"])
+            case .accepted:
+                m.client.feed(["kind": "session.message", "session_id": "ses_t", "seq": 99, "msg_id": "u_msg", "role": "user", "text": msg, "client_id": "c_msg"])
+            default: break
+            }
+            m.client.reconciling.wait()
+            let s = m.client.state("ses_t")
+            let bubble = s.unsent.first { $0.text == msg }
+            check(places(s) == 1, "\(c.name): the message in exactly one place (\(places(s)))")
+            check(m.draft == "新的草稿", "\(c.name): the new draft untouched (\(m.draft))")
+            if let why = c.unsent {
+                check(bubble?.refused == why, "\(c.name): an unsent bubble, \(why) (\(String(describing: bubble?.refused)))")
+            } else {
+                check(bubble == nil, "\(c.name): taken, no bubble")
+            }
+        }
+        // a card waits: the bubble's send again waits too (answered on the card first — M1 decision 1)
+        do {
+            let mock = Mock()
+            mock.replies[SessionClient.Op.send] = ["ok": true]
+            let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
+                               work: { $0() }, deliver: { $0() })
+            let fixture = SessionTests.lines("task-card")
+            let askAt = fixture.firstIndex { $0.event.kind == "ask" } ?? 0
+            for l in fixture.prefix(askAt + 1) { m.client.feed(l) }
+            m.selected = "ses_t"
+            _ = m.client.send(.say(msg), to: "ses_t")
+            let id = m.client.state("ses_t").unsent.first?.id ?? ""
+            let n = sends(mock)
+            m.resend(id)
+            check(!id.isEmpty && sends(mock) == n && m.client.state("ses_t").unsent.count == 1, "a card waits: send again does nothing yet")
+            let main = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
+            check(main.contains("Button(L(\"Send again\", lang: lang)) { shell.resend(item.id) }.buttonStyle(.link)\n                            .disabled(!shell.composer.enabled)"),
+                  "the bubble's Send again is off while a card waits")
+        }
     }
 
     // MARK: words

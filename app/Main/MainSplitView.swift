@@ -560,6 +560,7 @@ struct OutgoingRow: View {
                     HStack(spacing: 8) {
                         Text(shell.unsentText(item.refused)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
                         Button(L("Send again", lang: lang)) { shell.resend(item.id) }.buttonStyle(.link)
+                            .disabled(!shell.composer.enabled)      // (a card waits: answered on the card first)
                         Button(L("Remove", lang: lang)) { shell.dropUnsent(item.id) }.buttonStyle(.link)
                     }
                     .font(.system(size: 11))

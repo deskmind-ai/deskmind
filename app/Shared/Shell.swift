@@ -614,6 +614,8 @@ final class ShellModel: ObservableObject {
         guard let control = composer.control(text, sendNow: sendNow) else { return }
         guard cloudAllows() else { return }     // (the text stays in the composer)
         guard let id = selected else { openThenSend(control, text: text); return }
+        // (from here the words are the session's or an unsent bubble of it — SessionClient.send — never the composer's
+        // again: a draft typed meanwhile is never overwritten)
         draft = ""
         work { [weak self] in
             guard let self else { return }
@@ -622,24 +624,25 @@ final class ShellModel: ObservableObject {
         }
     }
 
-    /// The new conversation's first message: the session is opened (with the settings now), then the words sent.
+    /// The new conversation's first message: the session is opened (with the settings now), then the words sent. The
+    /// words stay in the composer until the session is open (it takes no typing meanwhile: `opening`); not opened, they
+    /// are still there; opened, they are the session's (sent, or an unsent bubble of it).
     private func openThenSend(_ control: SessionControl, text: String) {
         guard !opening else { return }
         opening = true
-        drafts[""] = ""
         let (config, lang) = sessionSettings()
         work { [weak self] in
             guard let self else { return }
             guard let id = self.client.open(config: config, lang: lang) else {
                 self.deliver {
                     self.opening = false
-                    if (self.drafts[""] ?? "").isEmpty { self.drafts[""] = text }
                     self.notice = L("Couldn't start a conversation. Is DeskMind's helper running?", lang: self.lang())
                 }
                 return
             }
             self.deliver {
                 self.opening = false
+                if self.drafts[""] == text { self.drafts[""] = "" }
                 self.states[id] = self.client.state(id)
                 if self.selected == nil { self.selected = id }
                 self.rebuild()
@@ -649,12 +652,10 @@ final class ShellModel: ObservableObject {
         }
     }
 
-    /// Words not sent and not held by the client (a refusal before they were held, or no helper): back in the
-    /// composer, unless the user has typed something new there.
+    /// Words not sent: the client holds them as an unsent bubble with its reason (「重新发送」), whatever the refusal —
+    /// never put back in the composer (a newer draft there stays as it is). No helper: said once too.
     private func notSent(_ r: SessionClient.SendResult, text: String, in id: String) {
-        if client.state(id).outbox.contains(where: { $0.text == text }) { return }   // held: shown with 「重新发送」
-        if (drafts[id] ?? "").isEmpty { drafts[id] = text }
-        if r == .unavailable { notice = L("DeskMind's helper didn't answer. Your message is back in the box.", lang: lang()) }
+        if r == .unavailable { notice = L("DeskMind's helper didn't answer. Your message is kept below; send it again.", lang: lang()) }
     }
 
     /// Stop (⌘.): the running task, else the reply that streams. Always available while there is one.
@@ -740,8 +741,9 @@ final class ShellModel: ObservableObject {
     func queueSendNow(_ id: String) { guard cloudAllows() else { return }; control(.queueSendNow(id: id)) }
     func retry() { guard cloudAllows() else { return }; control(.retry) }
 
+    /// Send again: only while the composer takes words (a card waits: it is answered on the card first — M1 decision 1).
     func resend(_ outgoing: String) {
-        guard let id = selected, cloudAllows() else { return }
+        guard let id = selected, composer.enabled, cloudAllows() else { return }
         work { [weak self] in _ = self?.client.resend(outgoing, in: id) }
     }
 
