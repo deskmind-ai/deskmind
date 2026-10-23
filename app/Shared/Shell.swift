@@ -962,7 +962,11 @@ enum ModelChoice {
     /// What Save writes for the engine: nothing unless the user moved the switch (shown differs from stored).
     static func engineToWrite(saved: Bool, shown: Bool) -> Bool? { shown == saved ? nil : shown }
     /// A model name as saved and sent: without the spaces and line ends a paste brings (the harness trims too).
-    static func modelName(_ typed: String) -> String { typed.trimmingCharacters(in: SessionClient.jsWhitespace) }
+    /// Trimmed of what JavaScript's trim() takes and of what Foundation counts as whitespace (U+0085 too): the stored
+    /// name is clean, and the harness's normalisation leaves it as it is (a U+0085 it keeps fails its model-id check:
+    /// bad_config). normalizeConfig stays the JavaScript set exactly.
+    static let saveTrim = SessionClient.jsWhitespace.union(.whitespacesAndNewlines)
+    static func modelName(_ typed: String) -> String { typed.trimmingCharacters(in: saveTrim) }
 }
 
 /// A card's body on screen (MainSplitView.CardView: the body scrolls inside a bounded height, its header and buttons

@@ -1054,7 +1054,7 @@ final class SessionClient {
         deleted.insert(sessionId)
         states[sessionId] = nil
         openedHere.remove(sessionId)
-        forgetSettings(sessionId)
+        forgetSettings(sessionId); ownConfigs[sessionId] = nil
         lock.unlock()
         return nil
     }
@@ -1255,7 +1255,10 @@ final class SessionClient {
                 lock.lock()
                 if let c = now.clientId, ownConfigs[id]?.contains(c) == true {
                     // our own echo, not desired (a normalisation not shared): once per (desired, generation)
-                    let key = "\(d.config ?? "\u{0}")|\(d.lang ?? "")|\(generation[id, default: 0])"
+                    let g = generation[id, default: 0]
+                    let key = "\(g)|\(d.config ?? "\u{0}")|\(d.lang ?? "")"
+                    // (keys of older generations can no longer match: pruned)
+                    echoResent[id] = echoResent[id, default: []].filter { $0.hasPrefix("\(g)|") }
                     trigger = echoResent[id, default: []].insert(key).inserted
                 } else {
                     trigger = true                                  // (not ours: the helper's null, another client's)

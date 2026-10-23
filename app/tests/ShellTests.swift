@@ -3211,8 +3211,17 @@ enum ShellTests {
         let portWrong = table.filter { harnessNormalize($0["input"]!) != $0["output"]! }
         check(table.count >= 50 && appWrong.isEmpty && portWrong.isEmpty,
               "normalizeConfig as the harness's own (\(table.count) cases; the app's wrong on \(appWrong.map { $0["input"]!.unicodeScalars.map { String($0.value, radix: 16) } }), the test port on \(portWrong.count))")
-        check(ModelChoice.modelName("\u{FEFF}gpt-4o\u{00A0}") == "gpt-4o" && ModelChoice.modelName("gpt-4o\u{200B}") == "gpt-4o\u{200B}"
-              && ModelChoice.modelName("\u{0085}gpt-4o") == "\u{0085}gpt-4o", "a model name saved trimmed as JavaScript trims (FEFF, NBSP; not 200B, 0085)")
+        // a saved name: trimmed of JavaScript's set and Foundation's (U+0085 too) — clean, and the harness's normalisation
+        // (the table's own function, here its port) leaves it as it is (#107 review at b8d2acf: a kept U+0085 failed the
+        // harness's model-id check)
+        for typed in ["\u{FEFF}gpt-4o\u{00A0}", "\u{0085}gpt-4o", "gpt-4o\u{0085}\u{FEFF}", " gpt-4o\n"] {
+            let saved = ModelChoice.modelName(typed)
+            check(saved == "gpt-4o" && harnessNormalize("openai:custom|" + saved) == "openai:custom|" + saved,
+                  "a model name saved clean (\(typed.unicodeScalars.map { String($0.value, radix: 16) })): \(saved.unicodeScalars.map { String($0.value, radix: 16) })")
+        }
+        let zw = ModelChoice.modelName("gpt-4o\u{200B}")       // (Foundation takes a zero-width space; trim() would not)
+        check(harnessNormalize("openai:custom|" + zw) == "openai:custom|" + zw, "a zero-width space: the saved name, as the harness reads it, unchanged")
+        check(SessionClient.normalizeConfig("openai:custom|\u{0085}x") == "openai:custom|\u{0085}x", "normalizeConfig stays JavaScript's set (U+0085 kept)")
         // the FEFF loop: a name pasted with U+FEFF, a harness that trims it — its echo is no trigger
         do {
             let h = GateHelper(); h.normalize = harnessNormalize
