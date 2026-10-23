@@ -340,6 +340,19 @@ final class SessionClient {
     private func reopenSettings(_ sessionId: String) -> (config: String?, lang: String?) {
         reopenWith[sessionId] ?? opened[sessionId] ?? defaults
     }
+    /// The settings' version: one more at every adoptSettings (under the lock). What a session's next process opens
+    /// with (`reopenWith`) and the set_config it is sent are decided against it, so neither is ever older than the
+    /// newest settings (#107 review at 7f09c1b: a reconcile that read A wrote A over a B adopted meanwhile; the
+    /// session's next process opened in the old language).
+    private var settingsVersion = 0
+    /// One set_config request per session at a time, each reading the settings when it goes (`sendConfigNow`): two
+    /// for one session never reach the helper out of order (an open's and a reconcile's ran on different threads).
+    private var configLocks: [String: NSLock] = [:]
+    private func configLock(_ id: String) -> NSLock {
+        lock.lock(); defer { lock.unlock() }
+        if let l = configLocks[id] { return l }
+        let l = NSLock(); configLocks[id] = l; return l
+    }
     /// What each session was opened with, to open it again the same way after its process ended. Only sessions this
     /// client opened: a watch reopens these (and no others).
     private var opened: [String: (config: String?, lang: String?)] = [:]
@@ -455,8 +468,15 @@ final class SessionClient {
         // before its set_config goes, so a refusal of that one stays shown
         mutate(id) { $0.settingsRefused = nil }
         let offNow = modelOff
-        if offNow { _ = sendConfig(id, config: nil, lang: lang, attempt: 1) }
-        else if noModel { _ = sendConfig(id, config: config ?? defaultConfig, lang: lang, attempt: 1) }
+        if offNow || noModel {
+            let wire = configLock(id)
+            wire.lock()
+            // (the settings as they are when it goes: the newest adopted, else what it was opened with)
+            lock.lock(); let how: (config: String?, lang: String?) = settingsVersion > 0 ? defaults : (config, lang); lock.unlock()
+            if offNow { _ = sendConfig(id, config: nil, lang: how.lang ?? lang, attempt: 1) }
+            else { _ = sendConfig(id, config: how.config ?? config ?? defaultConfig, lang: how.lang ?? lang, attempt: 1) }
+            wire.unlock()
+        }
         lock.lock()
         if states[id] == nil { states[id] = SessionState(sessionId: id) }
         states[id]?.exited = nil
@@ -480,7 +500,11 @@ final class SessionClient {
             states[id]?.awaitingStart = true
         }
         opened[id] = (config, lang)         // (with the model off, what it opens with once it is on again)
-        reopenWith[id] = nil                // opened with these now: they are what it opens again with
+        // opened with these: what it opens again with — unless they are not the newest settings (the caller read them
+        // before a change; every open of the app's is with the settings now): then the newest, and the reconcile its
+        // start sets off sends them in place
+        if settingsVersion > 0 && (defaults.config != config || defaults.lang != lang) { reopenWith[id] = defaults }
+        else { reopenWith[id] = nil }
         endedByApp.remove(id)
         idleClosed.remove(id)
         lock.unlock()
@@ -732,7 +756,7 @@ final class SessionClient {
     private func reconcileNow(_ id: String, settingsChanged: Bool) {
         lock.lock()
         let live = !deleted.contains(id) && (opening.contains(id) || states[id].map { $0.exited == nil || $0.awaitingStart } ?? true)
-        let how = reopenSettings(id), noModel = off
+        let how = reopenSettings(id), noModel = off, version = settingsVersion
         let have = runsWith[id] ?? states[id]?.settings.map { (config: $0.config, lang: $0.lang) }
         let wantNow: String? = noModel ? nil : how.config
         let underWay = pendingConfigs.values.contains { $0.sessionId == id && $0.config == wantNow && $0.lang == how.lang }
@@ -743,7 +767,7 @@ final class SessionClient {
         if !noModel && want.config == nil { return }                         // (no configuration to send)
         if let have, have.config == want.config && (want.lang == nil || have.lang == want.lang) { return }
         if have == nil && !noModel && !settingsChanged { return }
-        setConfig(id, config: want.config, lang: want.lang)
+        setConfig(id, config: want.config, lang: want.lang, version: version)
     }
 
     /// Sends a live session its settings now (set_config, harness#64): applied in place to its next model turns, no
@@ -752,21 +776,37 @@ final class SessionClient {
     /// session.config: a `busy` refusal (it took effect but was not stored) is sent once more, then shown
     /// (SessionState.settingsRefused), as bad_config is. True when it was sent (or its session is not open: its next
     /// process opens with it).
+    ///
+    /// `version`: the settings' version the caller read `config` and `lang` at (nil: now). Older than the newest by the
+    /// time it is written (compared and written under the lock): dropped, and the settings read again — the newest go,
+    /// to its next process and on the wire. Settings that change while it is sent: sent once more (at most twice).
     @discardableResult
-    func setConfig(_ sessionId: String, config: String?, lang: String?) -> Bool {
+    func setConfig(_ sessionId: String, config: String?, lang: String?, version: Int? = nil) -> Bool {
         let serial = sessionLock(sessionId)
         serial.lock(); defer { serial.unlock() }
-        // (a null — cloud models off — is never sent on an open line: what it opens with once they are on again stays)
-        lock.lock()
-        reopenWith[sessionId] = (config ?? reopenSettings(sessionId).config, lang)
-        // the model as it is now, read under the session's lock: a configuration decided before the switch turned off
-        // (queued behind its null) goes as null
-        let noModel = off
-        lock.unlock()
-        return sendConfig(sessionId, config: noModel ? nil : config, lang: lang, attempt: 1)
+        let wire = configLock(sessionId)
+        wire.lock(); defer { wire.unlock() }
+        lock.lock(); var read = version ?? settingsVersion; lock.unlock()
+        var want = (config: config, lang: lang)
+        var ok = false
+        for _ in 0..<3 {
+            lock.lock()
+            // a write older than the newest settings: the newest, read now
+            if read < settingsVersion { want = reopenSettings(sessionId); read = settingsVersion }
+            // (a null — cloud models off — is never sent on an open line: what it opens with once they are on again stays)
+            reopenWith[sessionId] = (want.config ?? reopenSettings(sessionId).config, want.lang)
+            // the model as it is now, read under the session's lock: a configuration decided before the switch turned
+            // off (queued behind its null) goes as null
+            let noModel = off
+            lock.unlock()
+            ok = sendConfig(sessionId, config: noModel ? nil : want.config, lang: want.lang, attempt: 1)
+            lock.lock(); let moved = settingsVersion != read; lock.unlock()
+            if !moved { break }
+        }
+        return ok
     }
 
-    /// The set_config line itself (the session's serial lock held, or the session just opened).
+    /// The set_config line itself, the session's `configLock` held by the caller (one per session on the wire at a time).
     private func sendConfig(_ sessionId: String, config: String?, lang: String?, attempt: Int) -> Bool {
         let cid = newClientId()
         lock.lock()
@@ -809,6 +849,7 @@ final class SessionClient {
     /// review: a busy or exited session kept the old ones; a language switch reached only the defaults).
     func adoptSettings(config: String?, lang: String?) {
         lock.lock()
+        settingsVersion += 1
         defaults = (config, lang)
         for id in Set(opened.keys).union(states.keys).union(reopenWith.keys) { reopenWith[id] = (config, lang) }
         lock.unlock()
@@ -818,13 +859,14 @@ final class SessionClient {
     /// it starts (the rest of the settings go in place, `setConfig`). The session decides when (the helper's
     /// end_if_idle: now if it is idle, else asked again once it may be — never under a reply, a queue, a task or a
     /// recovery); this client only asks, after any send it made before (one request per session at a time). Not an
-    /// `end`: the next send opens it again, with `config` and `lang`.
+    /// `end`: the next send opens it again, with the newest settings.
+    /// What the next process opens with is the client's own (adoptSettings, versioned): a restart writes none (#107
+    /// review at 7f09c1b: the settings a caller read before a change were written over the newer ones).
     @discardableResult
-    func restart(_ sessionId: String, config: String?, lang: String?) -> Bool {
+    func restart(_ sessionId: String) -> Bool {
         let serial = sessionLock(sessionId)
         serial.lock(); defer { serial.unlock() }
         lock.lock()
-        reopenWith[sessionId] = (config, lang)
         endedByApp.remove(sessionId)
         lock.unlock()
         guard let r = transport.request(Request.restart(sessionId: sessionId)) else { return false }
@@ -1070,6 +1112,8 @@ final class SessionClient {
                 guard let self else { return }
                 let serial = self.sessionLock(p.sessionId)
                 serial.lock(); defer { serial.unlock() }
+                let wire = self.configLock(p.sessionId)
+                wire.lock(); defer { wire.unlock() }
                 // (with the settings as they are now, not as that line had them)
                 self.lock.lock(); let how = self.reopenSettings(p.sessionId), noModel = self.off; self.lock.unlock()
                 if !self.sendConfig(p.sessionId, config: noModel ? nil : how.config, lang: how.lang, attempt: p.attempt + 1) {

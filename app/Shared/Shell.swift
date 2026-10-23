@@ -869,9 +869,8 @@ final class ShellModel: ObservableObject {
                 let ask = Set(stale).union(unknown).subtracting(asked).subtracting(failed)
                 if ask.isEmpty { break }
                 for id in ask.sorted() {
-                    // (the settings as they are at this ask: a newer save's never overwritten by an older round's)
-                    let (config, lang) = sessionSettings()
-                    if client.restart(id, config: config, lang: lang) {
+                    // (what its next process opens with is the client's newest settings: an ask carries none)
+                    if client.restart(id) {
                         asked.insert(id)
                         if unknown.contains(id) { keysLock.lock(); askedUnknown[id] = digest; keysLock.unlock() }
                     } else {

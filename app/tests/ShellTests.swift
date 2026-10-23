@@ -71,6 +71,7 @@ enum ShellTests {
         DecisionTests.group("shell.keyAckTests"); keyAckTests()
         DecisionTests.group("shell.reconcileNoWaitTests"); reconcileNoWaitTests()
         DecisionTests.group("shell.messageNeverLostTests"); messageNeverLostTests()
+        DecisionTests.group("shell.settingsOrderingTests"); settingsOrderingTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -460,7 +461,7 @@ enum ShellTests {
         let sendDone = DispatchSemaphore(value: 0), restartDone = DispatchSemaphore(value: 0)
         DispatchQueue.global().async { _ = c.send(.cua("x"), to: "ses_t"); sendDone.signal() }
         slow.inSend.wait()
-        DispatchQueue.global().async { c.restart("ses_t", config: "b", lang: "zh"); restartDone.signal() }
+        DispatchQueue.global().async { c.restart("ses_t"); restartDone.signal() }
         usleep(100_000)
         slow.lock.lock(); let early = slow.log; slow.lock.unlock()
         slow.release.signal()
@@ -1393,8 +1394,13 @@ enum ShellTests {
         _ = c.watch()
         shared.settle(); c.reconciling.wait()
         mock.onRequest = nil
-        let configs = mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }
-        check(!configs.contains { $0["config"] as? String == "ds-flash" }, "no configuration after the switch went off: \(configs.map { $0["config"] ?? "" })")
+        // (after the switch went off — with the first models.off — not before: the watch's own reconcile may send the
+        // configuration while the switch is still on; which comes first depends on the threads, a flake under load)
+        let all = mock.requests
+        let offAt = all.firstIndex { $0["op"] as? String == "models.off" } ?? all.count
+        let configs = all[offAt...].compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }
+        check(offAt < all.count && !configs.contains { $0["config"] as? String == "ds-flash" },
+              "no configuration after the switch went off: \(configs.map { $0["config"] ?? "" })")
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let main = (try? String(contentsOf: dir.appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
         let client = (try? String(contentsOf: dir.appendingPathComponent("Shared/SessionClient.swift"), encoding: .utf8)) ?? ""
@@ -2422,6 +2428,80 @@ enum ShellTests {
             let main = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
             check(main.contains("Button(L(\"Send again\", lang: lang)) { shell.resend(item.id) }.buttonStyle(.link)\n                            .disabled(!shell.composer.enabled)"),
                   "the bubble's Send again is off while a card waits")
+        }
+    }
+
+    /// #107 review at 7f09c1b — the invariant: what a session's next process opens with and the last set_config it was
+    /// sent are never older than the newest settings the client has. A reconcile that read A, held up behind the
+    /// session's lock (a send under way), while B is adopted (as the watch's applySettings does, with no reconcile of
+    /// its own): it must not write A over B, nor send A last.
+    static func settingsOrderingTests() {
+        final class Slow: SessionTransport {
+            let lock = NSLock()
+            var log: [[String: Any]] = []
+            var holdSay = false
+            let inSay = DispatchSemaphore(value: 0), gate = DispatchSemaphore(value: 0)
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                lock.lock(); log.append(body); let hold = holdSay && (body["line"] as? [String: Any])?["type"] as? String == "say"; if hold { holdSay = false }; lock.unlock()
+                if hold { inSay.signal(); gate.wait() }
+                if body["op"] as? String == SessionClient.Op.open { return ["ok": true, "session_id": body["session_id"] as? String ?? "ses_x"] }
+                return ["ok": true]
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+            func lastConfig() -> [String: Any]? {
+                lock.lock(); defer { lock.unlock() }
+                return log.compactMap { $0["line"] as? [String: Any] }.last { $0["type"] as? String == "set_config" }
+            }
+            func lastOpen() -> [String: Any]? { lock.lock(); defer { lock.unlock() }; return log.last { $0["op"] as? String == SessionClient.Op.open } }
+        }
+        /// A send holds the session's lock; a reconcile reads the settings and waits behind it; `change` runs; the send
+        /// goes on.
+        func interleave(_ c: SessionClient, _ t: Slow, _ id: String, change: () -> Void) {
+            t.lock.lock(); t.holdSay = true; t.lock.unlock()
+            let sent = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { _ = c.send(.say("在吗"), to: id); sent.signal() }
+            t.inSay.wait()
+            c.reconcileSession(id)                       // (reads the settings now, then waits for the session's lock)
+            usleep(200_000)
+            change()
+            t.gate.signal()
+            sent.wait(); c.reconciling.wait()
+        }
+
+        // the client: A read, B adopted meanwhile
+        do {
+            let t = Slow(), c = SessionClient(transport: t)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "old", "lang": "zh", "by": "open"])
+            c.reconciling.wait()
+            interleave(c, t, "s") { c.adoptSettings(config: "B", lang: "en") }
+            check(t.lastConfig()?["config"] as? String == "B" && t.lastConfig()?["lang"] as? String == "en",
+                  "the last set_config sent: B, not the A the reconcile read: \(String(describing: t.lastConfig()))")
+            c.feed(["kind": "helper.session_exit", "session_id": "s", "code": 0])
+            _ = c.reopenIfExited("s")
+            check(t.lastOpen()?["config"] as? String == "B" && t.lastOpen()?["lang"] as? String == "en",
+                  "its next process opens with B: \(String(describing: t.lastOpen()))")
+        }
+
+        // languageTests made deterministic: the shell's session, a reconcile that read (provider-b, zh) held up while
+        // the language switches to en: its next process opens in en
+        do {
+            let t = Slow()
+            var config = "provider-a", lang = ResolvedLang.zhHans
+            let m = ShellModel(client: SessionClient(transport: t), defaults: scratchDefaults(), config: { config }, lang: { lang },
+                               work: { $0() }, deliver: { $0() })
+            m.newConversation(); m.draft = "你好"; m.submit()
+            m.client.feed(["kind": "session.start", "session_id": "ses_x", "resumed": false, "last_seq": 0])
+            m.client.reconciling.wait()
+            config = "provider-b"
+            m.applySettings()                    // (adopted, not sent yet: it runs provider-a, the reconcile has one to send)
+            interleave(m.client, t, "ses_x") { lang = .en; m.applySettings() }
+            check(t.lastConfig()?["lang"] as? String == "en", "the last set_config: in en: \(String(describing: t.lastConfig()))")
+            m.client.feed(["kind": "helper.session_exit", "session_id": "ses_x", "code": 0, "idle": true])
+            m.selected = "ses_x"; m.draft = "again"; m.submit()
+            check(t.lastOpen()?["lang"] as? String == "en" && t.lastOpen()?["config"] as? String == "provider-b",
+                  "the reclaimed session reopens in en with provider-b: \(String(describing: t.lastOpen()))")
         }
     }
 
