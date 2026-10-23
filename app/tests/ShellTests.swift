@@ -75,6 +75,7 @@ enum ShellTests {
         DecisionTests.group("shell.evidenceTests"); evidenceTests()
         DecisionTests.group("shell.dirtyFlagTests"); dirtyFlagTests()
         DecisionTests.group("shell.switchGateTests"); switchGateTests()
+        DecisionTests.group("shell.normalizeTests"); normalizeTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -2543,7 +2544,7 @@ enum ShellTests {
                 let at = seq[id, default: 0]
                 emit(id, ["kind": "session.start", "resumed": at > 0, "last_seq": at], stored: false)
                 // (the harness normalises a config before it applies or stores it)
-                let ncfg = SessionClient.normalizeConfig(cfg)
+                let ncfg = harnessNormalize(cfg)
                 procs[id] = (ncfg, lang)
                 if let last = stored[id], last.config != ncfg || last.lang != lang {
                     stored[id] = (ncfg, lang)
@@ -2568,7 +2569,7 @@ enum ShellTests {
                     let hook = duringConfig, during = whileConfig
                     lock.unlock(); hook?(); during?(); lock.lock()
                     guard procs[id] != nil else { lock.unlock(); return ["ok": false, "code": "not_open"] }
-                    let cfg = (line["config"] as? String).map(SessionClient.normalizeConfig), lang = line["lang"] as? String ?? procs[id]?.lang
+                    let cfg = (line["config"] as? String).map(harnessNormalize), lang = line["lang"] as? String ?? procs[id]?.lang
                     if off && cfg != nil { offViolations += 1; lock.unlock(); return ["ok": false, "code": "no_model"] }
                     let mode = chaos?() ?? 0
                     if mode == 2 { lock.unlock(); return nil }
@@ -2644,7 +2645,7 @@ enum ShellTests {
         func save(_ c: String, _ l: ResolvedLang) { lock.lock(); value = (c, l); lock.unlock() }
         func setCloud(_ v: Bool) { lock.lock(); on = v; lock.unlock() }
         /// What every live process must apply: the configuration (none while cloud is off) and the language.
-        var expected: (config: String?, lang: String) { (cloud ? SessionClient.normalizeConfig(config) : nil, lang == .zhHans ? "zh" : "en") }
+        var expected: (config: String?, lang: String) { (cloud ? harnessNormalize(config) : nil, lang == .zhHans ? "zh" : "en") }
     }
 
     /// A shell on the simulated helper whose background work runs when the test says (in any order).
@@ -3040,16 +3041,18 @@ enum ShellTests {
         var seq = 0
         var configs: [String] = []
         var events: [String] = []
-        var trim = false
+        /// What the helper does to a config before it applies and stores it (the harness: harnessNormalize; nil: nothing).
+        var normalize: ((String) -> String)?
         var holdModelsOff: DispatchSemaphore?
         let modelsOffEntered = DispatchSemaphore(value: 0)
         var configDelayUs: UInt32 = 0
+        var offAt: Date?
         func request(_ body: [String: Any]) -> [String: Any]? {
             let op = body["op"] as? String ?? ""
             if op == SessionClient.Op.modelsOff {
                 modelsOffEntered.signal()
                 holdModelsOff?.wait()
-                lock.lock(); events.append("models.off(\(body["off"] as? Bool ?? false))"); lock.unlock()
+                lock.lock(); events.append("models.off(\(body["off"] as? Bool ?? false))"); offAt = Date(); lock.unlock()
                 return ["ok": true]
             }
             guard let l = body["line"] as? [String: Any], l["type"] as? String == "set_config" else { return ["ok": true] }
@@ -3057,7 +3060,7 @@ enum ShellTests {
             lock.lock(); defer { lock.unlock() }
             var cfg = l["config"] as? String
             configs.append(cfg ?? "null"); events.append("set_config(\(cfg ?? "null"))")
-            if trim, let c = cfg { cfg = SessionClient.normalizeConfig(c) }
+            if let n = normalize, let c = cfg { cfg = n(c) }
             seq += 1
             lines.append(["kind": "session.config", "session_id": body["session_id"] as? String ?? "s", "seq": seq,
                           "config": cfg as Any? ?? NSNull(), "lang": l["lang"] ?? "zh", "by": "set_config", "client_id": l["client_id"] ?? ""])
@@ -3080,7 +3083,7 @@ enum ShellTests {
         // R1: desired keeps the spaces an older version saved; the harness trims before it stores: its echo equals desired
         // once normalised — no set_config every round
         do {
-            let h = GateHelper(); h.trim = true
+            let h = GateHelper(); h.normalize = harnessNormalize
             let c = SessionClient(transport: h)
             c.retryBase = 0.002
             c.adoptSettings(config: "openai:custom| gpt-4o ", lang: "zh")
@@ -3139,6 +3142,24 @@ enum ShellTests {
             check(o.firstIndex(of: "set_config(A)").map { i in o.firstIndex(of: "models.off(true)").map { i < $0 } ?? false } == true,
                   "R5: cloud off while a configuration is in flight: models.off after it (\(o))")
         }
+        // R5b: the bound — a configuration still out when it passes: models.off goes anyway (the helper keeps the order)
+        do {
+            let h = GateHelper(); h.configDelayUs = 1_200_000
+            let c = SessionClient(transport: h)
+            c.modelsSync.offWaitBound = 0.3
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            let g = DispatchGroup(); g.enter()
+            DispatchQueue.global().async { c.reconciling.wait(); g.leave() }
+            usleep(100_000)                                               // (the set_config out, slow)
+            let pushed = Date()
+            c.modelOff = true; c.modelsSync.push()
+            c.modelsSync.settle(timeout: 3)
+            let waited = (h.offAt ?? .distantFuture).timeIntervalSince(pushed)
+            check(waited >= 0.25 && waited < 1.0 && h.order.first == "models.off(true)",
+                  "R5b: models.off waits for a configuration in flight up to its bound, then goes (\(String(format: "%.2f", waited)) s, \(h.order))")
+            g.wait()
+        }
         // R6: the helper acked off; the app's switch reads on before its push begins: no configuration until that push's ack
         do {
             let h = GateHelper()
@@ -3154,6 +3175,70 @@ enum ShellTests {
             for _ in 0..<500 { if h.sent.contains("A") { break }; usleep(2_000) }
             check(!before.contains { $0 != "null" } && h.sent.contains("A"),
                   "R6: the helper holds off, the app's switch on before its push: nothing sent, then A after the ack (\(before) → \(h.sent))")
+        }
+    }
+
+    /// The harness's normalizeConfig, ported here by hand and apart from the app's (SessionClient.normalizeConfig), so
+    /// that the fake helpers do not check the app against itself: /^openai:([a-z]+)\|([\s\S]*)$/, the model String.trim()'d
+    /// — JavaScript's WhiteSpace and LineTerminator code points, listed below.
+    static func harnessNormalize(_ spec: String) -> String {
+        let scalars = Array(spec.unicodeScalars)
+        let head = Array("openai:".unicodeScalars)
+        guard scalars.count > head.count, Array(scalars[..<head.count]) == head else { return spec }
+        var i = head.count
+        while i < scalars.count, scalars[i].value >= 0x61, scalars[i].value <= 0x7A { i += 1 }
+        guard i > head.count, i < scalars.count, scalars[i] == "|" else { return spec }
+        func jsSpace(_ s: Unicode.Scalar) -> Bool {
+            switch s.value {
+            case 0x09...0x0D, 0x20, 0xA0, 0x1680, 0x2000...0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF: return true
+            default: return false
+            }
+        }
+        var model = Array(scalars[(i + 1)...])
+        while let f = model.first, jsSpace(f) { model.removeFirst() }
+        while let l = model.last, jsSpace(l) { model.removeLast() }
+        var out = String.UnicodeScalarView(); out.append(contentsOf: scalars[...i]); out.append(contentsOf: model)
+        return String(out)
+    }
+
+    /// #107 review at 32c458b: normalisation as the harness does it, from its own code (a table node generated from
+    /// harness 0bbabd4: tests/fixtures/normalize-config.json); a U+FEFF that looped; the guard that keeps any normalisation
+    /// the app does not share from looping, while a real change still triggers.
+    static func normalizeTests() {
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("tests/fixtures/normalize-config.json")
+        let table = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any])?["cases"] as? [[String: String]] ?? []
+        let appWrong = table.filter { SessionClient.normalizeConfig($0["input"]!) != $0["output"]! }
+        let portWrong = table.filter { harnessNormalize($0["input"]!) != $0["output"]! }
+        check(table.count >= 50 && appWrong.isEmpty && portWrong.isEmpty,
+              "normalizeConfig as the harness's own (\(table.count) cases; the app's wrong on \(appWrong.map { $0["input"]!.unicodeScalars.map { String($0.value, radix: 16) } }), the test port on \(portWrong.count))")
+        check(ModelChoice.modelName("\u{FEFF}gpt-4o\u{00A0}") == "gpt-4o" && ModelChoice.modelName("gpt-4o\u{200B}") == "gpt-4o\u{200B}"
+              && ModelChoice.modelName("\u{0085}gpt-4o") == "\u{0085}gpt-4o", "a model name saved trimmed as JavaScript trims (FEFF, NBSP; not 200B, 0085)")
+        // the FEFF loop: a name pasted with U+FEFF, a harness that trims it — its echo is no trigger
+        do {
+            let h = GateHelper(); h.normalize = harnessNormalize
+            let c = SessionClient(transport: h)
+            c.retryBase = 0.002
+            c.adoptSettings(config: "openai:custom|gpt-4o\u{FEFF}", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            for _ in 0..<200 { c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait() }
+            check(h.sent.count <= 2 && h.sent.first == "openai:custom|gpt-4o", "a U+FEFF in the model name: \(h.sent.count) sends in 200 rounds")
+        }
+        // the guard: a helper that normalises what the app does not (drops a trailing "!") — its echo is ours and not
+        // desired: at most one more send, no loop; a real null from it (not ours) still repaired
+        do {
+            let h = GateHelper()
+            h.normalize = { $0.hasSuffix("!") ? String($0.dropLast()) : $0 }
+            let c = SessionClient(transport: h)
+            c.retryBase = 0.002
+            c.adoptSettings(config: "openai:custom|M!", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            for _ in 0..<200 { c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait() }
+            let looped = h.sent.count
+            h.lock.lock(); h.seq += 1; let n = h.seq; h.lock.unlock()
+            c.feed(["kind": "session.config", "session_id": "s", "seq": n, "config": NSNull(), "lang": "zh", "by": "set_config"])  // (the helper's)
+            c.reconciling.wait()
+            check(looped <= 2 && h.sent.count == looped + 1 && h.sent.last == "openai:custom|M!",
+                  "a normalisation the app does not share: \(looped) sends in 200 rounds (no loop); a real null after it: sent again (\(h.sent))")
         }
     }
 

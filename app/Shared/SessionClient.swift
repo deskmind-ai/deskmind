@@ -80,6 +80,12 @@ final class ModelsOffSync {
     /// waits for them, so none reaches the helper after it (#107 review at 00df2f8: one did, between a converge's check
     /// and its send).
     private var configSends = 0
+    /// Guards `configSends`, and wakes a models.off waiting for it to reach 0.
+    private let sendsDone = NSCondition()
+    /// How long a models.off waits for configurations let go before it (bounded, as every wait). Past it, it goes: the
+    /// helper keeps the order itself (SessionHost refuses a configuration after models.off, under the same lock), so the
+    /// bound never breaks the rule; it only stops the app's wait.
+    var offWaitBound: Double = 25
     /// What the helper last acked: it holds cloud models off (nil: not heard yet).
     private var helperOff: Bool?
     var helperHoldsOff: Bool? { lock.lock(); defer { lock.unlock() }; return helperOff }
@@ -88,10 +94,12 @@ final class ModelsOffSync {
     func beginConfigSend() -> Bool {
         lock.lock(); defer { lock.unlock() }
         if pending || helperOff == true { return false }
-        configSends += 1
+        sendsDone.lock(); configSends += 1; sendsDone.unlock()
         return true
     }
-    func endConfigSend() { lock.lock(); configSends -= 1; lock.unlock() }
+    func endConfigSend() {
+        sendsDone.lock(); configSends -= 1; if configSends == 0 { sendsDone.broadcast() }; sendsDone.unlock()
+    }
     /// Called after every ack (on this sync's queue: the callee must not wait for it — SessionClient queues a converge).
     func onAck(_ f: @escaping () -> Void) { lock.lock(); acked_.append(f); lock.unlock() }
 
@@ -104,10 +112,12 @@ final class ModelsOffSync {
     private func attempt(_ g: Int, delay: Double) {
         lock.lock(); let latest = g == gen; lock.unlock()
         guard latest else { return }                         // (a newer push carries on)
-        // configurations let go before this push began reach the helper first: waited for, however long — each ends
-        // within its transport's timeout (20 s a request, a few busy_ending tries), so this ends too (#107 review at
-        // 187ae8e: a 10 s bound broke the promise for a slow send)
-        while true { lock.lock(); let out = configSends; lock.unlock(); if out == 0 { break }; usleep(2_000) }
+        // configurations let go before this push began reach the helper first: waited for, at most `offWaitBound` (a
+        // condition, not a poll)
+        let deadline = Date().addingTimeInterval(offWaitBound)
+        sendsDone.lock()
+        while configSends > 0 { if !sendsDone.wait(until: deadline) { break } }
+        sendsDone.unlock()
         let off = current()
         let r = transport.request(SessionClient.Request.modelsOff(off))
         // a helper without the op holds no bit: nothing to keep equal
@@ -351,8 +361,19 @@ final class SessionClient {
         guard spec.hasPrefix("openai:"), let bar = spec.firstIndex(of: "|") else { return spec }
         let service = spec[spec.index(spec.startIndex, offsetBy: 7)..<bar]
         guard !service.isEmpty, service.allSatisfy({ $0 >= "a" && $0 <= "z" }) else { return spec }
-        return "openai:\(service)|" + spec[spec.index(after: bar)...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return "openai:\(service)|" + spec[spec.index(after: bar)...].trimmingCharacters(in: jsWhitespace)
     }
+
+    /// What JavaScript's String.prototype.trim removes, exactly (ECMA-262 WhiteSpace and LineTerminator): U+0009–000D,
+    /// 0020, 00A0, 1680, 2000–200A, 2028, 2029, 202F, 205F, 3000, FEFF — not U+0085, not U+200B. Foundation's
+    /// .whitespacesAndNewlines differs (it keeps U+FEFF, takes U+0085): a pasted name with a U+FEFF looped (#107 review
+    /// at 32c458b).
+    static let jsWhitespace: CharacterSet = {
+        var s = CharacterSet(charactersIn: Unicode.Scalar(0x09)!...Unicode.Scalar(0x0D)!)
+        for v: UInt32 in [0x20, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000, 0xFEFF] { s.insert(Unicode.Scalar(v)!) }
+        s.insert(charactersIn: Unicode.Scalar(0x2000)!...Unicode.Scalar(0x200A)!)
+        return s
+    }()
     /// desired()'s configuration and language (for a client in a test, settable: `stored`).
     var defaultConfig: String? {
         get { desired().config }
@@ -404,6 +425,12 @@ final class SessionClient {
     private var nextAttempt: [String: Int] = [:]
     /// Sessions with a converge retry waiting (one chain per session).
     private var retryScheduled: Set<String> = []
+    /// The client_ids of this client's recent set_configs per session (their echoes are its own), and the (desired,
+    /// generation) pairs an echo has already sent again: a guard, so that no normalisation the client does not share with
+    /// the harness can loop (#107 review at 32c458b) — an echo of ours that is not desired sends at most once per pair; a
+    /// row that is not ours (the helper's null, another client's) always does.
+    private var ownConfigs: [String: [String]] = [:]
+    private var echoResent: [String: Set<String>] = [:]
     /// A failed send's next try (per session: its delay; doubling, at most 30 s).
     private var retryDelay: [String: Double] = [:]
     /// Bumped on every open of a session and every process start heard: a check made before (a backfill's exit)
@@ -905,6 +932,7 @@ final class SessionClient {
     /// The session's process is gone (exit, delete): nothing owed to it — its next process opens with desired().
     private func forgetSettings(_ id: String) {
         dirty.remove(id); inFlight[id] = nil; nextAttempt[id] = nil; retryScheduled.remove(id); retryDelay[id] = nil
+        echoResent[id] = nil
     }
 
     /// Sends a session these settings (a test's own: the app converges) — set_config, harness#64: applied in place to
@@ -928,6 +956,8 @@ final class SessionClient {
         lock.lock()
         // (what it applied is known only from its answer: session.config, or busy — applied, not stored)
         pendingConfigs[cid] = PendingConfig(sessionId: sessionId, config: config, lang: lang, attempt: attempt)
+        ownConfigs[sessionId, default: []].append(cid)
+        if ownConfigs[sessionId]!.count > 32 { ownConfigs[sessionId]!.removeFirst() }
         lock.unlock()
         var line = SessionControl.setConfig(config: config, lang: lang).line
         line["client_id"] = cid
@@ -1221,7 +1251,17 @@ final class SessionClient {
         var trigger = started || (first && after.exited == nil) || noModelHere || busyAgain
         if !trigger, let now = settingsNow, after.exited == nil {
             let d = desiredNow()
-            if now.config.map(Self.normalizeConfig) != d.config || (d.lang != nil && now.lang != d.lang) { trigger = true }
+            if now.config.map(Self.normalizeConfig) != d.config || (d.lang != nil && now.lang != d.lang) {
+                lock.lock()
+                if let c = now.clientId, ownConfigs[id]?.contains(c) == true {
+                    // our own echo, not desired (a normalisation not shared): once per (desired, generation)
+                    let key = "\(d.config ?? "\u{0}")|\(d.lang ?? "")|\(generation[id, default: 0])"
+                    trigger = echoResent[id, default: []].insert(key).inserted
+                } else {
+                    trigger = true                                  // (not ours: the helper's null, another client's)
+                }
+                lock.unlock()
+            }
         }
         if trigger { reconcileSession(id) }
         // (no whole-state comparison per line: in a long session that cost more than the line itself)

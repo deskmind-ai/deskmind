@@ -1,0 +1,233 @@
+{
+ "source": "deskmind-ai/harness 0bbabd4 src/gateway/index.ts normalizeConfig",
+ "cases": [
+  {
+   "input": "openai:custom|gpt-4o",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|\tgpt-4o\t",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o\t",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|\ngpt-4o\n",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o\n",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|\r\ngpt-4o\r\n",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o\r\n",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|\u000bgpt-4o\u000b",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o\u000b",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|\fgpt-4o\f",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o\f",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| gpt-4o ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|　gpt-4o　",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o　",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|﻿gpt-4o﻿",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o﻿",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|​gpt-4o​",
+   "output": "openai:custom|​gpt-4o​"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o​",
+   "output": "openai:deepseek|gpt-4o​"
+  },
+  {
+   "input": "openai:custom|gpt-4o",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom|᠎gpt-4o᠎",
+   "output": "openai:custom|᠎gpt-4o᠎"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o᠎",
+   "output": "openai:deepseek|gpt-4o᠎"
+  },
+  {
+   "input": "openai:custom|﻿ gpt-4o﻿ ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o﻿ ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "openai:custom| ﻿ gpt-4o ﻿ ",
+   "output": "openai:custom|gpt-4o"
+  },
+  {
+   "input": "openai:deepseek|gpt-4o ﻿ ",
+   "output": "openai:deepseek|gpt-4o"
+  },
+  {
+   "input": "ds-flash",
+   "output": "ds-flash"
+  },
+  {
+   "input": " ds-flash ",
+   "output": " ds-flash "
+  },
+  {
+   "input": "openai:Custom| gpt-4o ",
+   "output": "openai:Custom| gpt-4o "
+  },
+  {
+   "input": "openai:|gpt-4o ",
+   "output": "openai:|gpt-4o "
+  },
+  {
+   "input": "openai:cus tom| x ",
+   "output": "openai:cus tom| x "
+  },
+  {
+   "input": "openai:custom|",
+   "output": "openai:custom|"
+  },
+  {
+   "input": "openai:custom|  ",
+   "output": "openai:custom|"
+  },
+  {
+   "input": "openai:custom|a b ",
+   "output": "openai:custom|a b"
+  },
+  {
+   "input": "openai:custom|x|y ",
+   "output": "openai:custom|x|y"
+  },
+  {
+   "input": "OPENAI:custom| x",
+   "output": "OPENAI:custom| x"
+  },
+  {
+   "input": "ark-evolving﻿",
+   "output": "ark-evolving﻿"
+  }
+ ]
+}

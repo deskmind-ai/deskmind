@@ -962,7 +962,7 @@ enum ModelChoice {
     /// What Save writes for the engine: nothing unless the user moved the switch (shown differs from stored).
     static func engineToWrite(saved: Bool, shown: Bool) -> Bool? { shown == saved ? nil : shown }
     /// A model name as saved and sent: without the spaces and line ends a paste brings (the harness trims too).
-    static func modelName(_ typed: String) -> String { typed.trimmingCharacters(in: .whitespacesAndNewlines) }
+    static func modelName(_ typed: String) -> String { typed.trimmingCharacters(in: SessionClient.jsWhitespace) }
 }
 
 /// A card's body on screen (MainSplitView.CardView: the body scrolls inside a bounded height, its header and buttons
