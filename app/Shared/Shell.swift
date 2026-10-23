@@ -741,6 +741,30 @@ final class ShellModel: ObservableObject {
         pick(a, immediate: false, in: id)
     }
 
+    /// When each card came on screen (CardView's appear; gone when it leaves), by card key; the last key-down the
+    /// window saw (any key).
+    private var shownAt: [String: Double] = [:]
+    private var lastKeyDown = -Double.infinity
+
+    func cardShown(_ card: CardModel) { let k = Self.cardKey(card); if shownAt[k] == nil { shownAt[k] = now() } }
+    func cardHidden(_ card: CardModel) { shownAt[Self.cardKey(card)] = nil }
+
+    /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true when it picked on the pinned
+    /// card and is consumed. A digit picks only when it is a card key (CardKeys.number), no key-down at all came in
+    /// the `CardKeys.quiet` before it (typing in progress — wherever the focus is now), and the pinned card has been on
+    /// screen for `CardKeys.cardOnScreen`. Typing in progress never lands on a card (#107).
+    func keyDown(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool) -> Bool {
+        let t = now()
+        let quietFor = t - lastKeyDown
+        lastKeyDown = t
+        guard let n = CardKeys.number(characters: characters, commandLike: commandLike, mainWindowIsKey: mainWindowIsKey,
+                                      editingText: editingText, isRepeat: isRepeat),
+              quietFor >= CardKeys.quiet,
+              let id = selected, let s = states[id], let p = pinned(s),
+              let since = shownAt[Self.cardKey(runId: p.runId, askId: p.card.askId)], t - since >= CardKeys.cardOnScreen else { return false }
+        return pressKey(n)
+    }
+
     /// Key `n` (1–9, CardKeys) on the pinned card: its n-th control as shown (CardLayout), picked as a click is — held for
     /// the take-back, an approve-type option only once the whole card was seen. False when it picks nothing (the key is
     /// the window's then).
@@ -1038,10 +1062,10 @@ final class ShellModel: ObservableObject {
 }
 
 extension CardModel.Role {
-    /// An option that lets the task go ahead on what the card shows (yes; "you decide"): answered only once the card's
-    /// whole body has been on screen (owner: never approve what you can't fully see). The way out, a pick, a skip and
-    /// undo are not.
-    var needsWholeBody: Bool { self == .approve || self == .delegate }
+    /// An option that lets the task go ahead on what the card shows (yes; "you decide") — or one whose kind this app
+    /// does not know, which might (it fails closed): answered only once the card's whole body has been on screen
+    /// (owner: never approve what you can't fully see). The way out, a pick, a skip and undo are not.
+    var needsWholeBody: Bool { self == .approve || self == .delegate || self == .other }
     /// An answer that resumes no model work (the way out; undo, which the session runs from its receipts): it goes
     /// with cloud models off too (#107 re-review: holding back an undo for its 600 s would break the gate).
     var reachesNoModel: Bool { self == .cancel || self == .undo }

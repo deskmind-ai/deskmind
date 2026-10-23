@@ -110,10 +110,21 @@ struct CardLayout: Equatable {
 }
 
 /// The 1–9 keys on a waiting card (handoff §3.7): only in the main window while it is the key window, with no modifier
-/// (⇧ aside), and not while the user types in a field (the card's own field, the composer).
+/// (⇧ aside), not an auto-repeat, and not while the user types in a field (the card's own field, the composer). Whether
+/// the user was typing a moment ago is not read from the focus (SwiftUI may drop it when the composer is disabled as a
+/// card arrives): ShellModel.keyDown adds the time guards (`cardOnScreen`, `quiet`).
 enum CardKeys {
-    static func number(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool) -> Int? {
-        guard mainWindowIsKey, !editingText, !commandLike, let c = characters, c.count == 1,
+    /// The card must have been on screen this long before a key picks on it (seconds): reading a new card and deciding
+    /// takes longer than this, while a keystroke that was already on its way when it appeared comes sooner.
+    static let cardOnScreen: Double = 1.0
+    /// And no key-down (any key, wherever it went) for this long before the digit: typing runs at roughly 0.1–0.3 s
+    /// between keys (40–100 words a minute), and even a slow typist rarely pauses a second inside a burst; a deliberate
+    /// answer key comes after a pause. A digit inside a burst is part of the burst — it never reaches the card, and it
+    /// renews the guard.
+    static let quiet: Double = 1.0
+
+    static func number(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool = false) -> Int? {
+        guard mainWindowIsKey, !editingText, !commandLike, !isRepeat, let c = characters, c.count == 1,
               let n = Int(c), (1...CardLayout.maxKeys).contains(n) else { return nil }
         return n
     }

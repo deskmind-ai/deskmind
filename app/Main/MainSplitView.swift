@@ -235,7 +235,9 @@ struct ChatColumn: View {
         GeometryReader { g in column(height: g.size.height) }
             .background(Brand.paper)
             // 1–9 pick the pinned card's options (only while this window is the key one and no field is typed in)
-            .background(CardKeyMonitor { n in shell.pressKey(n) })
+            .background(CardKeyMonitor { c, cmd, key, editing, rep in
+                shell.keyDown(characters: c, commandLike: cmd, mainWindowIsKey: key, editingText: editing, isRepeat: rep)
+            })
             .onChange(of: shell.current.flatMap { shell.pinned($0) }?.card.askId) { _, id in announce(shell.current, id) }
     }
 

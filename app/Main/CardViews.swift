@@ -106,6 +106,9 @@ struct CardView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(card.blocking && (phase.ending == nil || phase.isExpiredOffer) ? Brand.dot : Brand.line, lineWidth: 1.2))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Self.voiceOverLabel(card, phase: phase, lang: lang))
+        // (when it came on screen: its keys wait CardKeys.cardOnScreen)
+        .onAppear { shell.cardShown(card) }
+        .onDisappear { shell.cardHidden(card) }
     }
 
     /// One option's control: a row of the list (a pick), or a button; with its key (1–9) shown.
@@ -283,16 +286,17 @@ struct ConsentFields: View {
 /// key window and no field is being typed in, with no ⌘ ⌃ ⌥ (CardKeys); handed to `onKey`, and swallowed only when it
 /// picked something. It never takes the focus and never brings anything forward.
 struct CardKeyMonitor: NSViewRepresentable {
-    let onKey: (Int) -> Bool
+    /// Every key-down of this window, with what the gate needs; true: consumed (it picked).
+    let onKey: (_ characters: String?, _ commandLike: Bool, _ mainWindowIsKey: Bool, _ editingText: Bool, _ isRepeat: Bool) -> Bool
 
     func makeNSView(context: Context) -> NSView { Watcher(onKey: onKey) }
     func updateNSView(_ v: NSView, context: Context) { (v as? Watcher)?.onKey = onKey }
     static func dismantleNSView(_ v: NSView, coordinator: ()) { (v as? Watcher)?.stop() }
 
     final class Watcher: NSView {
-        var onKey: (Int) -> Bool
+        var onKey: (String?, Bool, Bool, Bool, Bool) -> Bool
         private var monitor: Any?
-        init(onKey: @escaping (Int) -> Bool) { self.onKey = onKey; super.init(frame: .zero) }
+        init(onKey: @escaping (String?, Bool, Bool, Bool, Bool) -> Bool) { self.onKey = onKey; super.init(frame: .zero) }
         required init?(coder: NSCoder) { nil }
 
         override func viewDidMoveToWindow() {
@@ -301,11 +305,10 @@ struct CardKeyMonitor: NSViewRepresentable {
             guard window != nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
                 guard let self, let w = self.window, e.window === w else { return e }
-                let n = CardKeys.number(characters: e.charactersIgnoringModifiers,
-                                        commandLike: !e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-                                        mainWindowIsKey: w.isKeyWindow, editingText: w.firstResponder is NSText)
-                guard let n, self.onKey(n) else { return e }
-                return nil
+                // (every key-down goes to the model, a digit or not: the typing guard counts them all)
+                let picked = self.onKey(e.charactersIgnoringModifiers, !e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                                        w.isKeyWindow, w.firstResponder is NSText, e.isARepeat)
+                return picked ? nil : e
             }
         }
 

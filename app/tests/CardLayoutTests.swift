@@ -25,6 +25,7 @@ enum CardLayoutTests {
         DecisionTests.group("layout.wholeCardTests"); wholeCardTests()
         DecisionTests.group("layout.factsTests"); factsTests()
         DecisionTests.group("layout.keyGateTests"); keyGateTests()
+        DecisionTests.group("layout.typingGuardTests"); typingGuardTests()
     }
 
     // MARK: samples
@@ -169,7 +170,8 @@ enum CardLayoutTests {
         for (name, json) in samples() {
             let card = model(json)
             for c in CardLayout(card).controls {
-                let waits = c.button.role == .approve || c.button.role == .delegate        // (handoff: approve, "you decide")
+                // (handoff: approve, "you decide"; and a kind this app does not know, which might approve: it fails closed)
+                let waits = c.button.role == .approve || c.button.role == .delegate || c.button.role == .other
                 let r = CardStoreTests.Rig()
                 r.ask("a1", card: json)
                 guard let m = r.model("a1") else { continue }
@@ -220,6 +222,7 @@ enum CardLayoutTests {
 
     static func keyGateTests() {
         for n in 1...9 { check(CardKeys.number(characters: "\(n)", commandLike: false, mainWindowIsKey: true, editingText: false) == n, "\(n) is key \(n)") }
+        check(CardKeys.number(characters: "1", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: true) == nil, "an auto-repeat: no key")
         for c in ["0", "a", "10", "", "１"] { check(CardKeys.number(characters: c, commandLike: false, mainWindowIsKey: true, editingText: false) == nil, "«\(c)» is no key") }
         check(CardKeys.number(characters: nil, commandLike: false, mainWindowIsKey: true, editingText: false) == nil, "no characters: no key")
         check(CardKeys.number(characters: "1", commandLike: true, mainWindowIsKey: true, editingText: false) == nil, "⌘1 / ⌃1 / ⌥1: not a card key")
@@ -229,9 +232,73 @@ enum CardLayoutTests {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let monitor = text.components(separatedBy: "struct CardKeyMonitor").dropFirst().first ?? ""
-        check(monitor.contains("CardKeys.number(") && monitor.contains("e.window === w") && monitor.contains("w.firstResponder is NSText"),
-              "the key monitor: its own window only, the gate, not while a field is typed in")
+        check(monitor.contains("e.window === w") && monitor.contains("w.firstResponder is NSText"),
+              "the key monitor: its own window only, and says whether a field is typed in")
+        check(monitor.contains("e.isARepeat") && !monitor.contains("CardKeys.number("), "the monitor hands every key-down, with its repeat flag, to the model's gate")
         let main = (try? String(contentsOf: url.deletingLastPathComponent().appendingPathComponent("MainSplitView.swift"), encoding: .utf8)) ?? ""
-        check(main.contains("CardKeyMonitor { n in shell.pressKey(n) }"), "the chat column hands the keys to the model")
+        check(main.contains("shell.keyDown(characters:"), "the chat column hands every key-down to the model")
+    }
+
+    // MARK: - typing never lands on a card (#111 review at 8fc3cdb)
+
+    /// The user types in the composer; a card arrives; the composer is disabled and SwiftUI may drop the focus, so the
+    /// next key-downs no longer go to a field. Digits typed on must not answer the card ("3" is 先别做了: at once, the task
+    /// ends). The guards are times, not the focus: a key picks only after `CardKeys.quiet` with no key-down at all, on a
+    /// card on screen for `CardKeys.cardOnScreen`.
+    static func typingGuardTests() {
+        func key(_ r: CardStoreTests.Rig, _ c: String, editing: Bool = false, repeating: Bool = false) -> Bool {
+            r.m.keyDown(characters: c, commandLike: false, mainWindowIsKey: true, editingText: editing, isRepeat: repeating)
+        }
+        func arrive(_ r: CardStoreTests.Rig) -> CardModel {
+            r.ask("a1")
+            let m = r.model("a1")!
+            r.m.cardShown(m)                                      // (on screen now)
+            r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+            return m
+        }
+        // typing in the composer (a field), the card comes, the focus is gone, the user types digits on at 0.2 s a key
+        let r = CardStoreTests.Rig()
+        for ch in "明天发周报给" { _ = key(r, String(ch), editing: true); r.timers.advance(0.2) }
+        _ = arrive(r)
+        var picked = false
+        for ch in "2023年3月" { picked = key(r, String(ch)) || picked; r.timers.advance(0.2) }
+        r.timers.advance(CardStore.takeBack * 2)
+        check(!picked && r.wire.count("answer") == 0 && r.phase("a1") == .open, "digits typed on after the card came (focus gone): nothing picked, nothing sent")
+        // a pause, then a deliberate key: it picks (through the take-back)
+        r.timers.advance(CardKeys.quiet)
+        check(key(r, "1") && r.phase("a1")?.pending != nil, "after a pause of \(CardKeys.quiet) s: key 1 picks")
+        // a digit inside a burst renews the guard: 2 then 3 at 0.5 s apart after a pause — only the 2 picks
+        let b = CardStoreTests.Rig()
+        _ = arrive(b)
+        b.timers.advance(2)
+        check(key(b, "2"), "a first key after a pause picks")
+        b.timers.advance(0.5)
+        check(!key(b, "3") && b.wire.count("answer") == 0, "the next one 0.5 s later does not (先别做了 would go at once)")
+        // the card must have been on screen: a pause, the card comes, a key at once does nothing
+        let c = CardStoreTests.Rig()
+        c.timers.advance(5)
+        _ = arrive(c)
+        c.timers.advance(CardKeys.cardOnScreen / 2)
+        check(!key(c, "1") && c.phase("a1") == .open, "a key \(CardKeys.cardOnScreen / 2) s after the card came: nothing")
+        c.timers.advance(CardKeys.cardOnScreen + CardKeys.quiet)
+        check(key(c, "1"), "on screen \(CardKeys.cardOnScreen) s and quiet: it picks")
+        // a card never on screen (another session shown, the window hidden): no key picks on it
+        let d = CardStoreTests.Rig()
+        d.ask("a1")
+        d.timers.advance(5)
+        check(!key(d, "1"), "a card not on screen: nothing")
+        // auto-repeat: a held key never picks, and keeps the guard (it is typing)
+        let e = CardStoreTests.Rig()
+        _ = arrive(e)
+        e.timers.advance(5)
+        check(!key(e, "1", repeating: true) && e.phase("a1") == .open, "an auto-repeat: nothing")
+        e.timers.advance(0.1)
+        check(!key(e, "1"), "and the key right after it is still inside the burst")
+        // typing in a field (the card's own words): never a key
+        let f = CardStoreTests.Rig()
+        _ = arrive(f)
+        f.timers.advance(5)
+        check(!key(f, "1", editing: true), "typing in a field: the digit is typed")
+        check(CardKeys.cardOnScreen >= 0.8 && CardKeys.quiet >= 0.8 && CardKeys.cardOnScreen <= 2 && CardKeys.quiet <= 2, "the guards: about a second")
     }
 }

@@ -603,24 +603,50 @@ enum ShellTests {
 
     /// #107 review (item 5, handoff §3.1): nothing in the window's views moves the keyboard focus — a card that arrives
     /// while the user types must never get the typing (its field's Return would send it as the answer).
-    /// M2 A2: every file of the window's views is checked — MainSplitView.swift and each Main/Card*.swift (the cards by
-    /// kind, their keys), so a new card file is in the check by its name — and none of them brings a window forward or
-    /// activates the app either (#103: the run view's five calls that did were removed; handoff §3.1).
+    /// The 0.5 window's view files, from the main app's source list in build.sh (whatever they are named, wherever they
+    /// are): each file that holds a view of the window (a `shell: ShellModel` property), and each file declaring a View
+    /// those build (`Name(`), comment lines left out. The old window (flag off) is not in it: its views have no shell.
+    static func windowViewFiles() -> [(name: String, code: String)] {
+        let app = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        guard let build = try? String(contentsOf: app.appendingPathComponent("build.sh"), encoding: .utf8) else { check(false, "build.sh readable"); return [] }
+        let lines = build.components(separatedBy: "\n")
+        guard let at = lines.firstIndex(where: { $0.contains("-o \"$MAIN/Contents/MacOS/DeskMind\"") }), at + 1 < lines.count else {
+            check(false, "build.sh: the main app's swiftc line"); return []
+        }
+        let files = lines[at + 1].split(separator: " ").map(String.init).filter { $0.hasSuffix(".swift") && !$0.hasPrefix("Shared/") }
+        var code: [String: String] = [:]
+        for f in files {
+            guard let t = try? String(contentsOf: app.appendingPathComponent(f), encoding: .utf8) else { check(false, "\(f) readable"); continue }
+            code[f] = t.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        }
+        func views(_ c: String) -> [String] {
+            c.components(separatedBy: "\n").compactMap { l -> String? in
+                let t = l.trimmingCharacters(in: .whitespaces)
+                guard t.hasPrefix("struct ") || t.hasPrefix("final class ") || t.hasPrefix("class "), let colon = t.firstIndex(of: ":") else { return nil }
+                let head = t[..<colon].split(separator: " ").last.map(String.init) ?? ""
+                return t[colon...].contains(" View") ? head : nil
+            }
+        }
+        var window = Set(code.filter { $0.value.contains("var shell: ShellModel") }.map(\.key))
+        let built = window.flatMap { f in code.filter { g in !window.contains(g.key) && views(g.value).contains { code[f]!.contains($0 + "(") } }.map(\.key) }
+        window.formUnion(built)
+        return window.sorted().map { ($0, code[$0]!) }
+    }
+
+    /// M2 A2: every file of the window's views is checked (windowViewFiles: from build.sh's list, so a renamed or moved
+    /// card view is still in it), and none of them brings a window forward or activates the app either (#103: the run
+    /// view's five calls that did were removed; handoff §3.1).
     static func focusTests() {
-        let main = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main")
-        let names = ((try? FileManager.default.contentsOfDirectory(atPath: main.path)) ?? [])
-            .filter { $0 == "MainSplitView.swift" || ($0.hasPrefix("Card") && $0.hasSuffix(".swift")) }.sorted()
-        check(names.contains("MainSplitView.swift") && names.contains("CardViews.swift"), "the window's view files: \(names)")
+        let files = windowViewFiles()
+        let names = files.map(\.name)
+        check(names.contains("Main/MainSplitView.swift") && names.count >= 2, "the window's view files: \(names)")
         let movers = ["@FocusState", ".focused(", "defaultFocus", "makeFirstResponder", "becomeFirstResponder", "prefersDefaultFocus", "focusScope", "FocusedValue",
                       "NSApp.activate", ".activate(", "makeKeyAndOrderFront", "orderFrontRegardless", "orderFront(", "makeKey()", "stepAside", "unhide("]
-        var all = ""
-        for n in names {
-            guard let text = try? String(contentsOf: main.appendingPathComponent(n), encoding: .utf8) else { check(false, "Main/\(n) readable"); continue }
-            let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        for (n, code) in files {
             let found = movers.filter { code.contains($0) }
-            check(found.isEmpty, "Main/\(n) moves no focus and brings nothing forward (a card's field is focused only by the user's click): \(found)")
-            all += code
+            check(found.isEmpty, "\(n) moves no focus and brings nothing forward (a card's field is focused only by the user's click): \(found)")
         }
+        let all = files.map(\.code).joined(separator: "\n")
         check(all.contains("struct CardView") && all.contains("TextField(L(\"Or answer in your own words\""), "the check reads the card's own field's file")
     }
 
@@ -745,7 +771,8 @@ enum ShellTests {
         check(sent(mock)?["text"] as? String == "好的", "then sent: \(String(describing: sent(mock)))")
         // a card with no approve-type option takes words at once
         var plain = card
-        plain["options"] = [["kind": "choice", "text": "周一"], ["kind": "cancel", "text": "先别做了"]]
+        // (a reading: a kind the app knows takes no wait; an unknown kind would — it fails closed, #111 review)
+        plain["options"] = [["kind": "reading", "text": "周一"], ["kind": "cancel", "text": "先别做了"]]
         var pl = lines
         pl[3]["card"] = plain
         let mock2 = Mock()

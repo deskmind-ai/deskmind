@@ -686,10 +686,9 @@ enum CardStoreTests {
     /// The window's views read a card through its phase (ShellModel.phase / pinned) only: never the reducer's outcome
     /// or the open card directly, so the chat, the pinned card, VoiceOver and the dot cannot disagree.
     static func viewsTests() {
-        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main")
-        // (the window's views: MainSplitView.swift, and the cards' own file once they have one)
-        let text = ["MainSplitView.swift", "CardViews.swift"].compactMap { try? String(contentsOf: dir.appendingPathComponent($0), encoding: .utf8) }.joined(separator: "\n")
-        guard !text.isEmpty else { check(false, "Main/MainSplitView.swift readable"); return }
+        // (the window's view files, as the focus check finds them: from build.sh)
+        let text = ShellTests.windowViewFiles().map(\.code).joined(separator: "\n")
+        guard !text.isEmpty else { check(false, "the window's view files readable"); return }
         let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
         for banned in [".outcome", ".openCard", ".explicit", "cards.picks", "cards.sent"] {
             check(!code.contains(banned), "the views do not read \(banned)")
