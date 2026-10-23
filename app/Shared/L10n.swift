@@ -577,6 +577,8 @@ enum L10n {
         "Picked, sending in a moment": "已选，稍后发出",
         "Sent, waiting for the task": "已发出，等任务确认",
         "Expired: no answer in time": "已过期：没有及时回答",
+        "Expired; answering it now was refused": "已过期：「现在回答」没有被接受",
+        "Expired; answering it now was refused: %@": "已过期：「现在回答」没有被接受：%@",
         "Expired; your late answer was not used": "已过期：之后的回答没有用上",
         "Expired, waiting for you: %@": "已过期，等你：%@",
         "The card expired; the task waits where it was": "卡片已过期，任务停在原地等你",

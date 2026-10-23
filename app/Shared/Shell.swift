@@ -133,6 +133,8 @@ enum ShellText {
         case .pending: return L("Picked, sending in a moment", lang: lang)
         case .sent: return L("Sent, waiting for the task", lang: lang)
         case .answered: return L("Answered", lang: lang)
+        case .expired(_, .refused(let why)):
+            return why.isEmpty ? L("Expired; answering it now was refused", lang: lang) : L("Expired; answering it now was refused: %@", why, lang: lang)
         case .expired(let late, _):
             return late ? L("Expired; your late answer was not used", lang: lang) : L("Expired: no answer in time", lang: lang)
         case .voided(let why):

@@ -732,7 +732,7 @@ struct CardView: View {
             Text(L("Nobody answered in 10 minutes, so this card expired. The task waits where it was; nothing was done.", lang: lang))
                 .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if now != .gone, let ask = card.askId {
+            if now == .offered || now == .asked, let ask = card.askId {
                 Button(now == .asked ? L("Looking again…", lang: lang) : L("Answer now", lang: lang)) { shell.answerNow(card.runId, askId: ask) }
                     .buttonStyle(InkButtonStyle(prominent: true))
                     .disabled(now == .asked)

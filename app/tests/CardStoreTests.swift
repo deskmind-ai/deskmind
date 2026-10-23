@@ -20,6 +20,7 @@ enum CardStoreTests {
 
     static func run() {
         DecisionTests.group("cards.wireTests"); wireTests()
+        DecisionTests.group("cards.movedOnTests"); movedOnTests()
         DecisionTests.group("cards.tableTests"); tableTests()
         DecisionTests.group("cards.allOrdersTests"); allOrdersTests()
         DecisionTests.group("cards.propertyTests"); propertyTests()
@@ -168,6 +169,65 @@ enum CardStoreTests {
         s.ask("a1")
         s.emit("refused", ["what": "answer for a1", "why": "", "by": "user"])
         check(s.state.task(rid)?.refusedAnswers.isEmpty == true, "only the executor's refusal of an answer counts")
+    }
+
+    // MARK: - the task goes on without its expired card (#110 review at 2712bb4)
+
+    /// After a card's timeout void, the run's own word that it went on — a steer it took, a step, a new plan, a refused
+    /// 「现在回答」 — or Stop ends the wait on it: nothing pinned, the dot says what the task does, the window may stay
+    /// back (taskRunningWithoutCard, which IslandView reads before bringing the main window forward).
+    static func movedOnTests() {
+        func waits(_ r: Rig) -> Bool { r.m.pinned(r.state) != nil || r.state.task(rid)?.expiredCard != nil }
+        func refusedSaid(_ r: Rig, _ why: String) -> Bool { r.phase("a1").map { ShellText.cardState($0, lang: .en).contains(why) } ?? false }
+        // R1: a steer after the expiry, then a step
+        let a = Rig()
+        a.ask("a1"); a.void("a1", CardState.timeout)
+        check(waits(a) && !a.m.taskRunningWithoutCard, "expired: the task waits on its card")
+        a.emit("steered", ["text": "改成发给小李"])
+        check(!waits(a) && a.m.taskRunningWithoutCard, "a steer taken: no longer waiting on the expired card (\(String(describing: a.m.pinned(a.state)?.phase)))")
+        check(ShellText.status(a.state.status, lang: .en).hasPrefix("Working"), "the dot: working, not expired: \(ShellText.status(a.state.status, lang: .en))")
+        a.emit("step", ["step_id": "s9", "text": "click 发送", "purpose": "send"])
+        a.answerNow("a1")
+        check(a.wire.count("reask") == 0, "「现在回答」 on a card the task left: nothing sent")
+        // R1b: a step alone (the executor acts again)
+        let b = Rig()
+        b.ask("a1"); b.void("a1", CardState.timeout)
+        b.emit("step", ["step_id": "s2", "text": "observe", "purpose": "look again"])
+        check(!waits(b) && b.m.taskRunningWithoutCard, "a step after the expiry: no longer waiting")
+        // R2: 「现在回答」, the screen moved, it goes on without a card
+        let c = Rig()
+        c.ask("a1"); c.void("a1", CardState.timeout)
+        c.answerNow("a1")
+        check(c.wire.count("reask") == 1 && waits(c), "reask sent; waiting for what it brings")
+        c.emit("step", ["step_id": "s2", "text": "observe", "purpose": "look again"])
+        check(!waits(c) && c.m.taskRunningWithoutCard && c.m.cards.reasks.isEmpty, "the reask brought a step, no card: nothing pinned, nothing held")
+        // a reask the executor refuses: its reason on the card, nothing pinned, never stuck on 「正在重新看屏幕…」
+        let d = Rig()
+        d.ask("a1"); d.void("a1", CardState.timeout)
+        d.answerNow("a1")
+        d.emit("refused", ["what": "reask", "why": "no card has expired", "by": "executor"])
+        check(!waits(d) && d.m.cards.reasks.isEmpty && refusedSaid(d, "no card has expired"), "refused by the executor: said, not pinned: \(String(describing: d.phase("a1")))")
+        d.answerNow("a1")
+        check(d.wire.count("reask") == 1, "and not offered again")
+        // … or by the session (its refusal names no run: the running task's expired card)
+        let e = Rig()
+        e.ask("a1"); e.void("a1", CardState.timeout)
+        e.answerNow("a1")
+        e.m.client.feed(["kind": "session.error", "session_id": sid, "code": "no_task", "text": "no card of this task has expired", "control": "reask"])
+        check(!waits(e) && refusedSaid(e, "no card of this task has expired"), "refused by the session: said, not pinned: \(String(describing: e.phase("a1")))")
+        // Stop beats the expiry: the dot says stopping until task_done
+        let f = Rig()
+        f.ask("a1"); f.void("a1", CardState.timeout)
+        f.m.stop()
+        f.emit("refused", ["what": "the task", "why": "stopped", "by": "user"])
+        check(f.state.status == .stopping && !waits(f), "stopping: the dot says so, nothing pinned: \(f.state.status)")
+        f.done()
+        check(!waits(f) && f.phase("a1")?.ending == .expired, "ended: the card stays expired in the chat")
+        // a timeout void that was replayed: the same (the run's order decides, not when the lines came)
+        let g = Rig()
+        g.ask("a1"); g.void("a1", CardState.timeout); g.emit("steered", ["text": "x"])
+        g.restart()
+        check(!waits(g), "after a restart's replay: still not waiting")
     }
 
     // MARK: - the table (plan §4.2), cell by cell
@@ -387,7 +447,12 @@ enum CardStoreTests {
         var gone = false
         var stdin: [[String: Any]] = []
         var n = 0
+        /// It waits on its expired card (after a timeout void, until a steer, a reask or its end).
         var waitingReask = false
+        /// How a reask goes: 0 a new card, 1 the screen moved — it looks again and goes on without a card (H1's stale), 2
+        /// refused, and it goes on.
+        var reaskWay: () -> Int = { 0 }
+        var steps = 0
         let rig: Rig
         init(_ rig: Rig) { self.rig = rig; rig.wire.onLine = { [weak self] l in self?.stdin.append(l) } }
 
@@ -422,6 +487,8 @@ enum CardStoreTests {
             gone = true
             outbox.append(["kind": "helper.session_exit", "session_id": sid, "code": 0, "last_seq": 2])
         }
+        /// It acts: a step.
+        func step() { steps += 1; emit("step", ["step_id": "s\(steps)", "text": "click", "purpose": "go on"]) }
         /// Reads the next line on its stdin, as the executor does.
         func read() {
             guard !stdin.isEmpty else { return }
@@ -440,7 +507,22 @@ enum CardStoreTests {
             case "stop":
                 if !done { void("stop"); emit("refused", ["what": "the task", "why": "stopped", "by": "user"]); finish("stopped") }
             case "reask":
-                if !done && waitingReask && open == nil { ask("action") }
+                guard !done else { break }
+                if waitingReask && open == nil {
+                    switch reaskWay() {
+                    case 0: ask("action")
+                    case 1: waitingReask = false; step()
+                    default: waitingReask = false; emit("refused", ["what": "reask", "why": "the screen changed", "by": "executor"]); step()
+                    }
+                } else {
+                    emit("refused", ["what": "reask", "why": "no card has expired", "by": "executor"])
+                }
+            case "steer":
+                // (the session refuses a steer while a card waits: card_open, nothing stored)
+                guard !done, open == nil else { break }
+                waitingReask = false
+                emit("steered", ["text": l["text"] as? String ?? ""])
+                step()
             default: break
             }
         }
@@ -462,7 +544,10 @@ enum CardStoreTests {
         var g = RNG(x: seed &* 2654435761 &+ 7)
         let r = Rig()
         let h = Harness(r)
-        let kinds = ["action", "plan", "ambiguity", "missing"]
+        var gw = RNG(x: seed &* 31 &+ 3)
+        h.reaskWay = { gw.next(3) }
+        // (action cards half the time: only they expire)
+        let kinds = ["action", "plan", "action", "ambiguity", "action", "missing"]
         // the user's own record, per app life: each card's picks (when, what) and take-backs — what may be written
         struct Intent { var life: Int; var at: Double; var answer: [String: Any]?; var immediate: Bool }
         var intents: [String: [Intent]] = [:]
@@ -492,7 +577,7 @@ enum CardStoreTests {
             case 3, 4:                                              // the harness reads its stdin
                 h.read()
             case 5:                                                 // the harness: a new card, a changed request, an expiry
-                if h.open == nil { h.ask(kinds[g.next(kinds.count)]) }
+                if h.open == nil { if !h.waitingReask || g.next(4) == 0 { h.ask(kinds[g.next(kinds.count)]) } }
                 else if h.cards.last?.kind == "action", g.next(2) == 0 { h.void(CardState.timeout) }      // (action cards only expire)
                 else if g.next(3) == 0 { h.void("steer") }
             case 6, 7:                                              // the user picks an option on the pinned card
@@ -523,8 +608,11 @@ enum CardStoreTests {
                 r.timers.advance(Double(1 + g.next(3)))
             case 12:                                                // 「现在回答」
                 if let p = r.m.pinned(r.state), case .expired(_, .offered) = p.phase { r.answerNow(p.card.askId) }
-            case 13:
+            case 13:                                                // Stop, or a changed request (⌘Return) while no card waits
                 if g.next(12) == 0 { r.m.stop() }
+                else if r.state.composerEnabled, r.state.runningTask != nil, g.next(r.state.task(rid)?.expiredCard != nil ? 2 : 6) == 0 {
+                    _ = r.m.client.send(.steer("改一下", runId: rid), to: sid)
+                }
             case 14:                                                // the app restarts (its held picks are gone)
                 if g.next(3) == 0 { r.restart() }
             default:                                                // the task ends, or (rarely) its process
@@ -547,6 +635,16 @@ enum CardStoreTests {
                 if dot.hasPrefix("Waiting for you") != waiting { problem = "the dot (\(dot)) and the pinned card (\(String(describing: pin?.phase))) disagree" }
                 if waiting, s.composerEnabled { problem = "a card waits, the composer takes typing" }
                 if dot.hasPrefix("Expired") != (pin?.phase.isExpiredOffer ?? false) { problem = "the dot (\(dot)) and the expired card (\(String(describing: pin?.phase))) disagree" }
+                // caught up with the harness (all it wrote delivered): the app waits on an expired card exactly while the
+                // harness does, and a task the harness runs with nothing for the user lets the window stay back
+                if h.outbox.isEmpty, !h.gone, !h.done, problem == nil {
+                    let harnessWaits = h.open == nil && h.waitingReask
+                    if harnessWaits != (pin?.phase.isExpiredOffer ?? false) {
+                        problem = "the harness \(harnessWaits ? "waits" : "does not wait") on its expired card; the app pins \(String(describing: pin?.phase))"
+                    } else if (h.open == nil && !harnessWaits) != r.m.taskRunningWithoutCard {
+                        problem = "the harness runs \(h.open == nil && !harnessWaits ? "with nothing for the user" : "waiting for the user"); taskRunningWithoutCard is \(r.m.taskRunningWithoutCard)"
+                    }
+                }
             }
         }
         if let problem { return problem }
