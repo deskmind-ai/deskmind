@@ -201,8 +201,6 @@ struct SessionSummary: Equatable {
     var ending = false
     /// Its process is being spawned, or its session.start has not come yet: not `open`; `keys` nil while unknown.
     var starting = false
-    /// Listed by the helper only for the keys rounds (being spawned, no stored history yet): never a row.
-    var new = false
 
     static func == (a: SessionSummary, b: SessionSummary) -> Bool {
         a.sessionId == b.sessionId && a.title == b.title && a.updatedAt == b.updatedAt
@@ -222,7 +220,6 @@ struct SessionSummary: Equatable {
         self.keys = o["keys"] as? String
         self.ending = o["ending"] as? Bool ?? false
         self.starting = o["starting"] as? Bool ?? false
-        self.new = o["new"] as? Bool ?? false
     }
 }
 
@@ -418,14 +415,17 @@ final class SessionClient {
 
     // MARK: ops
 
-    /// The sessions as rows: without one the helper lists only because it is being spawned (`new`).
-    func list() -> [SessionSummary]? { listWithKeys()?.sessions.filter { !$0.new } }
+    /// The sessions as rows (the stored list).
+    func list() -> [SessionSummary]? { listWithKeys()?.sessions }
 
-    /// sessions.list, with the models.env digest now as the helper reads it (its `keys`; nil from an older helper).
-    func listWithKeys() -> (sessions: [SessionSummary], keysNow: String?)? {
+    /// sessions.list: the stored sessions (rows), the models.env digest now as the helper reads it (`keys`), and the
+    /// helper's own process table (`processes`: every session process it holds, stored or not). nil keys/processes:
+    /// an older helper (its `sessions` say `open` only).
+    func listWithKeys() -> (sessions: [SessionSummary], keysNow: String?, processes: [SessionSummary]?)? {
         guard let r = transport.request(Request.list()), r["ok"] as? Bool != false,
               let items = r["sessions"] as? [[String: Any]] else { return nil }
-        return (items.compactMap(SessionSummary.init), r["keys"] as? String)
+        let procs = (r["processes"] as? [[String: Any]]).map { $0.compactMap(SessionSummary.init) }
+        return (items.compactMap(SessionSummary.init), r["keys"] as? String, procs)
     }
 
     /// Opens a session (a new one when `sessionId` is nil); its id, or nil when the helper could not.

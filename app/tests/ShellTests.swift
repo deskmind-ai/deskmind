@@ -1812,6 +1812,8 @@ enum ShellTests {
         var starting: Set<String> = []
         /// Being spawned, its keys not read yet: listed `starting` with no digest, `new` (no stored history).
         var unread: Set<String> = []
+        /// Started, nothing stored yet: in the process table, not in the stored list.
+        var unstored: Set<String> = []
         var old = false
         init(key: String, running: [String] = []) {
             self.key = key
@@ -1834,14 +1836,24 @@ enum ShellTests {
             switch op {
             case SessionClient.Op.list:
                 if failList > 0 { failList -= 1; return nil }
-                var r: [String: Any] = ["ok": true, "sessions": procs.keys.sorted().map { id -> [String: Any] in
+                // the stored list (rows): processes whose session has something stored; an older helper says `open` only
+                let stored = procs.keys.filter { !unread.contains($0) && !unstored.contains($0) }.sorted()
+                var r: [String: Any] = ["ok": true, "sessions": stored.map { id -> [String: Any] in
                     var i: [String: Any] = ["session_id": id, "title": "", "open": !starting.contains(id), "ending": procs[id]!.ending]
                     if starting.contains(id) { i["starting"] = true }
-                    if unread.contains(id) { i["new"] = true; return i }
                     if !old { i["keys"] = procs[id]!.keys }
                     return i
                 }]
-                if !old { r["keys"] = now }
+                if !old {
+                    r["keys"] = now
+                    // the helper's own process table: every process, stored or not, its digest once read
+                    r["processes"] = procs.keys.sorted().map { id -> [String: Any] in
+                        var p: [String: Any] = ["session_id": id, "open": !starting.contains(id), "ending": procs[id]!.ending]
+                        if starting.contains(id) { p["starting"] = true }
+                        if !unread.contains(id) { p["keys"] = procs[id]!.keys }
+                        return p
+                    }
+                }
                 return r
             case SessionClient.Op.end:
                 if let n = failEnd[id], n > 0 { failEnd[id] = n - 1; return nil }
@@ -2150,7 +2162,7 @@ enum ShellTests {
             h.key = "K=B"
             m.syncSettings()
             check(h.ends() == ["ses_t"] && m.keysPending && clock.waiting.count == 1, "being spawned, keys not read: owed, not asked: \(h.ends())")
-            check(m.client.list()?.contains { $0.sessionId == "ses_new" } == false && m.client.listWithKeys()?.sessions.contains { $0.sessionId == "ses_new" } == true,
+            check(m.client.list()?.contains { $0.sessionId == "ses_new" } == false && m.client.listWithKeys()?.processes?.contains { $0.sessionId == "ses_new" } == true,
                   "and not a row of the list (the keys round sees it): \(String(describing: m.client.list()?.map(\.sessionId)))")
             // a starting session with no stored message that this app does not hold (a watch reconnect while it starts,
             // a helper that does not mark it new): no row either; once it has a message or the app holds it, a row
@@ -2171,6 +2183,34 @@ enum ShellTests {
             h.start("ses_new")
             clock.fire()
             check(!m.keysPending && h.allCurrent && h.ends() == ["ses_t", "ses_new"], "started: asked; all on A: \(h.ends())")
+        }
+
+        // started, nothing stored yet (#107 review at 588dbad): not in the stored list, in the helper's process table —
+        // B saved: it is asked like any other
+        do {
+            let h = FakeHelper(key: "K=A", running: ["ses_t"]), clock = Clock()
+            let m = keyShell(h, clock: clock)
+            m.syncSettings()
+            h.spawn("ses_u"); h.unstored = ["ses_u"]
+            h.key = "K=B"
+            m.syncSettings()
+            check(h.ends() == ["ses_t", "ses_u"] && !m.keysPending && h.allCurrent, "started, nothing stored: asked onto B: \(h.ends()) pending=\(m.keysPending)")
+            check(m.client.list()?.contains { $0.sessionId == "ses_u" } == false, "(and no row until something is stored)")
+        }
+
+        // an older helper: an ask not taken stays owed (#107 review at 588dbad: the next pass cleared it and the round
+        // committed); the retry asks it again, and only then is nothing owed
+        do {
+            let h = FakeHelper(key: "K=old", running: ["ses_o"]), clock = Clock()
+            h.old = true
+            let m = keyShell(h, clock: clock)
+            h.failEnd["ses_o"] = 1
+            h.key = "K=new"
+            m.syncSettings()
+            check(h.ends() == ["ses_o"] && m.keysPending && clock.waiting.count == 1 && h.runsOn("ses_o") != nil,
+                  "older helper, the ask lost: owed, a retry waits: pending=\(m.keysPending) retries=\(clock.waiting.count)")
+            clock.fire()
+            check(h.ends() == ["ses_o", "ses_o"] && !m.keysPending && h.runsOn("ses_o") == nil, "the retry asks it again; then none owed: \(h.ends())")
         }
 
         // an older helper (no digests): its open sessions asked once per key file; not again for the same file
@@ -2260,8 +2300,9 @@ enum ShellTests {
               && spawn.contains("let keys = ModelKeys.digest(env: keysEnv)") && spawn.contains("p.environment = setup.environment(keysEnv)")
               && spawn.contains("defer { lock.lock(); spawning[id] = nil; lock.unlock() }"),
               "spawn: listed before its single read of the keys; the environment and the digest from that read; unlisted on every way out")
-        check(list.contains("for (id, k) in spawning where running[id] == nil") && list.contains("\"new\": true"),
-              "sessions.list: a spawn in progress is starting (digest or unknown), new ones marked not rows")
+        check(list.contains("for (id, k) in spawning where running[id] == nil") && list.contains("\"processes\": processes")
+              && list.contains("let processes = running.keys.sorted()"),
+              "sessions.list: the process table — every process held (spawning, started with nothing stored, running) — apart from the stored list")
     }
 
     /// Delta review of a09c632: a reconcile never waits for the switch's push. Run from ModelsOffSync's own callback

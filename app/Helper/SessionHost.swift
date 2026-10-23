@@ -24,9 +24,10 @@
 //                                        with `keys` (the models.env digest that process started with, ModelKeys) and
 //                                        `ending` (a restart asked, at its next idle moment); `keys` at the top: the
 //                                        file's digest now — a process whose `keys` differ runs on keys no longer saved.
-//                                        One being spawned or whose session.start has not come yet: `starting`, with
-//                                        its `keys` once it has read them (absent: unknown); not `open`. A new one the
-//                                        harness has no history of yet is listed too, marked `new` (not a row)
+//                                        One whose session.start has not come yet: `starting`; not `open`.
+//                                        `processes`: every session process this helper holds (being spawned, started
+//                                        with nothing stored yet, running), stored or not — {session_id, open, keys
+//                                        (absent: not read yet), ending, starting?}: what the app's keys rounds read
 //   models.off {off}                     cloud models off (the app's engine setting, from any window): this helper
 //                                        holds it for every session it runs, whichever client — persisted in its
 //                                        folder (`models-off`). While off: every running session process is written
@@ -659,12 +660,9 @@ enum SessionHost {
         // being spawned: `starting`, its digest once it has read the keys (none: unknown, owed until known)
         for (id, k) in spawning where running[id] == nil { running[id] = (k, false, true) }
         lock.unlock()
-        var listedIds = Set<String>()
-        var reported = items.map { i -> [String: Any] in
+        let reported = items.map { i -> [String: Any] in
             var i = i
-            let id = i["session_id"] as? String ?? ""
-            listedIds.insert(id)
-            let r = running[id]
+            let r = running[i["session_id"] as? String ?? ""]
             i["open"] = r.map { !$0.starting } ?? false
             if let r {
                 if let k = r.keys { i["keys"] = k }
@@ -673,14 +671,17 @@ enum SessionHost {
             }
             return i
         }
-        // (a new session starting has no stored history yet: the harness's list does not name it — `new`, for the keys
-        // rounds only: never a row of the app's list)
-        for (id, r) in running where r.starting && !listedIds.contains(id) {
-            var i: [String: Any] = ["session_id": id, "title": "", "open": false, "starting": true, "ending": r.ending, "new": true]
-            if let k = r.keys { i["keys"] = k }
-            reported.append(i)
+        // the keys rounds read this helper's own process table, never the stored list: every process it holds — being
+        // spawned, started with nothing stored yet, running — is there by construction (#107 review at 588dbad: one
+        // started whose history was not on disk yet was in neither list, and kept the old key)
+        let processes = running.keys.sorted().map { id -> [String: Any] in
+            let r = running[id]!
+            var p: [String: Any] = ["session_id": id, "open": !r.starting, "ending": r.ending]
+            if r.starting { p["starting"] = true }
+            if let k = r.keys { p["keys"] = k }
+            return p
         }
-        return ["ok": true, "keys": keysNow, "sessions": reported]
+        return ["ok": true, "keys": keysNow, "sessions": reported, "processes": processes]
     }
 
     // MARK: watching

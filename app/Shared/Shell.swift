@@ -814,17 +814,19 @@ final class ShellModel: ObservableObject {
     /// A new key reaches a process only when it starts: a process that runs on keys no longer saved is asked for a new
     /// one (`restart`, when idle), whatever the switch says now (turned on later, a session must not run on old keys).
     /// Which ones is the helper's to say (#107 review at b3b8464: the app's own record of what it had asked missed a
-    /// session that restarted on B when the file went back to A): sessions.list gives the digest of the file now and,
-    /// for each open session, the digest its process started with and whether a restart is asked already (`ending`).
-    /// Owed: an open one, or one still starting, whose digest is not the file's; asked: the open ones not ending. After asking, the list is read
-    /// again (a process ended at once is gone; one busy stays owed, `ending`, until it goes; one whose ask failed is
-    /// not asked again in the same round). Owed left, the list
-    /// unread, or an ask not taken (no answer, an error): tried again on the next syncSettings and after a backoff
-    /// (`retryAfter`), with no user action. A quit, a helper restart, a lost ask, A→B→A: the next round reads them.
+    /// session that restarted on B when the file went back to A): sessions.list gives the digest of the file now and
+    /// the helper's own process table (`processes`, every process it holds, whether or not its session is stored yet):
+    /// each one's digest at its start and whether a restart is asked already (`ending`). Owed: a process whose digest
+    /// is not the file's (or not read yet); asked: the started ones not ending. After asking, the list is read again (a
+    /// process ended at once is gone; one busy stays owed, `ending`, until it goes). An ask not taken (no answer, an
+    /// error) stays owed and is not asked again in the same round. Owed left, or the list unread: tried again on the
+    /// next syncSettings and after a backoff (`retryAfter`), with no user action. A quit, a helper restart, a lost ask,
+    /// A→B→A: the next round reads them.
     ///
     /// An older helper (no digests) or a list not read: what each process runs on is unknown — each such session
-    /// (open in the list; else the ones this client knows to be live) is asked once per key file (`askedUnknown`),
-    /// when the file differs from the last checked one (`keysSeenKey`). Off the main thread; one round at a time.
+    /// (open in the list; else the ones this client knows to be live) is asked once per key file (`askedUnknown`, set
+    /// only when the helper took the ask), when the file differs from the last checked one (`keysSeenKey`, written
+    /// only when nothing is owed). Off the main thread; one round at a time.
     private func askNewProcesses() {
         keysLock.lock()
         if keysRound { keysAgain = true; keysLock.unlock(); return }
@@ -833,25 +835,26 @@ final class ShellModel: ObservableObject {
         while true {
             let digest = keysPrint()
             var owed = false
-            // (a session asked in this round is not asked again in it: one whose ask failed waits for the retry)
-            var asked: Set<String> = []
+            // `asked`: asks the helper took in this round (not asked again in it); `failed`: asks it did not take — not
+            // asked again in this round either (the retry does), and owed until one is taken (#107 review at 588dbad:
+            // a failed ask was put with the taken ones, the next pass cleared `owed`, and the round committed)
+            var asked: Set<String> = [], failed: Set<String> = []
             for pass in 0..<3 {
                 let listed = client.listWithKeys()
                 var stale: [String] = [], unknown: [String] = []
                 owed = false
-                if let listed, let now = listed.keysNow {
-                    for s in listed.sessions where s.open || s.starting {
+                if let listed, let now = listed.keysNow, let processes = listed.processes {
+                    // the helper's own process table (never the stored list: a process with nothing stored yet is in it)
+                    for s in processes {
                         if s.keys == now { continue }
-                        // starting: not asked (the helper's end finds it not open) but owed while its keys are not the
-                        // file's or not known yet (being spawned); the backoff reads it again (#107 review at 36c5737)
-                        if s.starting { owed = true; continue }
-                        if s.keys == nil { if s.open { unknown.append(s.sessionId) }; continue }
+                        // starting, or its keys not read yet: not asked (the helper's end finds it not open), owed; the
+                        // backoff reads it again once started (#107 reviews at 85d81f6, 36c5737)
+                        if s.starting || s.keys == nil { owed = true; continue }
                         owed = true
-                        // (one still starting is not asked — it is not open to the helper's end yet — but owed: the
-                        // backoff reads it again once started, #107 review at 85d81f6)
-                        if !s.ending && !s.starting { stale.append(s.sessionId) }
+                        if !s.ending { stale.append(s.sessionId) }
                     }
                 } else {
+                    // an older helper (no digests, no process table), or the list unread: what each runs on is unknown
                     let open = listed.map { $0.sessions.filter(\.open).map(\.sessionId) } ?? client.liveIds()
                     unknown = open
                     if listed == nil { owed = true }
@@ -861,21 +864,22 @@ final class ShellModel: ObservableObject {
                 let seen = defaults.string(forKey: Self.keysSeenKey)
                 unknown = seen == digest ? [] : unknown.filter { askedUnknown[$0] != digest }
                 keysLock.unlock()
-                let ask = Set(stale).union(unknown).subtracting(asked)
+                let ask = Set(stale).union(unknown).subtracting(asked).subtracting(failed)
                 if ask.isEmpty { break }
-                asked.formUnion(ask)
                 for id in ask.sorted() {
                     // (the settings as they are at this ask: a newer save's never overwritten by an older round's)
                     let (config, lang) = sessionSettings()
                     if client.restart(id, config: config, lang: lang) {
+                        asked.insert(id)
                         if unknown.contains(id) { keysLock.lock(); askedUnknown[id] = digest; keysLock.unlock() }
                     } else {
-                        owed = true
+                        failed.insert(id)
                     }
                 }
                 // (read again: what the asks did — ended at once, or ending at its next idle moment — and an ask lost)
                 if pass == 2 { owed = true }
             }
+            if !failed.isEmpty { owed = true }
             let done = !owed && keysPrint() == digest
             if done { defaults.set(digest, forKey: Self.keysSeenKey) }
             // whether to run again, and the round's end, decided under one lock (a request at the round's end is
