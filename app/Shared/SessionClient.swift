@@ -393,7 +393,8 @@ final class SessionClient {
     /// setting), never a copy (#107 review: a cached copy that caught up only when the sheet closed set off a storm of
     /// models.off and refused set_configs). A client without one (a test) keeps its own.
     var modelOff: Bool {
-        get { lock.lock(); defer { lock.unlock() }; return off }
+        // (the app's switch read outside this client's lock: never a call out while holding it)
+        get { if let s = injectedSync { return s.switchOff() }; lock.lock(); defer { lock.unlock() }; return offStored }
         set { lock.lock(); offStored = newValue; lock.unlock() }
     }
     private var offStored = false
@@ -859,12 +860,9 @@ final class SessionClient {
     /// Safe from any thread but the main one.
     func converge(_ id: String) {
         while true {
+            // take the session: live, dirty, nothing in flight
             lock.lock()
-            let st = states[id]
-            // opening with no start heard (the reply and the start converge it), exited, deleted: nothing to send
-            let started = st.map { $0.exited == nil || $0.awaitingStart } ?? false
-            let live = !deleted.contains(id) && (started || (st == nil && !opening.contains(id)))
-            guard live, inFlight[id] == nil, dirty.contains(id) else { lock.unlock(); return }
+            guard isLiveLocked(id), inFlight[id] == nil, dirty.contains(id) else { lock.unlock(); return }
             let gen = generation[id, default: 0]
             inFlight[id] = gen; dirty.remove(id)
             let attempt = nextAttempt.removeValue(forKey: id) ?? 1
@@ -873,34 +871,91 @@ final class SessionClient {
             // every session — a null goes at once. Counted with the sync before the switch is read, so a push begun after
             // this waits for this send (never a configuration after models.off).
             let gated = modelsSync.beginConfigSend()
-            let want = desiredNow()
-            if !modelOff && want.config == nil {
-                // (no settings known: dirty, and nothing scheduled — desired becomes something only by a save, which
-                // converges every session)
-                if gated { modelsSync.endConfigSend() }
-                lock.lock(); inFlight[id] = nil; dirty.insert(id); if attempt > 1 { nextAttempt[id] = attempt }; lock.unlock()
-                return
+            // ONE read: the settings and the switch together (#107 review at 9c59a1f: the switch read twice — off for the
+            // value, on for the check — turned a null of "off" into "nothing configured", and nothing was scheduled)
+            let snap = snapshot()
+            afterSnapshot?(id)
+            let outcome: ConvergeOutcome
+            if snap.off {
+                outcome = .sent(sendConfig(id, config: nil, lang: snap.lang, attempt: attempt))
+            } else if snap.config == nil {
+                outcome = .nothingToSend
+            } else if !gated {
+                outcome = .blocked
+            } else {
+                outcome = .sent(sendConfig(id, config: snap.config, lang: snap.lang, attempt: attempt))
             }
-            if want.config != nil && !gated {
-                // blocked by the switch: dirty again. Its ack converges every session — but it may have come between the
-                // check and here, and found this one in flight (#107 review at 187ae8e: dirty, nothing scheduled, for
-                // good): the gate is read again now that it is not in flight, and a retry kept in any case
-                lock.lock(); inFlight[id] = nil; dirty.insert(id); if attempt > 1 { nextAttempt[id] = attempt }; lock.unlock()
-                if !modelsSync.isPending && modelsSync.helperHoldsOff != true { continue }
-                retryLater(id)
-                return
-            }
-            let r = sendConfig(id, config: want.config, lang: want.lang, attempt: attempt)
             if gated { modelsSync.endConfigSend() }
-            lock.lock()
-            if inFlight[id] == gen { inFlight[id] = nil }
-            // a reply from a process that is gone: what the new one runs is unknown — sent again. (A guard, not load-bearing:
-            // every generation bump also sets dirty.)
-            if generation[id, default: 0] != gen { dirty.insert(id) }
-            if r == .failed { dirty.insert(id) } else { retryDelay[id] = nil }
-            lock.unlock()
-            if r == .failed { retryLater(id); return }
+            switch release(id, gen: gen, acted: snap, outcome: outcome, attempt: attempt) {
+            case .done: return
+            case .again: continue
+            case .retry: retryLater(id); return
+            }
         }
+    }
+
+    /// A test's seam: called in a converge right after its one read, before it sends (nil in the app).
+    var afterSnapshot: ((String) -> Void)?
+
+    /// What desired() and the switch are, read together.
+    private struct Snapshot: Equatable { var config: String?; var lang: String?; var off: Bool }
+    private func snapshot() -> Snapshot {
+        let off = modelOff
+        let d = desired()
+        return Snapshot(config: d.config.map(Self.normalizeConfig), lang: d.lang, off: off)
+    }
+    private enum ConvergeOutcome { case sent(ConfigSend), nothingToSend, blocked }
+    private enum AfterRelease { case done, again, retry }
+
+    /// The one way out of a converge that took a session (in flight): the slot cleared, the outcome recorded, and — the
+    /// family of "dirty, nothing scheduled" exits closed in one place (#107 reviews at 187ae8e, 9c59a1f) — the settings
+    /// and the switch read again: changed since the read, or dirty, it goes on (now, or after a backoff); never left
+    /// dirty with nothing in flight and no timer, except "nothing configured" with nothing changed (only a save makes
+    /// settings known, and a save converges every session).
+    private func release(_ id: String, gen: Int, acted: Snapshot, outcome: ConvergeOutcome, attempt: Int) -> AfterRelease {
+        lock.lock()
+        if inFlight[id] == gen { inFlight[id] = nil }
+        var failed = false
+        switch outcome {
+        case .nothingToSend, .blocked:
+            dirty.insert(id); if attempt > 1 { nextAttempt[id] = attempt }
+        case .sent(let r):
+            // a reply from a process that is gone: what the new one runs is unknown — sent again. (A guard, not
+            // load-bearing: every generation bump also sets dirty.)
+            if generation[id, default: 0] != gen { dirty.insert(id) }
+            if r == .failed { dirty.insert(id); failed = true } else { retryDelay[id] = nil }
+        }
+        lock.unlock()
+        let now = snapshot()
+        lock.lock()
+        if now != acted { dirty.insert(id) }
+        let owed = dirty.contains(id) && isLiveLocked(id)
+        lock.unlock()
+        guard owed else { return .done }
+        if failed { return .retry }
+        switch outcome {
+        case .nothingToSend:
+            return now != acted ? .again : .done
+        case .blocked:
+            return !modelsSync.isPending && modelsSync.helperHoldsOff != true ? .again : .retry
+        case .sent:
+            return .again
+        }
+    }
+
+    /// Live sessions left dirty with nothing in flight and no retry waiting — what must never be (tests check it at
+    /// quiescence).
+    var settingsStranded: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return dirty.filter { isLiveLocked($0) && inFlight[$0] == nil && !retryScheduled.contains($0) }.sorted()
+    }
+
+    /// Live for settings: a process running, or one coming whose start is heard (opening with no start: its reply and its
+    /// start converge it).
+    private func isLiveLocked(_ id: String) -> Bool {
+        let st = states[id]
+        let started = st.map { $0.exited == nil || $0.awaitingStart } ?? false
+        return !deleted.contains(id) && (started || (st == nil && !opening.contains(id)))
     }
 
     /// The first wait before a failed send is tried again (doubling, at most 30 s; tests make it short).

@@ -76,6 +76,7 @@ enum ShellTests {
         DecisionTests.group("shell.dirtyFlagTests"); dirtyFlagTests()
         DecisionTests.group("shell.switchGateTests"); switchGateTests()
         DecisionTests.group("shell.normalizeTests"); normalizeTests()
+        DecisionTests.group("shell.oneReadTests"); oneReadTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -2781,6 +2782,7 @@ enum ShellTests {
             r.settle()
             var ok = r.converged()
             var why = ok ? "" : "after settle"
+            if ok && !r.m.client.settingsStranded.isEmpty { ok = false; why = "stranded: \(r.m.client.settingsStranded)" }
             // a next process: one that ended opens again with the last saved
             if let id = r.m.client.liveIds().first(where: { r.h.live[$0] != nil }) {
                 r.h.exit(id); r.h.deliverAll(r.m.client)
@@ -3249,6 +3251,47 @@ enum ShellTests {
             check(looped <= 2 && h.sent.count == looped + 1 && h.sent.last == "openai:custom|M!",
                   "a normalisation the app does not share: \(looped) sends in 200 rounds (no loop); a real null after it: sent again (\(h.sent))")
         }
+    }
+
+    /// #107 review at 9c59a1f (Codex): the switch read while off for the value, then on; the on-ack's converge ran while
+    /// this send held the session — a configuration still reaches it (one read of settings and switch; one release path).
+    static func oneReadTests() {
+        final class T: SessionTransport {
+            let lock = NSLock(); var configs: [String] = []
+            func request(_ body: [String: Any]) -> [String: Any]? {
+                if let l = body["line"] as? [String: Any], l["type"] as? String == "set_config" {
+                    lock.lock(); configs.append((l["config"] as? String) ?? "null"); lock.unlock()
+                }
+                return ["ok": true]
+            }
+            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+            var sent: [String] { lock.lock(); defer { lock.unlock() }; return configs }
+        }
+        final class Switch { let lock = NSLock(); var off = true; func read() -> Bool { lock.lock(); defer { lock.unlock() }; return off } }
+        let t = T(), sw = Switch()
+        let sync = ModelsOffSync(transport: t, current: { sw.read() })
+        let c = SessionClient(transport: t, modelsSync: sync)
+        c.retryBase = 0.002
+        c.adoptSettings(config: "A", lang: "zh")
+        sync.push(); sync.settle(timeout: 2)                                   // (the helper holds off)
+        c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+        c.reconciling.wait(); sync.settle(timeout: 2); c.reconciling.wait()
+        // a save: its converge reads the settings and the switch (off) — then, before it sends, the switch turns on, its
+        // push is acked and the ack's converge runs, finding this session in flight
+        let fired = NSLock(); var once = true
+        c.afterSnapshot = { _ in
+            fired.lock(); let go = once; once = false; fired.unlock()
+            guard go else { return }
+            sw.lock.lock(); sw.off = false; sw.lock.unlock()
+            sync.push(); sync.settle(timeout: 2); c.reconciling.wait()
+        }
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { c.convergeAll(); done.signal() }
+        done.wait()
+        for _ in 0..<500 { c.reconciling.wait(); if t.sent.last == "A" { break }; usleep(2_000) }
+        c.afterSnapshot = nil
+        check(t.sent.last == "A" && c.settingsStranded.isEmpty,
+              "the switch read off, then on and acked during the send: A still reaches the session (\(t.sent); stranded \(c.settingsStranded))")
     }
 
     struct SplitMix {
