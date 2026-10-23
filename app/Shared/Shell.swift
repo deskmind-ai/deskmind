@@ -243,7 +243,9 @@ enum ShellList {
     static func rows(summaries: [SessionSummary], states: [String: SessionState], names: [String: String],
                      deleted: Set<String>, untitled: String) -> [ShellRow] {
         var out: [String: ShellRow] = [:]
-        for s in summaries where !deleted.contains(s.sessionId) {
+        // (a session the helper lists only because its process is starting — no stored message yet, none of this app's
+        // — is no row: if its start fails, it would stay an empty "untitled" row at the top; #107 review at 36c5737)
+        for s in summaries where !deleted.contains(s.sessionId) && !(s.starting && s.updatedAt == nil && states[s.sessionId] == nil) {
             out[s.sessionId] = ShellRow(id: s.sessionId, title: s.title, status: .idle, updatedAt: s.updatedAt, taskRunning: false)
         }
         for (id, st) in states where !deleted.contains(id) {
@@ -840,6 +842,9 @@ final class ShellModel: ObservableObject {
                 if let listed, let now = listed.keysNow {
                     for s in listed.sessions where s.open || s.starting {
                         if s.keys == now { continue }
+                        // starting: not asked (the helper's end finds it not open) but owed while its keys are not the
+                        // file's or not known yet (being spawned); the backoff reads it again (#107 review at 36c5737)
+                        if s.starting { owed = true; continue }
                         if s.keys == nil { if s.open { unknown.append(s.sessionId) }; continue }
                         owed = true
                         // (one still starting is not asked — it is not open to the helper's end yet — but owed: the

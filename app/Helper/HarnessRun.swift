@@ -237,7 +237,8 @@ enum HarnessRun {
     /// executors inherit it: the model keys (models.env), Brain as the first judge, the judge's learning files, and the
     /// execution layer (hands' executor on the bundled Python). `apps`: the apps a request names, which may be brought
     /// forward for a step (a session names none: its tasks are not known when it starts).
-    static func environment(apps: [String] = []) -> [String: String] {
+    /// `keys`: models.env as already read (a session's one read, its digest's: SessionHost.spawn); nil: read here.
+    static func environment(apps: [String] = [], keys: [String: String]? = nil) -> [String: String] {
         let runtime = Runner.runtime, work = Runner.work
         let python = runtime.appendingPathComponent("python/bin/python3.12").path
         let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
@@ -281,7 +282,7 @@ enum HarnessRun {
                 + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
                 + "\"\(python)\" -m deskmind_hands.executor",
         ]
-        for (k, v) in modelEnv() where env[k] == nil { env[k] = v }
+        for (k, v) in keys ?? modelEnv() where env[k] == nil { env[k] = v }
         return env
     }
 

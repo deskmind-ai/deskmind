@@ -68,7 +68,7 @@ enum OpRunE2E {
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         DeskMindIPC.supportOverride = support
         SessionHost.setup = .init(node: URL(fileURLWithPath: "/"), bundle: URL(fileURLWithPath: "/"), dir: support, cwd: nil,
-                                  logs: support.appendingPathComponent("logs"), environment: { [:] }, prepare: {}, idleSeconds: 300, driver: "sim")
+                                  logs: support.appendingPathComponent("logs"), environment: { _ in [:] }, prepare: {}, idleSeconds: 300, driver: "sim")
         guard Runner.runtime.path.hasSuffix("/oprun/bin/runtime") else { print("FAIL runtime is \(Runner.runtime.path), not the test's"); exit(1) }
         // prepareWork: nothing to copy (the working copy says the shipped version)
         try? FileManager.default.createDirectory(at: Runner.work, withIntermediateDirectories: true)

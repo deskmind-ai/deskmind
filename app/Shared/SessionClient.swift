@@ -199,8 +199,10 @@ struct SessionSummary: Equatable {
     var keys: String?
     /// A restart of its process is asked already (at its next idle moment).
     var ending = false
-    /// Its process is spawned (its keys read) and its session.start has not come yet: not `open`.
+    /// Its process is being spawned, or its session.start has not come yet: not `open`; `keys` nil while unknown.
     var starting = false
+    /// Listed by the helper only for the keys rounds (being spawned, no stored history yet): never a row.
+    var new = false
 
     static func == (a: SessionSummary, b: SessionSummary) -> Bool {
         a.sessionId == b.sessionId && a.title == b.title && a.updatedAt == b.updatedAt
@@ -220,6 +222,7 @@ struct SessionSummary: Equatable {
         self.keys = o["keys"] as? String
         self.ending = o["ending"] as? Bool ?? false
         self.starting = o["starting"] as? Bool ?? false
+        self.new = o["new"] as? Bool ?? false
     }
 }
 
@@ -412,7 +415,8 @@ final class SessionClient {
 
     // MARK: ops
 
-    func list() -> [SessionSummary]? { listWithKeys()?.sessions }
+    /// The sessions as rows: without one the helper lists only because it is being spawned (`new`).
+    func list() -> [SessionSummary]? { listWithKeys()?.sessions.filter { !$0.new } }
 
     /// sessions.list, with the models.env digest now as the helper reads it (its `keys`; nil from an older helper).
     func listWithKeys() -> (sessions: [SessionSummary], keysNow: String?)? {

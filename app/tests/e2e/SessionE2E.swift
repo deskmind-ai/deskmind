@@ -40,7 +40,7 @@ enum SessionE2E {
         let pass = ProcessInfo.processInfo.environment.filter { ["LOCAL_URL", "LOCAL_API_KEY", "TMPDIR"].contains($0.key) }
         SessionHost.setup = .init(node: URL(fileURLWithPath: a[4]), bundle: URL(fileURLWithPath: a[5]), dir: dir, cwd: nil,
                                   logs: dir.appendingPathComponent("logs"),
-                                  environment: { ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"].merging(pass) { x, _ in x } },
+                                  environment: { _ in ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"].merging(pass) { x, _ in x } },
                                   prepare: {}, idleSeconds: Double(a[6]) ?? 300, driver: "sim")
         SessionHost.onModelsOff = { uiLock.lock(); modelsOffStops += 1; uiLock.unlock() }
         SessionHost.setup.ui = .init(start: { run, _, _ in note(run, "start") }, show: { run, ev in note(run, "show", ev) },
@@ -120,7 +120,7 @@ enum SessionE2E {
 
     static func setup(_ dir: String) {
         SessionHost.setup = .init(node: URL(fileURLWithPath: "/"), bundle: URL(fileURLWithPath: "/"), dir: URL(fileURLWithPath: dir), cwd: nil,
-                                  logs: URL(fileURLWithPath: dir), environment: { [:] }, prepare: {}, idleSeconds: 300)
+                                  logs: URL(fileURLWithPath: dir), environment: { _ in [:] }, prepare: {}, idleSeconds: 300)
     }
 
     static func until(_ f: () -> Bool, _ s: Double = 5) -> Bool {

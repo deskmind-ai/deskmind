@@ -1757,6 +1757,8 @@ enum ShellTests {
         var failList = 0
         var busy: Set<String> = []
         var starting: Set<String> = []
+        /// Being spawned, its keys not read yet: listed `starting` with no digest, `new` (no stored history).
+        var unread: Set<String> = []
         var old = false
         init(key: String, running: [String] = []) {
             self.key = key
@@ -1767,6 +1769,9 @@ enum ShellTests {
             lock.lock(); procs[id] = (now, false); if !started { starting.insert(id) }; lock.unlock()
         }
         func start(_ id: String) { lock.lock(); starting.remove(id); lock.unlock() }
+        /// A spawn listed before its read of the keys (SessionHost.spawning), then that one read (the file then).
+        func spawnUnread(_ id: String) { lock.lock(); procs[id] = ("", false); starting.insert(id); unread.insert(id); lock.unlock() }
+        func readKeys(_ id: String) { lock.lock(); procs[id] = (now, false); unread.remove(id); lock.unlock() }
         /// A busy session goes idle: the helper ends it if a restart was asked.
         func idle(_ id: String) { lock.lock(); busy.remove(id); if procs[id]?.ending == true { procs[id] = nil }; lock.unlock() }
         func request(_ body: [String: Any]) -> [String: Any]? {
@@ -1779,6 +1784,7 @@ enum ShellTests {
                 var r: [String: Any] = ["ok": true, "sessions": procs.keys.sorted().map { id -> [String: Any] in
                     var i: [String: Any] = ["session_id": id, "title": "", "open": !starting.contains(id), "ending": procs[id]!.ending]
                     if starting.contains(id) { i["starting"] = true }
+                    if unread.contains(id) { i["new"] = true; return i }
                     if !old { i["keys"] = procs[id]!.keys }
                     return i
                 }]
@@ -2081,6 +2087,39 @@ enum ShellTests {
             check(h.ends() == ["ses_t", "ses_new"] && !m.keysPending && h.allCurrent, "started: asked; none owed: \(h.ends())")
         }
 
+        // a spawn listed before its one read of the keys (#107 review at 36c5737): unknown → owed, not asked, and never a
+        // row; A→B→A around its read (it read B): owed while starting, asked once started
+        do {
+            let h = FakeHelper(key: "K=A", running: ["ses_t"]), clock = Clock()
+            let m = keyShell(h, clock: clock)
+            m.syncSettings()
+            h.spawnUnread("ses_new")
+            h.key = "K=B"
+            m.syncSettings()
+            check(h.ends() == ["ses_t"] && m.keysPending && clock.waiting.count == 1, "being spawned, keys not read: owed, not asked: \(h.ends())")
+            check(m.client.list()?.contains { $0.sessionId == "ses_new" } == false && m.client.listWithKeys()?.sessions.contains { $0.sessionId == "ses_new" } == true,
+                  "and not a row of the list (the keys round sees it): \(String(describing: m.client.list()?.map(\.sessionId)))")
+            // a starting session with no stored message that this app does not hold (a watch reconnect while it starts,
+            // a helper that does not mark it new): no row either; once it has a message or the app holds it, a row
+            var starting = SessionSummary(sessionId: "ses_s", title: "", updatedAt: nil, lastMessage: nil)
+            starting.starting = true
+            let old = SessionSummary(sessionId: "ses_o", title: "旧的", updatedAt: 1, lastMessage: nil)
+            let rows = ShellList.rows(summaries: [starting, old], states: [:], names: [:], deleted: [], untitled: "New conversation")
+            check(rows.map(\.id) == ["ses_o"], "a starting entry with nothing stored, not held here: no row: \(rows.map(\.id))")
+            var stored = starting; stored.updatedAt = 2
+            check(ShellList.rows(summaries: [stored, old], states: [:], names: [:], deleted: [], untitled: "x").map(\.id) == ["ses_s", "ses_o"],
+                  "one with stored messages (a reopen): a row")
+            let held = ShellList.rows(summaries: [starting, old], states: ["ses_s": SessionState(sessionId: "ses_s")], names: [:], deleted: [], untitled: "x")
+            check(held.map(\.id).contains("ses_s"), "one this app holds (its new conversation): a row")
+            h.readKeys("ses_new")                               // (its one read: B — the environment and the digest)
+            h.key = "K=A"
+            clock.fire()
+            check(m.keysPending && h.ends() == ["ses_t"], "read B, the file back to A: owed while it starts")
+            h.start("ses_new")
+            clock.fire()
+            check(!m.keysPending && h.allCurrent && h.ends() == ["ses_t", "ses_new"], "started: asked; all on A: \(h.ends())")
+        }
+
         // an older helper (no digests): its open sessions asked once per key file; not again for the same file
         do {
             let h = FakeHelper(key: "K=old", running: ["ses_o"]), clock = Clock()
@@ -2154,14 +2193,22 @@ enum ShellTests {
         // the helper records each process's digest at its start (before its environment is read) and reports both
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let host = (try? String(contentsOf: dir.appendingPathComponent("Helper/SessionHost.swift"), encoding: .utf8)) ?? ""
-        let spawn = host.components(separatedBy: "private static func spawn(").dropFirst().first ?? ""
-        check(spawn.range(of: "let keys = ModelKeys.digest(env: HarnessRun.modelEnv())").map { spawn[..<$0.lowerBound].contains("p.environment") == false } == true
-              && spawn.contains("s.keysDigest = keys"), "spawn: the digest read before the environment, kept with the process")
+        let spawn = host.components(separatedBy: "private static func spawn(").dropFirst().first?.components(separatedBy: "static func send(").first ?? ""
+        check(spawn.contains("s.keysDigest = keys"), "spawn: the digest kept with the process")
         let list = host.components(separatedBy: "static func list() -> [String: Any] {").dropFirst().first ?? ""
         check(list.contains("\"keys\": keysNow") && list.contains("i[\"keys\"] = k") && list.contains("i[\"ending\"] = r.ending"),
               "sessions.list: the file's digest now, each open process's, and whether it is ending")
         check(list.contains("(s.started || s.process.isRunning)") && list.contains("i[\"starting\"] = true"),
               "sessions.list: a process spawned, not started yet, is reported (starting) with its digest")
+        // (#107 review at 36c5737) listed from before its one read of the keys file; the environment and the digest of it
+        let listedAt = spawn.range(of: "spawning[id] = .some(nil)")?.lowerBound
+        let readAt = spawn.range(of: "let keysEnv = HarnessRun.modelEnv()")?.lowerBound
+        check(listedAt != nil && readAt != nil && listedAt! < readAt! && spawn.components(separatedBy: "modelEnv()").count == 2
+              && spawn.contains("let keys = ModelKeys.digest(env: keysEnv)") && spawn.contains("p.environment = setup.environment(keysEnv)")
+              && spawn.contains("defer { lock.lock(); spawning[id] = nil; lock.unlock() }"),
+              "spawn: listed before its single read of the keys; the environment and the digest from that read; unlisted on every way out")
+        check(list.contains("for (id, k) in spawning where running[id] == nil") && list.contains("\"new\": true"),
+              "sessions.list: a spawn in progress is starting (digest or unknown), new ones marked not rows")
     }
 
     // MARK: words

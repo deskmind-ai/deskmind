@@ -24,8 +24,9 @@
 //                                        with `keys` (the models.env digest that process started with, ModelKeys) and
 //                                        `ending` (a restart asked, at its next idle moment); `keys` at the top: the
 //                                        file's digest now — a process whose `keys` differ runs on keys no longer saved.
-//                                        One spawned whose session.start has not come yet: `starting`, with its `keys`
-//                                        (not `open`; a new session's is listed though the harness has no history of it)
+//                                        One being spawned or whose session.start has not come yet: `starting`, with
+//                                        its `keys` once it has read them (absent: unknown); not `open`. A new one the
+//                                        harness has no history of yet is listed too, marked `new` (not a row)
 //   models.off {off}                     cloud models off (the app's engine setting, from any window): this helper
 //                                        holds it for every session it runs, whichever client — persisted in its
 //                                        folder (`models-off`). While off: every running session process is written
@@ -68,7 +69,9 @@ enum SessionHost {
         var cwd: URL?
         /// Each session process's stderr: `<session_id>.stderr`.
         var logs: URL
-        var environment: () -> [String: String]
+        /// A session process's environment, from the one read of models.env its digest is of (`keys`: #107 review at
+        /// 36c5737 — two reads let a save between them give a process one key file and its digest another's).
+        var environment: (_ keys: [String: String]) -> [String: String]
         var prepare: () throws -> Void
         /// How long a session with nothing going on and nobody watching stays up.
         var idleSeconds: Double
@@ -76,11 +79,13 @@ enum SessionHost {
         var driver = "hands"
         /// The live card and the recording (`UI.standard`; a recorder in tests).
         var ui = UI.standard
+        /// Called once a spawn is listed (`spawning`), before its read of models.env: a test's pause (none in the app).
+        var beforeKeys: () -> Void = {}
 
         static func standard() -> Setup {
             Setup(node: HarnessRun.node, bundle: HarnessRun.bundle, dir: DeskMindIPC.supportDir, cwd: Runner.work,
                   logs: DeskMindIPC.supportDir.appendingPathComponent("work/session-logs"),
-                  environment: { HarnessRun.environment() }, prepare: Runner.prepareWork,
+                  environment: { HarnessRun.environment(keys: $0) }, prepare: Runner.prepareWork,
                   idleSeconds: max(10, UserDefaults.standard.object(forKey: "sessions.idleSeconds") as? Double ?? 300))
         }
     }
@@ -109,6 +114,10 @@ enum SessionHost {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var sessions: [String: Session] = [:]
     nonisolated(unsafe) private static var opening: Set<String> = []
+    /// Sessions being spawned, not in `sessions` yet: listed (`starting`) from before their read of models.env to
+    /// their entry in `sessions`, with that read's digest once it is made (nil before: unknown). #107 review at
+    /// 36c5737: a process that had read the keys before it was listed was missed by a save meanwhile.
+    nonisolated(unsafe) private static var spawning: [String: String?] = [:]
     nonisolated(unsafe) private static var watchers: [Watcher] = []
     nonisolated(unsafe) private static var reaping = false
     nonisolated(unsafe) private static var expiring = false
@@ -397,10 +406,16 @@ enum SessionHost {
         p.executableURL = setup.node
         p.arguments = [setup.bundle.path, "session", "--dir", setup.dir.path]
         if let cwd = setup.cwd { p.currentDirectoryURL = cwd }
-        // the keys file's digest read before the environment is: a save between the two reads leaves an older digest
-        // (one restart more), never a newer one over the old keys
-        let keys = ModelKeys.digest(env: HarnessRun.modelEnv())
-        p.environment = setup.environment()
+        // listed before it reads the keys (its digest unknown meanwhile), and until it is in `sessions` — whatever
+        // happens on the way (a failed launch leaves nothing listed)
+        lock.lock(); spawning[id] = .some(nil); lock.unlock()
+        defer { lock.lock(); spawning[id] = nil; lock.unlock() }
+        setup.beforeKeys()
+        // ONE read of the keys file: the environment the process gets and the digest the helper reports are of it
+        let keysEnv = HarnessRun.modelEnv()
+        let keys = ModelKeys.digest(env: keysEnv)
+        lock.lock(); spawning[id] = .some(keys); lock.unlock()
+        p.environment = setup.environment(keysEnv)
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = err ?? FileHandle.nullDevice
         try p.run()
@@ -413,6 +428,7 @@ enum SessionHost {
         // header: a first line with a type is no header, and the session would refuse to start.
         lock.lock()
         sessions[id] = s
+        spawning[id] = nil              // (in `sessions` now, under the same lock: never missing from a list between)
         idleClosed.remove(id); exitedLastSeq[id] = nil
         _ = s.write(header)
         var after: Int?
@@ -640,6 +656,8 @@ enum SessionHost {
         for (id, s) in sessions where !s.closing && (s.started || s.process.isRunning) {
             running[id] = (s.keysDigest, s.endWhenIdle, !s.started)
         }
+        // being spawned: `starting`, its digest once it has read the keys (none: unknown, owed until known)
+        for (id, k) in spawning where running[id] == nil { running[id] = (k, false, true) }
         lock.unlock()
         var listedIds = Set<String>()
         var reported = items.map { i -> [String: Any] in
@@ -655,9 +673,10 @@ enum SessionHost {
             }
             return i
         }
-        // (a new session starting has no stored history yet: the harness's list does not name it)
+        // (a new session starting has no stored history yet: the harness's list does not name it — `new`, for the keys
+        // rounds only: never a row of the app's list)
         for (id, r) in running where r.starting && !listedIds.contains(id) {
-            var i: [String: Any] = ["session_id": id, "title": "", "open": false, "starting": true, "ending": r.ending]
+            var i: [String: Any] = ["session_id": id, "title": "", "open": false, "starting": true, "ending": r.ending, "new": true]
             if let k = r.keys { i["keys"] = k }
             reported.append(i)
         }
