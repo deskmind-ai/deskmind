@@ -739,6 +739,18 @@ final class ShellModel: ObservableObject {
         pick(a, immediate: false, in: id)
     }
 
+    /// Key `n` (1–9, CardKeys) on the pinned card: its n-th control as shown (CardLayout), picked as a click is — held for
+    /// the take-back, an approve-type option only once the whole card was seen. False when it picks nothing (the key is
+    /// the window's then).
+    @discardableResult
+    func pressKey(_ n: Int) -> Bool {
+        guard let id = selected, let s = states[id], let p = pinned(s), p.phase.takesPick else { return false }
+        let card = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+        guard let c = CardLayout(card).control(forKey: n) else { return false }
+        click(c.button)
+        return true
+    }
+
     /// 「撤回」 within the take-back: the held answer is dropped, never sent; the card waits again.
     func takeBack(_ card: CardModel) { cards.takeBack(Self.cardKey(card)) }
 

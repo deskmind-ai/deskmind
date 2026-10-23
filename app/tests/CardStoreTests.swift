@@ -108,6 +108,7 @@ enum CardStoreTests {
         func emit(_ kind: String, _ f: [String: Any]) { feed(line(kind, f)) }
 
         func ask(_ id: String, _ kind: String = "action") { emit("ask", ["ask_id": id, "card": cardJSON(kind)]) }
+        func ask(_ id: String, card: [String: Any]) { emit("ask", ["ask_id": id, "card": card]) }
         func resumed(_ id: String) { emit("resumed", ["ask_id": id]) }
         func void(_ id: String, _ why: String) { emit("ask_void", ["ask_id": id, "why": why]) }
         func done(_ status: String = "stopped") { emit("task_done", ["status": status, "reason": "", "summary": ""]) }
@@ -587,8 +588,10 @@ enum CardStoreTests {
     /// The window's views read a card through its phase (ShellModel.phase / pinned) only: never the reducer's outcome
     /// or the open card directly, so the chat, the pinned card, VoiceOver and the dot cannot disagree.
     static func viewsTests() {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { check(false, "Main/MainSplitView.swift readable"); return }
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main")
+        // (the window's views: MainSplitView.swift, and the cards' own file once they have one)
+        let text = ["MainSplitView.swift", "CardViews.swift"].compactMap { try? String(contentsOf: dir.appendingPathComponent($0), encoding: .utf8) }.joined(separator: "\n")
+        guard !text.isEmpty else { check(false, "Main/MainSplitView.swift readable"); return }
         let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
         for banned in [".outcome", ".openCard", ".explicit", "cards.picks", "cards.sent"] {
             check(!code.contains(banned), "the views do not read \(banned)")

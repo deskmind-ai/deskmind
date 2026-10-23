@@ -603,14 +603,25 @@ enum ShellTests {
 
     /// #107 review (item 5, handoff §3.1): nothing in the window's views moves the keyboard focus — a card that arrives
     /// while the user types must never get the typing (its field's Return would send it as the answer).
+    /// M2 A2: every file of the window's views is checked — MainSplitView.swift and each Main/Card*.swift (the cards by
+    /// kind, their keys), so a new card file is in the check by its name — and none of them brings a window forward or
+    /// activates the app either (#103: the run view's five calls that did were removed; handoff §3.1).
     static func focusTests() {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { check(false, "Main/MainSplitView.swift readable from \(url.path)"); return }
-        let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
-        let movers = ["@FocusState", ".focused(", "defaultFocus", "makeFirstResponder", "becomeFirstResponder", "prefersDefaultFocus", "focusScope", "FocusedValue"]
-        let found = movers.filter { code.contains($0) }
-        check(found.isEmpty, "the views set no focus anywhere (a card's field is focused only by the user's click): \(found)")
-        check(code.contains("struct CardView") && code.contains("TextField(L(\"Or answer in your own words\""), "the check reads the card's own field's file")
+        let main = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main")
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: main.path)) ?? [])
+            .filter { $0 == "MainSplitView.swift" || ($0.hasPrefix("Card") && $0.hasSuffix(".swift")) }.sorted()
+        check(names.contains("MainSplitView.swift") && names.contains("CardViews.swift"), "the window's view files: \(names)")
+        let movers = ["@FocusState", ".focused(", "defaultFocus", "makeFirstResponder", "becomeFirstResponder", "prefersDefaultFocus", "focusScope", "FocusedValue",
+                      "NSApp.activate", ".activate(", "makeKeyAndOrderFront", "orderFrontRegardless", "orderFront(", "makeKey()", "stepAside", "unhide("]
+        var all = ""
+        for n in names {
+            guard let text = try? String(contentsOf: main.appendingPathComponent(n), encoding: .utf8) else { check(false, "Main/\(n) readable"); continue }
+            let code = text.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+            let found = movers.filter { code.contains($0) }
+            check(found.isEmpty, "Main/\(n) moves no focus and brings nothing forward (a card's field is focused only by the user's click): \(found)")
+            all += code
+        }
+        check(all.contains("struct CardView") && all.contains("TextField(L(\"Or answer in your own words\""), "the check reads the card's own field's file")
     }
 
     /// #107 review (item 3): the helper closed an idle session (watched or not): nothing shows as cut off, a watch does
@@ -839,7 +850,7 @@ enum ShellTests {
     /// #107 re-review (effect): the hint under a card whose approve (and own field) wait for the body is neutral, and
     /// the field says why it is off to VoiceOver.
     static func cardHintTests() {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift")
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let card = text.components(separatedBy: "struct CardView").dropFirst().first ?? ""
         check(!card.contains("Scroll to the end of the card to approve"), "no approve-only hint under the card")
@@ -1790,7 +1801,7 @@ enum ShellTests {
 
     /// Final round (6): the "read the whole card first" hint only while the card is open.
     static func hintOpenOnlyTests() {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift")
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let card = text.components(separatedBy: "struct CardView").dropFirst().first ?? ""
         let before = card.components(separatedBy: "Text(L(\"Read the whole card first: scroll to its end\"").first ?? ""
