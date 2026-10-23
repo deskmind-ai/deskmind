@@ -369,6 +369,11 @@ final class ShellModel: ObservableObject {
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
+        // the settings as stored now, read by the client whenever it opens or converges a session (never a copy)
+        client.settingsSource = { [weak self] in
+            guard let self else { return (nil, nil) }
+            let s = self.sessionSettings(); return (s.config, s.lang)
+        }
         client.onWaitingForHelper = { [weak self] waiting in self?.deliver { self?.waitingForHelper = waiting } }
         applySettings()
         appliedSettings = settingsPrint()
@@ -389,20 +394,17 @@ final class ShellModel: ObservableObject {
     /// settings as they are now (#107 review: one rule for both fields).
     func sessionSettings() -> (config: String?, lang: String) { (config(), Self.langCode(lang())) }
 
-    /// Sessions open with the settings as they are now: when either field changed (a key saved, the UI language
-    /// switched), every session's next process opens with the new value (SessionClient.adoptSettings), not only those
-    /// this client never opened. Called before each open and send, and when the settings change.
+    /// The client reads the settings where they are stored, when it needs them (SessionClient.settingsSource, set in
+    /// init: desired()); nothing is handed to it. Only the cloud switch of a client with no ModelsOffSync of the app's
+    /// (a test's) is kept here: `reconcileIfModelChanged` — it moved since the client last heard: every session
+    /// converged. Called before each open and send, and when the settings change.
     func applySettings() { applySettings(reconcileIfModelChanged: true) }
 
-    /// `reconcileIfModelChanged`: the switch moved since the client last heard (turned in the window as it was, say):
-    /// the client takes it at once (an open from now on sees it) and every session it knows is told (`reconcile`).
     private func applySettings(reconcileIfModelChanged: Bool) {
-        let now = sessionSettings()
-        if client.defaultConfig != now.config || client.defaultLang != now.lang { client.adoptSettings(config: now.config, lang: now.lang) }
         let off = !cloudOn()
         guard client.modelOff != off else { return }
         client.modelOff = off
-        if reconcileIfModelChanged { work { [weak self] in self?.client.reconcile(config: now.config, lang: now.lang, off: off) } }
+        if reconcileIfModelChanged { work { [weak self] in self?.client.convergeAll() } }
     }
 
     /// The settings as the window shows them (on the main thread): cloud models on or off.
@@ -536,7 +538,6 @@ final class ShellModel: ObservableObject {
         client.markSeen(id)
         let known = (states[id]?.lastSeq ?? 0) > 0 || client.state(id).lastSeq > 0
         applySettings()
-        let (config, lang) = sessionSettings(), cloud = cloudOn()
         work { [weak self] in
             guard let self else { return }
             // what this app has is never taken as the whole of it (#107 review: a reply finished while the window was
@@ -547,8 +548,8 @@ final class ShellModel: ObservableObject {
                 return
             }
             guard !known else { return }    // (an older helper without session.history: the watch keeps it current)
-            guard cloud else { return }     // (cloud models off: no process for it)
-            let ok = self.client.open(sessionId: id, config: config, lang: lang) != nil
+            guard self.cloudOn() else { return }     // (cloud models off: no process for it)
+            let ok = self.client.open(sessionId: id) != nil
             if !ok { self.deliver { self.notice = L("Couldn't open this conversation. Is DeskMind's helper running?", lang: self.lang()) } }
         }
     }
@@ -630,10 +631,10 @@ final class ShellModel: ObservableObject {
     private func openThenSend(_ control: SessionControl, text: String) {
         guard !opening else { return }
         opening = true
-        let (config, lang) = sessionSettings()
         work { [weak self] in
             guard let self else { return }
-            guard let id = self.client.open(config: config, lang: lang) else {
+            // (with the settings stored when it goes: SessionClient.desired())
+            guard let id = self.client.open() else {
                 self.deliver {
                     self.opening = false
                     self.notice = L("Couldn't start a conversation. Is DeskMind's helper running?", lang: self.lang())
@@ -802,13 +803,11 @@ final class ShellModel: ObservableObject {
         applySettings(reconcileIfModelChanged: false)
         refreshSettings()
         appliedSettings = settingsPrint()
-        let (config, lang) = sessionSettings()
-        let off = !cloudOn()
+        // only "converge now": the settings are read when each set_config goes, never carried here (#107 review at
+        // 00969e8: two saves whose work ran C then B left the sessions on B)
         work { [weak self] in
             guard let self else { return }
-            // every session the client knows with a process or one coming (live, opening, reopening, awaiting its
-            // start: the client's list, not this window's view of it)
-            self.client.reconcile(config: config, lang: lang, off: off)
+            self.client.convergeAll()
             if keyChanged { self.askNewProcesses() }
         }
     }

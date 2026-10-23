@@ -836,7 +836,8 @@ enum SessionTests {
         let mock = MockTransport()
         mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
         let client = SessionClient(transport: mock)
-        _ = client.open(sessionId: "s", lang: "zh")
+        client.adoptSettings(config: nil, lang: "zh")            // (the settings stored: a next process opens with them)
+        _ = client.open(sessionId: "s")
         [taskR1, start, ask, exit].forEach { client.feed($0) }
         check(client.state("s").exited == 9, "the client sees the exit")
         mock.requests = []
@@ -1912,11 +1913,13 @@ enum SessionTests {
         let cm = SessionClient(transport: pm)
         cm.defaultConfig = "openai:local|fake"; cm.defaultLang = "zh"
         cm.feed(L(#"{"seq":1,"session_id":"old","kind":"session.message","msg_id":"u","role":"user","text":"a"}"#))
+        cm.reconciling.wait()                       // (its first line here converged it: a set_config of its own)
         pm.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
         _ = cm.send(.say("x"), to: "old")
         let openReq = pm.requests.first { $0["op"] as? String == SessionClient.Op.open }
         check(openReq?["config"] as? String == "openai:local|fake" && openReq?["lang"] as? String == "zh", "reopened with the app's config: \(String(describing: openReq))")
-        // a session this client opened keeps what it was opened with (even none), not the defaults
+        // a session this client opened opens again with the settings stored now (desired, read at the open), not with
+        // what it was opened with (#107 review at 00969e8: no settings remembered per session)
         let pn = MockTransport()
         pn.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0, "pid": 1], SessionClient.Op.send: ["ok": true]]
         let cn = SessionClient(transport: pn)
@@ -1925,7 +1928,7 @@ enum SessionTests {
         cn.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#))
         pn.requests = []
         _ = cn.send(.say("y"), to: "s")
-        check(pn.requests.first { $0["op"] as? String == SessionClient.Op.open }.map { $0["config"] == nil } == true, "opened here without a config: reopened without one")
+        check(pn.requests.first { $0["op"] as? String == SessionClient.Op.open }?["config"] as? String == "X", "opened here before a save: reopened with the settings now")
         queueInterleavingTests()
     }
 
