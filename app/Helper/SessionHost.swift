@@ -23,7 +23,9 @@
 //   sessions.list                        `harness.mjs sessions list`, each marked `open` when its process runs here,
 //                                        with `keys` (the models.env digest that process started with, ModelKeys) and
 //                                        `ending` (a restart asked, at its next idle moment); `keys` at the top: the
-//                                        file's digest now — a process whose `keys` differ runs on keys no longer saved
+//                                        file's digest now — a process whose `keys` differ runs on keys no longer saved.
+//                                        One spawned whose session.start has not come yet: `starting`, with its `keys`
+//                                        (not `open`; a new session's is listed though the harness has no history of it)
 //   models.off {off}                     cloud models off (the app's engine setting, from any window): this helper
 //                                        holds it for every session it runs, whichever client — persisted in its
 //                                        folder (`models-off`). While off: every running session process is written
@@ -632,19 +634,34 @@ enum SessionHost {
         // (the file now, read before the processes' digests: a save meanwhile shows as owed, never as applied)
         let keysNow = ModelKeys.digest(env: HarnessRun.modelEnv())
         lock.lock()
-        var running: [String: (keys: String?, ending: Bool)] = [:]
-        for (id, s) in sessions where s.started && !s.closing { running[id] = (s.keysDigest, s.endWhenIdle) }
+        // a process spawned whose session.start has not come yet (`starting`) has read its keys already: reported with
+        // its digest too (#107 review at 85d81f6: missed, a key saved while it started left it on the old one)
+        var running: [String: (keys: String?, ending: Bool, starting: Bool)] = [:]
+        for (id, s) in sessions where !s.closing && (s.started || s.process.isRunning) {
+            running[id] = (s.keysDigest, s.endWhenIdle, !s.started)
+        }
         lock.unlock()
-        return ["ok": true, "keys": keysNow, "sessions": items.map { i -> [String: Any] in
+        var listedIds = Set<String>()
+        var reported = items.map { i -> [String: Any] in
             var i = i
-            let r = running[i["session_id"] as? String ?? ""]
-            i["open"] = r != nil
+            let id = i["session_id"] as? String ?? ""
+            listedIds.insert(id)
+            let r = running[id]
+            i["open"] = r.map { !$0.starting } ?? false
             if let r {
                 if let k = r.keys { i["keys"] = k }
                 i["ending"] = r.ending
+                if r.starting { i["starting"] = true }
             }
             return i
-        }]
+        }
+        // (a new session starting has no stored history yet: the harness's list does not name it)
+        for (id, r) in running where r.starting && !listedIds.contains(id) {
+            var i: [String: Any] = ["session_id": id, "title": "", "open": false, "starting": true, "ending": r.ending]
+            if let k = r.keys { i["keys"] = k }
+            reported.append(i)
+        }
+        return ["ok": true, "keys": keysNow, "sessions": reported]
     }
 
     // MARK: watching

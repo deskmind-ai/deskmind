@@ -199,6 +199,8 @@ struct SessionSummary: Equatable {
     var keys: String?
     /// A restart of its process is asked already (at its next idle moment).
     var ending = false
+    /// Its process is spawned (its keys read) and its session.start has not come yet: not `open`.
+    var starting = false
 
     static func == (a: SessionSummary, b: SessionSummary) -> Bool {
         a.sessionId == b.sessionId && a.title == b.title && a.updatedAt == b.updatedAt
@@ -217,6 +219,7 @@ struct SessionSummary: Equatable {
         self.open = o["open"] as? Bool ?? false
         self.keys = o["keys"] as? String
         self.ending = o["ending"] as? Bool ?? false
+        self.starting = o["starting"] as? Bool ?? false
     }
 }
 

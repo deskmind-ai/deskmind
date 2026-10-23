@@ -814,7 +814,7 @@ final class ShellModel: ObservableObject {
     /// Which ones is the helper's to say (#107 review at b3b8464: the app's own record of what it had asked missed a
     /// session that restarted on B when the file went back to A): sessions.list gives the digest of the file now and,
     /// for each open session, the digest its process started with and whether a restart is asked already (`ending`).
-    /// Owed: an open one whose digest is not the file's; asked: those of them not ending. After asking, the list is read
+    /// Owed: an open one, or one still starting, whose digest is not the file's; asked: the open ones not ending. After asking, the list is read
     /// again (a process ended at once is gone; one busy stays owed, `ending`, until it goes; one whose ask failed is
     /// not asked again in the same round). Owed left, the list
     /// unread, or an ask not taken (no answer, an error): tried again on the next syncSettings and after a backoff
@@ -838,11 +838,13 @@ final class ShellModel: ObservableObject {
                 var stale: [String] = [], unknown: [String] = []
                 owed = false
                 if let listed, let now = listed.keysNow {
-                    for s in listed.sessions where s.open {
+                    for s in listed.sessions where s.open || s.starting {
                         if s.keys == now { continue }
-                        if s.keys == nil { unknown.append(s.sessionId); continue }
+                        if s.keys == nil { if s.open { unknown.append(s.sessionId) }; continue }
                         owed = true
-                        if !s.ending { stale.append(s.sessionId) }
+                        // (one still starting is not asked — it is not open to the helper's end yet — but owed: the
+                        // backoff reads it again once started, #107 review at 85d81f6)
+                        if !s.ending && !s.starting { stale.append(s.sessionId) }
                     }
                 } else {
                     let open = listed.map { $0.sessions.filter(\.open).map(\.sessionId) } ?? client.liveIds()

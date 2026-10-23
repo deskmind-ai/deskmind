@@ -1746,7 +1746,8 @@ enum ShellTests {
     /// file's digest read from the test's key file: a process records the digest at its start, as SessionHost.spawn
     /// does. `failEnd`: the next N asks of a session unanswered; `refuseEnd`: answered with an error; `failList`: the
     /// next N lists unanswered; `busy`: sessions whose ask is deferred (ending at their next idle moment); `old`: a
-    /// helper that says no digests.
+    /// helper that says no digests; `starting`: processes spawned (their keys read) whose session.start has not come
+    /// (listed `starting`, not `open`; an end finds them not open, as SessionHost.end does).
     final class FakeHelper: SessionTransport {
         let lock = NSLock()
         var key: String
@@ -1755,13 +1756,17 @@ enum ShellTests {
         var failEnd: [String: Int] = [:], refuseEnd: [String: Int] = [:]
         var failList = 0
         var busy: Set<String> = []
+        var starting: Set<String> = []
         var old = false
         init(key: String, running: [String] = []) {
             self.key = key
             for id in running { procs[id] = (ModelKeys.digest(key), false) }
         }
         var now: String { ModelKeys.digest(key) }
-        func spawn(_ id: String) { lock.lock(); procs[id] = (now, false); lock.unlock() }
+        func spawn(_ id: String, started: Bool = true) {
+            lock.lock(); procs[id] = (now, false); if !started { starting.insert(id) }; lock.unlock()
+        }
+        func start(_ id: String) { lock.lock(); starting.remove(id); lock.unlock() }
         /// A busy session goes idle: the helper ends it if a restart was asked.
         func idle(_ id: String) { lock.lock(); busy.remove(id); if procs[id]?.ending == true { procs[id] = nil }; lock.unlock() }
         func request(_ body: [String: Any]) -> [String: Any]? {
@@ -1772,7 +1777,8 @@ enum ShellTests {
             case SessionClient.Op.list:
                 if failList > 0 { failList -= 1; return nil }
                 var r: [String: Any] = ["ok": true, "sessions": procs.keys.sorted().map { id -> [String: Any] in
-                    var i: [String: Any] = ["session_id": id, "title": "", "open": true, "ending": procs[id]!.ending]
+                    var i: [String: Any] = ["session_id": id, "title": "", "open": !starting.contains(id), "ending": procs[id]!.ending]
+                    if starting.contains(id) { i["starting"] = true }
                     if !old { i["keys"] = procs[id]!.keys }
                     return i
                 }]
@@ -1781,7 +1787,7 @@ enum ShellTests {
             case SessionClient.Op.end:
                 if let n = failEnd[id], n > 0 { failEnd[id] = n - 1; return nil }
                 if let n = refuseEnd[id], n > 0 { refuseEnd[id] = n - 1; return ["ok": false, "code": "bad_request", "error": "x"] }
-                guard procs[id] != nil else { return ["ok": false, "code": "not_open"] }
+                guard procs[id] != nil, !starting.contains(id) else { return ["ok": false, "code": "not_open"] }
                 if busy.contains(id) { procs[id]!.ending = true; return ["ok": true, "deferred": true] }
                 procs[id] = nil
                 return ["ok": true]
@@ -2057,6 +2063,24 @@ enum ShellTests {
             check(!m.keysPending && h.ends() == ["ses_busy"] && clock.waiting.isEmpty, "gone at its idle moment: none owed")
         }
 
+        // a process spawned on A, its session.start not come, when B is saved (#107 review at 85d81f6): owed, not asked
+        // while it starts (the helper's end finds it not open); asked once started, by the backoff alone
+        do {
+            let h = FakeHelper(key: "K=A", running: ["ses_t"]), clock = Clock()
+            let m = keyShell(h, clock: clock)
+            m.syncSettings()
+            h.spawn("ses_new", started: false)                 // (it read A)
+            h.key = "K=B"
+            m.syncSettings()
+            check(h.ends() == ["ses_t"] && m.keysPending && h.runsOn("ses_new") != "now" && clock.waiting.count == 1,
+                  "starting: owed, not asked yet: \(h.ends()) pending=\(m.keysPending)")
+            clock.fire()
+            check(h.ends() == ["ses_t"] && m.keysPending && clock.waiting.count == 1, "still starting: still owed, read again later")
+            h.start("ses_new")
+            clock.fire()
+            check(h.ends() == ["ses_t", "ses_new"] && !m.keysPending && h.allCurrent, "started: asked; none owed: \(h.ends())")
+        }
+
         // an older helper (no digests): its open sessions asked once per key file; not again for the same file
         do {
             let h = FakeHelper(key: "K=old", running: ["ses_o"]), clock = Clock()
@@ -2136,6 +2160,8 @@ enum ShellTests {
         let list = host.components(separatedBy: "static func list() -> [String: Any] {").dropFirst().first ?? ""
         check(list.contains("\"keys\": keysNow") && list.contains("i[\"keys\"] = k") && list.contains("i[\"ending\"] = r.ending"),
               "sessions.list: the file's digest now, each open process's, and whether it is ending")
+        check(list.contains("(s.started || s.process.isRunning)") && list.contains("i[\"starting\"] = true"),
+              "sessions.list: a process spawned, not started yet, is reported (starting) with its digest")
     }
 
     // MARK: words
