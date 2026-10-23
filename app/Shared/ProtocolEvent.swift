@@ -270,6 +270,18 @@ struct SessionTaskUndo: Codable, Equatable {
 
 /// The result card was answered (harness#61): stored before the answer goes to the executor. `undo`: the option picked
 /// is the card's undo — from here until session.task_undo the undo may be under way.
+/// session.config (harness#64, stored): the session's settings from here on — set_config's answer (`by: "set_config"`,
+/// with that line's client_id) or an open's settings that differ from the stored ones (`by: "open"`). `config` nil: no
+/// model (`set_config{config:null}`).
+struct SessionConfigEvent: Codable, Equatable {
+    var config: String?
+    var model: String?
+    var lang: String?
+    var by: String?
+    var clientId: String?
+    enum CodingKeys: String, CodingKey { case config, model, lang, by, clientId = "client_id" }
+}
+
 struct SessionTaskRespond: Codable, Equatable {
     @LStr var runId: String = ""
     var option: Int?
@@ -324,9 +336,12 @@ struct HelperSessionExit: Codable, Equatable {
     var pid: Int?
     /// The stored seq the process began after (its session.start's last_seq).
     var startSeq: Int?
-    enum CodingKeys: String, CodingKey { case code, lastSeq = "last_seq", pid, startSeq = "start_seq" }
-    init(code: Int?, lastSeq: Int? = nil, pid: Int? = nil, startSeq: Int? = nil) {
-        self.code = code; self.lastSeq = lastSeq; self.pid = pid; self.startSeq = startSeq
+    /// The helper closed it because it was idle (no task, reply, queue or undo: no run was cut): it is opened again on
+    /// the next send, not by a watch.
+    var idle: Bool?
+    enum CodingKeys: String, CodingKey { case code, lastSeq = "last_seq", pid, startSeq = "start_seq", idle }
+    init(code: Int?, lastSeq: Int? = nil, pid: Int? = nil, startSeq: Int? = nil, idle: Bool? = nil) {
+        self.code = code; self.lastSeq = lastSeq; self.pid = pid; self.startSeq = startSeq; self.idle = idle
     }
     /// A field of another type (or out of range) is absent: the exit itself must not be lost.
     init(from decoder: Decoder) throws {
@@ -335,6 +350,7 @@ struct HelperSessionExit: Codable, Equatable {
         lastSeq = (try? c.decodeIfPresent(Int.self, forKey: .lastSeq)) ?? nil
         pid = (try? c.decodeIfPresent(Int.self, forKey: .pid)) ?? nil
         startSeq = (try? c.decodeIfPresent(Int.self, forKey: .startSeq)) ?? nil
+        idle = (try? c.decodeIfPresent(Bool.self, forKey: .idle)) ?? nil
     }
 }
 
@@ -550,6 +566,7 @@ enum ProtocolEvent: Equatable {
     case taskClosed(SessionTaskClosed)
     case taskUndo(SessionTaskUndo)
     case taskRespond(SessionTaskRespond)
+    case sessionConfig(SessionConfigEvent)
     case steer(SessionSteer)
     case retry(SessionRetry)
     case queue(SessionQueue)
@@ -591,6 +608,7 @@ enum ProtocolEvent: Equatable {
         case .taskClosed: return "session.task_closed"
         case .taskUndo: return "session.task_undo"
         case .taskRespond: return "session.task_respond"
+        case .sessionConfig: return "session.config"
         case .steer: return "session.steer"
         case .retry: return "session.retry"
         case .queue: return "session.queue"
@@ -650,6 +668,7 @@ extension ProtocolEvent: Codable {
         case "session.task_closed": self = read(ProtocolEvent.taskClosed)
         case "session.task_undo": self = read(ProtocolEvent.taskUndo)
         case "session.task_respond": self = read(ProtocolEvent.taskRespond)
+        case "session.config": self = read(ProtocolEvent.sessionConfig)
         case "session.steer": self = read(ProtocolEvent.steer)
         case "session.retry": self = read(ProtocolEvent.retry)
         case "session.queue": self = read(ProtocolEvent.queue)
@@ -691,6 +710,7 @@ extension ProtocolEvent: Codable {
         case .taskClosed(let v): try v.encode(to: encoder)
         case .taskUndo(let v): try v.encode(to: encoder)
         case .taskRespond(let v): try v.encode(to: encoder)
+        case .sessionConfig(let v): try v.encode(to: encoder)
         case .steer(let v): try v.encode(to: encoder)
         case .retry(let v): try v.encode(to: encoder)
         case .queue(let v): try v.encode(to: encoder)

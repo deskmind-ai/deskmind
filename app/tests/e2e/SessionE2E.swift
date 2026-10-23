@@ -11,7 +11,7 @@
 //
 // `serve` adds test ops beside the session ops: `e2e.ui` (what the live card and the recording were driven with, by
 // run), `e2e.state` (SessionHost.taskRunning), `e2e.acquire {run_id}` (an op run that starts on the lock and is over
-// at once: ok, or computer_busy).
+// at once: ok, or computer_busy), `e2e.run` (an op run's request: refused no_model by the models-off bit, or would run).
 // `lock` and `linger` print PASS or FAIL per check; their exit status is the number of failures.
 
 import AppKit
@@ -40,8 +40,9 @@ enum SessionE2E {
         let pass = ProcessInfo.processInfo.environment.filter { ["LOCAL_URL", "LOCAL_API_KEY", "TMPDIR"].contains($0.key) }
         SessionHost.setup = .init(node: URL(fileURLWithPath: a[4]), bundle: URL(fileURLWithPath: a[5]), dir: dir, cwd: nil,
                                   logs: dir.appendingPathComponent("logs"),
-                                  environment: { ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"].merging(pass) { x, _ in x } },
+                                  environment: { _ in ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"].merging(pass) { x, _ in x } },
                                   prepare: {}, idleSeconds: Double(a[6]) ?? 300, driver: "sim")
+        SessionHost.onModelsOff = { uiLock.lock(); modelsOffStops += 1; uiLock.unlock() }
         SessionHost.setup.ui = .init(start: { run, _, _ in note(run, "start") }, show: { run, ev in note(run, "show", ev) },
                                      record: { run, ev in note(run, "record", ev) }, finish: { run, st in note(run, "finish", ["status": "\(String(describing: st))"]) })
         serve(path: a[2])
@@ -49,6 +50,8 @@ enum SessionE2E {
 
     // what the live card and the recording were driven with
     nonisolated(unsafe) static var ui: [[String: Any]] = []
+    /// How often models.off (true) asked the helper's op run to stop (SessionHost.onModelsOff).
+    nonisolated(unsafe) static var modelsOffStops = 0
     static let uiLock = NSLock()
     static func note(_ run: String, _ what: String, _ ev: [String: Any] = [:]) {
         uiLock.lock(); ui.append(["run_id": run, "what": what, "event": ev["event"] ?? ev["status"] ?? ""]); uiLock.unlock()
@@ -60,7 +63,11 @@ enum SessionE2E {
             uiLock.lock(); defer { uiLock.unlock() }
             return ["ok": true, "ui": ui]
         case "e2e.state":
-            return ["ok": true, "task_running": SessionHost.taskRunning]
+            uiLock.lock(); defer { uiLock.unlock() }
+            return ["ok": true, "task_running": SessionHost.taskRunning, "models_off_stops": modelsOffStops]
+        case "e2e.run":
+            // the helper's op run as far as the models-off bit goes (HandsHelper: refused before anything starts)
+            return SessionHost.refusesRun(req) ?? ["ok": true, "would_run": true]
         case "e2e.acquire":
             let run = req["run_id"] as? String ?? "run_e2e"
             let p = executor("true")
@@ -113,7 +120,7 @@ enum SessionE2E {
 
     static func setup(_ dir: String) {
         SessionHost.setup = .init(node: URL(fileURLWithPath: "/"), bundle: URL(fileURLWithPath: "/"), dir: URL(fileURLWithPath: dir), cwd: nil,
-                                  logs: URL(fileURLWithPath: dir), environment: { [:] }, prepare: {}, idleSeconds: 300)
+                                  logs: URL(fileURLWithPath: dir), environment: { _ in [:] }, prepare: {}, idleSeconds: 300)
     }
 
     static func until(_ f: () -> Bool, _ s: Double = 5) -> Bool {

@@ -434,6 +434,8 @@ final class RunModel: ObservableObject {
             rawError = exit == 0 ? "" : L("Exit code %d\n%@", exit, e["stderr_tail"] as? String ?? "", lang: lang)
             summary = exit == 0 ? L("%d/%d tasks passed", result.passed, result.total, lang: lang) : Self.friendly(rawError)
             ask = nil; preparing = ""
+            // stopped because cloud models went off (the helper stopped it): said as that, not as a stop by the app
+            let modelsOff = e["reason"] as? String == "models_off"
             if free && exit == 0 {
                 // No grader: say it finished (or stopped), and send the user to the answer or the change list.
                 let completed = result.passed > 0
@@ -441,6 +443,8 @@ final class RunModel: ObservableObject {
                 let folder = goalRequest?.folder != nil
                 if !answer.isEmpty {
                     summary = L("Answer: %@", answer, lang: lang)
+                } else if modelsOff {
+                    summary = L("The cloud model was turned off, so the task stopped.", lang: lang)
                 } else if folder {
                     summary = completed ? L("Finished. Check what changed in DeskMind.", lang: lang)
                         : (e["reason"] as? String == "no_progress_loop"
@@ -465,7 +469,8 @@ final class RunModel: ObservableObject {
             phase = .failed
             ask = nil; preparing = ""
             rawError = e["error"] as? String ?? L("Something went wrong", lang: ResolvedLang.current)
-            summary = e["code"] as? String == "brain_not_ready" ? rawError : Self.friendly(rawError)
+            // (said as it is: the local model not ready yet; the cloud model off — the helper refused the run)
+            summary = ["brain_not_ready", "no_model"].contains(e["code"] as? String ?? "") ? rawError : Self.friendly(rawError)
             if real { RunOverlay.shared.finish(passed: false, summary: summary) }
         default:
             break

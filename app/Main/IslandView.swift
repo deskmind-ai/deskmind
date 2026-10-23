@@ -222,6 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // window then would put it over the app being driven, after every step. Nothing is done; the island is
             // the way in. With a card waiting, hands is blocked on the user and takes no steps: it is the user.
             if RunModel.shared?.phase == .running && RunModel.shared?.ask == nil { return false }
+            // The same in the 0.5 window: a session's task running, no card waiting (handoff §3.1).
+            if ShellFlag.isOn() && ShellModel.shared?.taskRunningWithoutCard == true { return false }
             if MainWindow.comeBack() { return false }
             return true
         }

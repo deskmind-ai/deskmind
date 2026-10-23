@@ -48,11 +48,21 @@ enum CloudModelSettings {
         let text = env.keys.sorted().compactMap { k in env[k].map { "\(k)=\($0)" } }.joined(separator: "\n") + "\n"
         try text.write(to: fileURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        // each writer of the model settings says so (the key file here, the service and the configuration below): the
+        // app's sessions take them whichever window saved (ShellModel.syncSettings; #107 review at 5999bd9)
+        ModelSettingsSaved.post()
     }
 
     static var provider: CloudProvider {
         get { CloudProvider.named(UserDefaults.standard.string(forKey: "cloud.provider") ?? "deepseek") }
-        set { UserDefaults.standard.set(newValue.id, forKey: "cloud.provider") }
+        set { UserDefaults.standard.set(newValue.id, forKey: "cloud.provider"); ModelSettingsSaved.post() }
+    }
+    /// The configuration saved (`engine.config`: the runs of the window as it was send it, History.swift; sessions
+    /// open with it, MainSplitView.modelConfig). Read and written through here only (ShellTests checks no other file
+    /// names its key).
+    static var engineConfig: String? {
+        get { UserDefaults.standard.string(forKey: "engine.config") }
+        set { UserDefaults.standard.set(newValue, forKey: "engine.config"); ModelSettingsSaved.post() }
     }
     /// The harness configuration the main app sends with every run (History.swift reads `engine.config`).
     static func config(for p: CloudProvider, model: String) -> String { p.custom ? p.config + model : p.config }
@@ -65,7 +75,12 @@ enum CloudModelSettings {
     }
     static var engineIsCloud: Bool {
         get { UserDefaults.standard.string(forKey: "engine") == "harness" }
-        set { UserDefaults.standard.set(newValue ? "harness" : "hands", forKey: "engine") }
+        set {
+            UserDefaults.standard.set(newValue ? "harness" : "hands", forKey: "engine")
+            // the helper holds "cloud models off" for every session it runs (models.off): told wherever the setting
+            // is written — either window's sheet, any path — so no session keeps the cloud behind it
+            ModelsOffSync.shared.push()      // (the switch as it is when it goes, in order, again until the helper has it)
+        }
     }
 }
 
@@ -90,10 +105,16 @@ struct CloudModelRow: View {
 /// Provider, key, (custom) URL and model; Test asks the helper to reach the model once; Save writes models.env and
 /// switches the engine.
 struct CloudModelSheet: View {
+    /// Opened from the 0.5 window: its conversations need a cloud model (0.5.0 has no local-only mode), so the switch
+    /// can only be turned on there; it shows what is stored, and Save writes it only if the user moved it
+    /// (ModelChoice). The window as it was keeps its choice.
+    var inShell = false
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @Environment(\.dismiss) private var dismiss
     @State private var useCloud = CloudModelSettings.engineIsCloud
+    /// The engine as stored when the sheet opened: Save writes it only if the switch was moved from it.
+    @State private var savedCloud = CloudModelSettings.engineIsCloud
     @State private var provider = CloudModelSettings.provider
     @State private var key = ""
     @State private var url = ""
@@ -106,6 +127,11 @@ struct CloudModelSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(L("Which model thinks", lang: lang)).font(.system(size: 16, weight: .semibold, design: .rounded))
             Toggle(L("Use a cloud model (the harness engine)", lang: lang), isOn: $useCloud)
+                .disabled(ModelChoice.switchLocked(inShell: inShell, saved: savedCloud))
+            if !ModelChoice.offersLocalOnly(inShell: inShell) {
+                Text(L("Conversations in DeskMind 0.5 need a cloud model.", lang: lang))
+                    .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
+            }
             if useCloud {
                 Picker(L("Service", lang: lang), selection: $provider) {
                     ForEach(CloudProvider.all) { p in Text(p.title).tag(p) }
@@ -124,7 +150,10 @@ struct CloudModelSheet: View {
                             .lineLimit(3).fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Text(L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.", lang: lang))
+                // (the 0.5 window offers no local model: its note says what is sent, not to use one)
+                Text(inShell
+                     ? L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is stored in models.env in Application Support, readable by you only.", lang: lang)
+                     : L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -135,7 +164,11 @@ struct CloudModelSheet: View {
             }
         }
         .padding(22).frame(width: 440)
-        .onAppear { load(provider) }
+        .onAppear {
+            savedCloud = CloudModelSettings.engineIsCloud
+            useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)
+            load(provider)
+        }
     }
 
     private func load(_ p: CloudProvider) {
@@ -169,17 +202,19 @@ struct CloudModelSheet: View {
     }
 
     private func persist() throws {
+        let model = ModelChoice.modelName(modelID)         // (a pasted name's spaces never saved)
         var env = CloudModelSettings.read()
         env[provider.keyEnv] = key
-        if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = modelID }
+        if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = model }
         try CloudModelSettings.write(env)
         CloudModelSettings.provider = provider
-        UserDefaults.standard.set(CloudModelSettings.config(for: provider, model: modelID), forKey: "engine.config")
+        CloudModelSettings.engineConfig = CloudModelSettings.config(for: provider, model: model)
     }
 
     private func save() {
         do { if useCloud { try persist() } } catch { result = error.localizedDescription; resultOK = false; return }
-        CloudModelSettings.engineIsCloud = useCloud
+        // the engine only if the user moved the switch (a privacy setting, shared with the window as it was)
+        if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }
         model.refreshCloud()
         dismiss()
     }

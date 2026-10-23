@@ -4,7 +4,7 @@ Starts the fake model service (fake_model.py) and SessionE2E (Helper/SessionHost
 then drives the socket as the main app would. Each check prints PASS or FAIL; the exit status is the number of
 failures.
 
-    python3 -I session_e2e.py <SessionE2E> <node> <harness.mjs> <out dir>
+    python3 -I session_e2e.py <SessionE2E> <node> <harness.mjs> <out dir> [<SessionClientE2E> [<ShellE2E>]]
 """
 import json
 import os
@@ -19,7 +19,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN, NODE, BUNDLE, OUT = sys.argv[1:5]
 CLIENT = sys.argv[5] if len(sys.argv) > 5 else None     # SessionClientE2E: the app's client, on a helper of its own
+SHELL = sys.argv[6] if len(sys.argv) > 6 else None      # ShellE2E: the 0.5 window's model, on a helper (and a folder) of its own
 DIR = os.path.join(OUT, "support")
+SHELL_DIR = os.path.join(OUT, "shell-support")
 # a Unix socket's path is at most 103 bytes: beside the output when that is short enough, else in a folder of its own
 SOCK = os.path.join(OUT, "s.sock")
 if len(SOCK.encode()) > 100:
@@ -121,10 +123,10 @@ def alive(pid):
         return True
 
 
-def start_helper(env):
+def start_helper(env, folder=DIR):
     if os.path.exists(SOCK):
         os.unlink(SOCK)
-    p = subprocess.Popen([BIN, "serve", SOCK, DIR, NODE, BUNDLE, str(IDLE)], env=env, stdout=subprocess.PIPE,
+    p = subprocess.Popen([BIN, "serve", SOCK, folder, NODE, BUNDLE, str(IDLE)], env=env, stdout=subprocess.PIPE,
                          stderr=open(os.path.join(OUT, "helper.log"), "a"), text=True)
     assert p.stdout.readline().strip() == "listening"
     return p
@@ -165,18 +167,38 @@ def main():
                 if p.poll() is None:
                     p.kill(); p.wait()
             helpers.append(start_helper(env))
+            request({"op": "models.off", "off": False})      # (the app asserts its switch as it connects)
             r = subprocess.run([CLIENT, SOCK, CONFIG], capture_output=True, text=True, timeout=240)
             print(r.stdout, end="")
             check(r.returncode == 0, f"the app's session client against the helper ({r.returncode} failures){r.stderr[-400:]}")
+        if SHELL:
+            # the 0.5 window's model: a conversation, then the app quits and the helper restarts (the sessions' processes
+            # go with it), then the app again; defaults in a suite of their own (removed at the end), a folder of its own.
+            # Nothing asserts the models-off switch here but the shell's own start: phase a is a first run on a fresh
+            # helper (off until told)
+            os.makedirs(SHELL_DIR, exist_ok=True)
+            suite = f"ai.deskmind.e2e.shell.{os.getpid()}"
+            state = os.path.join(OUT, "shell-state")
+            for phase in ["a", "b"]:
+                for p in helpers:
+                    if p.poll() is None:
+                        p.kill(); p.wait()
+                helpers.append(start_helper(env, SHELL_DIR))
+                r = subprocess.run([SHELL, phase, SOCK, CONFIG, suite, SHELL_DIR, state], capture_output=True, text=True, timeout=300,
+                                   env={**os.environ, "FAKE_MODEL_PORT": open(port_file).read().strip()})
+                print(r.stdout, end="")
+                check(r.returncode == 0, f"the 0.5 window's model against the helper, phase {phase} ({r.returncode} failures){r.stderr[-400:]}")
+            subprocess.run(["defaults", "delete", suite], capture_output=True)
     finally:
         for p in helpers + [fake]:
             if p.poll() is None:
                 p.kill()
         # the session processes go when their helper does (stdin's end); any left are reported, then stopped
-        left = subprocess.run(["pgrep", "-f", f"harness.mjs session --dir {DIR}"], capture_output=True, text=True).stdout.split()
-        check(until(lambda: not subprocess.run(["pgrep", "-f", f"harness.mjs session --dir {DIR}"], capture_output=True).stdout, 20) is not None,
+        pattern = f"harness.mjs session --dir {OUT}/"
+        left = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
+        check(until(lambda: not subprocess.run(["pgrep", "-f", pattern], capture_output=True).stdout, 20) is not None,
               f"no session process outlives the test ({left})")
-        for pid in subprocess.run(["pgrep", "-f", f"harness.mjs session --dir {DIR}"], capture_output=True, text=True).stdout.split():
+        for pid in subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split():
             os.kill(int(pid), signal.SIGKILL)
 
 
@@ -186,6 +208,10 @@ def run(env, helper):
 
     w1 = Watch()
     check(until(lambda: w1.kinds("helper.watching")) is not None, "the watch says it is watching")
+    # a fresh helper (no models-off file): off, the safe side, until a client asserts the switch — as the app does on
+    # every connect
+    check(w1.kinds("helper.watching")[0].get("models_off") is True, f"a fresh helper holds cloud models off until told: {w1.kinds('helper.watching')[0]}")
+    check(request({"op": "models.off", "off": False}).get("off") is False, "the app's switch asserted: on")
 
     o = request({"op": "session.open", "config": CONFIG, "lang": "zh", "driver": "sim"})
     sid = o.get("session_id", "")
@@ -215,8 +241,46 @@ def run(env, helper):
     check(r.get("ok") is True, "a line as JSON text")
     until(lambda: len([m for m in w1.kinds("session.message", sid) if m.get("role") == "assistant"]) == 2)
 
+    # cloud models off (harness#64 set_config, the app's switch): no model call at all — a running task stopped, no turn
+    # after it, the words refused (no_model) — and back on, the next say answered, in place by the same process
+    import urllib.request
+
+    def model_calls():
+        with urllib.request.urlopen(env["LOCAL_URL"] + "/calls", timeout=5) as f:
+            return json.loads(f.read())["calls"]
+
+    so = request({"op": "session.open", "config": CONFIG, "lang": "zh", "driver": "sim"})
+    off = so.get("session_id", "")
+    check(send(off, {"type": "cua", "text": "给笔记换个颜色"}).get("ok") is True, "model off: a task first")
+    check(until(lambda: w1.kinds("ask", off), 30) is not None, "model off: its card waits")
+    calls = model_calls()
+    r = send(off, {"type": "set_config", "config": None, "client_id": "c_off"})
+    cfg = until(lambda: [e for e in w1.kinds("session.config", off) if e.get("client_id") == "c_off"], 10)
+    check(r.get("ok") is True and bool(cfg) and cfg[0].get("config") is None, f"set_config null: sent, stored ({r})")
+    send(off, {"type": "stop"})       # the user's Stop as well
+    ended = until(lambda: w1.kinds("session.task_end", off), 20)
+    check(ended is not None, f"model off: the running task stopped ({ended and ended[0].get('status')})")
+    until(lambda: w1.kinds("session.task_closed", off), 20)
+    time.sleep(2)
+    check(model_calls() == calls, f"model off: no model call after the switch and Stop (no turn after the task): {model_calls() - calls}")
+    send(off, {"type": "say", "text": "你好", "client_id": "c_say_off"})
+    no = until(lambda: [e for e in w1.kinds("session.error", off) if e.get("code") == "no_model" and e.get("client_id") == "c_say_off"], 10)
+    check(no is not None and model_calls() == calls, "model off: a say is refused (no_model), nothing reaches the model")
+    r = send(off, {"type": "set_config", "config": CONFIG, "lang": "zh", "client_id": "c_on"})
+    check(until(lambda: [e for e in w1.kinds("session.config", off) if e.get("client_id") == "c_on"], 10) is not None, "model back on: stored")
+    send(off, {"type": "say", "text": "你好"})
+    back = until(lambda: [m for m in w1.kinds("session.message", off) if m.get("role") == "assistant" and m.get("text") == "你好，我是测试模型。"], 30)
+    check(back is not None and alive(so.get("pid")), "model back on: answered, by the same process (no restart)")
+    r = request({"op": "session.end", "session_id": off})
+    check(r.get("ok") is True and until(lambda: not alive(so.get("pid")), 15) is not None, f"its session ends, idle ({r})")
+
     # a computer task on the simulated computer: its question card, answered over the socket
     check(send(sid, {"type": "cua", "text": "给笔记换个颜色"}).get("ok") is True, "cua")
+    # the app ends the session right after the /cua, before its session.task can have come back (#107 review): the
+    # helper asks the session itself, after the /cua, and refuses — the task is not stopped
+    r = request({"op": "session.end", "session_id": sid})
+    check(r.get("ok") is False and r.get("code") == "not_idle" and "busy" in (r.get("why") or []),
+          f"session.end right after a /cua: refused, not idle, and why — the session's own answer to end_if_idle ({r})")
     ask = until(lambda: w1.kinds("ask", sid))
     task = w1.kinds("session.task", sid)
     check(bool(ask) and bool(task) and ask[0].get("run_id") == task[0].get("run_id"), f"the task's card comes through, with its session: {ask and ask[0].get('card', {}).get('text')}")
@@ -254,6 +318,9 @@ def run(env, helper):
     check(send(sid, {"type": "say", "text": "你好"}).get("ok") is True, "say while nobody watches")
     check(until(lambda: session_lines(sid)[-1]["seq"] == n + 2, 10) is not None, "its reply is stored")
     check(send(sid, {"type": "say", "text": "讲个长故事"}).get("ok") is True, "a long reply starts")
+    r = request({"op": "session.end", "session_id": sid})
+    check(r.get("ok") is False and r.get("code") == "not_idle" and "busy" in (r.get("why") or []),
+          f"session.end while a reply streams: refused, busy ({r})")
     time.sleep(0.6)   # some of it streamed while nobody watched
     w2 = Watch(after={sid: n})
     w3 = Watch()       # from the beginning, at the same time
@@ -344,7 +411,9 @@ def run(env, helper):
     if ask:
         send(sid, {"type": "answer", "run_id": runn, "ask_id": ask[0]["ask_id"], "option": 0})
     until(lambda: [e for e in w2.kinds("session.task_closed", sid) if e.get("run_id") == runn], 30)
-    until(lambda: len([m for m in w2.kinds("session.message", sid) if m.get("text") == "任务结束了。"]) >= 4, 20)
+    # (w2 joined after the first task: it has the model's line after each of the other three; waiting for a fourth
+    # sat 20 s idle, long enough for the helper to close the session — #107: it closes idle sessions watched or not)
+    until(lambda: len([m for m in w2.kinds("session.message", sid) if m.get("text") == "任务结束了。"]) >= 3, 20)
     time.sleep(0.5)
     last = session_lines(sid)[-1]["seq"]
     until(lambda: w2.last_seq(sid) == last and w3.last_seq(sid) == last, 10)
@@ -352,6 +421,10 @@ def run(env, helper):
     r = request({"op": "sessions.list"})
     item = [s for s in r.get("sessions", []) if s.get("session_id") == sid]
     check(r.get("ok") is True and bool(item) and item[0].get("open") is True and item[0].get("title") == "你好", f"sessions.list: {item}")
+    # the models.env digest now, and the one this process started with (ModelKeys): equal, no restart asked
+    keys = r.get("keys")
+    check(isinstance(keys, str) and len(keys) == 64 and item[0].get("keys") == keys and item[0].get("ending") is False,
+          f"sessions.list: the keys file's digest now and the process's ({keys!r}, {item[0].get('keys')!r}, ending {item[0].get('ending')!r})")
 
     # the machine lock: held by a live process the way the helper's own run holds it, a session's task is refused
     lock = os.path.join(DIR, "sessions", "computer.lock")
@@ -385,15 +458,59 @@ def run(env, helper):
     check(w3.stored(sid) == list(range(1, last + 3)), "the other watch too")
     last += 2
 
+    # its history from the stored log, while it runs and with no process (#107 review: reading needs none)
+    h = request({"op": "session.history", "session_id": sid, "after_seq": last - 2})
+    check(h.get("ok") is True and h.get("open") is True and [e.get("seq") for e in h.get("lines", []) if str(e.get("kind")).startswith("session.")] == [last - 1, last]
+          and all(e.get("session_id") == sid for e in h.get("lines", [])), f"session.history after a cursor, open: {[e.get('seq') for e in h.get('lines', [])]}")
+
+    # idle and watched (#107 review: each process is ~80 MB): the helper closes it all the same, says it was idle (no
+    # run cut), and the watch goes on; reading it needs no process
+    pid2 = o2["pid"]
+    check(until(lambda: not alive(pid2), IDLE + 20) is not None, f"an idle session closes after {IDLE} s, watched")
+    exits = until(lambda: [e for e in w2.kinds("helper.session_exit", sid) if e.get("pid") == pid2], 10) or []
+    check(bool(exits) and exits[-1].get("idle") is True, f"its exit says idle: {exits[-1:]}")
+    h = request({"op": "session.history", "session_id": sid, "runs": {run_id: 0}})
+    whole = [e["seq"] for e in session_lines(sid)]
+    check(h.get("ok") is True and h.get("open") is False and h.get("last_seq") == whole[-1]
+          and [e.get("seq") for e in h.get("lines", []) if str(e.get("kind")).startswith("session.")] == whole
+          and [e["seq"] for e in h.get("lines", []) if e.get("run_id") == run_id and not str(e.get("kind")).startswith("session.")] == seqs,
+          f"session.history with no process: the whole story and the task's lines ({h.get('open')}, {h.get('last_seq')})")
+    w = request({"op": "sessions.list"})
+    check([x.get("open") for x in w.get("sessions", []) if x.get("session_id") == sid] == [False], "listed, not open")
+    w9 = Watch(after={sid: last})
+    hw = until(lambda: w9.kinds("helper.watching"), 5)
+    check(bool(hw) and sid in hw[0].get("idle", []), f"a watch that comes later hears it was closed idle: {hw and hw[0]}")
+    w9.close()
+    # a restart the app asks for while a task waits on its card: deferred, the task goes on; done once it is idle
+    o2 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
+    pid2 = o2.get("pid")
+    send(sid, {"type": "cua", "text": "给笔记换个颜色"})
+    askd = until(lambda: [a for a in w2.kinds("ask", sid) if a.get("run_id") not in (run_id, run1, runk, runn)], 30)
+    rund = askd[0]["run_id"] if askd else ""
+    r = request({"op": "session.end", "session_id": sid, "when_idle": True})
+    check(r.get("ok") is True and r.get("deferred") is True, f"a restart while a task waits on its card: deferred ({r})")
+    time.sleep(1)
+    check(alive(pid2), "the task's session stays up meanwhile")
+    if askd:
+        send(sid, {"type": "answer", "run_id": rund, "ask_id": askd[0]["ask_id"], "option": 0})
+    check(until(lambda: not alive(pid2), 40) is not None, "the task over and its reply done: the restart happens")
+    ends = [e for e in w2.kinds("session.task_end", sid) if e.get("run_id") == rund]
+    exits = until(lambda: [e for e in w2.kinds("helper.session_exit", sid) if e.get("pid") == pid2], 10) or []
+    check(bool(ends) and ends[-1].get("status") != "stopped" and bool(exits) and exits[-1].get("idle") is True,
+          f"the task was not stopped by it ({ends and ends[-1].get('status')}), the exit says idle")
+    until(lambda: w2.last_seq(sid) == session_lines(sid)[-1]["seq"], 10)
+    last = session_lines(sid)[-1]["seq"]
+
     # idle and unwatched: the session closes; with a task waiting on its card, it stays (the app closed, the card waits)
+    o2 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
     w2.close(); w3.close()
     pid2 = o2["pid"]
     check(until(lambda: not alive(pid2), IDLE + 20) is not None, f"an idle session nobody watches closes after {IDLE} s")
     o3 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim", "live_view": False})
     w4 = Watch(after={sid: last})
-    send(sid, {"type": "cua", "text": "给笔记换个颜色"})
+    sent2 = send(sid, {"type": "cua", "text": "给笔记换个颜色"})
     ask2 = until(lambda: w4.kinds("ask", sid), 30)
-    check(ask2 is not None, "a second task waits on its card")
+    check(ask2 is not None, f"a second task waits on its card ({sent2}, {[(e.get('code'), e.get('why'), e.get('text')) for e in w4.kinds('session.error', sid)]})")
     run2 = ask2[0]["run_id"] if ask2 else ""
     whats = [d["what"] for d in ui(run2)]
     check("start" not in whats and "show" not in whats, f"live_view false: no card, the recording only ({whats})")
@@ -423,6 +540,8 @@ def run(env, helper):
     # a new helper: the session reopens and its story is whole
     helper2 = start_helper(env)
     try:
+        r = request({"op": "models.off", "off": False})     # (the app asserts its switch as it connects)
+        check(r.get("ok") is True, f"a new helper told the switch: {r}")
         o4 = request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
         check(o4.get("ok") is True and o4.get("resumed") is True, "reopened under a new helper")
         w6 = Watch(runs={run_id: 0, run1: 0, run2: 0})
@@ -453,6 +572,59 @@ def run(env, helper):
         r = subprocess.run([BIN, "tryacquire", DIR], capture_output=True, text=True).stdout.strip()
         check(r == "ok", f"the group gone: the next run takes the Mac ({r})")
         w8.close()
+
+        # the helper holds "cloud models off" (models.off: the app's engine setting, written from either window): for
+        # every session it runs, whichever client — a running one nulled at once, what needs a model refused, a new
+        # one started with null — and it survives a helper restart
+        def cfgs(s):
+            try:
+                return [l for l in session_lines(s) if l.get("kind") == "session.config"]
+            except OSError:
+                return []
+        request({"op": "session.open", "session_id": sid, "config": CONFIG, "driver": "sim"})
+        stops = request({"op": "e2e.state"}).get("models_off_stops")
+        r = request({"op": "models.off", "off": True})
+        check(r.get("ok") is True and r.get("off") is True and r.get("persisted") is True, f"models.off: {r}")
+        # the helper's own harness op run (the old window's) is stopped by its normal stop path when cloud goes off
+        check(request({"op": "e2e.state"}).get("models_off_stops") == (stops or 0) + 1, "models off: the helper's op run asked to stop")
+        check(until(lambda: cfgs(sid) and cfgs(sid)[-1].get("config") is None, 10) is not None, "models off: a running session nulled at once (stored)")
+        calls = model_calls()
+        r = send(sid, {"type": "say", "text": "你好", "client_id": "c_hoff"})
+        check(r.get("ok") is False and r.get("code") == "no_model" and r.get("client_id") == "c_hoff", f"models off: a say refused by the helper, no_model ({r})")
+        r = send(sid, {"type": "set_config", "config": CONFIG, "lang": "zh"})
+        check(r.get("ok") is False and r.get("code") == "no_model", f"models off: a client that still has cloud on cannot set a model back ({r})")
+        check(send(sid, {"type": "set_config", "config": None}).get("ok") is True, "models off: a null passes")
+        helper2.kill()
+        helper2.wait()
+        helper2 = start_helper(env)
+        o5 = request({"op": "session.open", "config": CONFIG, "lang": "zh", "driver": "sim"})
+        s5 = o5.get("session_id", "")
+        first = until(lambda: cfgs(s5), 10)
+        check(bool(first) and first[0].get("config") is None, f"after a helper restart (the bit kept): a new session's first settings are null ({first and first[0]}; {o5})")
+        r = send(s5, {"type": "say", "text": "你好"})
+        check(r.get("code") == "no_model" and model_calls() == calls, f"and what needs a model is refused there, no model call ({r})")
+        # the old window's run with the cloud engine, confirmed after cloud was turned off: refused before anything
+        # starts, no model call; a local-engine run is not the cloud's
+        r = request({"op": "e2e.run", "engine": "harness", "goal": "给笔记换个颜色", "config": CONFIG})
+        check(r.get("event") == "error" and r.get("code") == "no_model" and model_calls() == calls, f"models off: an op run with the cloud engine is refused ({r})")
+        r = request({"op": "e2e.run", "engine": "hands", "goal": "给笔记换个颜色"})
+        check(r.get("would_run") is True, f"models off: a local-engine run is not refused ({r})")
+        check(request({"op": "models.off", "off": False}).get("ok") is True, "models on again")
+        r = request({"op": "e2e.run", "engine": "harness", "goal": "给笔记换个颜色", "config": CONFIG})
+        check(r.get("would_run") is True, f"models on: the cloud engine's run goes ({r})")
+        # the bit's file cannot be written (a folder in its place): said, and an off leaves no "on" behind — the next
+        # start reads it missing, off
+        offp = os.path.join(DIR, "models-off")
+        if os.path.isfile(offp):
+            os.remove(offp)
+        os.makedirs(os.path.join(offp, "x"), exist_ok=True)
+        r = request({"op": "models.off", "off": True})
+        check(r.get("ok") is True and r.get("persisted") is False and not os.path.exists(offp),
+              f"models off not written down: said (persisted false), and the file gone, so a restart reads off ({r}, {os.path.exists(offp)})")
+        check(request({"op": "models.off", "off": False}).get("persisted") is True, "models on again, written down")
+        check(send(s5, {"type": "set_config", "config": CONFIG, "lang": "zh"}).get("ok") is True, "models on: a configuration passes")
+        check(send(s5, {"type": "say", "text": "你好"}).get("ok") is True, "models on: a say passes")
+        check(until(lambda: [m for m in session_lines(s5) if m.get("role") == "assistant"], 30) is not None, "and is answered")
     finally:
         helper2.kill()
         helper2.wait()

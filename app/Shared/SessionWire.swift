@@ -14,7 +14,19 @@ enum SessionWire {
     /// carry. A replay (`attach`) the app asks for itself is safe: each watching connection takes a stored line once
     /// (Gate), whoever asked for it.
     static let knownTypes: Set<String> = ["say", "cua", "steer", "answer", "respond", "stop", "retry", "attach",
-                                          "queue_edit", "queue_cancel", "queue_send_now", "end"]
+                                          "queue_edit", "queue_cancel", "queue_send_now", "end",
+                                          "end_if_idle", "set_config"]     // (harness#62, #64)
+    /// A control line that makes the model work (harness `no_model` refuses these when the session has no model): say,
+    /// cua, retry, steer, queue_send_now, and a set_config that is not null. The helper refuses them while cloud models
+    /// are off (models.off), from any client.
+    static func needsModel(_ o: [String: Any]) -> Bool {
+        switch o["type"] as? String {
+        case "say", "cua", "retry", "steer", "queue_send_now": return true
+        case "set_config": return !(o["config"] is NSNull) && o["config"] != nil
+        default: return false
+        }
+    }
+
     /// A control line's longest JSON (the harness refuses a user message over 32k characters itself; this only keeps a
     /// runaway write off the session's stdin).
     static let maxLineBytes = 1 << 20
@@ -61,6 +73,12 @@ enum SessionWire {
             if !integer("option") { return (nil, "respond needs option (an index)") }
         case "attach":
             if o["after_seq"] != nil && !integer("after_seq") { return (nil, "attach's after_seq must be a seq") }
+        case "set_config":
+            // a configuration, or null (no model): it must be there (harness docs/protocol.md set_config)
+            guard let c = o["config"], c is String || c is NSNull else { return (nil, "set_config needs config (a string or null)") }
+            if let l = o["lang"], !(l is NSNull), (l as? String).map({ ["zh", "en"].contains($0) }) != true {
+                return (nil, "set_config's lang is zh or en")
+            }
         default: break
         }
         if o["run_id"] != nil && !has("run_id") { return (nil, "run_id must be a string") }
@@ -234,6 +252,29 @@ enum SessionWire {
             default: break
             }
         }
+    }
+
+    /// The helper's own end_if_idle (harness#62: the one place that decides a session is idle — for the idle reclaim,
+    /// a restart for a new key, and `session.end`). The session handles its stdin in order and answers this line by
+    /// ending (its process exits, as on `end`: it was idle) or with a refusal that is not stored,
+    /// `session.error{code:"not_idle", control:"end_if_idle", why, client_id}`. Only the code, `why` and the client_id
+    /// are read, never the text. The client_id is the helper's own: its refusal goes to nobody.
+    struct EndAsk {
+        static let prefix = "helper_end_"
+        let clientId: String
+        init(clientId: String = EndAsk.prefix + UUID().uuidString.lowercased().prefix(12)) { self.clientId = clientId }
+
+        var line: [String: Any] { ["type": "end_if_idle", "client_id": clientId] }
+
+        /// A refusal of a helper's end_if_idle (this one, or an earlier one's that came late).
+        static func isRefusal(_ e: [String: Any]) -> Bool {
+            e["kind"] as? String == "session.error" && e["code"] as? String == "not_idle"
+                && (e["client_id"] as? String)?.hasPrefix(prefix) == true
+        }
+        /// This ask's refusal.
+        func refused(_ e: [String: Any]) -> Bool { Self.isRefusal(e) && e["client_id"] as? String == clientId }
+        /// Why it was not idle (busy, queue, task, recovering).
+        static func why(_ e: [String: Any]) -> [String] { (e["why"] as? [Any])?.compactMap { $0 as? String } ?? [] }
     }
 
     /// The machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2): the executor's process group, which

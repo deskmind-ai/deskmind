@@ -10,41 +10,42 @@ enum SessionTests {
     }
 
     static func run() {
-        decodeTests()
-        chatTests()
-        chatErrorTests()
-        cardTaskTests()
-        undoTests()
-        stopTests()
-        steerQueueTests()
-        questionTests()
-        pausedLookOnlyTests()
-        lockedTests()
-        replayTests()
-        unknownTests()
-        deltaTests()
-        cardModelTests()
-        staleAnswerTests()
-        clientTests()
-        orderTests()
-        undoOrderTests()
-        resentAskTests()
-        causeTests()
-        sessionExitTests()
-        closedWithoutEndTests()
-        undoRecordTests()
-        clientGapTests()
-        cardIdentityTests()
-        steerLookOnlyTests()
-        wireNeverCrashesTests()
-        crossStreamTests()
-        exitLeftoversTests()
-        interleavingPropertyTests()
-        rereviewTests()
-        processInterleavingTests()
-        ownershipTests()
-        resendAndAcceptanceTests()
-        duplicateSendTests()
+        DecisionTests.group("session.decodeTests"); decodeTests()
+        DecisionTests.group("session.chatTests"); chatTests()
+        DecisionTests.group("session.chatErrorTests"); chatErrorTests()
+        DecisionTests.group("session.cardTaskTests"); cardTaskTests()
+        DecisionTests.group("session.undoTests"); undoTests()
+        DecisionTests.group("session.stopTests"); stopTests()
+        DecisionTests.group("session.steerQueueTests"); steerQueueTests()
+        DecisionTests.group("session.questionTests"); questionTests()
+        DecisionTests.group("session.pausedLookOnlyTests"); pausedLookOnlyTests()
+        DecisionTests.group("session.lockedTests"); lockedTests()
+        DecisionTests.group("session.replayTests"); replayTests()
+        DecisionTests.group("session.unknownTests"); unknownTests()
+        DecisionTests.group("session.deltaTests"); deltaTests()
+        DecisionTests.group("session.cardModelTests"); cardModelTests()
+        DecisionTests.group("session.staleAnswerTests"); staleAnswerTests()
+        DecisionTests.group("session.clientTests"); clientTests()
+        DecisionTests.group("session.orderTests"); orderTests()
+        DecisionTests.group("session.undoOrderTests"); undoOrderTests()
+        DecisionTests.group("session.resentAskTests"); resentAskTests()
+        DecisionTests.group("session.causeTests"); causeTests()
+        DecisionTests.group("session.sessionExitTests"); sessionExitTests()
+        DecisionTests.group("session.closedWithoutEndTests"); closedWithoutEndTests()
+        DecisionTests.group("session.undoRecordTests"); undoRecordTests()
+        DecisionTests.group("session.clientGapTests"); clientGapTests()
+        DecisionTests.group("session.cardIdentityTests"); cardIdentityTests()
+        DecisionTests.group("session.steerLookOnlyTests"); steerLookOnlyTests()
+        DecisionTests.group("session.wireNeverCrashesTests"); wireNeverCrashesTests()
+        DecisionTests.group("session.crossStreamTests"); crossStreamTests()
+        DecisionTests.group("session.exitLeftoversTests"); exitLeftoversTests()
+        DecisionTests.group("session.interleavingPropertyTests"); interleavingPropertyTests()
+        DecisionTests.group("session.cutOffDotTests"); cutOffDotTests()
+        DecisionTests.group("session.rereviewTests"); rereviewTests()
+        DecisionTests.group("session.processInterleavingTests"); processInterleavingTests()
+        DecisionTests.group("session.ownershipTests"); ownershipTests()
+        DecisionTests.group("session.resendAndAcceptanceTests"); resendAndAcceptanceTests()
+        DecisionTests.group("session.duplicateSendTests"); duplicateSendTests()
     }
 
     // MARK: fixtures
@@ -467,20 +468,43 @@ enum SessionTests {
 
     // MARK: the client
 
+    /// The helper, scripted. Thread-safe: the client also asks from its own queues (a reconcile runs on
+    /// `reconcileQueue`) while a test reads or resets what was asked — unguarded, two appends at once corrupted the
+    /// array and crashed the test binary on CI (#107 at c2997ba, a segmentation fault).
     final class MockTransport: SessionTransport {
-        var requests: [[String: Any]] = []
-        var replies: [String: [String: Any]] = [:]
+        private let lock = NSLock()
+        private var _requests: [[String: Any]] = []
+        private var _replies: [String: [String: Any]] = [:]
+        private var _queued: [String: [[String: Any]]] = [:]
+        private var _onRequest: ((String) -> Void)? = nil
+        private func locked<T>(_ f: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return f() }
+        var requests: [[String: Any]] {
+            get { locked { _requests } }
+            set { locked { _requests = newValue } }
+        }
+        var replies: [String: [String: Any]] {
+            get { locked { _replies } }
+            set { locked { _replies = newValue } }
+        }
         var streamLines: [[String: Any]] = []
         /// Replies given once each, before `replies`, per op.
-        var queued: [String: [[String: Any]]] = [:]
-        /// Called with each request's op before it is answered (a line the helper streams meanwhile).
-        var onRequest: ((String) -> Void)? = nil
+        var queued: [String: [[String: Any]]] {
+            get { locked { _queued } }
+            set { locked { _queued = newValue } }
+        }
+        /// Called with each request's op before it is answered (a line the helper streams meanwhile); outside the lock.
+        var onRequest: ((String) -> Void)? {
+            get { locked { _onRequest } }
+            set { locked { _onRequest = newValue } }
+        }
         func request(_ body: [String: Any]) -> [String: Any]? {
-            requests.append(body)
             let op = body["op"] as? String ?? ""
-            onRequest?(op)
-            if var q = queued[op], !q.isEmpty { let r = q.removeFirst(); queued[op] = q; return r }
-            return replies[op]
+            let hook: ((String) -> Void)? = locked { _requests.append(body); return _onRequest }
+            hook?(op)
+            return locked {
+                if var q = _queued[op], !q.isEmpty { let r = q.removeFirst(); _queued[op] = q; return r }
+                return _replies[op]
+            }
         }
         /// Each watch's lines from its number (1, 2, …), when set; a guard ends a run-away loop.
         var gen: ((Int) -> [[String: Any]])? = nil
@@ -491,7 +515,7 @@ enum SessionTests {
         var clock = Date(timeIntervalSince1970: 0)
         var quiet: TimeInterval = 5
         func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
-            requests.append(body)
+            locked { _requests.append(body) }
             watches += 1
             if watches > 50 { return true }
             let lines = gen.map { $0(watches) } ?? (nextStreams.isEmpty ? streamLines : nextStreams.removeFirst())
@@ -525,6 +549,10 @@ enum SessionTests {
         let n = mock.requests.count
         check(client.send(.say("顺便说一句"), to: "ses_t") == .refused("card_open") && mock.requests.count == n, "say while a card waits: not sent")
         check(client.send(.steer("改成别的"), to: "ses_t") == .refused("card_open"), "steer too")
+        // (never dropped: both kept as unsent bubbles, card_open — the user removes them here)
+        let held = client.state("ses_t").unsent
+        check(held.map(\.text) == ["顺便说一句", "改成别的"] && held.allSatisfy { $0.refused == "card_open" }, "both kept unsent: \(held.map(\.text))")
+        for o in held { client.dropUnsent(o.id, in: "ses_t") }
         check(client.send(.stop(), to: "ses_t") == .sent, "stop is always sent")
         let (runId, open) = client.state("ses_t").openCard!
         check(client.answer(.option(runId: runId, askId: "ask_old", option: 0), in: "ses_t") != .sent, "a stale answer: not sent")
@@ -595,7 +623,8 @@ enum SessionTests {
         let client = SessionClient(transport: mock)
         [taskR1, start, step, closed].forEach { client.feed($0) }
         mock.requests = []
-        check(client.send(.steer("改一下"), to: "s") == .refused("no task is running") && mock.requests.isEmpty, "steer after task_closed: not sent")
+        check(client.send(.steer("改一下"), to: "s") == .refused("task_ended") && mock.requests.isEmpty
+              && client.state("s").unsent.map(\.text) == ["改一下"], "steer after task_closed: not sent, kept as unsent (never dropped)")
         // the helper's view of it: nothing runs, the live card lets it go
         var act = SessionWire.Activity()
         act.note(["kind": "session.task", "run_id": "r1", "raw": "x"])
@@ -633,8 +662,14 @@ enum SessionTests {
         // its process went away, or its executor: still undoing (its result comes on reopen), never expired
         let exited = SessionReducer.reduce(asked, L(#"{"kind":"helper.session_exit","session_id":"s","code":3,"last_seq":3}"#))
         check(exited.exited == 3 && exited.task("r1")?.undo == .undoing, "session_exit after task_respond: undoing, not expired: \(String(describing: exited.task("r1")?.undo))")
+        // closed with no undo result (an older log: harness#63 records task_undo before the closure): unknown, never
+        // an undo under way for good, never expired
         let closed = SessionReducer.reduce(asked, se(4, #""kind":"session.task_closed","run_id":"r1","why":"linger""#))
-        check(closed.task("r1")?.undo == .undoing, "task_closed after task_respond: undoing, not expired")
+        check(closed.task("r1")?.undo == .unknown(nil) && closed.task("r1")?.undo.finished == false,
+              "task_closed after task_respond, no undo result: unknown: \(String(describing: closed.task("r1")?.undo))")
+        // its result after all (the executor's result_response, another stream, later): done
+        let late = SessionReducer.reduce(closed, ex(3, #""kind":"result_response","picked":"undo","effect":"undone","undone":1,"total":1"#))
+        check(late.task("r1")?.undo == .done(undone: 1, total: 1, refused: nil), "its result after the closure: done")
         // reopened: the undo recorded as unknown — not done, not "nothing undone"
         let reopened = SessionReducer.reduce(exited, [se(nil, #""kind":"session.start","resumed":true,"last_seq":3"#), se(4, #""kind":"session.task_undo","run_id":"r1","undone":0,"total":0,"refused":"the undo was cut off","unknown":true"#),
                                                       se(5, #""kind":"session.task_closed","run_id":"r1","why":"session_end""#)])
@@ -801,7 +836,8 @@ enum SessionTests {
         let mock = MockTransport()
         mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
         let client = SessionClient(transport: mock)
-        _ = client.open(sessionId: "s", lang: "zh")
+        client.adoptSettings(config: nil, lang: "zh")            // (the settings stored: a next process opens with them)
+        _ = client.open(sessionId: "s")
         [taskR1, start, ask, exit].forEach { client.feed($0) }
         check(client.state("s").exited == 9, "the client sees the exit")
         mock.requests = []
@@ -846,6 +882,7 @@ enum SessionTests {
         check(!unheard.state("s").composerEnabled, "a card waits")
         mock.streamLines = [["kind": "helper.watching", "open": ["other"]]]
         unheard.watch()
+        unheard.backfilling.wait()          // (its stored lines read after the reconnect, off the stream's thread)
         check(unheard.state("s").exited != nil && unheard.state("s").composerEnabled, "not in helper.watching's open: exited, its card voided")
         mock.streamLines = [["kind": "helper.watching", "open": ["s"]]]
         let listed = SessionClient(transport: mock)
@@ -1116,6 +1153,7 @@ enum SessionTests {
         let deep = #"{"session_id":"s","kind":"session.queue","items":[],"x":"# + String(repeating: "[", count: 510) + "1" + String(repeating: "]", count: 510) + "}"
         let deepUnknown = #"{"session_id":"s","kind":"session.zzz","x":"# + String(repeating: #"{"a":"#, count: 500) + "1" + String(repeating: "}", count: 500) + "}"
         let fine = #"{"session_id":"s","kind":"session.zzz","x":"# + String(repeating: #"{"a":"#, count: 90) + "1" + String(repeating: "}", count: 90) + "}"
+        let finished = DispatchSemaphore(value: 0)
         let th = Thread {
             let c = SessionClient(transport: MockTransport())
             for text in [deep, deepUnknown] {
@@ -1126,12 +1164,11 @@ enum SessionTests {
             let tooDeep = c.state("s").unknownKinds.isEmpty && ProtocolLine.parse(deep) == nil
             if let o = DeskMindIPC.lineObject(Data(fine.utf8)) { c.feed(o) }
             ok = tooDeep && c.state("s").unknownKinds == ["session.zzz"]
+            finished.signal()            // (its result handed over through the semaphore, not by polling isFinished)
         }
         th.stackSize = 512 * 1024
-        let done = DispatchSemaphore(value: 0)
-        let wrapped = Thread { th.start(); while !th.isFinished { usleep(1000) }; done.signal() }
-        wrapped.start()
-        done.wait()
+        th.start()
+        finished.wait()
         check(ok, "lines nested 500 deep on a 512 KB stack: left, no crash; 90 deep: read")
         check(DeskMindIPC.nestingWithin(Data(#"{"a":"[[[[[[","b":"\"[[["}"#.utf8), limit: 1), "brackets in strings do not count")
     }
@@ -1201,6 +1238,24 @@ enum SessionTests {
             r("r2", 1, #""kind":"start","raw":"b""#), r("r2", 2, #""kind":"ask","ask_id":"a9","# + card),
             se(5, #""kind":"session.task_end","run_id":"r2","status":"interrupted","summary":"","undo":"none""#),
         ]
+        // cut off (#107 review): a model-started task after the reply's first words, its process gone mid-step
+        // (helper.session_exit: no task_done, no task_end); and a /cua task cut off the same way after a finished chat
+        let exitAt = { (n: Int) in L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"start_seq":0,"last_seq":\#(n)}"#) }
+        let cutModel: [ProtocolLine] = [
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"整理桌面""#),
+            se(2, #""kind":"session.message","msg_id":"m1","role":"assistant","text":"好的，我来整理。","reply_to":"u1""#),
+            se(3, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"整理桌面","by":"model","reply_to":"u1""#),
+            r("r1", 1, #""kind":"start","raw":"整理桌面""#), r("r1", 2, #""kind":"step","text":"{}","step_id":"s1""#),
+            exitAt(3),
+        ]
+        let cutSlash: [ProtocolLine] = [
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"你好""#),
+            se(2, #""kind":"session.message","msg_id":"m1","role":"assistant","text":"你好！","reply_to":"u1""#),
+            se(3, #""kind":"session.message","msg_id":"u2","role":"user","text":"x","via":"cua""#),
+            se(4, #""kind":"session.task","msg_id":"u2","run_id":"r1","raw":"x","by":"slash""#),
+            r("r1", 1, #""kind":"start","raw":"x""#), r("r1", 2, #""kind":"plan","steps":[{"purpose":"p"}]"#),
+            exitAt(4),
+        ]
         // session.task_closed with no session.task_end (it could not be stored): r1's executor died mid-step with a card
         // answered; r2 said task_done, its card offered undo, then its executor closed
         let closedNoEnd: [ProtocolLine] = [
@@ -1236,6 +1291,8 @@ enum SessionTests {
         cases.append(("undo cut off, reopened", undoUnknown))
         cases.append(("multi", multi))
         cases.append(("interrupted", interrupted))
+        cases.append(("cut off, model", cutModel))
+        cases.append(("cut off, /cua", cutSlash))
         cases.append(("closed without end", closedNoEnd))
         var runs = 0
         for (name, ls) in cases {
@@ -1251,6 +1308,18 @@ enum SessionTests {
             }
         }
         check(runs >= cases.count * 15, "orders tried: \(runs)")
+        // a run cut off with no status is interrupted, never done, in every order (the walk must not fall back to the
+        // assistant message before it); seen, it rests idle; acting outranks it
+        for (name, ls) in [("cut off, model", cutModel), ("cut off, /cua", cutSlash)] {
+            for (how, order) in merges(streams(ls), seeds: 12) {
+                var got = SessionReducer.reduce(SessionState(), order)
+                let unseen = got.status
+                got.markSeen()
+                if unseen != .error("interrupted") || got.status != .idle {
+                    check(false, "\(name), \(how): cut off: \(unseen), seen: \(got.status)")
+                }
+            }
+        }
         // what the hand-built ones should show
         let m = SessionReducer.reduce(SessionState(), multi)
         check(m.status == .waitingForYou(cardKind: "action") && m.openCard?.runId == "r2" && m.task("r1")?.undo == .done(undone: 1, total: 1, refused: nil)
@@ -1266,6 +1335,55 @@ enum SessionTests {
         let ua = SessionReducer.reduce(SessionState(), undoAsked), uu = SessionReducer.reduce(SessionState(), undoUnknown)
         check(ua.task("r1")?.undo == .undoing && ua.exited == 3 && ua.runningTask == nil, "undo asked, process gone: \(summary(ua))")
         check(uu.task("r1")?.undo == .unknown("the undo was cut off") && uu.task("r1")?.status == "succeeded" && uu.exited == nil, "undo cut off, reopened: \(summary(uu))")
+    }
+
+    /// #107 review: a run that ended without a status (its process went mid-task) is a problem the user has not seen,
+    /// never a finish: `.error("interrupted")`, by the unseen rules (opening the session clears it, a later process end
+    /// brings back only a new one); a running task outranks it; a later stored model error is newer.
+    static func cutOffDotTests() {
+        let exit = { (n: Int) in L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"start_seq":0,"last_seq":\#(n)}"#) }
+        var s = SessionReducer.reduce(SessionState(), [
+            se(1, #""kind":"session.message","msg_id":"u1","role":"user","text":"整理桌面""#),
+            se(2, #""kind":"session.message","msg_id":"m1","role":"assistant","text":"好的，我来整理。","reply_to":"u1""#),
+            se(3, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"整理桌面","by":"model""#),
+            ex(1, #""kind":"start","raw":"整理桌面""#), ex(2, #""kind":"step","text":"{}","step_id":"a1""#)])
+        s.markSeen()                                            // the user watched it run
+        check(s.status == .acting(step: 1, of: nil), "running: acting (\(s.status))")
+        SessionReducer.apply(&s, exit(3))
+        check(s.task("r1")?.cutOff == true && s.task("r1")?.status == nil, "the process gone mid-task: cut off, no status")
+        check(s.status == .error("interrupted") && s.status.shape == .bang, "cut off after the reply's first words: interrupted (!), not done: \(s.status)")
+        s.markSeen()
+        check(s.status == .idle, "opened: seen, idle (never done): \(s.status)")
+        // a /cua cut off: interrupted too (it was idle before the fix: the walk had nothing but the task)
+        var c = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), exit(1)])
+        check(c.status == .error("interrupted"), "a /cua cut off: interrupted: \(c.status)")
+        // the next process's start (its exit missed) cuts it off the same way
+        c = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), se(nil, #""kind":"session.start","resumed":true,"last_seq":1"#)])
+        check(c.status == .error("interrupted"), "cut off by the next process's start: interrupted: \(c.status)")
+        // the harness's own end on reopen (task_end interrupted) is the same problem, at its stored seq
+        SessionReducer.apply(&c, se(2, #""kind":"session.task_end","run_id":"r1","status":"interrupted","summary":"","undo":"none""#))
+        check(c.status == .error("interrupted"), "then its stored interrupted end: still interrupted")
+        // a running task outranks it (a later task of the session runs)
+        SessionReducer.apply(&s, se(nil, #""kind":"session.start","resumed":true,"last_seq":3"#))
+        s.markSeen()
+        let s0 = s
+        SessionReducer.apply(&s, se(4, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"再来","by":"slash""#))
+        SessionReducer.apply(&s, ex(1, #""kind":"start","raw":"再来""#, run: "r2"))
+        SessionReducer.apply(&s, ex(2, #""kind":"step","text":"{}","step_id":"b1""#, run: "r2"))
+        check(s.status == .acting(step: 1, of: nil), "a new task runs: acting: \(s.status)")
+        SessionReducer.apply(&s, exit(4))
+        check(s.status == .error("interrupted"), "it is cut off too: interrupted again (a new problem): \(s.status)")
+        // seen once, a later process's end with nothing new cut off brings nothing back
+        var q = s0
+        q.markSeen()
+        SessionReducer.apply(&q, se(4, #""kind":"session.message","msg_id":"u9","role":"user","text":"在吗""#))
+        SessionReducer.apply(&q, se(5, #""kind":"session.message","msg_id":"m9","role":"assistant","text":"在","reply_to":"u9""#))
+        SessionReducer.apply(&q, exit(5))
+        check(q.status == .done(at: nil, stopped: false), "a later chat, then an idle process end: done, no old problem back: \(q.status)")
+        // a stored model error after it is newer
+        var e = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), exit(1)])
+        SessionReducer.apply(&e, se(2, #""kind":"session.error","code":"no_key","text":"k","reply_to":"u""#))
+        check(e.status == .error("no_key"), "a later model error is the newest problem: \(e.status)")
     }
 
     static func dumpDiff(_ a: SessionState, _ b: SessionState) {
@@ -1795,11 +1913,13 @@ enum SessionTests {
         let cm = SessionClient(transport: pm)
         cm.defaultConfig = "openai:local|fake"; cm.defaultLang = "zh"
         cm.feed(L(#"{"seq":1,"session_id":"old","kind":"session.message","msg_id":"u","role":"user","text":"a"}"#))
+        cm.reconciling.wait()                       // (its first line here converged it: a set_config of its own)
         pm.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
         _ = cm.send(.say("x"), to: "old")
         let openReq = pm.requests.first { $0["op"] as? String == SessionClient.Op.open }
         check(openReq?["config"] as? String == "openai:local|fake" && openReq?["lang"] as? String == "zh", "reopened with the app's config: \(String(describing: openReq))")
-        // a session this client opened keeps what it was opened with (even none), not the defaults
+        // a session this client opened opens again with the settings stored now (desired, read at the open), not with
+        // what it was opened with (#107 review at 00969e8: no settings remembered per session)
         let pn = MockTransport()
         pn.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0, "pid": 1], SessionClient.Op.send: ["ok": true]]
         let cn = SessionClient(transport: pn)
@@ -1808,7 +1928,7 @@ enum SessionTests {
         cn.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#))
         pn.requests = []
         _ = cn.send(.say("y"), to: "s")
-        check(pn.requests.first { $0["op"] as? String == SessionClient.Op.open }.map { $0["config"] == nil } == true, "opened here without a config: reopened without one")
+        check(pn.requests.first { $0["op"] as? String == SessionClient.Op.open }?["config"] as? String == "X", "opened here before a save: reopened with the settings now")
         queueInterleavingTests()
     }
 
@@ -1902,7 +2022,8 @@ enum SessionTests {
         // a steer with no task running: not sent (nothing to name), never held
         let c3 = SessionClient(transport: m2)
         c3.feed(se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#))
-        check(c3.send(.steer("改"), to: "s") == .refused("no task is running") && c3.state("s").outbox.isEmpty, "no task: refused here")
+        check(c3.send(.steer("改"), to: "s") == .refused("task_ended") && c3.state("s").unsent.first?.refused == "task_ended",
+              "no task: refused here, the words kept unsent")
         // a resend after its stored line came: taken, not sent again (SessionClient.send also checks `taken` as it holds
         // the words, for a stored line that comes between a resend's look and its hold)
         let m4 = MockTransport()

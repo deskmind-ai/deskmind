@@ -8,6 +8,9 @@ import Foundation
 @main
 enum DecisionTests {
     static var failures = 0
+    /// The test group about to run, named on stderr (one line in all, no newline until the end): a crash in a group
+    /// (CI: a segmentation fault with nothing else said, #107 at c2997ba) shows which one it was.
+    static func group(_ name: String) { FileHandle.standardError.write(Data((name + " ").utf8)) }
 
     static func check(_ ok: Bool, _ what: String, file: StaticString = #file, line: UInt = #line) {
         if !ok { failures += 1; print("FAIL \(line): \(what)") }
@@ -206,20 +209,21 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
-        liveViewTests()
-        issueReportTests()
-        runErrorTests()
-        fileExampleTests()
-        selfTestTests()
-        notInstalledTests()
-        folderPolicyTests()
-        diagnosticsTests()
-        recordingCaptureTests()
-        helperLocationTests()
-        harnessEventsTests()
-        cardButtonTests()
+        group("liveViewTests"); liveViewTests()
+        group("issueReportTests"); issueReportTests()
+        group("runErrorTests"); runErrorTests()
+        group("fileExampleTests"); fileExampleTests()
+        group("selfTestTests"); selfTestTests()
+        group("notInstalledTests"); notInstalledTests()
+        group("folderPolicyTests"); folderPolicyTests()
+        group("diagnosticsTests"); diagnosticsTests()
+        group("recordingCaptureTests"); recordingCaptureTests()
+        group("helperLocationTests"); helperLocationTests()
+        group("harnessEventsTests"); harnessEventsTests()
+        group("cardButtonTests"); cardButtonTests()
         SessionTests.run()
-        sessionWireTests()
+        ShellTests.run()
+        group("sessionWireTests"); sessionWireTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")
         check(!AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 1, documentBased: false), "it has a window")
@@ -237,6 +241,7 @@ enum DecisionTests {
         check(!AppWindow.shouldLaunch(bundle: "com.apple.TextEdit", running: false) && !AppWindow.shouldLaunch(bundle: "com.apple.finder", running: false),
               "TextEdit and Finder: hands opens their documents and folders")
 
+        FileHandle.standardError.write(Data("\n".utf8))
         print(failures == 0 ? "DecisionTests: all passed" : "DecisionTests: \(failures) failed")
         exit(failures == 0 ? 0 : 1)
     }
@@ -992,6 +997,29 @@ enum DecisionTests {
         a.note(["kind": "session.message", "seq": 9, "role": "user", "text": "hi"])
         check(a.idle, "a message changes nothing")
 
+        // the helper's end_if_idle (harness#62): the session decides; only the code, why and client_id are read
+        let ask = W.EndAsk(clientId: "helper_end_t1")
+        check(ask.line as NSDictionary == ["type": "end_if_idle", "client_id": "helper_end_t1"] as NSDictionary && ok(ask.line), "the ask's line, valid to send")
+        let refusal: [String: Any] = ["kind": "session.error", "code": "not_idle", "control": "end_if_idle", "why": ["busy", "queue"],
+                                      "client_id": "helper_end_t1", "text": "会话还在忙"]
+        check(ask.refused(refusal) && W.EndAsk.why(refusal) == ["busy", "queue"], "its refusal, and why (the text never read)")
+        var late = refusal; late["client_id"] = "helper_end_old"
+        check(!ask.refused(late) && W.EndAsk.isRefusal(late), "an earlier ask's late refusal: the helper's own, not this one's")
+        var apps = refusal; apps["client_id"] = "c_1"
+        check(!W.EndAsk.isRefusal(apps), "the app's own end_if_idle's refusal is the app's")
+        var code = refusal; code["code"] = "busy"
+        check(!W.EndAsk.isRefusal(code), "another code is not an answer")
+        // set_config (harness#64): a configuration or null; lang zh or en
+        check(ok(["type": "set_config", "config": "ds-flash", "lang": "en"]) && ok(["type": "set_config", "config": NSNull()])
+              && ok(#"{"type":"set_config","config":null,"client_id":"c_9"}"#), "set_config: a config or null")
+        check(!ok(["type": "set_config"]) && !ok(["type": "set_config", "config": 3]) && !ok(["type": "set_config", "config": "x", "lang": "fr"]),
+              "set_config: config must be there; lang zh or en")
+        check(ok(["type": "end_if_idle"]), "end_if_idle")
+        // what the helper refuses while cloud models are off (models.off): what needs a model, as harness no_model
+        check(["say", "cua", "retry", "steer", "queue_send_now"].allSatisfy { W.needsModel(["type": $0]) }
+              && W.needsModel(["type": "set_config", "config": "ds-flash"]) && !W.needsModel(["type": "set_config", "config": NSNull()])
+              && !["stop", "answer", "respond", "queue_cancel", "queue_edit", "attach", "end", "end_if_idle"].contains { W.needsModel(["type": $0]) },
+              "needsModel: say, cua, retry, steer, queue_send_now, a non-null set_config; never stop, answers, undo, queue cancel")
 
         // the machine lock's holder (harness docs/protocol.md 「电脑锁」, version 2)
         let v2 = #"{"v":2,"state":"lingering","pgid":4100,"pid":4100,"start":1792600000,"run_id":"run_a","session_id":"ses_a","by":"session","owner":4000,"t":1.5}"#

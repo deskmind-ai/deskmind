@@ -237,7 +237,8 @@ enum HarnessRun {
     /// executors inherit it: the model keys (models.env), Brain as the first judge, the judge's learning files, and the
     /// execution layer (hands' executor on the bundled Python). `apps`: the apps a request names, which may be brought
     /// forward for a step (a session names none: its tasks are not known when it starts).
-    static func environment(apps: [String] = []) -> [String: String] {
+    /// `keys`: models.env as already read (a session's one read, its digest's: SessionHost.spawn); nil: read here.
+    static func environment(apps: [String] = [], keys: [String: String]? = nil) -> [String: String] {
         let runtime = Runner.runtime, work = Runner.work
         let python = runtime.appendingPathComponent("python/bin/python3.12").path
         let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
@@ -281,7 +282,7 @@ enum HarnessRun {
                 + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
                 + "\"\(python)\" -m deskmind_hands.executor",
         ]
-        for (k, v) in modelEnv() where env[k] == nil { env[k] = v }
+        for (k, v) in keys ?? modelEnv() where env[k] == nil { env[k] = v }
         return env
     }
 
@@ -298,6 +299,11 @@ enum HarnessRun {
         if let why = HarnessEvents.refusal(button, askID: askID, state: state) {
             NSLog("DeskMind Hands: answer not sent: \(why)")
             return ["ok": false, "code": "stale_card", "error": why]
+        }
+        // cloud models off: only the way out and undo (no model needed); anything else would let the run go on
+        if SessionHost.modelsOffNow && !HarnessEvents.needsNoModel(button, state: state) {
+            return ["ok": false, "code": "no_model",
+                    "error": L("The cloud model is off. Turn it on in the model settings to run this task.", lang: ResolvedLang.current)]
         }
         guard let line = HarnessEvents.answerLine(button, askID: askID, state: state),
               var data = try? JSONSerialization.data(withJSONObject: line) else { return ["ok": false, "error": "nothing to send for this button"] }
@@ -381,15 +387,25 @@ enum HarnessRun {
         let linger = Lingering(process: p, input: inPipe.fileHandleForWriting)
         linger.runID = runID
         linger.holder = acquired
-        lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; lock.unlock()
+        lock.lock(); state = HarnessEvents.State(); input = inPipe.fileHandleForWriting; stoppedForModelsOff = false; lock.unlock()
         // a stop between the launch and here found no stdin to write to (it terminated the process): the stop line too
         if Runner.cancelled { Runner.stopRequested = true; stop(p) }
+        // cloud models turned off since the run was accepted (refusesRun), while it waited for the lock or its folder:
+        // its stop found no run going (input was nil), so it is seen here — `input` set first, then the bit read, as
+        // models.off sets the bit, then stops: the request never goes, the harness ends with nothing to do
+        let offSinceAccepted = SessionHost.modelsOffNow
+        if offSinceAccepted {
+            NSLog("DeskMind Hands: cloud models off before the run started: not starting it")
+            lock.lock(); stoppedForModelsOff = true; lock.unlock()
+            Runner.stopRequested = true
+            try? inPipe.fileHandleForWriting.close()      // (no request: it exits at once)
+        }
 
         // The request: one JSON line, then stdin stays open for answers.
         var req: [String: Any] = ["run_id": runID, "raw": spec.goal ?? "", "config": spec.config, "lang": spec.lang, "driver": "hands",
                                   "apps": spec.apps.map(\.bundle)]
         if let folder = spec.folder { req["scope"] = folder }
-        if var line = try? JSONSerialization.data(withJSONObject: req) { line.append(0x0A); try? inPipe.fileHandleForWriting.write(contentsOf: line) }
+        if !offSinceAccepted, var line = try? JSONSerialization.data(withJSONObject: req) { line.append(0x0A); try? inPipe.fileHandleForWriting.write(contentsOf: line) }
         if spec.liveView {
             // the new engine names no apps before the run: the card waits for the first step's window, not Finder
             LiveCard.start(bundles: spec.apps.map(\.bundle), goal: spec.goal ?? "", onStop: Runner.requestStop)
@@ -466,7 +482,11 @@ enum HarnessRun {
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
         Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept
         // a lingering process has no exit status yet (reading it would raise); a run that wrote task_done needs none
-        _ = emit(HarnessEvents.done(state: state, terminationStatus: lingers ? 0 : p.terminationStatus, stopped: stopped, stderrTail: tail))
+        var done = HarnessEvents.done(state: state, terminationStatus: lingers ? 0 : p.terminationStatus, stopped: stopped, stderrTail: tail)
+        // stopped because cloud models went off: said so (the harness records it as a stop by the app; the window says why)
+        lock.lock(); let forModelsOff = stoppedForModelsOff; lock.unlock()
+        if forModelsOff { done = HarnessEvents.stoppedForModelsOff(done) }
+        _ = emit(done)
     }
 
     /// What the live card and the recording make of one of the app's events (HarnessEvents.translate): the run waits
@@ -517,17 +537,45 @@ enum HarnessRun {
         }
     }
 
+    /// Cloud models turned off (models.off): a harness op run going is stopped by its normal stop path (Runner's
+    /// Stop), and says why (`stoppedForModelsOff`: its done event's reason "models_off"); one that wrote task_done and
+    /// lingers for its result card is left alone (its undo needs no model). A run accepted but not started yet sees the
+    /// bit itself before its request goes (run): models.off sets the bit before it calls this, so one side always
+    /// sees the other.
+    static func stopForModelsOff() {
+        lock.lock(); let going = input != nil; lock.unlock()
+        guard going, let p = Runner.current, p.isRunning, !isLingering(p) else { return }
+        NSLog("DeskMind Hands: cloud models off: stopping the harness run")
+        lock.lock(); stoppedForModelsOff = true; lock.unlock()
+        Runner.requestStop()
+    }
+    /// This run was stopped because cloud models went off (reset at each run's start).
+    nonisolated(unsafe) static var stoppedForModelsOff = false
+    /// The processes a stop was already scheduled for: a stop asked again (a repeated models.off, Stop pressed twice)
+    /// schedules no second interrupt — a second SIGINT would cut short the harness's wait for an action still out at
+    /// the driver.
+    nonisolated(unsafe) private static var stopping: Set<Int32> = []
+    /// How many stops scheduled their signals (tests).
+    nonisolated(unsafe) static var stopSchedules = 0
+
     /// Stop: the harness reads `{"stop":true}` on its stdin as the stop switch (its executor refuses every action from
     /// then on and the run ends as stopped); a process that does not end on that is interrupted, then terminated.
     /// The interrupt starts the harness's own stop: up to 0.8 s for the run to end, then up to 10 s more for an action
     /// still out at the driver (docs/protocol.md, signals). A second signal cuts that wait short, so the terminate
     /// comes 12 s after the interrupt (15 s after the stop line; it was 8 s, inside the wait). A run that has written
-    /// task_done and lingers for the result card's answer is left alone.
+    /// task_done and lingers for the result card's answer is left alone. Once per process.
     static func stop(_ p: Process) {
         lock.lock()
+        let pid = p.processIdentifier
+        guard !stopping.contains(pid) else { lock.unlock(); return }
+        stopping.insert(pid)
+        stopSchedules += 1
         if let h = input, var line = try? JSONSerialization.data(withJSONObject: ["stop": true]) { line.append(0x0A); try? h.write(contentsOf: line) }
         lock.unlock()
         DispatchQueue.global().asyncAfter(deadline: .now() + 3) { if p.isRunning && !isLingering(p) { p.interrupt() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 15) { if p.isRunning && !isLingering(p) { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
+            if p.isRunning && !isLingering(p) { p.terminate() }
+            lock.lock(); stopping.remove(pid); lock.unlock()
+        }
     }
 }

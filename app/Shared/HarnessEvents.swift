@@ -124,6 +124,14 @@ enum HarnessEvents {
                 "answer": state.answer, "stderr_tail": stopped ? "" : environment ? (detail.isEmpty ? stderrTail : detail) : ranToAnEnd ? "" : stderrTail]
     }
 
+    /// A run's done event when the helper stopped it because cloud models went off: a stop, not a failure, with its
+    /// own reason (the old window says 「云端模型关了，任务停下了」, not "stopped by the app").
+    static func stoppedForModelsOff(_ done: [String: Any]) -> [String: Any] {
+        var d = done
+        d["exit"] = 0; d["reason"] = "models_off"; d["models_off"] = true; d["stderr_tail"] = ""
+        return d
+    }
+
     /// What the user did on a card. Each button says itself what it sends: an option button its own option (by its
     /// place among the options shown), Approve the card's approve option, Deny its way out, the field their words.
     /// The card's kind only picks which buttons are shown (deskmind#102: every option button used to be sent as
@@ -183,6 +191,20 @@ enum HarnessEvents {
             if !same { return "option \(n) of the open card is not \"\(text)\"" }
         }
         return nil
+    }
+
+    /// Whether an answer needs no model, so the helper lets it through while cloud models are off: the way out (deny,
+    /// a cancel option) or undo. Picks, words and approvals let the run go on with the model, and are refused then.
+    /// By what the button resolves to on this card (answerLine), not the button: Deny is the card's cancel if it has
+    /// one, else its first option that is not approve — which may be a pick — else an empty answer (no).
+    static func needsNoModel(_ b: CardButton, state: State) -> Bool {
+        guard let line = answerLine(b, askID: nil, state: state) else { return false }
+        if let i = line["option"] as? Int {
+            guard state.askOptions.indices.contains(i) else { return false }
+            return ["cancel", "undo"].contains(state.askOptions[i]["kind"] as? String ?? "")
+        }
+        if case .deny = b { return line["text"] == nil }       // (nothing to pick: answered with nothing, a no)
+        return false
     }
 
     /// The user's answer, as the harness reads it: an option's index, or their own words. Nil when it is refused
