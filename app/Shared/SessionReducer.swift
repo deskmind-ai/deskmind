@@ -166,6 +166,12 @@ struct TaskState: Equatable {
     /// Cards whose answer the executor refused (`refused{what:"answer for <ask_id>"}`): it came after the card was
     /// voided or expired, and was not used.
     var refusedAnswers: Set<String> = []
+    /// Expired cards the task no longer waits on: after the card's timeout void the run went on without it — a steer it
+    /// took (steered), a step, a new plan, or a refused 「现在回答」 (by ask_id).
+    var movedOn: Set<String> = []
+    /// Why a 「现在回答」 (reask) was refused, by the expired card's ask_id: the executor's refused{what:"reask"}, or the
+    /// session's refusal of the control.
+    var reaskRefused: [String: String] = [:]
     /// The executor's running total (changes events).
     var runChanges: Changes? = nil
     var verify: VerifyEvent? = nil
@@ -241,9 +247,16 @@ struct TaskState: Equatable {
     var openCard: CardState? { openCardId.flatMap { id in cards.first { $0.askId == id } } }
     /// The card the task waits on after it expired (ask_void timeout): its newest card, while the task runs and no card
     /// is open. A newer card (after 「现在回答」, or a changed request) or the task's end takes its place.
+    /// The run's own word ends the wait: a step, a steer it took, a new plan or a refused reask after the void (movedOn),
+    /// and Stop (stopping: the task is ending, nothing waits on the user).
     var expiredCard: CardState? {
-        guard running, openCardId == nil, let c = cards.last, c.outcome == .void(CardState.timeout) else { return nil }
+        guard running, !stopping, openCardId == nil, let c = cards.last, c.outcome == .void(CardState.timeout), !movedOn.contains(c.askId) else { return nil }
         return c
+    }
+    /// The newest card, when it expired and the task has not gone on without it yet (the run's events in their order).
+    fileprivate var waitingOnExpired: String? {
+        guard let c = cards.last, c.explicit == .void(CardState.timeout), !movedOn.contains(c.askId) else { return nil }
+        return c.askId
     }
     /// The task's final status: task_done's, else session.task_end's (`interrupted` when no task_done was ever written).
     var status: String? { done?.status ?? end?.status }
@@ -645,6 +658,11 @@ enum SessionReducer {
                 place(&s, .error(seq), seq: seq)
             } else {
                 s.lastRefusal = e
+                // the session refused 「现在回答」 (no run named on the refusal: the running task's expired card)
+                if e.control == "reask", let i = s.tasks.lastIndex(where: { $0.running }), let c = s.tasks[i].expiredCard {
+                    s.tasks[i].movedOn.insert(c.askId)
+                    s.tasks[i].reaskRefused[c.askId] = e.text.isEmpty ? e.code : e.text
+                }
                 // a refusal of the app's words: they are the app's again, not sent (a queue entry's refusal leaves it
                 // in the queue, the session's: nothing here then)
                 if let c = e.clientId, let i = s.outbox.firstIndex(where: { $0.id == c }) {
@@ -779,8 +797,10 @@ enum SessionReducer {
         case .plan(let p):
             task.plan = p.steps
             task.preparing = false
+            if let e = task.waitingOnExpired { task.movedOn.insert(e) }
         case .step(let e):
             task.preparing = false
+            if let x = task.waitingOnExpired { task.movedOn.insert(x) }        // (it acts again: no longer waits on the expired card)
             let id = e.stepId ?? "step-\(task.steps.count + 1)"
             var st = task.step(id) ?? StepState(id: id, n: task.steps.count + 1, text: e.text)
             st.text = e.text
@@ -830,8 +850,14 @@ enum SessionReducer {
             if r.by == "user" && task.running { task.stopping = true }
             // a late answer the executor did not use (its format: "answer for <ask_id>", harness app.ts)
             if r.by == "executor", r.what.hasPrefix(Self.answerFor) { task.refusedAnswers.insert(String(r.what.dropFirst(Self.answerFor.count))) }
+            // 「现在回答」 refused: the card no longer waits (its reason said on it); the user steers or stops
+            if r.what == "reask", let e = task.cards.last(where: { $0.explicit == .void(CardState.timeout) })?.askId {
+                task.movedOn.insert(e)
+                task.reaskRefused[e] = r.why
+            }
         case .steered(let e):
             task.steered.append(e.text)
+            if let x = task.waitingOnExpired { task.movedOn.insert(x) }        // (a changed request: the task decides anew)
             // the executor drops "only look for evidence" when it applies a steer (harness ed96440, applySteers;
             // docs/protocol.md: until finish unconfirmed, or the user changed the request)
             task.lookOnly = false

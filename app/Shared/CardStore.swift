@@ -50,7 +50,8 @@ enum CardPhase: Equatable {
     enum AnswerNow: Equatable {
         case offered            // the newest card of a task that still runs: reask
         case asked              // reask sent; the task looks again and asks a new card
-        case gone               // a newer card came, or the task ended
+        case gone               // a newer card came, the task went on without it, or it ended
+        case refused(String)    // 「现在回答」 was refused: why
     }
 
     enum Ending: Equatable { case answered, voided, expired }
@@ -74,7 +75,7 @@ enum CardPhase: Equatable {
     var pending: CardAnswer? { if case .pending(let a, _) = self { return a }; return nil }
 
     /// An expired card the task still waits on (「现在回答」 offered or asked).
-    var isExpiredOffer: Bool { if case .expired(_, let n) = self { return n != .gone }; return false }
+    var isExpiredOffer: Bool { if case .expired(_, let n) = self { return n == .offered || n == .asked }; return false }
 }
 
 struct CardStore: Equatable {
@@ -123,7 +124,9 @@ struct CardStore: Equatable {
         case .answered:
             return .answered
         case .void(let why) where why == CardState.timeout:
-            let now: CardPhase.AnswerNow = task.expiredCard?.askId != card.askId ? .gone : reasks[key] != nil ? .asked : .offered
+            let now: CardPhase.AnswerNow
+            if let why = task.reaskRefused[card.askId] { now = .refused(why) }
+            else { now = task.expiredCard?.askId != card.askId ? .gone : reasks[key] != nil ? .asked : .offered }
             return .expired(late: task.refusedAnswers.contains(card.askId), answerNow: now)
         case .void(let why):
             return .voided(why)
