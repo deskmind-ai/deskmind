@@ -70,9 +70,10 @@ struct MainSplitView: View {
 
     /// The configuration sessions open with: the one the settings saved, else the chosen service's.
     static func modelConfig() -> String {
-        if let c = CloudModelSettings.engineConfig, !c.isEmpty { return c }
+        // (as the harness reads it: a model name saved with spaces around it by an older version, without them)
+        if let c = CloudModelSettings.engineConfig, !c.isEmpty { return SessionClient.normalizeConfig(c) }
         let p = CloudModelSettings.provider
-        return CloudModelSettings.config(for: p, model: CloudModelSettings.read()["CUSTOM_MODEL"] ?? "")
+        return SessionClient.normalizeConfig(CloudModelSettings.config(for: p, model: CloudModelSettings.read()["CUSTOM_MODEL"] ?? ""))
     }
 }
 

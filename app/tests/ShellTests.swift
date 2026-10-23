@@ -74,6 +74,7 @@ enum ShellTests {
         DecisionTests.group("shell.settingsConvergeTests"); settingsConvergeTests()
         DecisionTests.group("shell.evidenceTests"); evidenceTests()
         DecisionTests.group("shell.dirtyFlagTests"); dirtyFlagTests()
+        DecisionTests.group("shell.switchGateTests"); switchGateTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -2511,10 +2512,11 @@ enum ShellTests {
         var duringOpen: ((String) -> Void)?
         /// Inside a set_config request, before it is applied (a slow helper).
         var duringConfig: (() -> Void)?
-        /// Per set_config: 0 as asked, 1 busy (applied, not stored: session.error busy), 2 no answer (not applied).
+        /// Per set_config: 0 as asked, 1 busy (applied, not stored: session.error busy), 2 no answer (not applied),
+        /// 3 no answer but applied and stored (the reply lost).
         var chaos: (() -> Int)?
-        /// Inside a models.off request, before it is applied.
-        var duringModelsOff: (() -> Void)?
+        /// Inside each set_config request, before it is applied (the switch turned while it is in flight, say).
+        var whileConfig: (() -> Void)?
         /// Configurations that reached it while it held cloud models off (must stay 0).
         var offViolations = 0
         private func emit(_ id: String, _ l: [String: Any], stored s: Bool) {
@@ -2540,9 +2542,12 @@ enum ShellTests {
                 procs[id] = (cfg, lang)
                 let at = seq[id, default: 0]
                 emit(id, ["kind": "session.start", "resumed": at > 0, "last_seq": at], stored: false)
-                if let last = stored[id], last.config != cfg || last.lang != lang {
-                    stored[id] = (cfg, lang)
-                    emit(id, ["kind": "session.config", "config": cfg, "lang": lang, "by": "open"], stored: true)
+                // (the harness normalises a config before it applies or stores it)
+                let ncfg = SessionClient.normalizeConfig(cfg)
+                procs[id] = (ncfg, lang)
+                if let last = stored[id], last.config != ncfg || last.lang != lang {
+                    stored[id] = (ncfg, lang)
+                    emit(id, ["kind": "session.config", "config": ncfg, "lang": lang, "by": "open"], stored: true)
                 }
                 if off { nullOut(id) }                  // (the helper's first control to a process it starts while off)
                 opens.append(body)
@@ -2551,8 +2556,6 @@ enum ShellTests {
                 hook?(id)
                 return ["ok": true, "session_id": id, "last_seq": at]
             case SessionClient.Op.modelsOff:
-                let hook = duringModelsOff
-                lock.unlock(); hook?(); lock.lock()
                 off = body["off"] as? Bool ?? off
                 if off { for id in procs.keys.sorted() where procs[id]?.config != nil { nullOut(id) } }
                 lock.unlock()
@@ -2562,14 +2565,20 @@ enum ShellTests {
                 guard procs[id] != nil else { lock.unlock(); return ["ok": false, "code": "not_open"] }
                 let line = body["line"] as? [String: Any] ?? [:]
                 if line["type"] as? String == "set_config" {
-                    let hook = duringConfig
-                    lock.unlock(); hook?(); lock.lock()
+                    let hook = duringConfig, during = whileConfig
+                    lock.unlock(); hook?(); during?(); lock.lock()
                     guard procs[id] != nil else { lock.unlock(); return ["ok": false, "code": "not_open"] }
-                    let cfg = line["config"] as? String, lang = line["lang"] as? String ?? procs[id]?.lang
+                    let cfg = (line["config"] as? String).map(SessionClient.normalizeConfig), lang = line["lang"] as? String ?? procs[id]?.lang
                     if off && cfg != nil { offViolations += 1; lock.unlock(); return ["ok": false, "code": "no_model"] }
                     let mode = chaos?() ?? 0
                     if mode == 2 { lock.unlock(); return nil }
                     procs[id] = (cfg, lang)
+                    if mode == 3 {
+                        stored[id] = (cfg, lang)
+                        emit(id, ["kind": "session.config", "config": cfg as Any? ?? NSNull(), "lang": lang ?? "zh", "by": "set_config",
+                                  "client_id": line["client_id"] ?? ""], stored: true)
+                        lock.unlock(); return nil
+                    }
                     if mode == 1 {
                         lines.append(["kind": "session.error", "session_id": id, "code": "busy", "control": "set_config",
                                       "client_id": line["client_id"] ?? "", "text": "busy"])
@@ -2608,6 +2617,13 @@ enum ShellTests {
             return true
         }
         func deliverAll(_ c: SessionClient) { while deliver(c) {} }
+        /// The helper restarts: every process gone (their exits), the models-off bit kept (it is persisted).
+        func restart() {
+            lock.lock()
+            for id in procs.keys.sorted() { lines.append(["kind": "helper.session_exit", "session_id": id, "code": 0]) }
+            procs = [:]
+            lock.unlock()
+        }
         /// A process ends (idle): the helper's exit line.
         func exit(_ id: String) {
             lock.lock(); procs[id] = nil; lines.append(["kind": "helper.session_exit", "session_id": id, "code": 0, "idle": true]); lock.unlock()
@@ -2628,7 +2644,7 @@ enum ShellTests {
         func save(_ c: String, _ l: ResolvedLang) { lock.lock(); value = (c, l); lock.unlock() }
         func setCloud(_ v: Bool) { lock.lock(); on = v; lock.unlock() }
         /// What every live process must apply: the configuration (none while cloud is off) and the language.
-        var expected: (config: String?, lang: String) { (cloud ? config : nil, lang == .zhHans ? "zh" : "en") }
+        var expected: (config: String?, lang: String) { (cloud ? SessionClient.normalizeConfig(config) : nil, lang == .zhHans ? "zh" : "en") }
     }
 
     /// A shell on the simulated helper whose background work runs when the test says (in any order).
@@ -2725,15 +2741,22 @@ enum ShellTests {
         let rngLock = NSLock()
         func roll(_ n: UInt64) -> UInt64 { rngLock.lock(); defer { rngLock.unlock() }; return rng.next() % n }
         var failures = 0, offViolations = 0
-        let values: [(String, ResolvedLang)] = [("A", .zhHans), ("B", .en), ("C", .zhHans), ("D", .en)]
+        let values: [(String, ResolvedLang)] = [("A", .zhHans), ("B", .en), ("C", .zhHans), ("openai:custom| D ", .en)]
         for round in 0..<150 {
             let r = Rig()
             var saves = 0
             r.h.duringOpen = { [unowned r] _ in if roll(2) == 0 { r.h.deliverAll(r.m.client) } }
             // (set_configs: now and then busy, or no answer — the client retries)
-            r.h.chaos = { switch roll(10) { case 0: return 1; case 1: return 2; default: return 0 } }
+            r.h.chaos = { switch roll(12) { case 0: return 1; case 1: return 2; case 2: return 3; default: return 0 } }
+            // (now and then the switch turns off while a set_config is in flight: the store, the client, the push — the
+            // models.off must reach the helper after it)
+            r.h.whileConfig = { [unowned r] in
+                guard r.store.cloud, roll(8) == 0 else { return }
+                r.store.setCloud(false); r.m.client.modelOff = true; r.m.client.modelsSync.push()
+                usleep(20_000)
+            }
             for _ in 0..<16 {
-                switch roll(9) {
+                switch roll(10) {
                 case 0 where saves < 6:
                     let v = values[Int(roll(UInt64(values.count)))]; r.save(v.0, v.1); saves += 1
                 case 1 where r.pending > 0: r.runWork(at: Int(roll(UInt64(r.pending))))
@@ -2745,9 +2768,14 @@ enum ShellTests {
                 case 5: r.h.deliver(r.m.client, swap: true)
                 case 6: r.h.deliver(r.m.client, duplicate: true)
                 case 7: r.cloud(!r.store.cloud)
+                case 8 where roll(3) == 0:
+                    r.h.restart()                                        // (the helper restarts; the watch comes back)
+                    r.h.deliverAll(r.m.client)
+                    for id in r.m.client.liveIds() { _ = r.m.client.reopenIfExited(id) }
                 default: r.m.client.reconciling.wait()
                 }
             }
+            r.h.lock.lock(); r.h.whileConfig = nil; r.h.lock.unlock()       // (the oracle's own steps below: no flips)
             if !r.store.cloud && roll(2) == 0 { r.cloud(true) }
             r.settle()
             var ok = r.converged()
@@ -3001,6 +3029,131 @@ enum ShellTests {
             c.adoptSettings(config: "A", lang: "zh"); c.convergeAll()            // (zh saved)
             settle(c)
             check(t.runs.config == nil && t.runs.lang == "zh", "bug 3: a late start, an old row, a busy reply, zh saved: the process on (null, zh) (\(t.runs))")
+        }
+    }
+
+    /// A helper as the review of 187ae8e probed it: its set_configs and models.offs in order; optionally trimming a model
+    /// name as the harness does (normalizeConfig), slow set_configs, a models.off held until released.
+    final class GateHelper: SessionTransport {
+        let lock = NSLock()
+        var lines: [[String: Any]] = []
+        var seq = 0
+        var configs: [String] = []
+        var events: [String] = []
+        var trim = false
+        var holdModelsOff: DispatchSemaphore?
+        let modelsOffEntered = DispatchSemaphore(value: 0)
+        var configDelayUs: UInt32 = 0
+        func request(_ body: [String: Any]) -> [String: Any]? {
+            let op = body["op"] as? String ?? ""
+            if op == SessionClient.Op.modelsOff {
+                modelsOffEntered.signal()
+                holdModelsOff?.wait()
+                lock.lock(); events.append("models.off(\(body["off"] as? Bool ?? false))"); lock.unlock()
+                return ["ok": true]
+            }
+            guard let l = body["line"] as? [String: Any], l["type"] as? String == "set_config" else { return ["ok": true] }
+            if configDelayUs > 0 { usleep(configDelayUs) }
+            lock.lock(); defer { lock.unlock() }
+            var cfg = l["config"] as? String
+            configs.append(cfg ?? "null"); events.append("set_config(\(cfg ?? "null"))")
+            if trim, let c = cfg { cfg = SessionClient.normalizeConfig(c) }
+            seq += 1
+            lines.append(["kind": "session.config", "session_id": body["session_id"] as? String ?? "s", "seq": seq,
+                          "config": cfg as Any? ?? NSNull(), "lang": l["lang"] ?? "zh", "by": "set_config", "client_id": l["client_id"] ?? ""])
+            return ["ok": true]
+        }
+        func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+        func deliverAll(_ c: SessionClient) {
+            while true {
+                lock.lock(); guard !lines.isEmpty else { lock.unlock(); return }; let l = lines.removeFirst(); lock.unlock()
+                c.feed(l)
+            }
+        }
+        var sent: [String] { lock.lock(); defer { lock.unlock() }; return configs }
+        var order: [String] { lock.lock(); defer { lock.unlock() }; return events }
+    }
+
+    /// #107 review at 187ae8e: the echo of a model name saved with spaces (R1), the switch gate's window (R2), a models.off
+    /// after a configuration in flight (R5), the helper's last ack of "off" (R6).
+    static func switchGateTests() {
+        // R1: desired keeps the spaces an older version saved; the harness trims before it stores: its echo equals desired
+        // once normalised — no set_config every round
+        do {
+            let h = GateHelper(); h.trim = true
+            let c = SessionClient(transport: h)
+            c.retryBase = 0.002
+            c.adoptSettings(config: "openai:custom| gpt-4o ", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            for _ in 0..<200 { c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait() }
+            check(h.sent.count <= 2 && h.sent.first == "openai:custom|gpt-4o",
+                  "R1: an untrimmed model name: sent normalised, its echo no trigger — \(h.sent.count) sends in 200 rounds")
+        }
+        // R2: a converge blocked by a pending push; the push's ack (and its converge) lands between the gate's check and
+        // the blocked branch's cleanup — the session is not left dirty with nothing scheduled
+        do {
+            let h = GateHelper()
+            let c = SessionClient(transport: h)
+            c.retryBase = 0.002
+            final class Box { let lock = NSLock(); var value = "A"; var hook: (() -> Void)? }
+            let box = Box()
+            c.settingsSource = {
+                box.lock.lock(); let v = box.value; let f = box.hook; box.hook = nil; box.lock.unlock()
+                f?()
+                return (v, "zh")
+            }
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait()
+            h.holdModelsOff = DispatchSemaphore(value: 0)
+            c.modelsSync.push()
+            h.modelsOffEntered.wait()                                     // (the push pending, held in the helper)
+            box.lock.lock()
+            box.value = "B"
+            box.hook = {                                                  // (read by the blocked converge: the ack lands now)
+                h.holdModelsOff?.signal()
+                for _ in 0..<500 { if !c.modelsSync.isPending { break }; usleep(1_000) }
+                c.modelsSync.settle(timeout: 2)
+                c.reconciling.wait()
+            }
+            box.lock.unlock()
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { c.convergeAll(); done.signal() }     // (B saved while the push is pending)
+            done.wait()
+            for _ in 0..<500 { c.reconciling.wait(); if h.sent.last == "B" { break }; usleep(2_000) }
+            check(h.sent.last == "B", "R2: the ack in the gate's window: B still sent (\(h.sent))")
+        }
+        // R5: a configuration in flight (a slow helper) when cloud is turned off: models.off reaches the helper after it
+        do {
+            let h = GateHelper(); h.configDelayUs = 300_000
+            let c = SessionClient(transport: h)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.reconciling.wait()
+            h.lock.lock(); h.events = []; h.lock.unlock()
+            let g = DispatchGroup(); g.enter()
+            DispatchQueue.global().async { c.convergeAll(); g.leave() }
+            usleep(50_000)                                                // (the set_config on its way, slow)
+            c.modelOff = true; c.modelsSync.push()
+            g.wait(); c.modelsSync.settle(timeout: 2); c.reconciling.wait()
+            let o = h.order
+            check(o.firstIndex(of: "set_config(A)").map { i in o.firstIndex(of: "models.off(true)").map { i < $0 } ?? false } == true,
+                  "R5: cloud off while a configuration is in flight: models.off after it (\(o))")
+        }
+        // R6: the helper acked off; the app's switch reads on before its push begins: no configuration until that push's ack
+        do {
+            let h = GateHelper()
+            let c = SessionClient(transport: h)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.modelOff = true; c.modelsSync.push(); c.modelsSync.settle(timeout: 2)
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.reconciling.wait(); c.modelsSync.settle(timeout: 2); c.reconciling.wait()
+            h.lock.lock(); h.configs = []; h.lock.unlock()
+            c.modelOff = false; c.convergeAll(); c.reconciling.wait()
+            let before = h.sent
+            c.modelsSync.push(); c.modelsSync.settle(timeout: 2); c.reconciling.wait()
+            for _ in 0..<500 { if h.sent.contains("A") { break }; usleep(2_000) }
+            check(!before.contains { $0 != "null" } && h.sent.contains("A"),
+                  "R6: the helper holds off, the app's switch on before its push: nothing sent, then A after the ack (\(before) → \(h.sent))")
         }
     }
 

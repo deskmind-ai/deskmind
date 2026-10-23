@@ -82,6 +82,7 @@ final class ModelsOffSync {
     private var configSends = 0
     /// What the helper last acked: it holds cloud models off (nil: not heard yet).
     private var helperOff: Bool?
+    var helperHoldsOff: Bool? { lock.lock(); defer { lock.unlock() }; return helperOff }
     /// A configuration may go now: no switch on its way, and the helper not known to hold models off (the app's switch
     /// may already read on before its push has begun) — counted in the same step, so a push begun after it waits.
     func beginConfigSend() -> Bool {
@@ -103,9 +104,10 @@ final class ModelsOffSync {
     private func attempt(_ g: Int, delay: Double) {
         lock.lock(); let latest = g == gen; lock.unlock()
         guard latest else { return }                         // (a newer push carries on)
-        // (configurations let go before this push began reach the helper first; bounded)
-        let until = Date().addingTimeInterval(10)
-        while Date() < until { lock.lock(); let out = configSends; lock.unlock(); if out == 0 { break }; usleep(2_000) }
+        // configurations let go before this push began reach the helper first: waited for, however long — each ends
+        // within its transport's timeout (20 s a request, a few busy_ending tries), so this ends too (#107 review at
+        // 187ae8e: a 10 s bound broke the promise for a slow send)
+        while true { lock.lock(); let out = configSends; lock.unlock(); if out == 0 { break }; usleep(2_000) }
         let off = current()
         let r = transport.request(SessionClient.Request.modelsOff(off))
         // a helper without the op holds no bit: nothing to keep equal
@@ -334,10 +336,22 @@ final class SessionClient {
         if let s = settingsSource { return s() }
         lock.lock(); defer { lock.unlock() }; return stored
     }
-    /// What a converge sends: desired, with no model while cloud models are off.
+    /// What a converge sends: desired, with no model while cloud models are off — normalised as the harness does
+    /// (`normalizeConfig`), so that the session's own echo of it compares equal.
     private func desiredNow() -> (config: String?, lang: String?) {
         let d = desired()
-        return (modelOff ? nil : d.config, d.lang)
+        return (modelOff ? nil : d.config.map(Self.normalizeConfig), d.lang)
+    }
+
+    /// The harness's normalizeConfig (gateway/index.ts), exactly: the model of `openai:<service>|<model>` without the
+    /// whitespace around it (a model name pasted into the settings keeps it; a version before 0.5 saved it so); anything
+    /// else as it is. #107 review at 187ae8e: unnormalised, the echo never equalled desired — a set_config, and a stored
+    /// line, every round.
+    static func normalizeConfig(_ spec: String) -> String {
+        guard spec.hasPrefix("openai:"), let bar = spec.firstIndex(of: "|") else { return spec }
+        let service = spec[spec.index(spec.startIndex, offsetBy: 7)..<bar]
+        guard !service.isEmpty, service.allSatisfy({ $0 >= "a" && $0 <= "z" }) else { return spec }
+        return "openai:\(service)|" + spec[spec.index(after: bar)...].trimmingCharacters(in: .whitespacesAndNewlines)
     }
     /// desired()'s configuration and language (for a client in a test, settable: `stored`).
     var defaultConfig: String? {
@@ -516,7 +530,7 @@ final class SessionClient {
         let noModel = modelOff
         // (desired, read now — never a value read before and carried here)
         let d = desired()
-        let line: (config: String?, lang: String?) = (noModel ? nil : (config ?? d.config), lang ?? d.lang)
+        let line: (config: String?, lang: String?) = (noModel ? nil : (config ?? d.config).map(Self.normalizeConfig), lang ?? d.lang)
         if let sessionId { lock.lock(); opening.insert(sessionId); lock.unlock() }
         defer { if let sessionId { lock.lock(); opening.remove(sessionId); lock.unlock() } }
         guard let r = transport.request(Request.open(sessionId: sessionId, config: line.config, lang: line.lang)), r["ok"] as? Bool != false,
@@ -833,16 +847,28 @@ final class SessionClient {
             // this waits for this send (never a configuration after models.off).
             let gated = modelsSync.beginConfigSend()
             let want = desiredNow()
-            if (!modelOff && want.config == nil) || (want.config != nil && !gated) {
+            if !modelOff && want.config == nil {
+                // (no settings known: dirty, and nothing scheduled — desired becomes something only by a save, which
+                // converges every session)
                 if gated { modelsSync.endConfigSend() }
                 lock.lock(); inFlight[id] = nil; dirty.insert(id); if attempt > 1 { nextAttempt[id] = attempt }; lock.unlock()
+                return
+            }
+            if want.config != nil && !gated {
+                // blocked by the switch: dirty again. Its ack converges every session — but it may have come between the
+                // check and here, and found this one in flight (#107 review at 187ae8e: dirty, nothing scheduled, for
+                // good): the gate is read again now that it is not in flight, and a retry kept in any case
+                lock.lock(); inFlight[id] = nil; dirty.insert(id); if attempt > 1 { nextAttempt[id] = attempt }; lock.unlock()
+                if !modelsSync.isPending && modelsSync.helperHoldsOff != true { continue }
+                retryLater(id)
                 return
             }
             let r = sendConfig(id, config: want.config, lang: want.lang, attempt: attempt)
             if gated { modelsSync.endConfigSend() }
             lock.lock()
             if inFlight[id] == gen { inFlight[id] = nil }
-            // a reply from a process that is gone: what the new one runs is unknown — sent again (its start set dirty)
+            // a reply from a process that is gone: what the new one runs is unknown — sent again. (A guard, not load-bearing:
+            // every generation bump also sets dirty.)
             if generation[id, default: 0] != gen { dirty.insert(id) }
             if r == .failed { dirty.insert(id) } else { retryDelay[id] = nil }
             lock.unlock()
@@ -1195,7 +1221,7 @@ final class SessionClient {
         var trigger = started || (first && after.exited == nil) || noModelHere || busyAgain
         if !trigger, let now = settingsNow, after.exited == nil {
             let d = desiredNow()
-            if now.config != d.config || (d.lang != nil && now.lang != d.lang) { trigger = true }
+            if now.config.map(Self.normalizeConfig) != d.config || (d.lang != nil && now.lang != d.lang) { trigger = true }
         }
         if trigger { reconcileSession(id) }
         // (no whole-state comparison per line: in a long session that cost more than the line itself)
