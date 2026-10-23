@@ -173,6 +173,8 @@ enum SessionControl: Equatable {
     case stop(runId: String? = nil)
     case steer(String, runId: String? = nil)
     case answer(CardAnswer)
+    /// 「现在回答」 on a card that expired (ask_void timeout, harness H1): the task looks again and asks a new card.
+    case reask(runId: String)
     case retry
     case queueEdit(id: String, text: String)
     case queueCancel(id: String)
@@ -188,6 +190,7 @@ enum SessionControl: Equatable {
         case .stop(let r): return ["type": "stop"].merging(r.map { ["run_id": $0] } ?? [:]) { a, _ in a }
         case .steer(let t, let r): return ["type": "steer", "text": t].merging(r.map { ["run_id": $0] } ?? [:]) { a, _ in a }
         case .answer(let a): return a.control
+        case .reask(let r): return ["type": "reask", "run_id": r]
         case .retry: return ["type": "retry"]
         case .queueEdit(let id, let t): return ["type": "queue_edit", "id": id, "text": t]
         case .queueCancel(let id): return ["type": "queue_cancel", "id": id]
@@ -655,6 +658,7 @@ final class SessionClient {
         }
         if control.isTyping && !s.composerEnabled { return refusedBeforeHeld("card_open") }
         if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
+        if case .reask(let r) = control, let why = Self.reaskRefusal(r, in: s) { return .refused(why) }
         if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return refusedBeforeHeld(why == "no task is running" ? "task_ended" : why) }
         if case .steer(_, nil) = control { return refusedBeforeHeld("task_ended") }    // no task to name: not sent
         // the user's words: held in the outbox from here until the session says what became of them
@@ -753,6 +757,7 @@ final class SessionClient {
         case .stop: return "the session is not running"
         case .steer: return s.runningTask == nil ? "no task is running" : nil
         case .answer(let a): return refusal(a, in: s)
+        case .reask(let r): return reaskRefusal(r, in: s)
         default: return nil
         }
     }
@@ -1340,6 +1345,14 @@ final class SessionClient {
     /// Why an answer must not be sent, or nil: a card answer goes only to the card that is open in that run (a click on
     /// a card that was voided, answered or replaced must never answer the open one, #103); a result-card answer only
     /// while the result card is still answerable (its executor lingers and it was not answered yet).
+    /// Why 「现在回答」 must not be sent, or nil: only for a task that still runs and waits on a card that expired.
+    static func reaskRefusal(_ runId: String, in s: SessionState) -> String? {
+        guard let task = s.task(runId) else { return "no such task" }
+        guard task.running else { return "the task has ended" }
+        guard task.expiredCard != nil else { return "no card of the task expired" }
+        return nil
+    }
+
     static func refusal(_ a: CardAnswer, in s: SessionState) -> String? {
         guard let task = s.task(a.runId) else { return "no such task" }
         if let askId = a.askId {

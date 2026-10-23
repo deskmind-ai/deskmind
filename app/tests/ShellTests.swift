@@ -90,13 +90,32 @@ enum ShellTests {
         return d
     }
 
-    /// A model whose work and deliveries run inline, on a mock helper.
+    /// A model whose work and deliveries run inline, on a mock helper; its take-back runs on `timers` (a test's clock).
     static func model(_ mock: Mock, defaults: UserDefaults = scratchDefaults(), config: String? = "openai:local|fake",
-                      lang: ResolvedLang = .zhHans) -> ShellModel {
+                      lang: ResolvedLang = .zhHans, timers: Timers = Timers()) -> ShellModel {
         let client = SessionClient(transport: mock)
         client.newClientId = { "c_1" }
         return ShellModel(client: client, defaults: defaults, config: { config }, lang: { lang },
-                          work: { $0() }, deliver: { $0() })
+                          takeBackAfter: timers.after, now: { timers.now }, work: { $0() }, deliver: { $0() })
+    }
+
+    /// A test's clock and timers: nothing fires until `advance` moves the clock past it.
+    final class Timers {
+        var now: Double = 1_000_000
+        private var due: [(at: Double, n: Int, f: () -> Void)] = []
+        private var n = 0
+        func after(_ d: TimeInterval, _ f: @escaping () -> Void) { n += 1; due.append((now + d, n, f)) }
+        /// The clock moves on by `d` seconds; what falls due runs, in order.
+        func advance(_ d: Double) {
+            let until = now + d
+            while let i = due.indices.filter({ due[$0].at <= until }).min(by: { (due[$0].at, due[$0].n) < (due[$1].at, due[$1].n) }) {
+                let t = due.remove(at: i)
+                now = max(now, t.at)
+                t.f()
+            }
+            now = until
+        }
+        var pending: Int { due.count }
     }
 
     static func feed(_ m: ShellModel, _ name: String, upTo match: ((ProtocolLine) -> Bool)? = nil) {
@@ -325,11 +344,12 @@ enum ShellTests {
         let rest = SessionTests.lines("task-card")
         let askAt = rest.firstIndex { $0.event.kind == "ask" }!, resumedAt = rest.firstIndex { $0.event.kind == "resumed" }!
         for l in rest[(askAt + 1)...resumedAt] { m.client.feed(l) }
-        check(m.answering.isEmpty, "resumed: nothing on its way any more")
+        check(m.cards.sent.isEmpty && m.cards.picks.isEmpty, "resumed: nothing on its way any more")
         // a card that takes words: its own field, answered with text
         let mock2 = Mock()
         mock2.replies = [SessionClient.Op.send: ["ok": true]]
-        let q = model(mock2)
+        let qt = Timers()
+        let q = model(mock2, timers: qt)
         feed(q, "task-question", upTo: SessionTests.isKind("ask"))
         q.selected = "ses_t"
         let (qrun, qopen) = q.states["ses_t"]!.openCard!
@@ -337,6 +357,8 @@ enum ShellTests {
         check(qcard.allowsFreeText, "the missing card takes words")
         q.cardBody(qcard, contentHeight: 40, visibleHeight: 40, offset: 0)   // (it has "you decide": words wait for its body)
         q.answer(qcard, text: "  明天下午三点  ")
+        check(sends(mock2) == 0, "words are held for the take-back first")
+        qt.advance(CardStore.takeBack)
         check(sent(mock2) as NSDictionary? == ["type": "answer", "run_id": qrun, "ask_id": qopen.askId, "text": "明天下午三点"] as NSDictionary, "its words: answer.text: \(String(describing: sent(mock2)))")
         // the result card: respond with the option's index
         let mock3 = Mock()
@@ -544,7 +566,8 @@ enum ShellTests {
               "the body's cap: a share of the column, bounded: \(CardBody.cap(columnHeight: 600))")
         let mock = Mock()
         mock.replies = [SessionClient.Op.send: ["ok": true]]
-        let m = model(mock)
+        let timers = Timers()
+        let m = model(mock, timers: timers)
         feed(m, "task-card", upTo: SessionTests.isKind("ask"))
         m.selected = "ses_t"
         let s = m.states["ses_t"]!
@@ -561,7 +584,8 @@ enum ShellTests {
         m.cardBody(card, contentHeight: 900, visibleHeight: 200, offset: 0)
         check(m.buttonEnabled(approve, card: card, in: s), "scrolled back up: stays on (it was all on screen)")
         m.click(approve)
-        check(sent(mock)?["option"] as? Int == approve.index, "then the click sends the approve option")
+        timers.advance(CardStore.takeBack)
+        check(sent(mock)?["option"] as? Int == approve.index, "then the click sends the approve option (after its take-back)")
         // another card starts unseen; its way out needs nothing
         let mock2 = Mock()
         mock2.replies = [SessionClient.Op.send: ["ok": true]]
@@ -692,7 +716,8 @@ enum ShellTests {
             ["kind": "ask", "session_id": "ses_w", "run_id": "r1", "seq": 2, "ask_id": "a1", "card": card]]
         let mock = Mock()
         mock.replies = [SessionClient.Op.send: ["ok": true]]
-        let m = model(mock)
+        let timers = Timers()
+        let m = model(mock, timers: timers)
         for l in lines { m.client.feed(l) }
         m.selected = "ses_w"
         guard let (run, open) = m.states["ses_w"]?.openCard else { check(false, "the card is open"); return }
@@ -700,10 +725,12 @@ enum ShellTests {
         check(c.allowsFreeText && c.buttons.contains { $0.role == .approve }, "a card with an approve and its own field")
         check(!m.wordsEnabled(c, in: m.states["ses_w"]!), "its field: off before the body was seen")
         m.answer(c, text: "好的")
+        timers.advance(CardStore.takeBack)
         check(sends(mock) == 0, "words before the body was seen: not sent")
         m.cardBody(c, contentHeight: 50, visibleHeight: 50, offset: 0)
         check(m.wordsEnabled(c, in: m.states["ses_w"]!), "its field: on once the body was on screen")
         m.answer(c, text: "好的")
+        timers.advance(CardStore.takeBack)
         check(sent(mock)?["text"] as? String == "好的", "then sent: \(String(describing: sent(mock)))")
         // a card with no approve-type option takes words at once
         var plain = card
@@ -712,14 +739,16 @@ enum ShellTests {
         pl[3]["card"] = plain
         let mock2 = Mock()
         mock2.replies = [SessionClient.Op.send: ["ok": true]]
-        let q = model(mock2)
+        let qt = Timers()
+        let q = model(mock2, timers: qt)
         for l in pl { q.client.feed(l) }
         q.selected = "ses_w"
         guard let (run2, open2) = q.states["ses_w"]?.openCard else { check(false, "the plain card is open"); return }
         let c2 = CardModel(card: open2.card, runId: run2, askId: open2.askId)
         q.answer(c2, text: "周二")
+        qt.advance(CardStore.takeBack)
         check(sent(mock2)?["text"] as? String == "周二" && q.wordsEnabled(c2, in: q.states["ses_w"]!) == false,
-              "no approve-type option: words go at once (\(sends(mock2)) sent)")
+              "no approve-type option: words go without waiting for the body (\(sends(mock2)) sent)")
         let card2 = CardModel(card: open2.card, runId: run2, askId: open2.askId)
         check(!ShellModel.wordsWaitForBody(card2) && ShellModel.wordsWaitForBody(c), "which cards' words wait")
     }
@@ -1765,7 +1794,7 @@ enum ShellTests {
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let card = text.components(separatedBy: "struct CardView").dropFirst().first ?? ""
         let before = card.components(separatedBy: "Text(L(\"Read the whole card first: scroll to its end\"").first ?? ""
-        check(before.split(separator: "\n").suffix(3).contains { $0.contains("if outcome == .open && !seen") }, "the hint shows only while the card is open")
+        check(before.split(separator: "\n").suffix(3).contains { $0.contains("if phase.takesPick && !seen") }, "the hint shows only while the card waits (open, or a pick held)")
     }
 
     /// #107 external review (P2 2): the language is a session setting like the model's: one value for both. A switch

@@ -83,6 +83,7 @@ enum ShellText {
     static func status(_ st: SessionStatus, lang: ResolvedLang) -> String {
         switch st {
         case .waitingForYou(let kind): return L("Waiting for you: %@", cardKind(kind, lang: lang), lang: lang)
+        case .cardExpired(let kind): return L("Expired, waiting for you: %@", cardKind(kind, lang: lang), lang: lang)
         case .error(let code): return problem(code, lang: lang)
         case .locked: return L("Stopped: the screen is locked", lang: lang)
         case .stopping: return L("Stopping…", lang: lang)
@@ -115,6 +116,33 @@ enum ShellText {
         case .cannot: return L("it can't be done as asked", lang: lang)
         case .result: return L("the result", lang: lang)
         case .other: return L("a question", lang: lang)
+        }
+    }
+
+    /// A card's line in the chat once it is no longer pinned, and the state VoiceOver says first: from its phase alone
+    /// (CardStore.phase), the same for every view.
+    static func cardLine(_ phase: CardPhase, kind: String, lang: ResolvedLang) -> String {
+        let k = cardKind(kind, lang: lang)
+        return L("%@: %@", cardState(phase, lang: lang), k, lang: lang)
+    }
+
+    /// A card's state in words (handoff §2.2, plan §4.2).
+    static func cardState(_ phase: CardPhase, lang: ResolvedLang) -> String {
+        switch phase {
+        case .open: return L("Waiting for your answer", lang: lang)
+        case .pending: return L("Picked, sending in a moment", lang: lang)
+        case .sent: return L("Sent, waiting for the task", lang: lang)
+        case .answered: return L("Answered", lang: lang)
+        case .expired(let late, _):
+            return late ? L("Expired; your late answer was not used", lang: lang) : L("Expired: no answer in time", lang: lang)
+        case .voided(let why):
+            switch why {
+            case "steer": return L("No longer needed (you changed the request)", lang: lang)
+            case "stop": return L("No longer needed (the task stopped)", lang: lang)
+            case "replaced": return L("No longer needed (a new card replaced it)", lang: lang)
+            case "session_exit", "executor_exit": return L("No longer needed (the task was interrupted)", lang: lang)
+            default: return L("No longer needed (the task ended)", lang: lang)
+            }
         }
     }
 
@@ -162,6 +190,7 @@ enum ShellText {
         if t.running {
             if t.stopping { return L("Stopping…", lang: lang) }
             if t.openCard != nil { return L("Waiting for your answer", lang: lang) }
+            if t.expiredCard != nil { return L("The card expired; the task waits where it was", lang: lang) }
             if t.preparing { return L("Getting ready…", lang: lang) }
             if t.userActive { return L("You're using the Mac, paused", lang: lang) }
             if t.lookOnly { return L("Checking the result (looking only)", lang: lang) }
@@ -296,9 +325,9 @@ final class ShellModel: ObservableObject {
     @Published private(set) var opening = false
     /// Something the helper did not do, said once above the composer (nil when none).
     @Published var notice: String?
-    /// Cards answered from here whose answer has not taken effect yet (`run/ask`; `run` for the result card): their
-    /// buttons stay off until the card's outcome changes, so one card is never answered twice.
-    @Published private(set) var answering: Set<String> = []
+    /// What the app holds for cards (CardStore): answers in their take-back, answers written and not yet taken, reasks.
+    /// With the session's state it is a card's one state (`phase`), which every view reads.
+    @Published private(set) var cards = CardStore()
     /// The helper answers (its socket): the session list came back.
     @Published private(set) var reachable = true
     /// An open waits for DeskMind's helper to take the cloud switch (at most a few seconds): said meanwhile.
@@ -340,6 +369,10 @@ final class ShellModel: ObservableObject {
     private var keysOwed = false
     private var askedUnknown: [String: String] = [:]
     let retryAfter: ((TimeInterval, @escaping () -> Void) -> Void)?
+    /// The take-back's timer (CardStore.takeBack): runs `f` on the main thread after the delay. Tests drive their own.
+    private let takeBackAfter: (TimeInterval, @escaping () -> Void) -> Void
+    /// Now, in seconds since 1970 (a held answer's deadline, for the countdown).
+    let now: () -> Double
     private var savedObserver: (center: NotificationCenter, token: NSObjectProtocol)?
     private var summaries: [SessionSummary] = []
     private var deleted: Set<String> = []
@@ -356,6 +389,8 @@ final class ShellModel: ObservableObject {
          config: @escaping () -> String?, lang: @escaping () -> ResolvedLang, cloudOn: @escaping () -> Bool = { true },
          keyFile: @escaping () -> String = { "" }, savedSettings: NotificationCenter? = nil,
          retryAfter: ((TimeInterval, @escaping () -> Void) -> Void)? = nil,
+         takeBackAfter: @escaping (TimeInterval, @escaping () -> Void) -> Void = { d, f in DispatchQueue.main.asyncAfter(deadline: .now() + d, execute: f) },
+         now: @escaping () -> Double = { Date().timeIntervalSince1970 },
          work: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.global(qos: .userInitiated).async(execute: f) },
          deliver: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) }) {
         self.client = client
@@ -366,6 +401,8 @@ final class ShellModel: ObservableObject {
         self.cloudOn = cloudOn
         self.keyFile = keyFile
         self.retryAfter = retryAfter
+        self.takeBackAfter = takeBackAfter
+        self.now = now
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
@@ -500,13 +537,10 @@ final class ShellModel: ObservableObject {
         for id in ids where !deleted.contains(id) {
             let s = client.state(id)
             states[id] = s
-            // a card's answer took effect, or the card went: its buttons are the card's again
-            answering = answering.filter { key in
-                let parts = key.split(separator: "/", maxSplits: 1).map(String.init)
-                guard let t = s.task(parts[0]) else { return true }
-                if parts.count == 2 { return t.openCard?.askId == parts[1] }
-                return t.resultResponse == nil && t.sessionUndo == nil && t.closed == nil
-            }
+            // a card that is no longer open: what the app held for it goes (a held answer is never sent then)
+            var c = cards
+            c.settle(id, s)
+            if c != cards { cards = c }
         }
         // the open session's problems are seen as they come (once per new stored line or process end: never a loop of
         // marks)
@@ -581,6 +615,7 @@ final class ShellModel: ObservableObject {
                 }
                 self.deleted.insert(id)
                 self.states[id] = nil
+                self.cards.forget(id)
                 self.names.set(id, nil)
                 self.drafts[id] = nil
                 if self.selected == id { self.selected = nil }
@@ -663,7 +698,7 @@ final class ShellModel: ObservableObject {
     func stop() {
         guard let id = selected, let s = states[id] else { return }
         let control: SessionControl
-        if let t = s.runningTask { control = .stop(runId: t.runId) }
+        if let t = s.runningTask { control = .stop(runId: t.runId); cards.stopping(t.runId) }   // (a held answer is never sent after Stop)
         else if s.streamingMessage != nil { control = .stop() }
         else { return }
         work { [weak self] in _ = self?.client.send(control, to: id) }
@@ -671,10 +706,18 @@ final class ShellModel: ObservableObject {
 
     // MARK: cards
 
-    static func answerKey(_ a: CardAnswer) -> String { a.askId.map { "\(a.runId)/\($0)" } ?? a.runId }
+    /// A card's one state, as every view shows it (CardStore.phase).
+    func phase(_ runId: String, _ card: CardState, in s: SessionState) -> CardPhase {
+        guard let t = s.task(runId) else { return .voided("task_done") }
+        return cards.phase(card, of: t)
+    }
 
-    /// A click on a card's button: that card's answer (its option index, its ask_id), sent only while it is the open
-    /// card; then its buttons stay off until the answer takes effect.
+    /// The card pinned above the composer, with its phase: the open card, else the expired one the task waits on.
+    func pinned(_ s: SessionState) -> (runId: String, card: CardState, phase: CardPhase)? { cards.pinned(s) }
+
+    /// A click on a card's button: that card's answer (its option index, its ask_id). On a card that waits, the answer
+    /// is held for its take-back (3 s: picking again starts over, 「撤回」 drops it) and sent once that ran out — only if
+    /// the card is still the open one; the way out (「先别做了」) is sent at once. A result card's answer goes at once.
     func click(_ button: CardModel.Button) {
         guard let id = selected else { return }
         // an approve-type option only once the card's whole body has been on screen (never approve what was not seen)
@@ -682,15 +725,32 @@ final class ShellModel: ObservableObject {
         // cloud models off: only what reaches no model is held back — the way out and undo (the session undoes from
         // its receipts, no model) always go; an answer that resumes the task would make the model go on
         if !button.role.reachesNoModel && !cloudAllows() { return }
-        send(CardModel.answer(button), in: id)
+        let a = CardModel.answer(button)
+        if a.askId == nil { act(cards.respond(a, sessionId: id, in: client.state(id)), in: id); return }
+        pick(a, immediate: button.role == .cancel, in: id)
     }
 
     /// The user's own words on a card that takes them (its own field): on a card with an approve-type option, only once
-    /// its whole body has been on screen, as its approve (words can approve too; they are never read).
+    /// its whole body has been on screen, as its approve (words can approve too; they are never read). Held for the
+    /// take-back as a click is.
     func answer(_ card: CardModel, text: String) {
         guard let id = selected, !Self.wordsWaitForBody(card) || bodySeen.contains(Self.cardKey(card)),
               let a = card.answer(text: text), cloudAllows() else { return }
-        send(a, in: id)
+        pick(a, immediate: false, in: id)
+    }
+
+    /// 「撤回」 within the take-back: the held answer is dropped, never sent; the card waits again.
+    func takeBack(_ card: CardModel) { cards.takeBack(Self.cardKey(card)) }
+
+    /// 「现在回答」 on an expired card: the task looks again and asks a new card (reask). Sent once.
+    func answerNow(_ runId: String, askId: String) {
+        guard let id = selected, cloudAllows(),
+              cards.answerNow(runId, askId: askId, sessionId: id, in: client.state(id)) else { return }
+        let key = CardStore.key(runId: runId, askId: askId)
+        work { [weak self] in
+            guard let self else { return }
+            if self.client.send(.reask(runId: runId), to: id) != .sent { self.deliver { self.cards.reaskNotSent(key) } }
+        }
     }
 
     /// A card whose own words wait for its whole body: one with an approve-type option (#107 re-review).
@@ -701,7 +761,7 @@ final class ShellModel: ObservableObject {
         answerable(card, in: s) && (!Self.wordsWaitForBody(card) || bodySeen.contains(Self.cardKey(card)))
     }
 
-    static func cardKey(runId: String, askId: String?) -> String { askId.map { "\(runId)/\($0)" } ?? runId }
+    static func cardKey(runId: String, askId: String?) -> String { CardStore.key(runId: runId, askId: askId) }
     static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
 
     /// The card's body as it is on screen (its scroll view's geometry, CardBody.endShown): once its end has been on
@@ -717,22 +777,47 @@ final class ShellModel: ObservableObject {
         answerable(card, in: s) && (!b.role.needsWholeBody || bodySeen.contains(Self.cardKey(card)))
     }
 
-    private func send(_ a: CardAnswer, in id: String) {
-        let key = Self.answerKey(a)
-        guard !answering.contains(key) else { return }
-        answering.insert(key)
-        work { [weak self] in
-            guard let self else { return }
-            let r = self.client.answer(a, in: id)
-            if r != .sent { self.deliver { self.answering.remove(key) } }
+    /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run
+    /// out — written once; or written now.
+    private func pick(_ a: CardAnswer, immediate: Bool, in id: String) {
+        act(cards.pick(a, sessionId: id, immediate: immediate, now: now(), in: client.state(id)), in: id)
+    }
+
+    private func act(_ action: CardStore.Action, in id: String) {
+        switch action {
+        case .none: break
+        case .send(let key, let a): write(a, key: key, in: id)
+        case .hold(let key, let token):
+            takeBackAfter(CardStore.takeBack) { [weak self] in self?.due(key, token: token, in: id) }
         }
     }
 
-    /// Whether a card's buttons take a click now: it is the open card (or the result card can still be answered) and
-    /// no answer from here is on its way.
+    /// A held answer's take-back ran out: written if it is still the card's pick and the card still waits (the newest
+    /// state the client has); cloud models turned off meanwhile: dropped (an answer that resumes the task would make the
+    /// model go on).
+    private func due(_ key: String, token: Int, in id: String) {
+        guard cards.picks[key]?.token == token else { return }
+        if !cloudAllows() { cards.takeBack(key); return }
+        guard let a = cards.due(key, token: token, in: client.state(id)) else { return }
+        write(a, key: key, in: id)
+    }
+
+    private func write(_ a: CardAnswer, key: String, in id: String) {
+        work { [weak self] in
+            guard let self else { return }
+            let r = self.client.answer(a, in: id)
+            if r != .sent { self.deliver { self.cards.notSent(key, a) } }
+        }
+    }
+
+    /// Whether a card's buttons take a click now: it waits (open, or held — a click picks again) and nothing for it is
+    /// on its way; a result card while it can still be answered and no answer from here is on its way.
     func answerable(_ card: CardModel, in s: SessionState) -> Bool {
-        let probe: CardAnswer = card.askId.map { .option(runId: card.runId, askId: $0, option: 0) } ?? .respond(runId: card.runId, option: 0)
-        return SessionClient.refusal(probe, in: s) == nil && !answering.contains(Self.answerKey(probe))
+        guard let askId = card.askId else {
+            return SessionClient.refusal(.respond(runId: card.runId, option: 0), in: s) == nil && !cards.responding(card.runId)
+        }
+        guard let t = s.task(card.runId), let c = t.cards.first(where: { $0.askId == askId }) else { return false }
+        return cards.phase(c, of: t).takesPick && SessionClient.refusal(.option(runId: card.runId, askId: askId, option: 0), in: s) == nil
     }
 
     // MARK: the queue, unsent words, retry
@@ -934,7 +1019,7 @@ final class ShellModel: ObservableObject {
     /// A task runs in some session with no card waiting for the user (a reopen of the app then is not the user's:
     /// handoff §3.1).
     var taskRunningWithoutCard: Bool {
-        states.values.contains { $0.runningTask != nil && $0.openCard == nil }
+        states.values.contains { $0.runningTask != nil && cards.pinned($0) == nil }
     }
 }
 

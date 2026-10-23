@@ -26,14 +26,14 @@ fi
 # the app's session client (Shared/SessionClient.swift and its reducer) against the same helper
 CLIENT="$OUT/SessionClientE2E"
 if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$CLIENT" Shared/L10n.swift Shared/Protocol.swift \
-     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/CardModel.swift Shared/SessionClient.swift tests/e2e/PathTransport.swift \
+     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/CardModel.swift Shared/CardStore.swift Shared/SessionClient.swift tests/e2e/PathTransport.swift \
      tests/e2e/SessionClientE2E.swift > "$OUT/build-client.log" 2>&1; then
   cat "$OUT/build-client.log"; exit 1
 fi
 # the 0.5 window's model (Shared/Shell.swift) on that client, against the same helper
 SHELL_BIN="$OUT/ShellE2E"
 if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$SHELL_BIN" Shared/L10n.swift Shared/Protocol.swift \
-     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/CardModel.swift Shared/SessionClient.swift Shared/Shell.swift \
+     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/CardModel.swift Shared/CardStore.swift Shared/SessionClient.swift Shared/Shell.swift \
      tests/e2e/PathTransport.swift tests/e2e/ShellE2E.swift > "$OUT/build-shell.log" 2>&1; then
   cat "$OUT/build-shell.log"; exit 1
 fi
