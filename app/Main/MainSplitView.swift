@@ -22,8 +22,6 @@ struct MainSplitView: View {
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @State private var settingsOpen = false
-    @State private var settingsBefore = ""
-    @State private var envBefore = ""
 
     var body: some View {
         NavigationSplitView {
@@ -46,33 +44,28 @@ struct MainSplitView: View {
         .onAppear {
             ShellModel.shared = shell
             shell.refreshSettings()
+            // what was saved while this window was not shown (the window as it was, before this launch): told now,
+            // before the watch (ShellModel.syncSettings; #107 review at 5999bd9)
+            shell.syncSettings()
             shell.start()
         }
-        .onChange(of: lang) { _, _ in shell.settingsChanged() }     // (the language is a session setting like the model's)
-    }
-
-    /// The model settings as saved now (the key file, the configuration, the service, and cloud models on or off), to
-    /// tell whether the sheet changed them.
-    static func settingsFingerprint() -> String {
-        return envFingerprint() + "|" + (UserDefaults.standard.string(forKey: "engine.config") ?? "") + "|" + CloudModelSettings.provider.id
-            + "|" + (UserDefaults.standard.string(forKey: "engine") ?? "") + "|" + ResolvedLang.current.rawValue
+        .onChange(of: lang) { _, _ in shell.syncSettings() }     // (the language is a session setting like the model's)
     }
 
     /// The key file (keys, a custom service's URL and model): a session process reads it when it starts, so only a
-    /// change here needs a new process (set_config carries the rest in place).
+    /// change here needs a new process (set_config carries the rest in place). The shell keeps what it last gave
+    /// (ShellModel.keyFile, syncSettings).
     static func envFingerprint() -> String {
         CloudModelSettings.read().sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
     }
 
-    private func openSettings() {
-        settingsBefore = Self.settingsFingerprint()
-        envBefore = Self.envFingerprint()
-        settingsOpen = true
-    }
+    private func openSettings() { settingsOpen = true }
 
+    /// The sheet's Save already told the shell (ModelSettingsSaved); this compares again, and acts only on what it has
+    /// not given its sessions yet (never a second restart for the same save: #107 review at 5999bd9).
     private func settingsClosed() {
         model.refreshCloud()
-        if Self.settingsFingerprint() != settingsBefore { shell.settingsChanged(keyChanged: Self.envFingerprint() != envBefore) }
+        shell.syncSettings()
     }
 
     /// The configuration sessions open with: the one the settings saved, else the chosen service's.
@@ -91,7 +84,9 @@ extension ShellModel {
         // (the app's one ModelsOffSync: the engine setter and the helper's connect push through the same one)
         let m = ShellModel(client: SessionClient(transport: transport, modelsSync: .shared), config: { MainSplitView.modelConfig() },
                            lang: { (AppLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue) ?? .en).resolved },
-                           cloudOn: { CloudModelSettings.engineIsCloud })
+                           cloudOn: { CloudModelSettings.engineIsCloud },
+                           // every save of the model settings, from whichever window (ModelSettingsSaved), while the app runs
+                           keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default)
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         return m
     }()

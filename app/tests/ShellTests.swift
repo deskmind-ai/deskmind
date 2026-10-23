@@ -67,6 +67,7 @@ enum ShellTests {
         runAnswerGateTests()
         pingPongTests()
         waitingForHelperTests()
+        savedAnywhereTests()
         textTests()
     }
 
@@ -1702,8 +1703,8 @@ enum ShellTests {
               "after a language switch, the reclaimed session reopens in it: \(String(describing: reopen?["lang"])) \(String(describing: reopen?["config"]))")
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let main = (try? String(contentsOf: dir.appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
-        check(main.contains(".onChange(of: lang) { _, _ in shell.settingsChanged() }") && main.contains("+ \"|\" + ResolvedLang.current.rawValue"),
-              "the window: a language switch goes the settings' way; the language is in the settings' fingerprint")
+        check(main.contains(".onChange(of: lang) { _, _ in shell.syncSettings() }"),
+              "the window: a language switch goes the settings' way (the language is in the shell's settings print)")
     }
 
     /// #107 review (item 3): reading a session needs no process — its history from the helper's stored log.
@@ -1738,6 +1739,132 @@ enum ShellTests {
         _ = k.client.history("ses_k")
         let ks = k.client.state("ses_k")
         check(ks.runningTask == nil && ks.status == .error("interrupted"), "a task its gone process left: interrupted (\(ks.status))")
+    }
+
+    /// #107 review at 5999bd9 (P2): what the sessions run with does not depend on which window saved. A key changed
+    /// in the window as it was (its sheet's Save: CloudModelSettings.write, never this window's settingsChanged) asks
+    /// every live session for a new process; a save made while this window was not shown is told when it is shown
+    /// again; this window's own sheet (its writes' notice, then its close) restarts nothing twice; a model change alone
+    /// goes in place (set_config), no restart.
+    static func savedAnywhereTests() {
+        func ends(_ mock: Mock) -> [String] {
+            mock.requests.filter { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true }.compactMap { $0["session_id"] as? String }
+        }
+        func configs(_ mock: Mock) -> [String] {
+            mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }.compactMap { $0["config"] as? String }
+        }
+        // the app's one shell, its settings read where they are saved; a center of the test's own (never the app's)
+        final class Saved { var key = "DEEPSEEK_API_KEY=old"; var config = "ds-flash" }
+        func shell(_ mock: Mock, _ saved: Saved, defaults: UserDefaults, center: NotificationCenter?) -> ShellModel {
+            ShellModel(client: SessionClient(transport: mock), defaults: defaults, config: { saved.config }, lang: { .zhHans },
+                       keyFile: { saved.key }, savedSettings: center, work: { $0() }, deliver: { $0() })
+        }
+        func helper() -> Mock {
+            let mock = Mock()
+            mock.replies = [SessionClient.Op.send: ["ok": true], SessionClient.Op.end: ["ok": true, "deferred": true],
+                            SessionClient.Op.open: ["ok": true, "session_id": "ses_t"]]
+            return mock
+        }
+
+        // 1. the old window's Save (its write posts; this window's settingsChanged never called): each live session
+        // asked for a new process, which opens with the settings saved
+        do {
+            let mock = helper(), saved = Saved(), center = NotificationCenter()
+            let m = shell(mock, saved, defaults: scratchDefaults(), center: center)
+            for l in SessionTests.lines("chat") { m.client.feed(l) }
+            m.stopWatching()                                     // (the 0.5 window off: ui05.shell turned off)
+            saved.key = "DEEPSEEK_API_KEY=new"
+            ModelSettingsSaved.post(center)
+            check(ends(mock) == ["ses_t"], "a key saved in the old window: the live session asked for a new process: \(ends(mock))")
+            m.client.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0, "idle": true])
+            mock.requests = []
+            m.selected = "ses_t"; m.draft = "again"; m.submit()
+            let reopen = mock.requests.first { $0["op"] as? String == SessionClient.Op.open }
+            check(reopen != nil && reopen?["config"] as? String == "ds-flash", "its next message opens a new process (the new key): \(String(describing: reopen))")
+        }
+
+        // 2. saved while nothing observed (this window not shown; no notice reached the shell): told when it is shown
+        do {
+            let mock = helper(), saved = Saved()
+            let m = shell(mock, saved, defaults: scratchDefaults(), center: nil)
+            for l in SessionTests.lines("chat") { m.client.feed(l) }
+            saved.key = "DEEPSEEK_API_KEY=new"
+            check(ends(mock).isEmpty, "nothing told yet")
+            m.syncSettings()                                     // (MainSplitView.onAppear)
+            check(ends(mock) == ["ses_t"], "shown again: the live session asked for a new process: \(ends(mock))")
+            mock.requests = []
+            m.syncSettings()
+            check(ends(mock).isEmpty && configs(mock).isEmpty, "shown once more, nothing new: nothing sent: \(mock.requests.map { $0["op"] ?? "" })")
+        }
+        // ... or before this launch: a new shell on the same defaults; a process the helper runs that this client has
+        // not seen yet (its list's `open`) is asked too
+        do {
+            let defaults = scratchDefaults(), saved = Saved()
+            _ = shell(helper(), saved, defaults: defaults, center: nil)
+            saved.key = "DEEPSEEK_API_KEY=new"                   // (the app quit, the key changed in the old window)
+            let mock = helper()
+            mock.replies[SessionClient.Op.list] = ["ok": true, "sessions": [["session_id": "ses_bg", "title": "", "open": true],
+                                                                             ["session_id": "ses_gone", "title": "", "open": false]]]
+            let m = shell(mock, saved, defaults: defaults, center: NotificationCenter())
+            m.syncSettings()
+            check(ends(mock) == ["ses_bg"], "a new launch: the helper's running session asked for a new process, the closed one not: \(ends(mock))")
+            mock.requests = []
+            let again = shell(mock, saved, defaults: defaults, center: nil)
+            again.syncSettings()
+            check(ends(mock).isEmpty, "and the launch after: nothing to ask")
+        }
+
+        // 3. this window's own sheet: its writes post (three of them: the key file, the service, the configuration), then
+        // it closes (settingsClosed): one restart per session
+        do {
+            let mock = helper(), saved = Saved(), center = NotificationCenter()
+            let m = shell(mock, saved, defaults: scratchDefaults(), center: center)
+            for l in SessionTests.lines("chat") { m.client.feed(l) }
+            saved.key = "OPENROUTER_API_KEY=k"; ModelSettingsSaved.post(center)
+            saved.config = "or-luna"; ModelSettingsSaved.post(center); ModelSettingsSaved.post(center)
+            m.syncSettings()                                     // (settingsClosed)
+            check(ends(mock) == ["ses_t"], "the window's own save: one restart, not two: \(ends(mock))")
+            check(configs(mock).last == "or-luna", "and the session has the new configuration: \(configs(mock))")
+        }
+
+        // 4. a model change alone (same key file): in place, no restart
+        do {
+            let mock = helper(), saved = Saved(), center = NotificationCenter()
+            let m = shell(mock, saved, defaults: scratchDefaults(), center: center)
+            for l in SessionTests.lines("chat") { m.client.feed(l) }
+            saved.config = "or-luna"
+            ModelSettingsSaved.post(center)
+            check(configs(mock) == ["or-luna"] && ends(mock).isEmpty, "a model change from any window: set_config only, no restart: \(configs(mock)) \(ends(mock))")
+            mock.requests = []
+            m.syncSettings()
+            check(mock.requests.isEmpty, "the sheet's close after it: nothing again")
+        }
+
+        // the app's writers post, and the app's one shell observes them; the window compares through the shell only
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let cloud = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
+        let write = cloud.components(separatedBy: "static func write(").dropFirst().first?.components(separatedBy: "static var provider").first ?? ""
+        let provider = cloud.components(separatedBy: "static var provider: CloudProvider {").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
+        let engineConfig = cloud.components(separatedBy: "static var engineConfig: String? {").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
+        check(write.contains("ModelSettingsSaved.post()") && provider.contains("ModelSettingsSaved.post()") && engineConfig.contains("ModelSettingsSaved.post()"),
+              "every writer of the model settings posts (the key file, the service, the configuration)")
+        let others = ["Main", "Shared"].flatMap { d in
+            ((try? FileManager.default.contentsOfDirectory(atPath: dir.appendingPathComponent(d).path)) ?? []).filter { $0.hasSuffix(".swift") }.map { "\(d)/\($0)" }
+        }
+        let rawWrites = others.filter { f in
+            let t = (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? ""
+            return f != "Main/CloudModel.swift" && t.split(separator: "\n").contains { l in
+                l.contains(".set(") && (l.contains("forKey: \"engine.config\")") || l.contains("forKey: \"cloud.provider\")"))
+            }
+        }
+        check(rawWrites.isEmpty && cloud.components(separatedBy: "forKey: \"engine.config\")").count == 3,
+              "the configuration and the service are written through those setters only: \(rawWrites)")
+        let main = (try? String(contentsOf: dir.appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
+        check(main.contains("keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default"), "the app's shell observes every save")
+        let appear = main.components(separatedBy: ".onAppear {").dropFirst().first?.components(separatedBy: "}").first ?? ""
+        let closed = main.components(separatedBy: "private func settingsClosed()").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
+        check(appear.contains("shell.syncSettings()") && closed.contains("shell.syncSettings()") && !main.contains("shell.settingsChanged("),
+              "the window shown and its sheet closed compare through the shell, never call settingsChanged itself")
     }
 
     // MARK: words

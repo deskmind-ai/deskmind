@@ -191,6 +191,10 @@ struct SessionSummary: Equatable {
     var title: String
     var updatedAt: Double?
     var lastMessage: (role: String, text: String)?
+    /// Its process runs in the helper now (sessions.list's `open`): one started before this app knew it, too — a new
+    /// key must reach it as well (ShellModel.settingsChanged, #107 review at 5999bd9). Not part of `==` (the list's rows
+    /// do not show it).
+    var open = false
 
     static func == (a: SessionSummary, b: SessionSummary) -> Bool {
         a.sessionId == b.sessionId && a.title == b.title && a.updatedAt == b.updatedAt
@@ -206,6 +210,7 @@ struct SessionSummary: Equatable {
         let last = o["last_message"] as? [String: Any]
         self.init(sessionId: id, title: o["title"] as? String ?? "", updatedAt: (o["updated_at"] as? NSNumber)?.doubleValue,
                   lastMessage: last.map { ($0["role"] as? String ?? "", $0["text"] as? String ?? "") })
+        self.open = o["open"] as? Bool ?? false
     }
 }
 

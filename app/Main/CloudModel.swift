@@ -48,11 +48,20 @@ enum CloudModelSettings {
         let text = env.keys.sorted().compactMap { k in env[k].map { "\(k)=\($0)" } }.joined(separator: "\n") + "\n"
         try text.write(to: fileURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+        // each writer of the model settings says so (the key file here, the service and the configuration below): the
+        // app's sessions take them whichever window saved (ShellModel.syncSettings; #107 review at 5999bd9)
+        ModelSettingsSaved.post()
     }
 
     static var provider: CloudProvider {
         get { CloudProvider.named(UserDefaults.standard.string(forKey: "cloud.provider") ?? "deepseek") }
-        set { UserDefaults.standard.set(newValue.id, forKey: "cloud.provider") }
+        set { UserDefaults.standard.set(newValue.id, forKey: "cloud.provider"); ModelSettingsSaved.post() }
+    }
+    /// The configuration saved (`engine.config`: the runs of the window as it was send it, History.swift; sessions
+    /// open with it, MainSplitView.modelConfig). Written here only.
+    static var engineConfig: String? {
+        get { UserDefaults.standard.string(forKey: "engine.config") }
+        set { UserDefaults.standard.set(newValue, forKey: "engine.config"); ModelSettingsSaved.post() }
     }
     /// The harness configuration the main app sends with every run (History.swift reads `engine.config`).
     static func config(for p: CloudProvider, model: String) -> String { p.custom ? p.config + model : p.config }
@@ -198,7 +207,7 @@ struct CloudModelSheet: View {
         if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = model }
         try CloudModelSettings.write(env)
         CloudModelSettings.provider = provider
-        UserDefaults.standard.set(CloudModelSettings.config(for: provider, model: model), forKey: "engine.config")
+        CloudModelSettings.engineConfig = CloudModelSettings.config(for: provider, model: model)
     }
 
     private func save() {

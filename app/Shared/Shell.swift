@@ -9,6 +9,7 @@
 // keyword in a sentence); a task's end says what its status says, never more (succeeded alone is "done").
 
 import Combine
+import CryptoKit
 import Foundation
 
 // MARK: - The flag
@@ -18,6 +19,19 @@ import Foundation
 enum ShellFlag {
     static let key = "ui05.shell"
     static func isOn(_ defaults: UserDefaults = .standard) -> Bool { defaults.bool(forKey: key) }
+}
+
+// MARK: - Model settings saved
+
+/// The model settings were saved — the key file, the service, the configuration — wherever that happened: the 0.5
+/// window's sheet, the window as it was, any path that writes them (Main/CloudModel.swift's CloudModelSettings posts it
+/// from each of its writers). The app's one ShellModel (`ShellModel.live`) takes it, so what its sessions run with no
+/// longer depends on which window saved (#107 review at 5999bd9: a key changed in the old window's settings never
+/// reached the live sessions; once the old key was revoked, chat failed for good). Cloud models on or off is not posted
+/// here: it has its own single path to the helper (ModelsOffSync, models.off).
+enum ModelSettingsSaved {
+    static let name = Notification.Name("ai.deskmind.modelSettingsSaved")
+    static func post(_ center: NotificationCenter = .default) { center.post(name: name, object: nil) }
 }
 
 // MARK: - The composer
@@ -303,6 +317,14 @@ final class ShellModel: ObservableObject {
     var lang: () -> ResolvedLang
     /// The settings' "use a cloud model" switch.
     var cloudOn: () -> Bool
+    /// The key file as saved now (keys, a custom service's URL and model: MainSplitView.envFingerprint): a session
+    /// process reads it once, when it starts.
+    var keyFile: () -> String
+    private let defaults: UserDefaults
+    /// The settings this shell last gave its sessions (`settingsPrint`: configuration, language, cloud on or off), so
+    /// that a save is acted on once however many paths report it (`syncSettings`).
+    private var appliedSettings = ""
+    private var savedObserver: (center: NotificationCenter, token: NSObjectProtocol)?
     private var summaries: [SessionSummary] = []
     private var deleted: Set<String> = []
     private let pendingLock = NSLock()
@@ -313,21 +335,37 @@ final class ShellModel: ObservableObject {
 
     weak static var shared: ShellModel?
 
+    /// `savedSettings`: where ModelSettingsSaved is posted (the app's: `.default`; a test's own; nil: not observed).
     init(client: SessionClient, defaults: UserDefaults = .standard,
          config: @escaping () -> String?, lang: @escaping () -> ResolvedLang, cloudOn: @escaping () -> Bool = { true },
+         keyFile: @escaping () -> String = { "" }, savedSettings: NotificationCenter? = nil,
          work: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.global(qos: .userInitiated).async(execute: f) },
          deliver: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) }) {
         self.client = client
         self.names = SessionNames(defaults: defaults)
+        self.defaults = defaults
         self.config = config
         self.lang = lang
         self.cloudOn = cloudOn
+        self.keyFile = keyFile
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
         client.onWaitingForHelper = { [weak self] waiting in self?.deliver { self?.waitingForHelper = waiting } }
         applySettings()
+        appliedSettings = settingsPrint()
+        // the first run with this record: the key file as it is now is the one sessions have (nothing to compare with)
+        if defaults.string(forKey: Self.keysAppliedKey) == nil { defaults.set(keysPrint(), forKey: Self.keysAppliedKey) }
+        // (on the main thread, after the save that posted it: a sheet's several writes are read once, all done)
+        if let center = savedSettings {
+            let token = center.addObserver(forName: ModelSettingsSaved.name, object: nil, queue: nil) { [weak self] _ in
+                self?.deliver { self?.syncSettings() }
+            }
+            savedObserver = (center, token)
+        }
     }
+
+    deinit { if let o = savedObserver { o.center.removeObserver(o.token) } }
 
     static func langCode(_ l: ResolvedLang) -> String { l == .zhHans ? "zh" : "en" }
 
@@ -704,6 +742,31 @@ final class ShellModel: ObservableObject {
 
     // MARK: settings
 
+    /// The key file's digest as sessions last got it (a new key asked for: `settingsChanged(keyChanged: true)`), in
+    /// the app's defaults so that a change made while no shell was there — the 0.5 window never shown in this launch,
+    /// the app quit since — is still told on the next look. Only a digest: the keys stay in models.env.
+    static let keysAppliedKey = "shell.keysApplied"
+
+    /// What a live session takes in place (set_config): the configuration, the language, cloud models on or off.
+    private func settingsPrint() -> String {
+        let (config, lang) = sessionSettings()
+        return (config ?? "") + "|" + lang + "|" + (cloudOn() ? "on" : "off")
+    }
+    private func keysPrint() -> String {
+        SHA256.hash(data: Data(keyFile().utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The settings as saved now, compared with what this shell last gave its sessions; changed → `settingsChanged`
+    /// (a new key file: a new process asked for each). One path for every way a save is learnt of, whichever window
+    /// saved (#107 review at 5999bd9): ModelSettingsSaved from any writer, this window appearing (a save while it was
+    /// not shown, or before this launch), its own sheet closing, a language switch. Each acts once: a save already
+    /// applied compares equal (the sheet's close after its own writes' notice restarts nothing twice). Main thread.
+    func syncSettings() {
+        let keysNew = keysPrint() != defaults.string(forKey: Self.keysAppliedKey)
+        guard keysNew || settingsPrint() != appliedSettings else { return }
+        settingsChanged(keyChanged: keysNew)
+    }
+
     /// The model settings were saved (a key, a service, cloud on or off): every session opens again with them, whenever
     /// its next process starts. The UI language goes the same way (MainSplitView: on a language change).
     ///
@@ -711,9 +774,13 @@ final class ShellModel: ObservableObject {
     /// off, no model at all (set_config null: it stops its running task, nothing that needs a model goes on). Only a
     /// new key needs a new process (a process reads its keys when it starts): `keyChanged` then asks the helper for one
     /// once the session is idle (end_if_idle; the helper and the session decide when).
+    ///
+    /// What it gave is recorded (`syncSettings` compares with it): the settings, and with `keyChanged` the key file.
     func settingsChanged(keyChanged: Bool = false) {
         applySettings(reconcileIfModelChanged: false)
         refreshSettings()
+        appliedSettings = settingsPrint()
+        if keyChanged { defaults.set(keysPrint(), forKey: Self.keysAppliedKey) }
         let (config, lang) = sessionSettings()
         let off = !cloudOn()
         work { [weak self] in
@@ -722,8 +789,12 @@ final class ShellModel: ObservableObject {
             // start: the client's list, not this window's view of it)
             self.client.reconcile(config: config, lang: lang, off: off)
             // a new key reaches a process only when it starts: asked for whatever the switch says now (turned on
-            // later, a session must not run on the old key)
-            if keyChanged { for id in self.client.liveIds() { self.client.restart(id, config: config, lang: lang) } }
+            // later, a session must not run on the old key) — of every process, the helper's list's too: one this
+            // client has not seen yet (the window not shown since the app started) runs on the key it started with
+            if keyChanged {
+                let helperOpen = self.client.list()?.filter(\.open).map(\.sessionId) ?? []
+                for id in Set(self.client.liveIds()).union(helperOpen).sorted() { self.client.restart(id, config: config, lang: lang) }
+            }
         }
     }
 
