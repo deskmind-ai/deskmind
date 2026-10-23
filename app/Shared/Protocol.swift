@@ -1,6 +1,23 @@
 // The wire between DeskMind.app and DeskMind Hands.app: one JSON object per line over a Unix socket.
 
+import CryptoKit
 import Foundation
+
+/// The model keys file (Application Support/DeskMind/models.env: keys, a custom service's URL and model) as one
+/// digest, computed the same way by the helper and the app. The helper records it for each session process when it
+/// starts one (a process reads its keys once, then) and reports it with the digest of the file now
+/// (sessions.list's `keys`): which processes still run on keys no longer saved is read from the helper, never guessed
+/// by the app (#107 review at b3b8464). Only digests leave this: never a key.
+enum ModelKeys {
+    /// KEY=VALUE pairs in one order, one per line.
+    static func fingerprint(_ env: [String: String]) -> String {
+        env.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+    }
+    static func digest(_ fingerprint: String) -> String {
+        SHA256.hash(data: Data(fingerprint.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    static func digest(env: [String: String]) -> String { digest(fingerprint(env)) }
+}
 
 enum DeskMindIPC {
     static let helperLabel = "ai.deskmind.hands"

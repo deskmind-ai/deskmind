@@ -56,7 +56,7 @@ struct MainSplitView: View {
     /// change here needs a new process (set_config carries the rest in place). The shell keeps what it last gave
     /// (ShellModel.keyFile, syncSettings).
     static func envFingerprint() -> String {
-        CloudModelSettings.read().sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: "\n")
+        ModelKeys.fingerprint(CloudModelSettings.read())
     }
 
     private func openSettings() { settingsOpen = true }

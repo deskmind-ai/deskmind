@@ -421,6 +421,10 @@ def run(env, helper):
     r = request({"op": "sessions.list"})
     item = [s for s in r.get("sessions", []) if s.get("session_id") == sid]
     check(r.get("ok") is True and bool(item) and item[0].get("open") is True and item[0].get("title") == "你好", f"sessions.list: {item}")
+    # the models.env digest now, and the one this process started with (ModelKeys): equal, no restart asked
+    keys = r.get("keys")
+    check(isinstance(keys, str) and len(keys) == 64 and item[0].get("keys") == keys and item[0].get("ending") is False,
+          f"sessions.list: the keys file's digest now and the process's ({keys!r}, {item[0].get('keys')!r}, ending {item[0].get('ending')!r})")
 
     # the machine lock: held by a live process the way the helper's own run holds it, a session's task is refused
     lock = os.path.join(DIR, "sessions", "computer.lock")

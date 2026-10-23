@@ -9,7 +9,6 @@
 // keyword in a sentence); a task's end says what its status says, never more (succeeded alone is "done").
 
 import Combine
-import CryptoKit
 import Foundation
 
 // MARK: - The flag
@@ -325,13 +324,19 @@ final class ShellModel: ObservableObject {
     /// that a save is acted on once however many paths report it (`syncSettings`).
     private var appliedSettings = ""
     /// A new key's restarts (`askNewProcesses`): one round at a time (`keysRound`; asked meanwhile: `keysAgain`, run
-    /// once more after it); a round that did not finish is tried again after `keysRetryDelay` (2 s, doubling, at most
-    /// 60 s), by `retryAfter` — the app's: the main queue's clock; nil (a test's default): only the next syncSettings.
+    /// once more after it); a round that left processes owed is tried again after `keysRetryDelay` (2 s, doubling, at
+    /// most 60 s), by `retryAfter` — the app's: the main queue's clock; nil (a test's default): only the next
+    /// syncSettings. `keysChecked`: the key file (this app's digest of it) at the last round that left nothing owed;
+    /// `keysOwed`: the last round left some. `askedUnknown`: sessions asked once for a key file without knowing what
+    /// their process runs on (an older helper; the list unread), by that file's digest.
     private let keysLock = NSLock()
     private var keysRound = false
     private var keysAgain = false
     private var keysRetryDelay: TimeInterval = 0
     private var keysRetryScheduled = false
+    private var keysChecked: String?
+    private var keysOwed = false
+    private var askedUnknown: [String: String] = [:]
     let retryAfter: ((TimeInterval, @escaping () -> Void) -> Void)?
     private var savedObserver: (center: NotificationCenter, token: NSObjectProtocol)?
     private var summaries: [SessionSummary] = []
@@ -365,8 +370,6 @@ final class ShellModel: ObservableObject {
         client.onWaitingForHelper = { [weak self] waiting in self?.deliver { self?.waitingForHelper = waiting } }
         applySettings()
         appliedSettings = settingsPrint()
-        // the first run with this record: the key file as it is now is the one sessions have (nothing to compare with)
-        if defaults.string(forKey: Self.keysAppliedKey) == nil { defaults.set(keysPrint(), forKey: Self.keysAppliedKey) }
         // (on the main thread, after the save that posted it: a sheet's several writes are read once, all done)
         if let center = savedSettings {
             let token = center.addObserver(forName: ModelSettingsSaved.name, object: nil, queue: nil) { [weak self] _ in
@@ -753,40 +756,35 @@ final class ShellModel: ObservableObject {
 
     // MARK: settings
 
-    /// The key file's digest once every session process has been asked for a new one and the helper took each ask
-    /// (`askNewProcesses`), in the app's defaults: a change made while no shell was there — the 0.5 window never shown
-    /// in this launch, the app quit since, or quit while the asks were still failing — is still told on the next look.
-    /// Never written before the helper acknowledged them all (#107 review at 0a5af02: written before the asks went, one
-    /// failed ask left a session on the old key for good). Only a digest: the keys stay in models.env.
-    static let keysAppliedKey = "shell.keysApplied"
-    /// The asks the helper took for a key file not applied yet: {"digest": its digest, "sessions": [session ids]}. A
-    /// session here is not asked again for that digest (a retry asks only the ones still owed); it survives a quit.
-    static let keysAckedKey = "shell.keysAcked"
+    /// The key file's digest at the last round that left nothing owed (a cache): only for a helper that does not say
+    /// what its processes run on — its open sessions are asked once when the file differs from this.
+    static let keysSeenKey = "shell.keysSeen"
 
     /// What a live session takes in place (set_config): the configuration, the language, cloud models on or off.
     private func settingsPrint() -> String {
         let (config, lang) = sessionSettings()
         return (config ?? "") + "|" + lang + "|" + (cloudOn() ? "on" : "off")
     }
-    private func keysPrint() -> String {
-        SHA256.hash(data: Data(keyFile().utf8)).map { String(format: "%02x", $0) }.joined()
+    private func keysPrint() -> String { ModelKeys.digest(keyFile()) }
+    /// Some session process may still run on keys no longer saved: the key file changed since the last round that
+    /// found none (or none has run in this launch), or that round left some owed.
+    var keysPending: Bool {
+        let now = keysPrint()
+        keysLock.lock(); defer { keysLock.unlock() }
+        return keysOwed || keysChecked != now
     }
-    /// A new key file not yet applied to every session process (its asks not all acknowledged).
-    var keysPending: Bool { keysPrint() != defaults.string(forKey: Self.keysAppliedKey) }
 
     /// The settings as saved now, compared with what this shell last gave its sessions. One path for every way a save
     /// is learnt of, whichever window saved (#107 review at 5999bd9): ModelSettingsSaved from any writer, this window
     /// appearing (a save while it was not shown, or before this launch), its own sheet closing, a language switch, and
     /// a key's retry. The settings that go in place (configuration, language, cloud on or off) are sent once per change:
-    /// a save already given compares equal (`appliedSettings`). A new key file is asked of every session process until
-    /// the helper has taken every ask (`keysPending`): each trigger asks again, only the sessions still owed — the sheet's
-    /// close after its own writes' notice restarts no session twice. Main thread.
+    /// a save already given compares equal (`appliedSettings`). The keys: a round (`askNewProcesses`) while any may be
+    /// owed (`keysPending`): the helper says which processes run on keys no longer saved, and only those are asked —
+    /// the sheet's close after its own writes' notice restarts no session twice. Main thread.
     func syncSettings() {
-        let keysNew = keysPending
-        if settingsPrint() != appliedSettings { settingsChanged(keyChanged: keysNew); return }
-        guard keysNew else { return }
-        let (config, lang) = sessionSettings()
-        work { [weak self] in self?.askNewProcesses(config: config, lang: lang) }
+        if settingsPrint() != appliedSettings { settingsChanged(keyChanged: keysPending); return }
+        guard keysPending else { return }
+        work { [weak self] in self?.askNewProcesses() }
     }
 
     /// The model settings were saved (a key, a service, cloud on or off): every session opens again with them, whenever
@@ -796,8 +794,6 @@ final class ShellModel: ObservableObject {
     /// off, no model at all (set_config null: it stops its running task, nothing that needs a model goes on). Only a
     /// new key needs a new process (a process reads its keys when it starts): `keyChanged` then asks the helper for one
     /// once the session is idle (end_if_idle; the helper and the session decide when): `askNewProcesses`.
-    ///
-    /// The settings given are recorded at once (`appliedSettings`); the key file only once the helper took every ask.
     func settingsChanged(keyChanged: Bool = false) {
         applySettings(reconcileIfModelChanged: false)
         refreshSettings()
@@ -809,65 +805,90 @@ final class ShellModel: ObservableObject {
             // every session the client knows with a process or one coming (live, opening, reopening, awaiting its
             // start: the client's list, not this window's view of it)
             self.client.reconcile(config: config, lang: lang, off: off)
-            if keyChanged { self.askNewProcesses(config: config, lang: lang) }
+            if keyChanged { self.askNewProcesses() }
         }
     }
 
-    /// A new key reaches a process only when it starts: each session process is asked for a new one (`restart`, when
-    /// idle), whatever the switch says now (turned on later, a session must not run on the old key) — every process:
-    /// the client's, and the helper's list's (`open`: one this client has not seen yet, the window not shown since the
-    /// app started, runs on the key it started with). The key file counts as applied (`keysAppliedKey`) only when the
-    /// list came back and the helper took every ask; a session whose ask it took is not asked again for that key file
-    /// (`keysAckedKey`), one whose ask failed (no answer, refused, the list not read) stays owed: asked again on the
-    /// next syncSettings, and after a backoff (`retryAfter`) with no user action (#107 review at 0a5af02). Off the main
-    /// thread. (A session opened while asks are owed reads the new file, but may be asked once too: a new process at
-    /// its next idle moment, harmless.)
-    private func askNewProcesses(config: String?, lang: String) {
+    /// A new key reaches a process only when it starts: a process that runs on keys no longer saved is asked for a new
+    /// one (`restart`, when idle), whatever the switch says now (turned on later, a session must not run on old keys).
+    /// Which ones is the helper's to say (#107 review at b3b8464: the app's own record of what it had asked missed a
+    /// session that restarted on B when the file went back to A): sessions.list gives the digest of the file now and,
+    /// for each open session, the digest its process started with and whether a restart is asked already (`ending`).
+    /// Owed: an open one whose digest is not the file's; asked: those of them not ending. After asking, the list is read
+    /// again (a process ended at once is gone; one busy stays owed, `ending`, until it goes; one whose ask failed is
+    /// not asked again in the same round). Owed left, the list
+    /// unread, or an ask not taken (no answer, an error): tried again on the next syncSettings and after a backoff
+    /// (`retryAfter`), with no user action. A quit, a helper restart, a lost ask, A→B→A: the next round reads them.
+    ///
+    /// An older helper (no digests) or a list not read: what each process runs on is unknown — each such session
+    /// (open in the list; else the ones this client knows to be live) is asked once per key file (`askedUnknown`),
+    /// when the file differs from the last checked one (`keysSeenKey`). Off the main thread; one round at a time.
+    private func askNewProcesses() {
         keysLock.lock()
         if keysRound { keysAgain = true; keysLock.unlock(); return }
         keysRound = true
         keysLock.unlock()
         while true {
             let digest = keysPrint()
-            var acked = ackedSessions(for: digest)
-            let listed = client.list()
-            let owed = Set(client.liveIds()).union(listed?.filter(\.open).map(\.sessionId) ?? []).subtracting(acked).sorted()
-            var all = listed != nil
-            for id in owed {
-                if client.restart(id, config: config, lang: lang) {
-                    acked.insert(id)
-                    defaults.set(["digest": digest, "sessions": acked.sorted()], forKey: Self.keysAckedKey)
+            var owed = false
+            // (a session asked in this round is not asked again in it: one whose ask failed waits for the retry)
+            var asked: Set<String> = []
+            for pass in 0..<3 {
+                let listed = client.listWithKeys()
+                var stale: [String] = [], unknown: [String] = []
+                owed = false
+                if let listed, let now = listed.keysNow {
+                    for s in listed.sessions where s.open {
+                        if s.keys == now { continue }
+                        if s.keys == nil { unknown.append(s.sessionId); continue }
+                        owed = true
+                        if !s.ending { stale.append(s.sessionId) }
+                    }
                 } else {
-                    all = false
+                    let open = listed.map { $0.sessions.filter(\.open).map(\.sessionId) } ?? client.liveIds()
+                    unknown = open
+                    if listed == nil { owed = true }
                 }
+                // unknown: asked once per key file, only when it differs from the last checked one
+                keysLock.lock()
+                let seen = defaults.string(forKey: Self.keysSeenKey)
+                unknown = seen == digest ? [] : unknown.filter { askedUnknown[$0] != digest }
+                keysLock.unlock()
+                let ask = Set(stale).union(unknown).subtracting(asked)
+                if ask.isEmpty { break }
+                asked.formUnion(ask)
+                for id in ask.sorted() {
+                    // (the settings as they are at this ask: a newer save's never overwritten by an older round's)
+                    let (config, lang) = sessionSettings()
+                    if client.restart(id, config: config, lang: lang) {
+                        if unknown.contains(id) { keysLock.lock(); askedUnknown[id] = digest; keysLock.unlock() }
+                    } else {
+                        owed = true
+                    }
+                }
+                // (read again: what the asks did — ended at once, or ending at its next idle moment — and an ask lost)
+                if pass == 2 { owed = true }
             }
-            // (the file changed again meanwhile: not this digest's to apply — the next round asks for the new one)
-            let done = all && keysPrint() == digest
-            if done {
-                defaults.set(digest, forKey: Self.keysAppliedKey)
-                defaults.removeObject(forKey: Self.keysAckedKey)
-            }
+            let done = !owed && keysPrint() == digest
+            if done { defaults.set(digest, forKey: Self.keysSeenKey) }
+            // whether to run again, and the round's end, decided under one lock (a request at the round's end is
+            // either run by this round or starts its own)
             keysLock.lock()
             let again = keysAgain
             keysAgain = false
-            if !again { keysRound = false }
-            if done { keysRetryDelay = 0 }
+            if !again {
+                keysRound = false
+                keysOwed = !done
+                if done { keysChecked = digest; keysRetryDelay = 0 }
+            }
             keysLock.unlock()
-            // (asked meanwhile: once more, unless this round applied it — then nothing is owed, nothing asked twice)
-            if again && (!done || keysPending) { continue }
-            if again { keysLock.lock(); keysRound = false; keysLock.unlock() }
+            if again { continue }
             if !done { scheduleKeysRetry() }
             return
         }
     }
 
-    /// The sessions whose ask the helper took for this key file (none when the record is of another).
-    private func ackedSessions(for digest: String) -> Set<String> {
-        guard let r = defaults.dictionary(forKey: Self.keysAckedKey), r["digest"] as? String == digest else { return [] }
-        return Set(r["sessions"] as? [String] ?? [])
-    }
-
-    /// Asks owed: tried again after a backoff (2 s, doubling to 60 s at most), one retry waiting at a time, for as
+    /// Owed processes: tried again after a backoff (2 s, doubling to 60 s at most), one retry waiting at a time, for as
     /// long as some are owed (each retry is a syncSettings: nothing when nothing is owed by then).
     private func scheduleKeysRetry() {
         guard let retryAfter else { return }

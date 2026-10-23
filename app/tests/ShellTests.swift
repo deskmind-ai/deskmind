@@ -1742,119 +1742,167 @@ enum ShellTests {
         check(ks.runningTask == nil && ks.status == .error("interrupted"), "a task its gone process left: interrupted (\(ks.status))")
     }
 
+    /// The helper as the key rounds see it (sessions.list's digests, session.end when_idle, session.open), with the
+    /// file's digest read from the test's key file: a process records the digest at its start, as SessionHost.spawn
+    /// does. `failEnd`: the next N asks of a session unanswered; `refuseEnd`: answered with an error; `failList`: the
+    /// next N lists unanswered; `busy`: sessions whose ask is deferred (ending at their next idle moment); `old`: a
+    /// helper that says no digests.
+    final class FakeHelper: SessionTransport {
+        let lock = NSLock()
+        var key: String
+        var procs: [String: (keys: String, ending: Bool)] = [:]
+        var requests: [[String: Any]] = []
+        var failEnd: [String: Int] = [:], refuseEnd: [String: Int] = [:]
+        var failList = 0
+        var busy: Set<String> = []
+        var old = false
+        init(key: String, running: [String] = []) {
+            self.key = key
+            for id in running { procs[id] = (ModelKeys.digest(key), false) }
+        }
+        var now: String { ModelKeys.digest(key) }
+        func spawn(_ id: String) { lock.lock(); procs[id] = (now, false); lock.unlock() }
+        /// A busy session goes idle: the helper ends it if a restart was asked.
+        func idle(_ id: String) { lock.lock(); busy.remove(id); if procs[id]?.ending == true { procs[id] = nil }; lock.unlock() }
+        func request(_ body: [String: Any]) -> [String: Any]? {
+            lock.lock(); defer { lock.unlock() }
+            requests.append(body)
+            let op = body["op"] as? String ?? "", id = body["session_id"] as? String ?? ""
+            switch op {
+            case SessionClient.Op.list:
+                if failList > 0 { failList -= 1; return nil }
+                var r: [String: Any] = ["ok": true, "sessions": procs.keys.sorted().map { id -> [String: Any] in
+                    var i: [String: Any] = ["session_id": id, "title": "", "open": true, "ending": procs[id]!.ending]
+                    if !old { i["keys"] = procs[id]!.keys }
+                    return i
+                }]
+                if !old { r["keys"] = now }
+                return r
+            case SessionClient.Op.end:
+                if let n = failEnd[id], n > 0 { failEnd[id] = n - 1; return nil }
+                if let n = refuseEnd[id], n > 0 { refuseEnd[id] = n - 1; return ["ok": false, "code": "bad_request", "error": "x"] }
+                guard procs[id] != nil else { return ["ok": false, "code": "not_open"] }
+                if busy.contains(id) { procs[id]!.ending = true; return ["ok": true, "deferred": true] }
+                procs[id] = nil
+                return ["ok": true]
+            case SessionClient.Op.open:
+                let sid = id.isEmpty ? "ses_new" : id
+                procs[sid] = (now, false)
+                return ["ok": true, "session_id": sid]
+            default:
+                return ["ok": true]
+            }
+        }
+        func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+        func ends() -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            return requests.filter { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true }.compactMap { $0["session_id"] as? String }
+        }
+        func configs() -> [String] {
+            lock.lock(); defer { lock.unlock() }
+            return requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }.compactMap { $0["config"] as? String }
+        }
+        func lists() -> Int { lock.lock(); defer { lock.unlock() }; return requests.filter { $0["op"] as? String == SessionClient.Op.list }.count }
+        /// Every process runs on the file's keys now.
+        var allCurrent: Bool { lock.lock(); defer { lock.unlock() }; return procs.values.allSatisfy { $0.keys == now } }
+        func runsOn(_ id: String) -> String? { lock.lock(); defer { lock.unlock() }; return procs[id].map { $0.keys == now ? "now" : $0.keys } }
+        func clear() { lock.lock(); requests = []; lock.unlock() }
+    }
+
+    /// The retry clock, run by hand.
+    final class Clock {
+        var waiting: [(delay: TimeInterval, f: () -> Void)] = []
+        func fire() { let w = waiting; waiting = []; for x in w { x.f() } }
+    }
+
+    /// The app's one shell on a fake helper: the configuration and the key file read where they are saved.
+    final class Saved { var config = "ds-flash" }
+    static func keyShell(_ h: FakeHelper, _ saved: Saved = Saved(), center: NotificationCenter? = nil, clock: Clock? = nil) -> ShellModel {
+        ShellModel(client: SessionClient(transport: h), defaults: scratchDefaults(), config: { saved.config }, lang: { .zhHans },
+                   keyFile: { h.lock.lock(); defer { h.lock.unlock() }; return h.key }, savedSettings: center,
+                   retryAfter: clock.map { c in { d, f in c.waiting.append((d, f)) } }, work: { $0() }, deliver: { $0() })
+    }
+
     /// #107 review at 5999bd9 (P2): what the sessions run with does not depend on which window saved. A key changed
     /// in the window as it was (its sheet's Save: CloudModelSettings.write, never this window's settingsChanged) asks
-    /// every live session for a new process; a save made while this window was not shown is told when it is shown
+    /// every process on the old key for a new one; a save made while this window was not shown is told when it is shown
     /// again; this window's own sheet (its writes' notice, then its close) restarts nothing twice; a model change alone
     /// goes in place (set_config), no restart.
     static func savedAnywhereTests() {
-        func ends(_ mock: Mock) -> [String] {
-            mock.requests.filter { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true }.compactMap { $0["session_id"] as? String }
-        }
-        func configs(_ mock: Mock) -> [String] {
-            mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }.compactMap { $0["config"] as? String }
-        }
-        // the app's one shell, its settings read where they are saved; a center of the test's own (never the app's)
-        final class Saved { var key = "DEEPSEEK_API_KEY=old"; var config = "ds-flash" }
-        func shell(_ mock: Mock, _ saved: Saved, defaults: UserDefaults, center: NotificationCenter?) -> ShellModel {
-            ShellModel(client: SessionClient(transport: mock), defaults: defaults, config: { saved.config }, lang: { .zhHans },
-                       keyFile: { saved.key }, savedSettings: center, work: { $0() }, deliver: { $0() })
-        }
-        func helper() -> Mock {
-            let mock = Mock()
-            mock.replies = [SessionClient.Op.send: ["ok": true], SessionClient.Op.end: ["ok": true, "deferred": true],
-                            SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.list: ["ok": true, "sessions": [Any]()]]
-            return mock
-        }
-
-        // 1. the old window's Save (its write posts; this window's settingsChanged never called): each live session
-        // asked for a new process, which opens with the settings saved
+        // 1. the old window's Save (its write posts; this window's settingsChanged never called)
         do {
-            let mock = helper(), saved = Saved(), center = NotificationCenter()
-            let m = shell(mock, saved, defaults: scratchDefaults(), center: center)
+            let h = FakeHelper(key: "K=old", running: ["ses_t"]), center = NotificationCenter()
+            let m = keyShell(h, center: center)
             for l in SessionTests.lines("chat") { m.client.feed(l) }
+            m.syncSettings()                                     // (shown: nothing owed)
             m.stopWatching()                                     // (the 0.5 window off: ui05.shell turned off)
-            saved.key = "DEEPSEEK_API_KEY=new"
+            h.key = "K=new"
             ModelSettingsSaved.post(center)
-            check(ends(mock) == ["ses_t"], "a key saved in the old window: the live session asked for a new process: \(ends(mock))")
+            check(h.ends() == ["ses_t"] && h.runsOn("ses_t") == nil, "a key saved in the old window: the live session asked for a new process: \(h.ends())")
             m.client.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0, "idle": true])
-            mock.requests = []
             m.selected = "ses_t"; m.draft = "again"; m.submit()
-            let reopen = mock.requests.first { $0["op"] as? String == SessionClient.Op.open }
-            check(reopen != nil && reopen?["config"] as? String == "ds-flash", "its next message opens a new process (the new key): \(String(describing: reopen))")
+            check(h.runsOn("ses_t") == "now", "its next message opens a new process, on the new key")
         }
 
         // 2. saved while nothing observed (this window not shown; no notice reached the shell): told when it is shown
         do {
-            let mock = helper(), saved = Saved()
-            let m = shell(mock, saved, defaults: scratchDefaults(), center: nil)
-            for l in SessionTests.lines("chat") { m.client.feed(l) }
-            saved.key = "DEEPSEEK_API_KEY=new"
-            check(ends(mock).isEmpty, "nothing told yet")
+            let h = FakeHelper(key: "K=old", running: ["ses_t"])
+            let m = keyShell(h)
+            m.syncSettings()
+            h.key = "K=new"
+            check(h.ends().isEmpty, "nothing told yet")
             m.syncSettings()                                     // (MainSplitView.onAppear)
-            check(ends(mock) == ["ses_t"], "shown again: the live session asked for a new process: \(ends(mock))")
-            mock.requests = []
+            check(h.ends() == ["ses_t"], "shown again: the live session asked for a new process: \(h.ends())")
+            h.clear()
             m.syncSettings()
-            check(ends(mock).isEmpty && configs(mock).isEmpty, "shown once more, nothing new: nothing sent: \(mock.requests.map { $0["op"] ?? "" })")
-        }
-        // ... or before this launch: a new shell on the same defaults; a process the helper runs that this client has
-        // not seen yet (its list's `open`) is asked too
-        do {
-            let defaults = scratchDefaults(), saved = Saved()
-            _ = shell(helper(), saved, defaults: defaults, center: nil)
-            saved.key = "DEEPSEEK_API_KEY=new"                   // (the app quit, the key changed in the old window)
-            let mock = helper()
-            mock.replies[SessionClient.Op.list] = ["ok": true, "sessions": [["session_id": "ses_bg", "title": "", "open": true],
-                                                                             ["session_id": "ses_gone", "title": "", "open": false]]]
-            let m = shell(mock, saved, defaults: defaults, center: NotificationCenter())
-            m.syncSettings()
-            check(ends(mock) == ["ses_bg"], "a new launch: the helper's running session asked for a new process, the closed one not: \(ends(mock))")
-            mock.requests = []
-            let again = shell(mock, saved, defaults: defaults, center: nil)
-            again.syncSettings()
-            check(ends(mock).isEmpty, "and the launch after: nothing to ask")
+            check(h.requests.isEmpty, "shown once more, nothing new: nothing sent: \(h.requests.map { $0["op"] ?? "" })")
+            // ... or before this launch: a new shell, a process the helper runs that this client has never seen
+            h.spawn("ses_bg"); h.key = "K=newer"; h.clear()
+            let m2 = keyShell(h)
+            m2.syncSettings()
+            check(h.ends() == ["ses_bg"] && h.allCurrent, "a new launch: the helper's running session on the old key asked: \(h.ends())")
         }
 
-        // 3. this window's own sheet: its writes post (three of them: the key file, the service, the configuration), then
-        // it closes (settingsClosed): one restart per session
+        // 3. this window's own sheet: its writes post (the key file, the service, the configuration), then it closes
         do {
-            let mock = helper(), saved = Saved(), center = NotificationCenter()
-            let m = shell(mock, saved, defaults: scratchDefaults(), center: center)
+            let h = FakeHelper(key: "K=old", running: ["ses_t"]), saved = Saved(), center = NotificationCenter()
+            let m = keyShell(h, saved, center: center)
             for l in SessionTests.lines("chat") { m.client.feed(l) }
-            saved.key = "OPENROUTER_API_KEY=k"; ModelSettingsSaved.post(center)
+            m.syncSettings()
+            h.key = "OPENROUTER_API_KEY=k"; ModelSettingsSaved.post(center)
             saved.config = "or-luna"; ModelSettingsSaved.post(center); ModelSettingsSaved.post(center)
             m.syncSettings()                                     // (settingsClosed)
-            check(ends(mock) == ["ses_t"], "the window's own save: one restart, not two: \(ends(mock))")
-            check(configs(mock).last == "or-luna", "and the session has the new configuration: \(configs(mock))")
+            check(h.ends() == ["ses_t"], "the window's own save: one restart, not two: \(h.ends())")
+            check(h.configs().last == "or-luna", "and the session has the new configuration: \(h.configs())")
         }
 
         // 4. a model change alone (same key file): in place, no restart
         do {
-            let mock = helper(), saved = Saved(), center = NotificationCenter()
-            let m = shell(mock, saved, defaults: scratchDefaults(), center: center)
+            let h = FakeHelper(key: "K=old", running: ["ses_t"]), saved = Saved(), center = NotificationCenter()
+            let m = keyShell(h, saved, center: center)
             for l in SessionTests.lines("chat") { m.client.feed(l) }
             saved.config = "or-luna"
             ModelSettingsSaved.post(center)
-            check(configs(mock) == ["or-luna"] && ends(mock).isEmpty, "a model change from any window: set_config only, no restart: \(configs(mock)) \(ends(mock))")
-            mock.requests = []
+            check(h.configs() == ["or-luna"] && h.ends().isEmpty, "a model change from any window: set_config only, no restart: \(h.configs()) \(h.ends())")
+            h.clear()
             m.syncSettings()
-            check(mock.requests.isEmpty, "the sheet's close after it: nothing again")
+            check(h.requests.isEmpty, "the sheet's close after it: nothing again")
         }
 
-        // 5. the in-place settings' dedupe (re-review E2): a language switch reported twice (the window's onChange, a
-        // notice) is sent once; switched back, once more
+        // 5. the in-place settings' dedupe (re-review E2): a language switch reported twice is sent once
         do {
-            let mock = helper(), saved = Saved()
+            let h = FakeHelper(key: "K=old", running: ["ses_t"])
             var lang = ResolvedLang.zhHans
-            let m = ShellModel(client: SessionClient(transport: mock), defaults: scratchDefaults(), config: { saved.config }, lang: { lang },
-                               keyFile: { saved.key }, work: { $0() }, deliver: { $0() })
+            let m = ShellModel(client: SessionClient(transport: h), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { lang },
+                               keyFile: { "K=old" }, work: { $0() }, deliver: { $0() })
             for l in SessionTests.lines("chat") { m.client.feed(l) }
+            m.syncSettings()
             func langs() -> [String] {
-                mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }.compactMap { $0["lang"] as? String }
+                h.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }.compactMap { $0["lang"] as? String }
             }
             lang = .en
             m.syncSettings(); m.syncSettings()
-            check(langs() == ["en"] && ends(mock).isEmpty, "a language switch told twice: one set_config, no restart: \(langs())")
+            check(langs() == ["en"] && h.ends().isEmpty, "a language switch told twice: one set_config, no restart: \(langs())")
             lang = .zhHans
             m.syncSettings(); m.syncSettings()
             check(langs() == ["en", "zh"], "switched back: one more: \(langs())")
@@ -1888,152 +1936,168 @@ enum ShellTests {
               "the window shown and its sheet closed compare through the shell, never call settingsChanged itself")
     }
 
-    /// #107 review at 0a5af02 (P2): a new key file counts as applied only once the helper took the ask of every session
-    /// process (the list read, each restart acknowledged). An ask that failed stays owed — asked again on the next
-    /// syncSettings and after a backoff with no user action, only the sessions still owed (one acknowledged is never
-    /// asked twice) — and survives a quit: the next launch asks the rest.
+    /// #107 review at 0a5af02 and at b3b8464 (P2): which processes still run on keys no longer saved is the helper's to
+    /// say (each process's digest at its start, the file's now). A lost or refused ask stays owed: asked again on the
+    /// next syncSettings and after a backoff with no user action, only the processes still on old keys; a quit, a
+    /// helper that is not read, a busy session (asked, ending at its next idle moment) and A→B→A all end with every
+    /// process on the keys saved now.
     static func keyAckTests() {
-        /// The mock helper, with the next N requests of an op unanswered (an IPC error, a helper busy restarting).
-        final class Flaky: SessionTransport {
-            let inner: Mock
-            var failNext: [String: Int] = [:]
-            /// The next N asks (session.end) of a session unanswered.
-            var failEnd: [String: Int] = [:]
-            init(_ inner: Mock) { self.inner = inner }
-            func request(_ body: [String: Any]) -> [String: Any]? {
-                let op = body["op"] as? String ?? ""
-                if let n = failNext[op], n > 0 { failNext[op] = n - 1; inner.requests.append(body); return nil }
-                if op == SessionClient.Op.end, let id = body["session_id"] as? String, let n = failEnd[id], n > 0 {
-                    failEnd[id] = n - 1; inner.requests.append(body); return nil
-                }
-                return inner.request(body)
-            }
-            func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
-                inner.stream(body, onLine: onLine, onIdle: onIdle)
-            }
-        }
-        /// The retry clock, run by hand.
-        final class Clock {
-            var waiting: [(delay: TimeInterval, f: () -> Void)] = []
-            func fire() { let w = waiting; waiting = []; for x in w { x.f() } }
-        }
-        final class Key { var text = "DEEPSEEK_API_KEY=old" }
-        func ends(_ mock: Mock) -> [String] {
-            mock.requests.filter { $0["op"] as? String == SessionClient.Op.end && $0["when_idle"] as? Bool == true }.compactMap { $0["session_id"] as? String }
-        }
-        func lists(_ mock: Mock) -> Int { mock.requests.filter { $0["op"] as? String == SessionClient.Op.list }.count }
-        func helper(open: [String] = []) -> Mock {
-            let mock = Mock()
-            mock.replies = [SessionClient.Op.send: ["ok": true], SessionClient.Op.end: ["ok": true, "deferred": true],
-                            SessionClient.Op.list: ["ok": true, "sessions": open.map { ["session_id": $0, "title": "", "open": true] }]]
-            return mock
-        }
-        func shell(_ t: SessionTransport, _ key: Key, defaults: UserDefaults, center: NotificationCenter?, clock: Clock?) -> ShellModel {
-            ShellModel(client: SessionClient(transport: t), defaults: defaults, config: { "ds-flash" }, lang: { .zhHans },
-                       keyFile: { key.text }, savedSettings: center,
-                       retryAfter: clock.map { c in { d, f in c.waiting.append((d, f)) } }, work: { $0() }, deliver: { $0() })
-        }
         func live(_ m: ShellModel) {
             for l in SessionTests.lines("chat") { m.client.feed(l) }                                 // ses_t
             m.client.feed(["kind": "session.task", "session_id": "ses_busy", "seq": 1, "msg_id": "m", "run_id": "r9", "raw": "x", "by": "slash"])
         }
 
-        // a restart unanswered: owed, retried by the clock (no user action) and by the next trigger; the one taken is not
-        // asked again; the key file applied only at the end
+        // an ask unanswered twice: the clock asks again (no user action), then the next trigger; the one taken not again
         do {
-            let mock = helper(), flaky = Flaky(mock), key = Key(), clock = Clock(), center = NotificationCenter()
-            let m = shell(flaky, key, defaults: scratchDefaults(), center: center, clock: clock)
+            let h = FakeHelper(key: "K=old", running: ["ses_busy", "ses_t"]), clock = Clock(), center = NotificationCenter()
+            let m = keyShell(h, center: center, clock: clock)
             live(m)
-            flaky.failEnd["ses_busy"] = 2
-            key.text = "DEEPSEEK_API_KEY=new"
+            m.syncSettings()
+            check(!m.keysPending && h.ends().isEmpty, "shown: nothing owed")
+            h.failEnd["ses_busy"] = 2
+            h.key = "K=new"
             ModelSettingsSaved.post(center)
-            check(ends(mock) == ["ses_busy", "ses_t"] && m.keysPending, "one ask unanswered: the key file not applied: \(ends(mock)) pending=\(m.keysPending)")
+            check(h.ends() == ["ses_busy", "ses_t"] && m.keysPending && h.runsOn("ses_busy") != "now",
+                  "one ask unanswered: still owed, its process on the old key: \(h.ends())")
             check(clock.waiting.map(\.delay) == [2], "a retry after 2 s: \(clock.waiting.map(\.delay))")
             clock.fire()
-            check(ends(mock) == ["ses_busy", "ses_t", "ses_busy"] && m.keysPending, "the retry asks only the one owed (unanswered again): \(ends(mock))")
+            check(h.ends() == ["ses_busy", "ses_t", "ses_busy"] && m.keysPending, "the retry asks only the one owed (unanswered again): \(h.ends())")
             check(clock.waiting.map(\.delay) == [4], "the next after 4 s: \(clock.waiting.map(\.delay))")
             m.syncSettings()                                   // (the window shown, a save, the sheet's close)
-            check(ends(mock) == ["ses_busy", "ses_t", "ses_busy", "ses_busy"] && !m.keysPending, "the next trigger: taken; the key file applied: \(ends(mock))")
+            check(h.ends() == ["ses_busy", "ses_t", "ses_busy", "ses_busy"] && !m.keysPending && h.allCurrent,
+                  "the next trigger: taken; nothing owed: \(h.ends())")
             clock.fire(); m.syncSettings(); ModelSettingsSaved.post(center)
-            check(ends(mock).count == 4 && clock.waiting.isEmpty, "then nothing asked again: \(ends(mock))")
-            // the restarted session's next message opens a new process (it reads the new key file)
-            mock.replies[SessionClient.Op.open] = ["ok": true, "session_id": "ses_busy"]
+            check(h.ends().count == 4 && clock.waiting.isEmpty, "then nothing asked again: \(h.ends())")
             m.client.feed(["kind": "helper.session_exit", "session_id": "ses_busy", "code": 0, "idle": true])
-            mock.requests = []
             m.selected = "ses_busy"; m.draft = "again"; m.submit()
-            check(mock.requests.contains { $0["op"] as? String == SessionClient.Op.open && $0["session_id"] as? String == "ses_busy" },
-                  "its next message: a new process, on the new key")
+            check(h.runsOn("ses_busy") == "now", "its next message: a new process, on the new key")
         }
 
-        // a refused ask counts as not taken too
+        // an ask answered with an error (the helper refused it): owed too
         do {
-            let mock = helper(), key = Key(), clock = Clock()
-            let m = shell(mock, key, defaults: scratchDefaults(), center: nil, clock: clock)
+            let h = FakeHelper(key: "K=old", running: ["ses_busy", "ses_t"]), clock = Clock()
+            let m = keyShell(h, clock: clock)
             live(m)
-            mock.queued[SessionClient.Op.end] = [["ok": false, "code": "busy_ending"]]
-            key.text = "DEEPSEEK_API_KEY=new"
             m.syncSettings()
-            check(m.keysPending && clock.waiting.count == 1, "a refused ask: owed")
+            h.refuseEnd["ses_busy"] = 1
+            h.key = "K=new"
+            m.syncSettings()
+            check(m.keysPending && clock.waiting.count == 1 && h.runsOn("ses_busy") != nil, "a refused ask: owed")
             clock.fire()
-            check(!m.keysPending && ends(mock) == ["ses_busy", "ses_t", "ses_busy"], "retried: applied: \(ends(mock))")
+            check(!m.keysPending && h.ends() == ["ses_busy", "ses_t", "ses_busy"] && h.allCurrent, "retried: none owed: \(h.ends())")
         }
 
-        // the list unread: the helper's sessions this client has not seen are not known — owed until it is read
+        // the list unread: the client's own live sessions asked (what they run on unknown); a process it has not seen is
+        // owed until the list is read
         do {
-            let mock = helper(open: ["ses_bg", "ses_t"]), flaky = Flaky(mock), key = Key(), clock = Clock()
-            let m = shell(flaky, key, defaults: scratchDefaults(), center: nil, clock: clock)
+            let h = FakeHelper(key: "K=old", running: ["ses_bg", "ses_t"]), clock = Clock()
+            let m = keyShell(h, clock: clock)
             for l in SessionTests.lines("chat") { m.client.feed(l) }
-            flaky.failNext[SessionClient.Op.list] = 1
-            key.text = "DEEPSEEK_API_KEY=new"
             m.syncSettings()
-            check(ends(mock) == ["ses_t"] && m.keysPending && clock.waiting.count == 1, "the list unread: the known one asked, not applied: \(ends(mock))")
+            h.failList = 2                                    // (the round's list, and its read after the asks)
+            h.key = "K=new"
+            m.syncSettings()
+            check(h.ends() == ["ses_t"] && m.keysPending && clock.waiting.count == 1, "the list unread: the known one asked, still owed: \(h.ends())")
             clock.fire()
-            check(ends(mock) == ["ses_t", "ses_bg"] && !m.keysPending && lists(mock) == 2, "retried: the helper's other session asked, ses_t not again; applied: \(ends(mock))")
+            check(h.ends() == ["ses_t", "ses_bg"] && !m.keysPending && h.allCurrent, "retried: the helper's other process asked, ses_t not again: \(h.ends())")
         }
 
-        // quit while owed: the next launch asks the rest (the ones taken are not asked again)
+        // quit while owed: the next launch reads the helper and asks what is still on the old keys
         do {
-            let defaults = scratchDefaults(), key = Key()
-            let mock1 = helper(), flaky = Flaky(mock1)
+            let h = FakeHelper(key: "K=old", running: ["ses_busy", "ses_t"])
             do {
-                let m1 = shell(flaky, key, defaults: defaults, center: nil, clock: Clock())
+                let m1 = keyShell(h)
                 live(m1)
-                flaky.failEnd["ses_busy"] = 1
-                key.text = "DEEPSEEK_API_KEY=new"
                 m1.syncSettings()
-                check(ends(mock1) == ["ses_busy", "ses_t"] && m1.keysPending, "before the quit: ses_busy owed")
+                h.failEnd["ses_busy"] = 1
+                h.key = "K=new"
+                m1.syncSettings()
+                check(h.ends() == ["ses_busy", "ses_t"] && m1.keysPending, "before the quit: ses_busy owed")
                 m1.stopWatching()
             }
-            let mock2 = helper(open: ["ses_busy", "ses_t"])
-            let m2 = shell(mock2, key, defaults: defaults, center: nil, clock: Clock())
-            check(m2.keysPending, "the next launch: still not applied")
+            h.clear()
+            let m2 = keyShell(h)
+            check(m2.keysPending, "the next launch: owed until read")
             m2.syncSettings()
-            check(ends(mock2) == ["ses_busy"] && !m2.keysPending, "it asks only the one owed, then applied: \(ends(mock2))")
+            check(h.ends() == ["ses_busy"] && !m2.keysPending && h.allCurrent, "it asks only the one still on the old key: \(h.ends())")
         }
 
-        // asked while a round is under way (a notice during the window's appear): one more round after it, never two at once
+        // A→B→A (the review's case): B saved, one ask lost, the other session restarted on B; back to A: the one on B is
+        // asked, the one still on A is not
+        do {
+            let h = FakeHelper(key: "K=A", running: ["ses_busy", "ses_t"]), clock = Clock()
+            let m = keyShell(h, clock: clock)
+            live(m)
+            m.syncSettings()
+            check(!m.keysPending, "A applied")
+            h.failEnd["ses_t"] = 1
+            h.key = "K=B"
+            m.syncSettings()
+            check(h.ends() == ["ses_busy", "ses_t"] && m.keysPending, "B: ses_busy taken, ses_t lost: \(h.ends())")
+            h.spawn("ses_busy")                                // (its next message: a process on B)
+            h.key = "K=A"
+            h.clear()
+            m.syncSettings()
+            check(h.ends() == ["ses_busy"] && h.allCurrent && !m.keysPending, "back to A: the process on B asked, the one on A not: \(h.ends())")
+        }
+
+        // a busy session: its ask deferred (ending at its next idle moment) — not asked again, owed until it goes
+        do {
+            let h = FakeHelper(key: "K=old", running: ["ses_busy"]), clock = Clock()
+            let m = keyShell(h, clock: clock)
+            m.syncSettings()
+            h.busy = ["ses_busy"]
+            h.key = "K=new"
+            m.syncSettings()
+            check(h.ends() == ["ses_busy"] && m.keysPending && clock.waiting.count == 1, "busy: asked once, owed while it runs")
+            clock.fire()
+            check(h.ends() == ["ses_busy"] && m.keysPending, "the retry: not asked again (ending)")
+            h.idle("ses_busy")
+            clock.fire()
+            check(!m.keysPending && h.ends() == ["ses_busy"] && clock.waiting.isEmpty, "gone at its idle moment: none owed")
+        }
+
+        // an older helper (no digests): its open sessions asked once per key file; not again for the same file
+        do {
+            let h = FakeHelper(key: "K=old", running: ["ses_o"]), clock = Clock()
+            h.old = true
+            let m = keyShell(h, clock: clock)
+            h.key = "K=new"
+            m.syncSettings()
+            check(h.ends() == ["ses_o"] && !m.keysPending, "unknown: asked once")
+            h.spawn("ses_o")
+            m.syncSettings()
+            h.key = "K=newer"
+            m.syncSettings()
+            check(h.ends() == ["ses_o", "ses_o"], "again only for a new key file: \(h.ends())")
+        }
+
+        // asked while a round is under way: no session asked twice, never two rounds at once, the round's end not lost
         do {
             final class Slow: SessionTransport {
                 let lock = NSLock()
                 var ends: [String] = []
                 var inEnd = 0, most = 0
+                var gone = false
                 let gate = DispatchSemaphore(value: 0)
                 var holdFirst = true
                 func request(_ body: [String: Any]) -> [String: Any]? {
                     let op = body["op"] as? String ?? ""
-                    if op == SessionClient.Op.list { return ["ok": true, "sessions": [["session_id": "ses_q", "title": "", "open": true]]] }
+                    if op == SessionClient.Op.list {
+                        lock.lock(); defer { lock.unlock() }
+                        return ["ok": true, "keys": "now", "sessions": gone ? [] : [["session_id": "ses_q", "title": "", "open": true, "keys": "old"]]]
+                    }
                     guard op == SessionClient.Op.end else { return ["ok": true] }
                     lock.lock(); inEnd += 1; most = max(most, inEnd); ends.append(body["session_id"] as? String ?? ""); let hold = holdFirst; holdFirst = false; lock.unlock()
                     if hold { gate.wait() }
-                    lock.lock(); inEnd -= 1; lock.unlock()
-                    return ["ok": true, "deferred": true]
+                    lock.lock(); inEnd -= 1; gone = true; lock.unlock()
+                    return ["ok": true]
                 }
                 func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
             }
-            let slow = Slow(), key = Key()
+            let slow = Slow()
             let m = ShellModel(client: SessionClient(transport: slow), defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
-                               keyFile: { key.text }, work: { f in DispatchQueue.global().async(execute: f) }, deliver: { $0() })
-            key.text = "DEEPSEEK_API_KEY=new"
+                               keyFile: { "K" }, work: { f in DispatchQueue.global().async(execute: f) }, deliver: { $0() })
             let done = DispatchGroup()
             done.enter(); DispatchQueue.global().async { m.syncSettings(); done.leave() }
             usleep(100_000)
@@ -2044,8 +2108,34 @@ enum ShellTests {
             var ok = false
             for _ in 0..<100 { if !m.keysPending { ok = true; break }; usleep(20_000) }
             slow.lock.lock(); let e = slow.ends, most = slow.most; slow.lock.unlock()
-            check(ok && e == ["ses_q"] && most == 1, "asked meanwhile: no second ask of a session taken, never two at once: \(e) most=\(most)")
+            check(ok && e == ["ses_q"] && most == 1, "asked meanwhile: no second ask, never two at once: \(e) most=\(most)")
         }
+
+        // each ask carries the settings as they are when it goes (a newer save's never overwritten by an older round's)
+        do {
+            let h = FakeHelper(key: "K=old", running: ["ses_t"]), saved = Saved()
+            let m = keyShell(h, saved)
+            for l in SessionTests.lines("chat") { m.client.feed(l) }
+            m.syncSettings()
+            h.key = "K=new"
+            saved.config = "or-luna"
+            m.syncSettings()
+            m.client.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 0, "idle": true])
+            h.clear()
+            m.selected = "ses_t"; m.draft = "again"; m.submit()
+            let reopen = h.requests.first { $0["op"] as? String == SessionClient.Op.open }
+            check(reopen?["config"] as? String == "or-luna", "the restarted session reopens with the settings now: \(String(describing: reopen?["config"]))")
+        }
+
+        // the helper records each process's digest at its start (before its environment is read) and reports both
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let host = (try? String(contentsOf: dir.appendingPathComponent("Helper/SessionHost.swift"), encoding: .utf8)) ?? ""
+        let spawn = host.components(separatedBy: "private static func spawn(").dropFirst().first ?? ""
+        check(spawn.range(of: "let keys = ModelKeys.digest(env: HarnessRun.modelEnv())").map { spawn[..<$0.lowerBound].contains("p.environment") == false } == true
+              && spawn.contains("s.keysDigest = keys"), "spawn: the digest read before the environment, kept with the process")
+        let list = host.components(separatedBy: "static func list() -> [String: Any] {").dropFirst().first ?? ""
+        check(list.contains("\"keys\": keysNow") && list.contains("i[\"keys\"] = k") && list.contains("i[\"ending\"] = r.ending"),
+              "sessions.list: the file's digest now, each open process's, and whether it is ending")
     }
 
     // MARK: words

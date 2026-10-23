@@ -192,9 +192,13 @@ struct SessionSummary: Equatable {
     var updatedAt: Double?
     var lastMessage: (role: String, text: String)?
     /// Its process runs in the helper now (sessions.list's `open`): one started before this app knew it, too — a new
-    /// key must reach it as well (ShellModel.settingsChanged, #107 review at 5999bd9). Not part of `==` (the list's rows
-    /// do not show it).
+    /// key must reach it as well (ShellModel.askNewProcesses, #107 review at 5999bd9). Not part of `==` (the list's
+    /// rows do not show these three).
     var open = false
+    /// The models.env digest its process started with (ModelKeys), when the helper says (nil: an older helper).
+    var keys: String?
+    /// A restart of its process is asked already (at its next idle moment).
+    var ending = false
 
     static func == (a: SessionSummary, b: SessionSummary) -> Bool {
         a.sessionId == b.sessionId && a.title == b.title && a.updatedAt == b.updatedAt
@@ -211,6 +215,8 @@ struct SessionSummary: Equatable {
         self.init(sessionId: id, title: o["title"] as? String ?? "", updatedAt: (o["updated_at"] as? NSNumber)?.doubleValue,
                   lastMessage: last.map { ($0["role"] as? String ?? "", $0["text"] as? String ?? "") })
         self.open = o["open"] as? Bool ?? false
+        self.keys = o["keys"] as? String
+        self.ending = o["ending"] as? Bool ?? false
     }
 }
 
@@ -403,9 +409,13 @@ final class SessionClient {
 
     // MARK: ops
 
-    func list() -> [SessionSummary]? {
-        guard let r = transport.request(Request.list()), r["ok"] as? Bool != false else { return nil }
-        return (r["sessions"] as? [[String: Any]])?.compactMap(SessionSummary.init)
+    func list() -> [SessionSummary]? { listWithKeys()?.sessions }
+
+    /// sessions.list, with the models.env digest now as the helper reads it (its `keys`; nil from an older helper).
+    func listWithKeys() -> (sessions: [SessionSummary], keysNow: String?)? {
+        guard let r = transport.request(Request.list()), r["ok"] as? Bool != false,
+              let items = r["sessions"] as? [[String: Any]] else { return nil }
+        return (items.compactMap(SessionSummary.init), r["keys"] as? String)
     }
 
     /// Opens a session (a new one when `sessionId` is nil); its id, or nil when the helper could not.

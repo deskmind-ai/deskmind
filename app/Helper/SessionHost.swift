@@ -20,7 +20,10 @@
 //                                        then its folder (history, task runs) and its stderr log are removed. Refused
 //                                        (`task_running`) while a task of it runs, and (`busy`) while it is opening or
 //                                        a process of it from an earlier helper still holds its lock
-//   sessions.list                        `harness.mjs sessions list`, each marked `open` when its process runs here
+//   sessions.list                        `harness.mjs sessions list`, each marked `open` when its process runs here,
+//                                        with `keys` (the models.env digest that process started with, ModelKeys) and
+//                                        `ending` (a restart asked, at its next idle moment); `keys` at the top: the
+//                                        file's digest now — a process whose `keys` differ runs on keys no longer saved
 //   models.off {off}                     cloud models off (the app's engine setting, from any window): this helper
 //                                        holds it for every session it runs, whichever client — persisted in its
 //                                        folder (`models-off`). While off: every running session process is written
@@ -218,6 +221,9 @@ enum SessionHost {
         var closedIdle = false
         /// A restart the app asked for (session.end when_idle): asked again at its next idle moment.
         var endWhenIdle = false
+        /// The model keys file's digest as this process read it when it started (ModelKeys; sessions.list's `keys`):
+        /// the app asks a process for a restart while this is not the file's now.
+        var keysDigest: String?
         // the reader thread's own: the live card's view of each live task
         var cards: [String: HarnessEvents.State] = [:]
         var cardRun: String?
@@ -389,6 +395,9 @@ enum SessionHost {
         p.executableURL = setup.node
         p.arguments = [setup.bundle.path, "session", "--dir", setup.dir.path]
         if let cwd = setup.cwd { p.currentDirectoryURL = cwd }
+        // the keys file's digest read before the environment is: a save between the two reads leaves an older digest
+        // (one restart more), never a newer one over the old keys
+        let keys = ModelKeys.digest(env: HarnessRun.modelEnv())
         p.environment = setup.environment()
         let inPipe = Pipe(), outPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = err ?? FileHandle.nullDevice
@@ -396,6 +405,7 @@ enum SessionHost {
         try? err?.close()
         let s = Session(id: id, process: p, input: inPipe.fileHandleForWriting)
         s.liveView = liveView
+        s.keysDigest = keys
         // The header, then a replay for whoever watches: the stored events after the earliest cursor among them. Written
         // under the lock, so a connection that starts watching meanwhile (sessions.watch) writes its attach after the
         // header: a first line with a type is no header, and the session would refuse to start.
@@ -619,11 +629,21 @@ enum SessionHost {
         guard let items = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
             return ["ok": false, "error": "no list from the harness (exit \(p.terminationStatus))"]
         }
+        // (the file now, read before the processes' digests: a save meanwhile shows as owed, never as applied)
+        let keysNow = ModelKeys.digest(env: HarnessRun.modelEnv())
         lock.lock()
-        let running = Set(sessions.filter { $0.value.started && !$0.value.closing }.keys)
+        var running: [String: (keys: String?, ending: Bool)] = [:]
+        for (id, s) in sessions where s.started && !s.closing { running[id] = (s.keysDigest, s.endWhenIdle) }
         lock.unlock()
-        return ["ok": true, "sessions": items.map { i -> [String: Any] in
-            var i = i; i["open"] = running.contains(i["session_id"] as? String ?? ""); return i
+        return ["ok": true, "keys": keysNow, "sessions": items.map { i -> [String: Any] in
+            var i = i
+            let r = running[i["session_id"] as? String ?? ""]
+            i["open"] = r != nil
+            if let r {
+                if let k = r.keys { i["keys"] = k }
+                i["ending"] = r.ending
+            }
+            return i
         }]
     }
 
