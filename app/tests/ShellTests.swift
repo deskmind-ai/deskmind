@@ -73,6 +73,7 @@ enum ShellTests {
         DecisionTests.group("shell.messageNeverLostTests"); messageNeverLostTests()
         DecisionTests.group("shell.settingsConvergeTests"); settingsConvergeTests()
         DecisionTests.group("shell.evidenceTests"); evidenceTests()
+        DecisionTests.group("shell.dirtyFlagTests"); dirtyFlagTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -919,13 +920,16 @@ enum ShellTests {
         check(mock.requests.first?["op"] as? String == SessionClient.Op.open && mock.requests.first?["config"] == nil
               && (mock.requests.dropFirst().first?["line"] as? [String: Any])?["config"] is NSNull,
               "an automatic reopen after an exit: the same: \(mock.requests)")
-        // back on: the open carries the configuration (the settings stored) again, no set_config needed
+        // back on: the open carries the configuration (the settings stored) again; the set_config after it (a new process:
+        // its settings sent again — the accepted cost) is the same
         c.adoptSettings(config: "ds-flash", lang: "zh")
         c.modelOff = false
         c.feed(["kind": "helper.session_exit", "session_id": "ses_t", "code": 1])
         mock.requests = []
         _ = c.reopenIfExited("ses_t", onlyOpenedHere: true)
-        check(mock.requests.count == 1 && mock.requests[0]["config"] as? String == "ds-flash", "model on: opened with its configuration: \(mock.requests)")
+        check(mock.requests.first?["config"] as? String == "ds-flash"
+              && mock.requests.dropFirst().allSatisfy { ($0["line"] as? [String: Any])?["config"] as? String == "ds-flash" },
+              "model on: opened with its configuration: \(mock.requests)")
     }
 
     /// Final round (4): set_config is never taken as applied: a `busy` refusal (it took effect, was not stored) is sent
@@ -1227,12 +1231,12 @@ enum ShellTests {
         c3.modelOff = true
         c3.setConfig("ses_c", config: "ds-flash", lang: "zh")
         check((mock3.requests.last?["line"] as? [String: Any])?["config"] is NSNull, "a configuration decided before the switch turned off: sent as null")
-        // acked: applied; a second reconcile sends nothing
+        // acked; a second reconcile (a trigger) may send again — sending is idempotent — but only null
         let cid = (mock3.requests.last?["line"] as? [String: Any])?["client_id"] as? String ?? ""
         c3.feed(["kind": "session.config", "session_id": "ses_c", "seq": 1, "config": NSNull(), "lang": "zh", "by": "set_config", "client_id": cid])
         mock3.requests = []
         c3.reconcile(config: "ds-flash", lang: "zh", off: true)
-        check(nulls(mock3) == 0, "acked: not sent again")
+        check(!mock3.requests.contains { ($0["line"] as? [String: Any])?["config"] is String }, "acked: again at most null, never a configuration")
     }
 
     /// Re-review of cb01397: the helper's own answers. `busy_ending` (it is deciding whether the session ends, the process
@@ -1680,12 +1684,12 @@ enum ShellTests {
         check(types.first == "set_config" && lines.first?["config"] is NSNull && types.contains("stop")
               && !types.contains { ["say", "cua", "retry", "steer", "queue_send_now"].contains($0) },
               "found running with cloud off: set_config null first, then Stop, nothing that needs the model: \(types)")
-        // reconciled once: the same running list again sends nothing more
+        // the same running list again (a trigger): sent again at most as null — sending is idempotent — never a configuration
         mock.requests = []
         mock.streamLines = [["kind": "helper.watching", "open": ["ses_k"]]]
         _ = m.client.watch()
         m.client.reconciling.wait()
-        check(!mock.requests.contains { ($0["line"] as? [String: Any])?["type"] as? String == "set_config" }, "idempotent: no second null")
+        check(!mock.requests.contains { ($0["line"] as? [String: Any])?["config"] is String }, "idempotent: no configuration while off")
     }
 
     /// External review of 473fdac (P2): a reconnect's backfill reads a session's log; meanwhile the user reopens it and
@@ -1808,7 +1812,8 @@ enum ShellTests {
         old.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_o"]]
         let o = model(old)
         o.select("ses_o")
-        check(old.requests.map { $0["op"] as? String ?? "" } == [SessionClient.Op.history, SessionClient.Op.open], "no history op: opened instead")
+        check(old.requests.filter { !(($0["line"] as? [String: Any])?["type"] as? String == "set_config") }.map { $0["op"] as? String ?? "" }
+              == [SessionClient.Op.history, SessionClient.Op.open], "no history op: opened instead")
         // a task left running by a process that is gone: interrupted, not running, not done
         let cut = Mock()
         cut.replies = [SessionClient.Op.history: ["ok": true, "open": false, "last_seq": 3, "lines": [
@@ -2510,6 +2515,8 @@ enum ShellTests {
         var chaos: (() -> Int)?
         /// Inside a models.off request, before it is applied.
         var duringModelsOff: (() -> Void)?
+        /// Configurations that reached it while it held cloud models off (must stay 0).
+        var offViolations = 0
         private func emit(_ id: String, _ l: [String: Any], stored s: Bool) {
             var l = l; l["session_id"] = id
             if s { seq[id, default: 0] += 1; l["seq"] = seq[id]! }
@@ -2559,7 +2566,7 @@ enum ShellTests {
                     lock.unlock(); hook?(); lock.lock()
                     guard procs[id] != nil else { lock.unlock(); return ["ok": false, "code": "not_open"] }
                     let cfg = line["config"] as? String, lang = line["lang"] as? String ?? procs[id]?.lang
-                    if off && cfg != nil { lock.unlock(); return ["ok": false, "code": "no_model"] }
+                    if off && cfg != nil { offViolations += 1; lock.unlock(); return ["ok": false, "code": "no_model"] }
                     let mode = chaos?() ?? 0
                     if mode == 2 { lock.unlock(); return nil }
                     procs[id] = (cfg, lang)
@@ -2697,11 +2704,15 @@ enum ShellTests {
             r.store.save("A2", .zhHans)
             let held = DispatchSemaphore(value: 0), go = DispatchSemaphore(value: 0)
             r.h.duringConfig = { [unowned r] in r.h.duringConfig = nil; held.signal(); go.wait() }
-            DispatchQueue.global().async { r.m.client.convergeAll() }     // (A2 on its way, held in the helper)
+            let sender = DispatchGroup()
+            sender.enter()
+            DispatchQueue.global().async { r.m.client.convergeAll(); sender.leave() }     // (A2 on its way, held in the helper)
             let wasHeld = held.wait(timeout: .now() + 5) == .success
             check(wasHeld, "(the set_config of A2 went, and is held)")
             r.save("B", .en)                                              // (saved and told while it is held)
-            DispatchQueue.global().async { go.signal() }
+            r.settle()                                                    // (its converge: one in flight — the sender's to redo)
+            go.signal()
+            _ = sender.wait(timeout: .now() + 10)                         // (the held send answered: the sender sends B)
             r.settle()
             check(r.converged(), "a set_config held while B is saved: the process ends on B: \(r.h.live)")
         }
@@ -2713,7 +2724,7 @@ enum ShellTests {
         var rng = SplitMix(seed: 107)
         let rngLock = NSLock()
         func roll(_ n: UInt64) -> UInt64 { rngLock.lock(); defer { rngLock.unlock() }; return rng.next() % n }
-        var failures = 0
+        var failures = 0, offViolations = 0
         let values: [(String, ResolvedLang)] = [("A", .zhHans), ("B", .en), ("C", .zhHans), ("D", .en)]
         for round in 0..<150 {
             let r = Rig()
@@ -2751,8 +2762,10 @@ enum ShellTests {
                 if ok && !r.converged() { ok = false; why = "after the reopen" }
             }
             if !ok { failures += 1; if failures == 1 { print("  (round \(round): \(why); live \(r.h.live), saved \(r.store.expected))") } }
+            r.h.lock.lock(); offViolations += r.h.offViolations; r.h.lock.unlock()
         }
         check(failures == 0, "150 random interleavings: every live process on the last saved, and a next one opens with it (\(failures) not)")
+        check(offViolations == 0, "150 random interleavings: no configuration ever reached the helper while it held cloud models off (\(offViolations))")
     }
 
     /// #107 delta review of a9117a7: what a session applies is held only from evidence about its current process, and
@@ -2871,6 +2884,123 @@ enum ShellTests {
             c.feed(["kind": "session.start", "session_id": "s", "resumed": true, "last_seq": 1])    // (opened elsewhere)
             c.reconciling.wait()
             check(configs(mock).last?["config"] as? String == "B", "a start of a known session (opened elsewhere): converged to B: \(configs(mock))")
+        }
+    }
+
+    /// #107 review at 00df2f8: the four ways racing evidence left a process on old settings, each now a deterministic
+    /// test. The oracle is what a one-process helper below runs (every set_config it is written, busy or not, takes
+    /// effect), never the client's own bookkeeping.
+    final class OneProcess: SessionTransport {
+        let lock = NSLock()
+        var value: (config: String?, lang: String?) = (nil, nil)
+        var sent: [[String: Any]] = []
+        /// Per set_config, by its number (1, 2, …): nil = no answer (not applied).
+        var noAnswer: Set<Int> = []
+        func request(_ body: [String: Any]) -> [String: Any]? {
+            lock.lock(); defer { lock.unlock() }
+            guard let l = body["line"] as? [String: Any], l["type"] as? String == "set_config" else { return ["ok": true] }
+            sent.append(l)
+            if noAnswer.contains(sent.count) { return nil }
+            value = (l["config"] as? String, l["lang"] as? String)
+            return ["ok": true]
+        }
+        func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+        var runs: (config: String?, lang: String?) { lock.lock(); defer { lock.unlock() }; return value }
+        var lastId: String { lock.lock(); defer { lock.unlock() }; return sent.last?["client_id"] as? String ?? "" }
+        var sentConfigs: [String] { lock.lock(); defer { lock.unlock() }; return sent.map { ($0["config"] as? String) ?? "null" } }
+    }
+
+    static func dirtyFlagTests() {
+        func settle(_ c: SessionClient) {
+            for _ in 0..<300 { c.reconciling.wait(); c.modelsSync.settle(timeout: 1); c.reconciling.wait(); if c.retriesPending == 0 { return }; usleep(5_000) }
+        }
+        // P1: a null held past a gap, applied when the gap fills (the switch on): the configuration is sent
+        do {
+            let t = OneProcess()
+            let c = SessionClient(transport: t)
+            c.retryBase = 0.002
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
+            settle(c)
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 3, "config": NSNull(), "lang": "zh", "by": "set_config"])  // (held)
+            settle(c)
+            t.lock.lock(); t.value = (nil, "zh"); t.lock.unlock()                // (the helper nulled it: what @3 says)
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 2, "config": "A", "lang": "zh", "by": "set_config", "client_id": "other"])
+            settle(c)
+            check(t.runs.config == "A", "P1: a held null applied when its gap fills: the configuration sent again (\(t.sentConfigs))")
+        }
+        // P3: busy on the first send; C saved; the second send gets no answer — retried until it is taken
+        do {
+            let t = OneProcess()
+            t.noAnswer = [3]
+            let c = SessionClient(transport: t)
+            c.retryBase = 0.002
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            settle(c)                                                           // (1: A)
+            c.adoptSettings(config: "B", lang: "zh"); c.convergeAll()            // (2: B, answered busy below)
+            let cid = t.lastId
+            c.adoptSettings(config: "C", lang: "zh")                             // (C saved)
+            c.feed(["kind": "session.error", "session_id": "s", "code": "busy", "control": "set_config", "client_id": cid, "text": "busy"])
+            settle(c)                                                           // (3: C, no answer; then again)
+            check(t.runs.config == "C" && c.retriesPending == 0, "P3: busy, then a send with no answer: retried until C is taken (\(t.sentConfigs))")
+        }
+        // P4: stored A; B saved and a reopen with B; A saved back while the open is out, its start heard before the reply;
+        // then the harness's by:open B — the process ends on A
+        do {
+            final class Reopen: SessionTransport {
+                let p = OneProcess()
+                var during: (() -> Void)?
+                func request(_ body: [String: Any]) -> [String: Any]? {
+                    if body["op"] as? String == SessionClient.Op.open {
+                        p.lock.lock(); p.value = (body["config"] as? String, body["lang"] as? String); p.lock.unlock()
+                        let d = during; during = nil; d?()
+                        return ["ok": true, "session_id": "s", "last_seq": 1]
+                    }
+                    return p.request(body)
+                }
+                func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+            }
+            let t = Reopen()
+            let c = SessionClient(transport: t)
+            c.retryBase = 0.002
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
+            c.feed(["kind": "helper.session_exit", "session_id": "s", "code": 0])
+            settle(c)
+            c.adoptSettings(config: "B", lang: "zh")
+            t.during = {
+                c.adoptSettings(config: "A", lang: "zh"); c.convergeAll()
+                c.feed(["kind": "session.start", "session_id": "s", "resumed": true, "last_seq": 1])
+                c.reconciling.wait()
+            }
+            _ = c.open(sessionId: "s")
+            settle(c)
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 2, "config": "B", "lang": "zh", "by": "open"])
+            settle(c)
+            check(t.p.runs.config == "A", "P4: opened with B, A saved back during the open, its start before the reply: the process on A (\(t.p.sentConfigs))")
+        }
+        // the 150 interleavings' trace (bug 3): cloud off, (null, en) sent and answered busy (it runs en); a late start; the
+        // open-time (null, zh) row; the busy reply; zh saved — the process ends on (null, zh)
+        do {
+            let t = OneProcess()
+            let c = SessionClient(transport: t)
+            c.retryBase = 0.002
+            c.modelOff = true
+            c.adoptSettings(config: "A", lang: "en")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            settle(c)                                                           // ((null, en) sent: it runs en)
+            let cid = t.lastId
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])   // (its start, late)
+            settle(c)
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": NSNull(), "lang": "zh", "by": "set_config"])
+            c.feed(["kind": "session.error", "session_id": "s", "code": "busy", "control": "set_config", "client_id": cid, "text": "busy"])
+            settle(c)
+            c.adoptSettings(config: "A", lang: "zh"); c.convergeAll()            // (zh saved)
+            settle(c)
+            check(t.runs.config == nil && t.runs.lang == "zh", "bug 3: a late start, an old row, a busy reply, zh saved: the process on (null, zh) (\(t.runs))")
         }
     }
 

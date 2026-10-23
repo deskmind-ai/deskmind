@@ -76,6 +76,21 @@ final class ModelsOffSync {
     init(transport: SessionTransport, current: @escaping () -> Bool) { self.transport = transport; self.current = current }
     private var acked_: [() -> Void] = []
     private var callbacks = 0
+    /// Configurations on their way to a session, let go while no switch was on its way (`beginConfigSend`): a models.off
+    /// waits for them, so none reaches the helper after it (#107 review at 00df2f8: one did, between a converge's check
+    /// and its send).
+    private var configSends = 0
+    /// What the helper last acked: it holds cloud models off (nil: not heard yet).
+    private var helperOff: Bool?
+    /// A configuration may go now: no switch on its way, and the helper not known to hold models off (the app's switch
+    /// may already read on before its push has begun) — counted in the same step, so a push begun after it waits.
+    func beginConfigSend() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if pending || helperOff == true { return false }
+        configSends += 1
+        return true
+    }
+    func endConfigSend() { lock.lock(); configSends -= 1; lock.unlock() }
     /// Called after every ack (on this sync's queue: the callee must not wait for it — SessionClient queues a converge).
     func onAck(_ f: @escaping () -> Void) { lock.lock(); acked_.append(f); lock.unlock() }
 
@@ -88,12 +103,16 @@ final class ModelsOffSync {
     private func attempt(_ g: Int, delay: Double) {
         lock.lock(); let latest = g == gen; lock.unlock()
         guard latest else { return }                         // (a newer push carries on)
+        // (configurations let go before this push began reach the helper first; bounded)
+        let until = Date().addingTimeInterval(10)
+        while Date() < until { lock.lock(); let out = configSends; lock.unlock(); if out == 0 { break }; usleep(2_000) }
         let off = current()
         let r = transport.request(SessionClient.Request.modelsOff(off))
         // a helper without the op holds no bit: nothing to keep equal
         let acked = r?["ok"] as? Bool == true || r?["error"] as? String == "unknown op"
         if acked && current() == off {
             lock.lock()
+            helperOff = r?["ok"] as? Bool == true ? off : nil
             var run: [() -> Void] = []
             if g == gen { pending = false; run = waiting; waiting = [] }
             let observers = acked_
@@ -277,35 +296,35 @@ final class SessionClient {
     private let transport: SessionTransport
     private let lock = NSLock()
     private var states: [String: SessionState] = [:]
-    // MARK: settings — desired, applied, converge
+    // MARK: settings — desired, dirty, one send in flight
     //
-    // The invariant (#107 review at 00969e8, the source-of-truth redesign): for every live session process, the
-    // configuration and language it has applied converge to the settings stored now; no stale value is ever carried by
-    // async work. Three parts:
+    // Sending set_config is idempotent, so the client does not track what a process "has" (#107 review at 00df2f8: three
+    // rounds of bugs came from deciding that out of racing evidence — open replies, starts, replayed and held rows).
     //
     // - desired(): the settings as stored now — read where the saves wrote them (`settingsSource`: the app's
     //   UserDefaults / CloudModelSettings, through the shell), with the models-off bit (no model: config null). Never
     //   captured into a closure or passed through a queue: async work only says "converge now", and reads it then.
-    // - appliedSettings[id]: what that session's process has applied, from evidence only — its stream's session.config (the
-    //   harness stores one for every set_config it takes and for an open whose settings differ from the last stored),
-    //   the open line it started with (when no set_config went since that open), a `busy` refusal (applied, not
-    //   stored). Unknown: not equal.
-    // - converge(id): idempotent. A live process whose applied is not desired is sent desired — one set_config per
-    //   session on the wire at a time, desired read when it goes — and its evidence recorded as it comes. A failed send
-    //   is tried again after a backoff. A next process opens with desired(), read at the open: nothing per session is
-    //   remembered for it.
+    // - Per session: `dirty`, at most one send in flight {its generation}, one retry timer. `generation` goes up at every
+    //   process start (an open reply that started one, a session.start).
     //
-    // converge runs at every point where a process may have stale settings: the open reply, session.start, a session's
-    // first line here, a settings save (ShellModel.settingsChanged → convergeAll), a watch reconnect (helper.watching's
-    // running sessions), a no_model refusal and a models-off ack (convergeAll), and the backoff after a failed send.
+    // The invariant: after the last trigger for a session, a set_config carrying desired() — read when it was sent —
+    // got ok (or busy) from the current process (same generation). Until then the session is dirty or has a send in
+    // flight, and is retried with backoff until it exits. A next process opens with desired(), read at its open.
     //
-    // | state                            | converge                                                                     |
-    // |----------------------------------|------------------------------------------------------------------------------|
-    // | opening (request out, no start)  | nothing: the open reply and the start converge it                            |
-    // | started, no open reply yet       | sends desired unless its session.config says it has it                       |
-    // | live                             | sends desired when applied ≠ desired (unknown counts as ≠)                    |
-    // | ending (a restart asked)         | as live: it runs until it ends                                               |
-    // | exited                           | nothing: its next process opens with desired(), read at the open             |
+    // Triggers (each marks the session dirty and converges): a save (convergeAll), a process start (an open reply that
+    // started one, session.start), a session's first line here, the helper's watch (re)connect, a no_model refusal, the
+    // switch's ack, an in-order applied session.config that is not desired (the reducer's settings after it took the
+    // row: a held row counts once its gap fills), a send that failed. Our own send's echo equals desired: no loop.
+    //
+    // | state \ trigger         | trigger                          | own reply, same generation | old generation      | failed       | exit/delete |
+    // |-------------------------|----------------------------------|----------------------------|---------------------|--------------|-------------|
+    // | idle                    | dirty; send desired → in flight  | —                          | —                   | —            | clear all   |
+    // | dirty, none in flight   | send desired (switch pending:    | —                          | —                   | —            | clear all   |
+    // |                         |   null only, until its ack)      |                            |                     |              |             |
+    // | in flight               | dirty (the reply re-checks)      | clear; dirty → send again  | drop; send again    | dirty; retry | clear all   |
+    // | exited / not live       | nothing (next open: desired())   | —                          | —                   | —            | —           |
+    //
+    // Accepted cost: one extra set_config after each open or start, and one per triggering row.
 
     /// Where the settings are read from, now (the app's store, through the shell). nil: `stored` (a client in a test).
     var settingsSource: (() -> (config: String?, lang: String?))?
@@ -363,25 +382,14 @@ final class SessionClient {
         // at most once per push: while one is under way, it carries this too
         modelsSync.pushOnce { [weak self] in self?.convergeAllLater() }
     }
-    /// What each session's process has applied, from evidence (see "settings" above). Absent: unknown. Written only
-    /// through `setApplied` (the lock held), which counts each write (`evidenceSeq`): a send's reply records its value only
-    /// if no other evidence came, and no new process started, since it went (#107 delta review of a9117a7).
-    private var appliedSettings: [String: (config: String?, lang: String?)] = [:]
-    private var evidenceSeq: [String: Int] = [:]
-    private func setApplied(_ id: String, _ value: (config: String?, lang: String?)?) {
-        appliedSettings[id] = value
-        evidenceSeq[id, default: 0] += 1
-    }
+    /// Sessions whose settings must be sent (see "settings" above).
+    private var dirty: Set<String> = []
+    /// The one set_config in flight per session: the generation it went to.
+    private var inFlight: [String: Int] = [:]
+    /// The next send's attempt (2 after a first `busy`: one more send to get it stored).
+    private var nextAttempt: [String: Int] = [:]
     /// Sessions with a converge retry waiting (one chain per session).
     private var retryScheduled: Set<String> = []
-    /// Each session's last stored settings (its stream's session.config): what a process started with no settings on its
-    /// open line applies (the harness takes the last stored).
-    private var storedSettings: [String: (config: String?, lang: String?)] = [:]
-    /// Sessions whose current process's settings came from this client's open reply (its line): its start keeps them.
-    private var appliedFromOpen: Set<String> = []
-    /// set_config lines sent to each session (a count): an open's reply takes its line as the evidence only if none went
-    /// since its request did.
-    private var configsSent: [String: Int] = [:]
     /// A failed send's next try (per session: its delay; doubling, at most 30 s).
     private var retryDelay: [String: Double] = [:]
     /// Bumped on every open of a session and every process start heard: a check made before (a backfill's exit)
@@ -511,20 +519,13 @@ final class SessionClient {
         let line: (config: String?, lang: String?) = (noModel ? nil : (config ?? d.config), lang ?? d.lang)
         if let sessionId { lock.lock(); opening.insert(sessionId); lock.unlock() }
         defer { if let sessionId { lock.lock(); opening.remove(sessionId); lock.unlock() } }
-        let sentBefore: Int? = sessionId.map { id in lock.lock(); defer { lock.unlock() }; return configsSent[id, default: 0] }
-        let evidenceBefore: Int = sessionId.map { id in lock.lock(); defer { lock.unlock() }; return evidenceSeq[id, default: 0] } ?? 0
         guard let r = transport.request(Request.open(sessionId: sessionId, config: line.config, lang: line.lang)), r["ok"] as? Bool != false,
               let id = r["session_id"] as? String ?? sessionId else { return nil }
         lock.lock()
-        generation[id, default: 0] += 1
-        // evidence: a process it started runs with its open line's settings — unless a set_config went to it since the
-        // request did (that one is newer), or the line carried no configuration (it took the last stored: its stream says)
-        // (and no other evidence about it came meanwhile — its start, or its stream's settings: those are newer)
-        if r["already_open"] as? Bool != true, configsSent[id, default: 0] == (sentBefore ?? 0), evidenceSeq[id, default: 0] == evidenceBefore {
-            // (no configuration on the line: it took the last stored)
-            setApplied(id, line.config != nil ? line : storedSettings[id])
-            appliedFromOpen.insert(id)
-        }
+        // a process it started is a new one: its settings sent again (desired, read when that goes); one found running
+        // is converged too
+        if r["already_open"] as? Bool != true { generation[id, default: 0] += 1 }
+        dirty.insert(id)
         lock.unlock()
         // opened (a configuration, or null): a "not stored" banner from before is past — cleared before its set_config
         // goes, so a refusal of that one stays shown
@@ -785,19 +786,22 @@ final class SessionClient {
         convergeAll()
     }
 
-    /// Every session with a process (or one coming) converged to desired() — off the main thread (one request per
-    /// session that differs).
+    /// Every session with a process (or one coming) marked dirty and converged — a save (off the main thread: one
+    /// request per session).
     func convergeAll() {
-        for id in liveIds() { converge(id) }
+        let ids = liveIds()
+        lock.lock(); for id in ids { dirty.insert(id) }; lock.unlock()
+        for id in ids { converge(id) }
     }
     /// convergeAll on this client's serial queue (from a callback that must not wait: ModelsOffSync's).
     func convergeAllLater() {
         for id in liveIds() { reconcileSession(id) }
     }
 
-    /// converge(id) on this client's own serial queue (`reconciling`): when a session comes into view with a process
-    /// (a watch's running list, a process's start, its first line here) or its settings must be repaired.
+    /// A trigger for one session (a watch's running list, a process's start, its first line here, a refusal, a row that
+    /// is not desired): dirty, and converged on this client's own serial queue (`reconciling`).
     func reconcileSession(_ id: String) {
+        lock.lock(); dirty.insert(id); lock.unlock()
         reconciling.enter()
         reconcileQueue.async { [weak self] in
             defer { self?.reconciling.leave() }
@@ -808,40 +812,42 @@ final class SessionClient {
     /// Reconciles under way (tests wait on it).
     let reconciling = DispatchGroup()
 
-    /// The one rule (see "settings" above): a live process whose applied settings are not desired() — read now, under
-    /// the session's set_config lock — is sent desired. Idempotent; safe from any thread but the main one.
+    /// The one rule (see "settings" above): a live, dirty session with no send in flight is sent desired() — read now —
+    /// at its current generation. The sender handles the reply: clean (ok, busy) at the same generation; dirty again
+    /// meanwhile, or a reply from an old process: sent again, on this thread; failed: dirty, retried after a backoff.
+    /// Safe from any thread but the main one.
     func converge(_ id: String) {
-        let wire = configLock(id)
-        wire.lock(); defer { wire.unlock() }
-        lock.lock()
-        let st = states[id]
-        // opening with no start heard (the reply and the start converge it), exited, deleted: nothing to send
-        let started = st.map { $0.exited == nil || $0.awaitingStart } ?? false
-        let live = !deleted.contains(id) && (started || (st == nil && !opening.contains(id)))
-        let have = appliedSettings[id]
-        lock.unlock()
-        guard live else { return }
-        let want = desiredNow()
-        if !modelOff && want.config == nil { return }                     // (no settings known: nothing to send)
-        if let have, have.config == want.config && (want.lang == nil || have.lang == want.lang) { return }
-        // the switch on its way to the helper: no configuration goes until it has it (it may be turning off — never a
-        // configuration after models.off); the ack converges every session (ModelsOffSync.onAck). A null goes at once.
-        if want.config != nil && modelsSync.isPending { return }
-        send(id, want, attempt: 1)
-    }
-
-    /// Sends one set_config (the session's set_config lock held): desired as read just now, recorded as applied once
-    /// the helper acks it (its session.config, coming after, is the session's own word and overrides). A send that
-    /// fails (no answer, an error) is converged again after a backoff; no_model tells the switch again (helperSays).
-    private func send(_ id: String, _ want: (config: String?, lang: String?), attempt: Int) {
-        lock.lock(); let before = (evidenceSeq[id, default: 0], generation[id, default: 0]); lock.unlock()
-        let r = sendConfig(id, config: want.config, lang: want.lang, attempt: attempt)
-        lock.lock()
-        // (the reply: what it applies — unless newer evidence, or a new process, came while it went: that one stands)
-        if r == .sent && evidenceSeq[id, default: 0] == before.0 && generation[id, default: 0] == before.1 { setApplied(id, want) }
-        if r != .failed { retryDelay[id] = nil }
-        lock.unlock()
-        if r == .failed { retryLater(id) }
+        while true {
+            lock.lock()
+            let st = states[id]
+            // opening with no start heard (the reply and the start converge it), exited, deleted: nothing to send
+            let started = st.map { $0.exited == nil || $0.awaitingStart } ?? false
+            let live = !deleted.contains(id) && (started || (st == nil && !opening.contains(id)))
+            guard live, inFlight[id] == nil, dirty.contains(id) else { lock.unlock(); return }
+            let gen = generation[id, default: 0]
+            inFlight[id] = gen; dirty.remove(id)
+            let attempt = nextAttempt.removeValue(forKey: id) ?? 1
+            lock.unlock()
+            // the switch on its way to the helper (it may be turning off): no configuration until its ack, which converges
+            // every session — a null goes at once. Counted with the sync before the switch is read, so a push begun after
+            // this waits for this send (never a configuration after models.off).
+            let gated = modelsSync.beginConfigSend()
+            let want = desiredNow()
+            if (!modelOff && want.config == nil) || (want.config != nil && !gated) {
+                if gated { modelsSync.endConfigSend() }
+                lock.lock(); inFlight[id] = nil; dirty.insert(id); if attempt > 1 { nextAttempt[id] = attempt }; lock.unlock()
+                return
+            }
+            let r = sendConfig(id, config: want.config, lang: want.lang, attempt: attempt)
+            if gated { modelsSync.endConfigSend() }
+            lock.lock()
+            if inFlight[id] == gen { inFlight[id] = nil }
+            // a reply from a process that is gone: what the new one runs is unknown — sent again (its start set dirty)
+            if generation[id, default: 0] != gen { dirty.insert(id) }
+            if r == .failed { dirty.insert(id) } else { retryDelay[id] = nil }
+            lock.unlock()
+            if r == .failed { retryLater(id); return }
+        }
     }
 
     /// The first wait before a failed send is tried again (doubling, at most 30 s; tests make it short).
@@ -861,9 +867,18 @@ final class SessionClient {
         // the session lives — quiescence is not waiting for it)
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
-            self.lock.lock(); self.retryScheduled.remove(id); let live = self.liveIdsLocked().contains(id); self.lock.unlock()
-            if live { self.converge(id) } else { self.lock.lock(); self.retryDelay[id] = nil; self.lock.unlock() }
+            self.lock.lock()
+            guard self.retryScheduled.remove(id) != nil else { self.lock.unlock(); return }    // (cancelled: exit, delete)
+            let live = self.liveIdsLocked().contains(id)
+            if !live { self.retryDelay[id] = nil }
+            self.lock.unlock()
+            if live { self.converge(id) }
         }
+    }
+
+    /// The session's process is gone (exit, delete): nothing owed to it — its next process opens with desired().
+    private func forgetSettings(_ id: String) {
+        dirty.remove(id); inFlight[id] = nil; nextAttempt[id] = nil; retryScheduled.remove(id); retryDelay[id] = nil
     }
 
     /// Sends a session these settings (a test's own: the app converges) — set_config, harness#64: applied in place to
@@ -875,12 +890,7 @@ final class SessionClient {
         serial.lock(); defer { serial.unlock() }
         let wire = configLock(sessionId)
         wire.lock(); defer { wire.unlock() }
-        let value = (config: modelOff ? nil : config, lang: lang)
-        lock.lock(); let before = (evidenceSeq[sessionId, default: 0], generation[sessionId, default: 0]); lock.unlock()
-        let r = sendConfig(sessionId, config: value.config, lang: value.lang, attempt: 1)
-        lock.lock()
-        if r == .sent && evidenceSeq[sessionId, default: 0] == before.0 && generation[sessionId, default: 0] == before.1 { setApplied(sessionId, value) }
-        lock.unlock()
+        let r = sendConfig(sessionId, config: modelOff ? nil : config, lang: lang, attempt: 1)
         return r != .failed
     }
 
@@ -892,14 +902,13 @@ final class SessionClient {
         lock.lock()
         // (what it applied is known only from its answer: session.config, or busy — applied, not stored)
         pendingConfigs[cid] = PendingConfig(sessionId: sessionId, config: config, lang: lang, attempt: attempt)
-        configsSent[sessionId, default: 0] += 1
         lock.unlock()
         var line = SessionControl.setConfig(config: config, lang: lang).line
         line["client_id"] = cid
         let r = requestLine(sessionId, line)
         if r?["ok"] as? Bool != false && r != nil { return .sent }
         // not written (no answer, not open, refused): what it applied is unknown
-        lock.lock(); pendingConfigs[cid] = nil; setApplied(sessionId, nil); lock.unlock()
+        lock.lock(); pendingConfigs[cid] = nil; lock.unlock()
         if r?["code"] as? String == "no_model" { helperSays(modelsOff: true); return .notOpen }
         return r?["code"] as? String == "not_open" ? .notOpen : .failed
     }
@@ -989,7 +998,7 @@ final class SessionClient {
         deleted.insert(sessionId)
         states[sessionId] = nil
         openedHere.remove(sessionId)
-        setApplied(sessionId, nil); storedSettings[sessionId] = nil; appliedFromOpen.remove(sessionId)
+        forgetSettings(sessionId)
         lock.unlock()
         return nil
     }
@@ -1140,14 +1149,13 @@ final class SessionClient {
         if case .sessionExit(let e) = line.event, e.idle == true { idleClosed.insert(id) }
         // the answer to a set_config of this app's: stored (session.config), or not (busy: sent once more; then, or
         // bad_config, shown)
-        var again: PendingConfig?, notApplied: String?
+        var busyAgain = false, notApplied: String?
         switch line.event {
         case .sessionConfig(let e): if let c = e.clientId { pendingConfigs[c] = nil }
         case .sessionError(let e) where e.control == "set_config":
             if let c = e.clientId, let p = pendingConfigs.removeValue(forKey: c) {
-                // busy: applied in this process, not stored — it runs with it; anything else: unknown
-                if e.code == "busy" { setApplied(id, (p.config, p.lang)) } else { setApplied(id, nil) }
-                if e.code == "busy" && p.attempt < 2 { again = p } else { notApplied = e.code }
+                // busy: it took effect, was not stored — sent once more (dirty); a second busy, or bad_config: shown
+                if e.code == "busy" && p.attempt < 2 { nextAttempt[id] = 2; busyAgain = true } else { notApplied = e.code }
             }
         default: break
         }
@@ -1158,65 +1166,38 @@ final class SessionClient {
         let applied = SessionReducer.apply(&after, line)
         if let notApplied { after.settingsRefused = notApplied.isEmpty ? "busy" : notApplied }
         states[id] = after
-        // a process's start or end: what it runs with is its own (a start: a new process, reconciled)
-        // evidence only from what the reducer took, in order (#107 delta review of a9117a7: a replayed session.config —
-        // a duplicate, or one held past a gap — read as the newest made a stale value "applied"): the session's
-        // settings as its stream has them now, when that changed (a held line applied once its gap filled counts then)
+        // the session's settings as its stream has them now, when they changed — only what the reducer took, in order
+        // (a duplicate changes nothing; a held row counts once its gap fills)
+        let settingsNow: SessionConfigEvent? = after.settings != settingsBefore ? after.settings : nil
+        // a process's start (a new one: generation; its settings sent again) or end (nothing owed to it)
         var started = false
-        if applied == .applied || applied == .held, let now = after.settings, now != settingsBefore {
-            // the session's own record: what it applies now, and what a process started with no settings takes
-            setApplied(id, (now.config, now.lang)); storedSettings[id] = (now.config, now.lang)
-        }
         if applied == .applied {
             switch line.event {
             case .sessionStart:
                 generation[id, default: 0] += 1; started = true
-                // a new process: what it applies is its open line's (this client's open reply), else the last stored
-                if !appliedFromOpen.contains(id) { setApplied(id, storedSettings[id]) }
                 pendingConfigs = pendingConfigs.filter { $0.value.sessionId != id }    // (sent to a process that is gone)
             case .sessionExit:
-                // (what the next process applies: its open line, or the last stored session.config — its stream says)
                 if after.exited != nil {
                     pendingConfigs = pendingConfigs.filter { $0.value.sessionId != id }
-                    setApplied(id, nil); appliedFromOpen.remove(id)
+                    forgetSettings(id)
                 }
             default: break
             }
         }
-        // nulled while the switch is on (by the helper, unseen here), or a refusal for having no model: repaired —
-        // reconciled to the switch, and the helper told it again if it holds otherwise (a refusal of a set_config is
-        // its own answer's echo, not a new one)
-        var repair = false, noModelHere = false
-        switch line.event {
-        case .sessionConfig(let e): repair = applied == .applied && e.config == nil && !off
-        case .sessionError(let e) where e.code == "no_model" && e.control != "set_config": repair = !off; noModelHere = !off
-        default: break
-        }
-        // a repair: what it applies is not what we hold (it has no model while the switch is on) — unknown, so the
-        // converge sends (#107 delta review of a9117a7: held equal to desired, it sent nothing and every message was
-        // refused)
-        if repair { setApplied(id, nil) }
+        // a refusal for having no model while the switch is on: the helper told again, and the settings sent (a refusal of
+        // a set_config is its own answer's echo, not a new one)
+        var noModelHere = false
+        if case .sessionError(let e) = line.event, e.code == "no_model", e.control != "set_config", !off { noModelHere = true }
         lock.unlock()
         if noModelHere { helperSays(modelsOff: true) }
-        // a session that comes into view with a process (its first line here, its process's start): the settings now
-        if started || (first && after.exited == nil) || repair { reconcileSession(id) }
-        if let p = again {
-            reconciling.enter()                     // (under way like a converge: waited for with them)
-            DispatchQueue.global().async { [weak self] in
-                defer { self?.reconciling.leave() }
-                guard let self else { return }
-                let serial = self.sessionLock(p.sessionId)
-                serial.lock(); defer { serial.unlock() }
-                let wire = self.configLock(p.sessionId)
-                wire.lock(); defer { wire.unlock() }
-                // (desired as it is now, not as that line had it; none stored here — a test's client — that line's)
-                let d = self.desiredNow()
-                let want = !self.modelOff && d.config == nil ? (p.config, p.lang) : (d.config, d.lang)
-                if self.sendConfig(p.sessionId, config: want.0, lang: want.1, attempt: p.attempt + 1) == .failed {
-                    self.mutate(p.sessionId) { $0.settingsRefused = "busy" }
-                }
-            }
+        // the triggers here (see "settings" above): a process start, its first line here, a no_model, a busy, a row whose
+        // settings are not desired (our own send's echo is: no loop)
+        var trigger = started || (first && after.exited == nil) || noModelHere || busyAgain
+        if !trigger, let now = settingsNow, after.exited == nil {
+            let d = desiredNow()
+            if now.config != d.config || (d.lang != nil && now.lang != d.lang) { trigger = true }
         }
+        if trigger { reconcileSession(id) }
         // (no whole-state comparison per line: in a long session that cost more than the line itself)
         if applied == .applied || applied == .held { onChange?(id, after) }
         return applied
