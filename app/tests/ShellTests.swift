@@ -72,6 +72,7 @@ enum ShellTests {
         DecisionTests.group("shell.reconcileNoWaitTests"); reconcileNoWaitTests()
         DecisionTests.group("shell.messageNeverLostTests"); messageNeverLostTests()
         DecisionTests.group("shell.settingsConvergeTests"); settingsConvergeTests()
+        DecisionTests.group("shell.evidenceTests"); evidenceTests()
         DecisionTests.group("shell.textTests"); textTests()
     }
 
@@ -1541,7 +1542,7 @@ enum ShellTests {
               "nulled with the switch on: its configuration sent back")
         mock.requests = []
         c.feed(["kind": "session.error", "session_id": "ses_t", "code": "no_model", "control": "say", "text": "x"])
-        c.reconciling.wait(); c.modelsSync.settle()
+        c.reconciling.wait(); c.modelsSync.settle(); c.reconciling.wait()     // (the ack's converge too)
         check(mock.requests.contains { $0["op"] as? String == "models.off" }, "a no_model in the stream with the switch on: the helper told again")
         // the echo of a refused set_config is not a new one (no loop)
         mock.requests = []
@@ -2494,17 +2495,30 @@ enum ShellTests {
         var procs: [String: (config: String?, lang: String?)] = [:]
         var stored: [String: (config: String?, lang: String?)] = [:]
         var lines: [[String: Any]] = []                 // the stream, in order, not delivered yet
+        var delivered: [[String: Any]] = []             // stored lines already delivered (replayed as duplicates)
         var seq: [String: Int] = [:]
         var opens: [[String: Any]] = []
         var n = 0
+        /// The helper's models-off bit (models.off): it nulls every process, starts new ones with null, refuses a
+        /// configuration (no_model) while it holds it — as SessionHost does.
+        var off = false
         /// Inside an open request, before its reply (the stream's lines may come first).
         var duringOpen: ((String) -> Void)?
         /// Inside a set_config request, before it is applied (a slow helper).
         var duringConfig: (() -> Void)?
+        /// Per set_config: 0 as asked, 1 busy (applied, not stored: session.error busy), 2 no answer (not applied).
+        var chaos: (() -> Int)?
+        /// Inside a models.off request, before it is applied.
+        var duringModelsOff: (() -> Void)?
         private func emit(_ id: String, _ l: [String: Any], stored s: Bool) {
             var l = l; l["session_id"] = id
             if s { seq[id, default: 0] += 1; l["seq"] = seq[id]! }
             lines.append(l)
+        }
+        private func nullOut(_ id: String) {
+            let lang = procs[id]?.lang
+            procs[id] = (nil, lang); stored[id] = (nil, lang)
+            emit(id, ["kind": "session.config", "config": NSNull(), "lang": lang ?? "zh", "by": "set_config"], stored: true)
         }
         func request(_ body: [String: Any]) -> [String: Any]? {
             let op = body["op"] as? String ?? ""
@@ -2523,11 +2537,19 @@ enum ShellTests {
                     stored[id] = (cfg, lang)
                     emit(id, ["kind": "session.config", "config": cfg, "lang": lang, "by": "open"], stored: true)
                 }
+                if off { nullOut(id) }                  // (the helper's first control to a process it starts while off)
                 opens.append(body)
                 let hook = duringOpen
                 lock.unlock()
                 hook?(id)
                 return ["ok": true, "session_id": id, "last_seq": at]
+            case SessionClient.Op.modelsOff:
+                let hook = duringModelsOff
+                lock.unlock(); hook?(); lock.lock()
+                off = body["off"] as? Bool ?? off
+                if off { for id in procs.keys.sorted() where procs[id]?.config != nil { nullOut(id) } }
+                lock.unlock()
+                return ["ok": true]
             case SessionClient.Op.send:
                 let id = body["session_id"] as? String ?? ""
                 guard procs[id] != nil else { lock.unlock(); return ["ok": false, "code": "not_open"] }
@@ -2535,10 +2557,20 @@ enum ShellTests {
                 if line["type"] as? String == "set_config" {
                     let hook = duringConfig
                     lock.unlock(); hook?(); lock.lock()
+                    guard procs[id] != nil else { lock.unlock(); return ["ok": false, "code": "not_open"] }
                     let cfg = line["config"] as? String, lang = line["lang"] as? String ?? procs[id]?.lang
-                    procs[id] = (cfg, lang); stored[id] = (cfg, lang)
-                    emit(id, ["kind": "session.config", "config": cfg as Any? ?? NSNull(), "lang": lang ?? "zh", "by": "set_config",
-                              "client_id": line["client_id"] ?? ""], stored: true)
+                    if off && cfg != nil { lock.unlock(); return ["ok": false, "code": "no_model"] }
+                    let mode = chaos?() ?? 0
+                    if mode == 2 { lock.unlock(); return nil }
+                    procs[id] = (cfg, lang)
+                    if mode == 1 {
+                        lines.append(["kind": "session.error", "session_id": id, "code": "busy", "control": "set_config",
+                                      "client_id": line["client_id"] ?? "", "text": "busy"])
+                    } else {
+                        stored[id] = (cfg, lang)
+                        emit(id, ["kind": "session.config", "config": cfg as Any? ?? NSNull(), "lang": lang ?? "zh", "by": "set_config",
+                                  "client_id": line["client_id"] ?? ""], stored: true)
+                    }
                 }
                 lock.unlock()
                 return ["ok": true]
@@ -2548,12 +2580,22 @@ enum ShellTests {
             }
         }
         func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
-        /// The next line of the stream to the client; false when none.
+        /// The next line of the stream to the client; false when none. `swap`: the one after it first, when both are
+        /// stored lines of one session (out of order: held until the gap fills). `duplicate`: a stored line delivered
+        /// before, again (a history read overlapping the watch).
         @discardableResult
-        func deliver(_ c: SessionClient) -> Bool {
+        func deliver(_ c: SessionClient, swap: Bool = false, duplicate: Bool = false) -> Bool {
             lock.lock()
+            if duplicate, !delivered.isEmpty {
+                let l = delivered[delivered.count / 2]
+                lock.unlock(); c.feed(l); return true
+            }
             guard !lines.isEmpty else { lock.unlock(); return false }
-            let l = lines.removeFirst()
+            var i = 0
+            if swap, lines.count > 1, lines[0]["seq"] != nil, lines[1]["seq"] != nil,
+               lines[0]["session_id"] as? String == lines[1]["session_id"] as? String { i = 1 }
+            let l = lines.remove(at: i)
+            if l["seq"] != nil { delivered.append(l) }
             lock.unlock()
             c.feed(l)
             return true
@@ -2567,14 +2609,19 @@ enum ShellTests {
         var lastOpen: [String: Any]? { lock.lock(); defer { lock.unlock() }; return opens.last }
     }
 
-    /// The settings as stored (the app's UserDefaults, here a box read from any thread).
+    /// The settings as stored (the app's UserDefaults, here a box read from any thread): the configuration, the
+    /// language, cloud models on or off.
     final class Store {
         private let lock = NSLock()
         private var value: (config: String, lang: ResolvedLang) = ("A", .zhHans)
+        private var on = true
         var config: String { lock.lock(); defer { lock.unlock() }; return value.config }
         var lang: ResolvedLang { lock.lock(); defer { lock.unlock() }; return value.lang }
+        var cloud: Bool { lock.lock(); defer { lock.unlock() }; return on }
         func save(_ c: String, _ l: ResolvedLang) { lock.lock(); value = (c, l); lock.unlock() }
-        var expected: (config: String, lang: String) { (config, lang == .zhHans ? "zh" : "en") }
+        func setCloud(_ v: Bool) { lock.lock(); on = v; lock.unlock() }
+        /// What every live process must apply: the configuration (none while cloud is off) and the language.
+        var expected: (config: String?, lang: String) { (cloud ? config : nil, lang == .zhHans ? "zh" : "en") }
     }
 
     /// A shell on the simulated helper whose background work runs when the test says (in any order).
@@ -2585,23 +2632,30 @@ enum ShellTests {
         var m: ShellModel!
         init() {
             m = ShellModel(client: SessionClient(transport: h), defaults: scratchDefaults(), config: { [store] in store.config },
-                           lang: { [store] in store.lang }, work: { [weak self] f in self?.workLock.lock(); self?.work.append(f); self?.workLock.unlock() },
+                           lang: { [store] in store.lang }, cloudOn: { [store] in store.cloud },
+                           work: { [weak self] f in self?.workLock.lock(); self?.work.append(f); self?.workLock.unlock() },
                            deliver: { $0() })
+            m.client.retryBase = 0.002
         }
         func runWork(at i: Int) { workLock.lock(); let f = work.remove(at: i); workLock.unlock(); f() }
         var pending: Int { workLock.lock(); defer { workLock.unlock() }; return work.count }
         /// A save: the store written, then the window told (its work queued).
         func save(_ c: String, _ l: ResolvedLang) { store.save(c, l); m.settingsChanged() }
+        /// Cloud models turned on or off: the store, the window told, the switch pushed to the helper (the engine setter).
+        func cloud(_ on: Bool) { store.setCloud(on); m.settingsChanged(); m.client.modelsSync.push() }
         /// A new conversation's first message (its open is queued work).
         func newConversation() { m.newConversation(); m.draft = "你好"; m.submit() }
-        /// Everything that is left: work (in order), the stream, the client's own converges — until nothing moves.
+        /// Everything that is left: work (in order), the stream, the client's own converges, the switch's push and the
+        /// retries — until nothing moves.
         func settle() {
-            for _ in 0..<50 {
+            for _ in 0..<400 {
                 while pending > 0 { runWork(at: 0) }
                 h.deliverAll(m.client)
                 m.client.reconciling.wait()
+                m.client.modelsSync.settle(timeout: 2)
                 h.lock.lock(); let more = !h.lines.isEmpty; h.lock.unlock()
-                if pending == 0 && !more { return }
+                if pending == 0 && !more && m.client.retriesPending == 0 && !m.client.modelsSync.isPending { return }
+                usleep(2_000)
             }
         }
         func converged() -> Bool {
@@ -2652,41 +2706,172 @@ enum ShellTests {
             check(r.converged(), "a set_config held while B is saved: the process ends on B: \(r.h.live)")
         }
         // random interleavings: saves, their work in any order, opens (the start before or after the reply), the stream's
-        // lines whenever, processes ending — at quiescence every live process has the last saved, and a next one opens
-        // with it
+        // lines whenever — some out of order (held until the gap fills), some again (a history read overlapping the
+        // watch) — processes ending, cloud turned off and on (the helper nulls and refuses), set_configs answered busy or
+        // not at all. At quiescence every live process has the last saved, and a next one opens with it. The oracle is
+        // the simulated helper's own state.
         var rng = SplitMix(seed: 107)
+        let rngLock = NSLock()
+        func roll(_ n: UInt64) -> UInt64 { rngLock.lock(); defer { rngLock.unlock() }; return rng.next() % n }
         var failures = 0
         let values: [(String, ResolvedLang)] = [("A", .zhHans), ("B", .en), ("C", .zhHans), ("D", .en)]
         for round in 0..<150 {
             let r = Rig()
             var saves = 0
-            r.h.duringOpen = { [unowned r] _ in if rng.next() % 2 == 0 { r.h.deliverAll(r.m.client) } }
-            for _ in 0..<14 {
-                switch rng.next() % 6 {
+            r.h.duringOpen = { [unowned r] _ in if roll(2) == 0 { r.h.deliverAll(r.m.client) } }
+            // (set_configs: now and then busy, or no answer — the client retries)
+            r.h.chaos = { switch roll(10) { case 0: return 1; case 1: return 2; default: return 0 } }
+            for _ in 0..<16 {
+                switch roll(9) {
                 case 0 where saves < 6:
-                    let v = values[Int(rng.next() % UInt64(values.count))]; r.save(v.0, v.1); saves += 1
-                case 1 where r.pending > 0: r.runWork(at: Int(rng.next() % UInt64(r.pending)))
-                case 2: if !r.m.opening { r.newConversation() }
+                    let v = values[Int(roll(UInt64(values.count)))]; r.save(v.0, v.1); saves += 1
+                case 1 where r.pending > 0: r.runWork(at: Int(roll(UInt64(r.pending))))
+                case 2: if !r.m.opening && r.store.cloud { r.newConversation() }
                 case 3: r.h.deliver(r.m.client)
                 case 4:
                     let ids = r.h.live.keys.sorted()
-                    if !ids.isEmpty { r.h.exit(ids[Int(rng.next() % UInt64(ids.count))]) }
+                    if !ids.isEmpty { r.h.exit(ids[Int(roll(UInt64(ids.count)))]) }
+                case 5: r.h.deliver(r.m.client, swap: true)
+                case 6: r.h.deliver(r.m.client, duplicate: true)
+                case 7: r.cloud(!r.store.cloud)
                 default: r.m.client.reconciling.wait()
                 }
             }
+            if !r.store.cloud && roll(2) == 0 { r.cloud(true) }
             r.settle()
             var ok = r.converged()
+            var why = ok ? "" : "after settle"
             // a next process: one that ended opens again with the last saved
             if let id = r.m.client.liveIds().first(where: { r.h.live[$0] != nil }) {
                 r.h.exit(id); r.h.deliverAll(r.m.client)
                 _ = r.m.client.reopenIfExited(id)
                 r.settle()
                 let want = r.store.expected
-                ok = ok && r.h.lastOpen?["config"] as? String == want.config && r.h.lastOpen?["lang"] as? String == want.lang && r.converged()
+                if ok && !((r.h.lastOpen?["config"] as? String) == want.config && r.h.lastOpen?["lang"] as? String == want.lang) { ok = false; why = "reopen line \(String(describing: r.h.lastOpen))" }
+                if ok && !r.converged() { ok = false; why = "after the reopen" }
             }
-            if !ok { failures += 1; if failures == 1 { print("  (round \(round): live \(r.h.live), saved \(r.store.expected))") } }
+            if !ok { failures += 1; if failures == 1 { print("  (round \(round): \(why); live \(r.h.live), saved \(r.store.expected))") } }
         }
         check(failures == 0, "150 random interleavings: every live process on the last saved, and a next one opens with it (\(failures) not)")
+    }
+
+    /// #107 delta review of a9117a7: what a session applies is held only from evidence about its current process, and
+    /// unknown whenever that is missing or contradicted.
+    static func evidenceTests() {
+        func configs(_ mock: Mock) -> [[String: Any]] {
+            mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }
+        }
+        // B1: a late duplicate of an old session.config is no evidence: A, B saved (and taken), config(A)@1 again, A
+        // saved — A is sent
+        do {
+            let mock = Mock()
+            mock.replies = [SessionClient.Op.send: ["ok": true]]
+            let c = SessionClient(transport: mock)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
+            c.reconciling.wait()
+            c.adoptSettings(config: "B", lang: "zh"); c.convergeAll()
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])   // (a replay)
+            mock.requests = []
+            c.adoptSettings(config: "A", lang: "zh"); c.convergeAll()
+            check(configs(mock).last?["config"] as? String == "A", "B1: a duplicate config(A) is no evidence: saving A again sends A: \(configs(mock))")
+        }
+        // B2: held equal to desired (wrongly), then a no_model refusal: unknown — the configuration is sent
+        do {
+            let mock = Mock()
+            mock.replies = [SessionClient.Op.send: ["ok": true], "models.off": ["ok": true]]
+            let c = SessionClient(transport: mock)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
+            c.reconciling.wait()
+            mock.requests = []
+            c.feed(["kind": "session.error", "session_id": "s", "code": "no_model", "control": "say", "text": "x"])
+            c.modelsSync.settle(); c.reconciling.wait()
+            check(configs(mock).contains { $0["config"] as? String == "A" }, "B2: after no_model, the configuration is sent again: \(configs(mock))")
+        }
+        // E1: newer evidence while a set_config is out (another's set_config, stored) is not overwritten by its reply
+        do {
+            final class Held: SessionTransport {
+                let gate = DispatchSemaphore(value: 0), inConfig = DispatchSemaphore(value: 0)
+                let lock = NSLock()
+                var hold = false, log: [[String: Any]] = []
+                func request(_ body: [String: Any]) -> [String: Any]? {
+                    lock.lock(); log.append(body)
+                    let h = hold && (body["line"] as? [String: Any])?["type"] as? String == "set_config"; if h { hold = false }
+                    lock.unlock()
+                    if h { inConfig.signal(); gate.wait() }
+                    return ["ok": true]
+                }
+                func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+            }
+            let t = Held()
+            let c = SessionClient(transport: t)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
+            c.reconciling.wait()
+            c.adoptSettings(config: "B", lang: "zh")
+            t.lock.lock(); t.hold = true; t.lock.unlock()
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async { c.convergeAll(); done.signal() }        // (B on its way, held)
+            t.inConfig.wait()
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 2, "config": "C", "lang": "zh", "by": "set_config"])  // (set by another, meanwhile)
+            t.gate.signal(); done.wait(); c.reconciling.wait()
+            t.lock.lock(); t.log = []; t.lock.unlock()
+            c.convergeAll()
+            t.lock.lock(); let again = t.log.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }; t.lock.unlock()
+            check(again.last?["config"] as? String == "B", "E1: the C that came while B went stands (not overwritten by B's reply): B sent again: \(again)")
+        }
+        // E2: the switch on its way to the helper (turning off): a session with no evidence that comes into view gets no
+        // configuration while it goes; after the ack, null
+        do {
+            final class SlowOff: SessionTransport {
+                let lock = NSLock(), gate = DispatchSemaphore(value: 0), inOff = DispatchSemaphore(value: 0)
+                var log: [[String: Any]] = []
+                func request(_ body: [String: Any]) -> [String: Any]? {
+                    lock.lock(); log.append(body); lock.unlock()
+                    if body["op"] as? String == "models.off" { inOff.signal(); gate.wait() }
+                    return ["ok": true]
+                }
+                func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
+            }
+            let t = SlowOff()
+            let box = NSLock()
+            var engineOff = false
+            let sync = ModelsOffSync(transport: t, current: { box.lock(); defer { box.unlock() }; return engineOff })
+            let c = SessionClient(transport: t, modelsSync: sync)
+            c.adoptSettings(config: "ds-flash", lang: "zh")
+            sync.push()                                                   // (the switch going, still on)
+            t.inOff.wait()
+            c.feed(["kind": "session.start", "session_id": "k", "resumed": true, "last_seq": 0])    // (in view, nothing known)
+            c.reconciling.wait()
+            box.lock(); engineOff = true; box.unlock()                     // (turned off while it goes)
+            t.gate.signal()
+            DispatchQueue.global().async { while true { if t.inOff.wait(timeout: .now() + 3) == .timedOut { break }; t.gate.signal() } }
+            sync.settle(timeout: 5); c.reconciling.wait()
+            t.lock.lock(); let cfgs = t.log.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" }; t.lock.unlock()
+            check(!cfgs.contains { $0["config"] is String } && cfgs.last?["config"] is NSNull,
+                  "E2: no configuration while the switch went (it turned off), then null: \(cfgs.map { $0["config"] ?? "" })")
+        }
+        // the start trigger: a session this client knew (exited) is opened elsewhere with the last stored (A); B was
+        // saved while it had no process — its start converges it to B
+        do {
+            let mock = Mock()
+            mock.replies = [SessionClient.Op.send: ["ok": true]]
+            let c = SessionClient(transport: mock)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
+            c.feed(["kind": "helper.session_exit", "session_id": "s", "code": 0])
+            c.reconciling.wait()
+            c.adoptSettings(config: "B", lang: "zh"); c.convergeAll()     // (no process: nothing to send)
+            mock.requests = []
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": true, "last_seq": 1])    // (opened elsewhere)
+            c.reconciling.wait()
+            check(configs(mock).last?["config"] as? String == "B", "a start of a known session (opened elsewhere): converged to B: \(configs(mock))")
+        }
     }
 
     struct SplitMix {
