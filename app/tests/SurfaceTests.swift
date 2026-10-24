@@ -131,19 +131,22 @@ enum SurfaceTests {
         var records: [GoalRecord] = []
         var recordingStops = 0
         var recordingBegins = 0
-        final class Held { var work: [() -> Void] = [] }
+        final class Held { var work: [() -> Void] = []; var deliver: [() -> Void] = [] }
         /// The work queue's jobs while `holdWork` (an open or a send that has not answered yet).
         let held = Held()
-        init(_ mock: Mock = Mock(), cloudOn: Bool = true, holdWork: Bool = false) {
+        init(_ mock: Mock = Mock(), cloudOn: Bool = true, holdWork: Bool = false, holdDeliver: Bool = false) {
             self.mock = mock
             let client = SessionClient(transport: mock)
             client.newClientId = { "c_1" }
             let held = held
             m = ShellModel(client: client, defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" }, lang: { .zhHans },
-                           cloudOn: { cloudOn }, work: { f in if holdWork { held.work.append(f) } else { f() } }, deliver: { $0() })
+                           cloudOn: { cloudOn }, work: { f in if holdWork { held.work.append(f) } else { f() } },
+                           deliver: { f in if holdDeliver { held.deliver.append(f) } else { f() } })
         }
         /// The held jobs run, in order (and those they queue).
         func drain() { while !held.work.isEmpty { held.work.removeFirst()() } }
+        /// The held hand-overs to the UI queue run (one flush takes every session that changed meanwhile: one update).
+        func drainDeliver() { while !held.deliver.isEmpty { held.deliver.removeFirst()() } }
         /// The lines sent, in order, with their session.
         var linesSent: [(sid: String?, line: [String: Any])] {
             mock.requests.compactMap { r in (r["line"] as? [String: Any]).map { (r["session_id"] as? String, $0) } }

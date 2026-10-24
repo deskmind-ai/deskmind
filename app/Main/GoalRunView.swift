@@ -23,7 +23,10 @@ struct GoalRunView: View {
     /// the goal's own (GoalRun, kept in GoalRuns.app: it outlives this view); the view only reads it (GoalRunScreen).
     @ObservedObject private var shell = ShellModel.live
     @StateObject private var goalBox = GoalRunBox()
-    @State private var sessionRun = false
+    @State private var sessionRunState = false
+    /// A session task is shown (a goal started here, or a past one whose session still has it); a past one whose
+    /// session or task is gone shows its record's own steps and summary instead (RunModel.show).
+    private var sessionRun: Bool { sessionRunState && !(past != nil && shownTask == nil) }
     /// A past session task opened from the recent runs (or the island's Show Details): its session and run, shown as
     /// the session has it (its result card included). nil for a goal started here.
     @State private var past: (sid: String, run: String?)?
@@ -179,8 +182,10 @@ struct GoalRunView: View {
             if let request { begin(request) }
             else if let record, let sid = record.sessionId {
                 // a session task kept in the recent runs: shown as the session has it (its result card included)
-                sessionRun = true; past = (sid, record.runId)
+                sessionRunState = true; past = (sid, record.runId)
                 shell.start(); shell.select(sid)
+                // (its own content too: shown if the session or its task is gone — deleted)
+                run.show(record)
             }
             else if let record { run.show(record) }
         }
@@ -259,12 +264,13 @@ struct GoalRunView: View {
     private func begin(_ r: GoalRequest) {
         // the harness engine: a session task (the chat's); the old engine (hands) keeps its own run
         if r.harness {
-            sessionRun = true
+            sessionRunState = true
             shell.start()
             // the goal already started for this request (this view came back), else a new one — none while another
             // goal is not over (GoalRuns: no second session then)
             goalBox.run = GoalRuns.app.start(r.id) {
-                GoalRun(goal: r.goal, folder: r.folder, record: r.record, shell: shell, effects: .app(lang: lang))
+                GoalRun(goal: r.goal, folder: r.folder, record: r.record, shell: shell, effects: .app(lang: lang, services: AppGoalServices.shared, surface: RunOverlaySurface.shared,
+                                                                                         after: { seconds, f in DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: f) }))
             }
             return
         }
@@ -274,11 +280,7 @@ struct GoalRunView: View {
 
     /// The task shown: the goal's own (GoalRun), or a past one's from its session.
     private var shownTask: (session: SessionState, task: TaskState)? {
-        if let past {
-            guard let s = shell.states[past.sid] else { return nil }
-            if let r = past.run { return s.task(r).map { (s, $0) } }
-            return s.tasks.last.map { (s, $0) }
-        }
+        if let past { return PastRun.task(sessionId: past.sid, runId: past.run, in: shell.states) }
         return goalBox.run?.task
     }
 
@@ -346,48 +348,6 @@ final class GoalRunBox: ObservableObject {
 extension GoalRuns {
     /// The app's goals (GoalRunView's), kept for as long as the app runs.
     static let app = GoalRuns()
-}
-
-extension GoalRunEffects {
-    /// The app's: RunRecorder records (its begin's own 25 s bound), RunHistory keeps the record — once, at the end.
-    /// (GoalRun runs on the shell's UI queue, the main queue in the app: every closure is called there.)
-    @MainActor static func app(lang: ResolvedLang) -> GoalRunEffects {
-        let id = UUID()
-        // the goal's island and notifications (IslandFeed's frames, applied once each by SessionIsland): kept with
-        // the goal, not the view
-        let island = SessionIsland()
-        return GoalRunEffects(
-            beginRecording: { goal, started in MainActor.assumeIsolated { RunRecorder.shared.begin(goal: goal, bundles: []) { _ in started() } } },
-            stopRecording: { _, done in
-                MainActor.assumeIsolated {
-                    RunRecorder.shared.stop { url in
-                        if let url { RunHistory.shared.setMovie(url.path, for: id) }
-                        done(url)
-                    }
-                }
-            },
-            writeRecord: { g in MainActor.assumeIsolated {
-                let t = g.task
-                RunHistory.shared.add(RunRecord(
-                    id: id, date: Date(), goal: g.goal, folder: g.folder, apps: [],
-                    finished: t?.status == "succeeded", errored: t == nil || t?.status == nil || t?.status == "failed",
-                    summary: t.map { ShellText.task($0, lang: lang) } ?? GoalRunScreen.why(g.failed ?? "", lang: lang),
-                    answer: t?.answer ?? "",
-                    steps: (t?.steps ?? []).map { RunRecord.Step(n: $0.n, human: $0.displayText, app: "", shot: $0.shot ?? "", describe: $0.text, detail: $0.why ?? "", ok: $0.status == .ok) },
-                    created: t?.changes.created ?? [], modified: t?.changes.modified ?? [], deleted: t?.changes.deleted ?? [],
-                    sessionId: t == nil ? nil : g.sessionId, runId: t?.runId))
-                // the island's Show Details opens this task's GoalRunView (its record keeps the session and the run)
-                if t != nil { RunOverlay.shared.detailsRecord = id }
-            } },
-            after: { seconds, f in DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: f) },
-            changed: { g in
-                MainActor.assumeIsolated {
-                    guard let f = IslandFeed.frame(g, lang: ResolvedLang.current) else { return }
-                    island.apply(f, title: g.goal, onStop: { [weak g] in g?.stop() })
-                }
-            })
-    }
-
 }
 
 /// The apps a run uses (icon and name) and its folder, or that it has none.

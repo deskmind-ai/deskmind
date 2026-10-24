@@ -29,6 +29,8 @@ struct IslandFrame: Equatable {
     var cardId: String?
     var cardApproval: Bool
     var cardText: String
+    /// The recent-runs record its "Show Details" opens (once kept).
+    var detailsRecord: UUID? = nil
 }
 
 enum IslandFeed {
@@ -59,11 +61,27 @@ enum IslandFeed {
         return f
     }
 
-    /// The frame for a GoalRun's own task (never the selected session's), with its session's pinned card; nil before
-    /// its task came.
-    static func frame(_ g: GoalRun, lang: ResolvedLang) -> IslandFrame? {
-        guard let (s, t) = g.task else { return nil }
-        return frame(t, pinned: g.shell.pinned(s).map { (card: $0.card, phase: $0.phase) }, lang: lang)
+    /// The frame for a GoalRun: running or ended by the goal's lifecycle — the one state GoalRunScreen reads too —
+    /// its task (its own, never the selected session's) for the detail; nil before its task came. A goal that ended
+    /// while its task does not say so yet (its process gone: interrupted) is ended here too.
+    static func frame(_ g: GoalRun, record: UUID?, lang: ResolvedLang) -> IslandFrame? {
+        let screen = GoalRunScreen(g.state, lang: lang)
+        var f: IslandFrame
+        if case .ended(_, _, let status) = g.state {
+            let t = g.task?.task
+            let line = t.map { $0.ended ? ShellText.task($0, lang: lang) : ShellText.ending(status, lang: lang) } ?? ShellText.ending(status, lang: lang)
+            f = IslandFrame(phase: .ended(passed: status == "succeeded", stopped: status == "cancelled" || status == "stopped"),
+                            step: t?.steps.count ?? 0, line: line, asking: false, cardId: nil, cardApproval: false, cardText: "")
+        } else {
+            guard screen.running, let (s, t) = g.task else { return nil }
+            f = frame(t, pinned: g.shell.pinned(s).map { (card: $0.card, phase: $0.phase) }, lang: lang)
+            // (running by the goal's state, whatever the task says: its end comes as the goal's)
+            if case .ended = f.phase {
+                f = IslandFrame(phase: .running, step: t.steps.count, line: f.line, asking: false, cardId: nil, cardApproval: false, cardText: "")
+            }
+        }
+        f.detailsRecord = record
+        return f
     }
 
     /// The record the island's "Show Details" opens: the session task's kept record, unless the window shows it

@@ -73,27 +73,90 @@ enum IslandFeedTests {
               "the end: not this one (RunOverlay.finish says it)")
     }
 
-    /// The island follows the goal's own task (GoalRun, never the selected session's), through the goal's `changed`
-    /// hook — which outlives the view — up to its end frame; Show Details opens the kept record, once.
+    /// The island as a test sees it: every call, in order, and the details link.
+    final class FakeSurface: IslandSurface {
+        var calls: [String] = []
+        var detailsRecord: UUID? = nil
+        var appActive = true
+        var userTyping = false
+        func requestNotifications() {}
+        func show(title: String, line: String, onStop: @escaping () -> Void) { calls.append("show"); detailsRecord = nil }   // (as RunOverlay.show)
+        func update(step: Int, line: String) { calls.append("update") }
+        func setAsking(_ on: Bool) { calls.append("asking:\(on)") }
+        func finish(passed: Bool, stopped: Bool, summary: String) { calls.append("finish:\(passed):\(summary)") }
+        func notify(title: String, body: String) { calls.append("notify") }
+    }
+    final class FakeServices: GoalRunServices {
+        var kept: [(GoalRecord, UUID)] = []
+        func beginRecording(goal: String, started: @escaping () -> Void) { started() }
+        func stopRecording(done: @escaping (URL?) -> Void) { done(nil) }
+        func keep(_ r: GoalRecord, id: UUID, lang: ResolvedLang) { kept.append((r, id)) }
+        func setMovie(_ path: String, for id: UUID) {}
+    }
+
+    /// The app's applier and effects (IslandApplier, GoalRunEffects.app) on a goal over the real ShellModel.
+    static func rig(holdDeliver: Bool = false) -> (SurfaceTests.Rig, FakeSurface, FakeServices, GoalRun) {
+        let r = SurfaceTests.Rig(holdDeliver: holdDeliver); SurfaceTests.openOK(r.mock)
+        let surface = FakeSurface(), services = FakeServices()
+        let g = GoalRun(goal: "整理下载", folder: nil, record: false, shell: r.m,
+                        effects: .app(lang: .en, services: services, surface: surface, after: { d, f in r.timers.after(d, f) }))
+        return (r, surface, services, g)
+    }
+
+    /// The island follows the goal's own task (never the selected session's) through the app's own applier, kept
+    /// with the goal; it ends with the goal; Show Details opens the kept record.
     static func wiringTests() {
         typealias T = SurfaceTests
-        var frames: [IslandFrame] = []
-        let r = T.Rig(); T.openOK(r.mock)
-        let g = r.goal(changed: { g in if let f = IslandFeed.frame(g, lang: .zhHans) { frames.append(f) } })
-        g.start()
-        check(frames.isEmpty, "no task yet: no island")
-        for l in T.taskLines { r.m.client.feed(l) }
-        check(frames.last?.phase == .running, "its task: the island shows it: \(String(describing: frames.last))")
-        r.m.selected = nil
-        r.m.client.feed(["kind": "session.task", "session_id": "ses_other", "seq": 1, "msg_id": "o1", "run_id": "r_other", "raw": "x", "by": "slash"])
-        check(IslandFeed.frame(g, lang: .zhHans) != nil && frames.last?.phase == .running, "another session selected: still its own task")
-        for l in T.endLines { r.m.client.feed(l) }
-        check(frames.last?.phase == .ended(passed: true, stopped: false), "its end reaches the island: \(String(describing: frames.last?.phase))")
+        do {
+            let (r, surface, services, g) = rig()
+            g.start()
+            check(surface.calls.isEmpty, "no task yet: no island")
+            for l in T.taskLines { r.m.client.feed(l) }
+            check(surface.calls.first == "show", "its task: the island shows it: \(surface.calls)")
+            r.m.selected = nil
+            r.m.client.feed(["kind": "session.task", "session_id": "ses_other", "seq": 1, "msg_id": "o1", "run_id": "r_other", "raw": "x", "by": "slash"])
+            check(!surface.calls.contains { $0.hasPrefix("finish") }, "another session selected: still its own task")
+            for l in T.endLines { r.m.client.feed(l) }
+            check(surface.calls.last == "finish:true:Done", "its end reaches the island: \(surface.calls)")
+            check(services.kept.count == 1 && surface.detailsRecord == services.kept.first?.1, "Show Details: its kept record")
+            check(services.kept.first?.0.sessionId == T.sid && services.kept.first?.0.task?.runId == T.rid, "the record keeps its session and run")
+        }
+        do {    // its start and end in one update: the record is kept before the island's first frame, whose `show` clears
+                // the last link — the frame's link is set after it
+            let (r, surface, services, g) = rig(holdDeliver: true)
+            g.start(); r.drainDeliver()
+            for l in T.taskLines + T.endLines { r.m.client.feed(l) }
+            r.drainDeliver()
+            check(g.state == .ended(sid: T.sid, run: T.rid, status: "succeeded"), "ended in one update: \(g.state)")
+            check(surface.calls.first == "show" && surface.calls.last == "finish:true:Done", "shown, then finished: \(surface.calls)")
+            check(services.kept.count == 1 && surface.detailsRecord == services.kept.first?.1, "Show Details keeps its record: \(String(describing: surface.detailsRecord))")
+        }
+        do {    // the session gone mid-task, its task not marked ended (the exit's last_seq before it): the goal's
+                // `interrupted` ends the island; nothing after the goal is let go
+            let (r, surface, _, g) = rig()
+            g.start()
+            for l in T.taskLines { r.m.client.feed(l) }
+            r.m.client.feed(["kind": "helper.session_exit", "session_id": T.sid, "code": 0, "last_seq": 1])
+            check(g.state == .ended(sid: T.sid, run: T.rid, status: "interrupted") && g.task?.task.ended == false,
+                  "the goal ended (interrupted), its task not marked ended: \(g.state)")
+            check(surface.calls.last == "finish:false:Interrupted", "the island ends with the goal: \(surface.calls)")
+            let n = surface.calls.count
+            r.m.client.feed(["kind": "step", "session_id": T.sid, "run_id": T.rid, "seq": 2, "text": "click", "step_id": "s1"])
+            r.timers.advance(3600)
+            check(surface.calls.count == n && !g.watching, "let go: no frame after: \(surface.calls.suffix(2))")
+        }
+        do {    // a recent run whose session (or task) is gone: its record's own content
+            var states: [String: SessionState] = [:]
+            check(PastRun.task(sessionId: T.sid, runId: T.rid, in: states) == nil, "session deleted: none (the record's own steps and summary)")
+            states[T.sid] = SessionState(sessionId: T.sid)
+            check(PastRun.task(sessionId: T.sid, runId: T.rid, in: states) == nil, "its task gone: none")
+            states[T.sid] = SessionReducer.reduce(SessionState(sessionId: T.sid), [SessionTests.taskR1, SessionTests.ex(1, #""kind":"start","raw":"x""#)])
+            check(PastRun.task(sessionId: T.sid, runId: "r1", in: states)?.task.runId == "r1", "there: shown as the session has it")
+        }
         let id = UUID(), other = UUID()
         check(IslandFeed.detailsRoute(record: id, showing: nil) == id && IslandFeed.detailsRoute(record: id, showing: other) == id,
               "Show Details: the task's record")
         check(IslandFeed.detailsRoute(record: id, showing: id) == nil && IslandFeed.detailsRoute(record: nil, showing: nil) == nil,
               "already shown, or none kept: the window as it is")
-        check(r.records.first?.sessionId == T.sid && r.records.first?.task?.runId == T.rid, "the record keeps its session and run")
     }
 }
