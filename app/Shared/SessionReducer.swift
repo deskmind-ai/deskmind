@@ -365,6 +365,10 @@ struct SessionState: Equatable {
     var unsent: [Outgoing] { outbox.filter { !$0.sending && !retired.contains($0.id) } }
     /// Words their sender gave up on (a GoalRun over: its cua), by client id: never shown, never resent.
     var retired: Set<String> = []
+    /// The answers to `stop {client_id}` (harness#72: session.stop_ack, not stored), by the cua's client id.
+    var stopAcks: [String: SessionStopAck] = [:]
+    /// Cuas a stop cancelled before any task came of them (session.cua_cancelled, stored).
+    var cancelledCuas: Set<String> = []
     /// The outbox as the chat shows it: without retired words.
     var shownOutbox: [Outgoing] { outbox.filter { !retired.contains($0.id) } }
     var errors: [StoredError] = []
@@ -780,6 +784,11 @@ enum SessionReducer {
         case .duplicate(let d):
             // the session had taken these words already (their stored line has come, or comes in a replay)
             if !d.clientId.isEmpty { taken(&s, d.clientId) }
+        case .stopAck(let a):
+            // (not stored: kept by client id until a newer one; a stop sent again gets the same answer)
+            if !a.clientId.isEmpty { s.stopAcks[a.clientId] = a }
+        case .cuaCancelled(let c):
+            if !c.clientId.isEmpty { s.cancelledCuas.insert(c.clientId) }
         case .unknown(let k, _):
             s.unknownKinds.insert(k)
         default:

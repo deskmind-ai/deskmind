@@ -195,6 +195,9 @@ enum SessionControl: Equatable {
     case say(String)
     case cua(String, scope: String? = nil)
     case stop(runId: String? = nil)
+    /// `stop {client_id}` (harness#72): the task a cua with that client id started, or — none yet — the cua cancelled;
+    /// answered by exactly one session.stop_ack.
+    case stopCua(clientId: String)
     case steer(String, runId: String? = nil)
     /// `reqId`: this client's id for the line (harness#71 echoes it on a refusal of it and on session.task_respond).
     case answer(CardAnswer, reqId: String? = nil)
@@ -213,6 +216,7 @@ enum SessionControl: Equatable {
         case .say(let t): return ["type": "say", "text": t]
         case .cua(let t, let scope): return ["type": "cua", "text": t].merging(scope.map { ["scope": $0] } ?? [:]) { a, _ in a }
         case .stop(let r): return ["type": "stop"].merging(r.map { ["run_id": $0] } ?? [:]) { a, _ in a }
+        case .stopCua(let c): return ["type": "stop", "client_id": c]
         case .steer(let t, let r): return ["type": "steer", "text": t].merging(r.map { ["run_id": $0] } ?? [:]) { a, _ in a }
         case .answer(let a, let req): var o = a.control; if let req { o["req_id"] = req }; return o
         case .reask(let r): return ["type": "reask", "run_id": r]
