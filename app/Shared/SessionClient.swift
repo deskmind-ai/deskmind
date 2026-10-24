@@ -55,6 +55,20 @@ final class HelperSessionTransport: SessionTransport {
     }
 }
 
+/// Where deferred work runs: a queue and the wall clock (the app), or a test's own steps, run when the test says — so a
+/// test's interleaving is its seed's, not the machine's timing (deskmind#112).
+struct DeferredWork {
+    /// Runs `f` later, in order with the rest given to this lane (a serial queue's async).
+    var soon: (@escaping () -> Void) -> Void
+    /// Runs `f` after about `d` seconds.
+    var after: (TimeInterval, @escaping () -> Void) -> Void
+    /// A test's steps only: what a wait for this work does instead — it runs the work, on the caller's thread.
+    var drain: (() -> Void)?
+    static func queue(_ q: DispatchQueue) -> DeferredWork {
+        DeferredWork(soon: { q.async(execute: $0) }, after: { d, f in q.asyncAfter(deadline: .now() + d, execute: f) }, drain: nil)
+    }
+}
+
 /// The helper's "cloud models off" bit kept equal to the app's switch (#107 review: a lost models.off left the helper
 /// off and the app on for good). One per app process, injected where it is used (never chosen by the transport's type:
 /// two would race each other). Every send reads the switch as it is when it goes (`current`), never a value captured
@@ -73,7 +87,11 @@ final class ModelsOffSync {
     private var waiting: [() -> Void] = []
     /// The first wait before a try again (doubling, up to 30 s).
     var firstDelay = 0.25
-    init(transport: SessionTransport, current: @escaping () -> Bool) { self.transport = transport; self.current = current }
+    init(transport: SessionTransport, current: @escaping () -> Bool) {
+        self.transport = transport; self.current = current; self.work = .queue(queue)
+    }
+    /// Where its sends run (the app: its own serial queue; a test: its steps). Set before the first push.
+    var work: DeferredWork
     private var acked_: [() -> Void] = []
     private var callbacks = 0
     /// Configurations on their way to a session, let go while no switch was on its way (`beginConfigSend`): a models.off
@@ -107,7 +125,7 @@ final class ModelsOffSync {
     func push(then: (() -> Void)? = nil) {
         let off = current()          // (read outside the lock: it reads the app's settings)
         lock.lock(); if off { offEpoch_ += 1 }; gen += 1; let g = gen; pending = true; if let then { waiting.append(then) }; lock.unlock()
-        queue.async { [weak self] in self?.attempt(g, delay: self?.firstDelay ?? 0.25) }
+        work.soon { [weak self] in self?.attempt(g, delay: self?.firstDelay ?? 0.25) }
     }
 
     private func attempt(_ g: Int, delay: Double) {
@@ -138,7 +156,7 @@ final class ModelsOffSync {
         }
         // not acked, or the switch moved while it went: again (at once if it only moved)
         let next = acked ? 0 : delay
-        queue.asyncAfter(deadline: .now() + next) { [weak self] in self?.attempt(g, delay: min(delay * 2, 30)) }
+        work.after(next) { [weak self] in self?.attempt(g, delay: min(delay * 2, 30)) }
     }
 
     /// The switch as it is now (where every path reads it).
@@ -161,6 +179,7 @@ final class ModelsOffSync {
 
     /// Waits (bounded) until the switch the helper holds is acked — a retry still scheduled is waited for too.
     func settle(timeout: Double? = nil) {
+        if let drain = work.drain { drain(); return }        // (a test's steps: run, not polled)
         let timeout = timeout ?? settleTimeout
         let until = Date().addingTimeInterval(timeout)
         while Date() < until {
@@ -498,6 +517,7 @@ final class SessionClient {
     init(transport: SessionTransport = HelperSessionTransport(), modelsSync: ModelsOffSync? = nil) {
         self.transport = transport
         self.injectedSync = modelsSync
+        self.reconcileWork = .queue(reconcileQueue)
         self.modelsSync = modelsSync ?? ModelsOffSync(transport: transport, current: { [weak self] in self?.modelOff ?? false })
         // a models-off ack: every session converged to the switch the helper holds now
         self.modelsSync.onAck { [weak self] in self?.convergeAllLater() }
@@ -864,12 +884,17 @@ final class SessionClient {
     func reconcileSession(_ id: String) {
         lock.lock(); dirty.insert(id); lock.unlock()
         reconciling.enter()
-        reconcileQueue.async { [weak self] in
+        reconcileWork.soon { [weak self] in
             defer { self?.reconciling.leave() }
             self?.converge(id)
         }
     }
     private let reconcileQueue = DispatchQueue(label: "ai.deskmind.session.reconcile")
+    /// Where reconciles run (the app: the serial queue above; a test: its steps, and it waits by running them, not on
+    /// `reconciling`).
+    var reconcileWork: DeferredWork
+    /// Where a retry waits for its time (the app: a global queue; a test: its steps).
+    var retryWork: DeferredWork = .queue(.global())
     /// Reconciles under way (tests wait on it).
     let reconciling = DispatchGroup()
 
@@ -877,10 +902,21 @@ final class SessionClient {
     /// at its current generation. The sender handles the reply: clean (ok, busy) at the same generation; dirty again
     /// meanwhile, or a reply from an old process: sent again, on this thread; failed: dirty, retried after a backoff.
     /// Safe from any thread but the main one.
-    func converge(_ id: String) {
+    func converge(_ id: String) { converge(id, retry: false) }
+
+    /// `retry`: the session's retry chain, its time come — handed over to this converge in the same step that takes the
+    /// session, so that no moment shows it dirty with neither a send in flight nor a retry waiting (deskmind#112: a
+    /// quiescence check read that moment, after the timer's removal and before the send).
+    private func converge(_ id: String, retry: Bool) {
+        var retry = retry
         while true {
             // take the session: live, dirty, nothing in flight
             lock.lock()
+            if retry {
+                retry = false
+                guard retryScheduled.remove(id) != nil else { lock.unlock(); return }          // (cancelled: exit, delete)
+                if !liveIdsLocked().contains(id) { retryDelay[id] = nil; lock.unlock(); return }
+            }
             guard isLiveLocked(id), inFlight[id] == nil, dirty.contains(id) else { lock.unlock(); return }
             let gen = generation[id, default: 0]
             inFlight[id] = gen; dirty.remove(id)
@@ -992,15 +1028,7 @@ final class SessionClient {
         lock.unlock()
         // (not in `reconciling`: a retry waits for its time, and a helper that never answers is retried for as long as
         // the session lives — quiescence is not waiting for it)
-        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            guard self.retryScheduled.remove(id) != nil else { self.lock.unlock(); return }    // (cancelled: exit, delete)
-            let live = self.liveIdsLocked().contains(id)
-            if !live { self.retryDelay[id] = nil }
-            self.lock.unlock()
-            if live { self.converge(id) }
-        }
+        retryWork.after(delay) { [weak self] in self?.converge(id, retry: true) }
     }
 
     /// The session's process is gone (exit, delete): nothing owed to it — its next process opens with desired().
