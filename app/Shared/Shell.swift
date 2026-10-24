@@ -332,7 +332,22 @@ final class ShellModel: ObservableObject {
     @Published var notice: String?
     /// What the app holds for cards (CardStore): answers in their take-back, answers written and not yet taken, reasks.
     /// With the session's state it is a card's one state (`phase`), which every view reads.
-    @Published private(set) var cards = CardStore()
+    ///
+    /// Touched only on the UI queue (`uiQueue`: the main queue; a test's own) — every read and every write traps
+    /// anywhere else (dispatchPrecondition, in release builds too). The watcher, the socket and the work queue hand
+    /// over with `deliver` (#110 Codex review at 4a411c2: a clear from the watch thread overwrote a `sent` just
+    /// recorded on main, and one card wrote two answers).
+    var cards: CardStore {
+        get { onUI(); return cardStore }
+        set { onUI(); cardStore = newValue }
+    }
+    @Published private var cardStore = CardStore()
+    /// The queue the window's model runs on (where `deliver` lands).
+    let uiQueue: DispatchQueue
+    private func onUI() { dispatchPrecondition(condition: .onQueue(uiQueue)) }
+    private let uiKey = DispatchSpecificKey<Bool>()
+    /// `f` now when on the UI queue, else queued to it.
+    private func onUIQueue(_ f: @escaping () -> Void) { if DispatchQueue.getSpecific(key: uiKey) == true { f() } else { uiQueue.async(execute: f) } }
     /// The helper answers (its socket): the session list came back.
     @Published private(set) var reachable = true
     /// An open waits for DeskMind's helper to take the cloud switch (at most a few seconds): said meanwhile.
@@ -397,7 +412,10 @@ final class ShellModel: ObservableObject {
          takeBackAfter: @escaping (TimeInterval, @escaping () -> Void) -> Void = { d, f in DispatchQueue.main.asyncAfter(deadline: .now() + d, execute: f) },
          now: @escaping () -> Double = { Date().timeIntervalSince1970 },
          work: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.global(qos: .userInitiated).async(execute: f) },
-         deliver: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) }) {
+         deliver: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) },
+         uiQueue: DispatchQueue = .main) {
+        self.uiQueue = uiQueue
+        uiQueue.setSpecific(key: uiKey, value: true)
         self.client = client
         self.names = SessionNames(defaults: defaults)
         self.defaults = defaults
@@ -442,12 +460,20 @@ final class ShellModel: ObservableObject {
     /// converged. Called before each open and send, and when the settings change.
     func applySettings() { applySettings(reconcileIfModelChanged: true) }
 
+    /// Called from any thread (the watch thread too): the held answers' clear goes to the UI queue, carrying the
+    /// switch's off-epoch it saw — it drops only picks made before that off (a clear that runs late, after the switch
+    /// is on again, leaves the picks made since alone). The take-back's own check (CardStore.due's epoch) is what
+    /// keeps a held answer from going after an off; this clear only makes the window show it at once.
     private func applySettings(reconcileIfModelChanged: Bool) {
         let off = !cloudOn()
-        if off && !cards.picks.isEmpty { cards.cloudOff() }    // (held answers go with the switch: SessionClient.offEpoch)
-        guard client.modelOff != off else { return }
-        client.modelOff = off
-        if reconcileIfModelChanged { work { [weak self] in self?.client.convergeAll() } }
+        if client.modelOff != off {
+            client.modelOff = off
+            if reconcileIfModelChanged { work { [weak self] in self?.client.convergeAll() } }
+        }
+        if off {
+            let epoch = client.offEpoch
+            deliver { [weak self] in self?.cards.cloudOff(before: epoch) }
+        }
     }
 
     /// The settings as the window shows them (on the main thread): cloud models on or off.
@@ -544,10 +570,14 @@ final class ShellModel: ObservableObject {
         for id in ids where !deleted.contains(id) {
             let s = client.state(id)
             states[id] = s
-            // a card that is no longer open: what the app held for it goes (a held answer is never sent then)
-            var c = cards
-            c.settle(id, s)
-            if c != cards { cards = c }
+            // a card that is no longer open: what the app held for it goes (a held answer is never sent then) — on the
+            // UI queue only (flush runs there in the app; a test that delivers inline from a client thread hands it over)
+            onUIQueue { [weak self] in
+                guard let self else { return }
+                var c = self.cards
+                c.settle(id, self.client.state(id))
+                if c != self.cards { self.cards = c }
+            }
         }
         // the open session's problems are seen as they come (once per new stored line or process end: never a loop of
         // marks)
