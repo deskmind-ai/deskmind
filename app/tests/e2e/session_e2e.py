@@ -48,12 +48,15 @@ def new_suite(prefix):
 
 
 def remove_suite(suite):
-    # cfprefsd first (it would write its copy back), then the file
-    subprocess.run(["defaults", "delete", suite], capture_output=True)
+    # cfprefsd first (it would write its copy back), then the file. A failure is reported and never raised: the
+    # cleanup after it (other suites, the helper and fake model) must still run.
     try:
+        subprocess.run(["defaults", "delete", suite], capture_output=True)
         os.remove(os.path.join(PREFS, suite + ".plist"))
     except FileNotFoundError:
         pass
+    except Exception as exc:
+        print(f"WARN could not remove the defaults suite {suite}: {exc!r}", flush=True)
 
 
 def sweep_suites():
@@ -226,18 +229,25 @@ def main():
                 print(r.stdout, end="")
                 check(r.returncode == 0, f"the 0.5 window's model against the helper, phase {phase} ({r.returncode} failures){r.stderr[-400:]}")
     finally:
-        for s in SUITES:
-            remove_suite(s)
-        for p in helpers + [fake]:
-            if p.poll() is None:
-                p.kill()
-        # the session processes go when their helper does (stdin's end); any left are reported, then stopped
-        pattern = f"harness.mjs session --dir {OUT}/"
-        left = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
-        check(until(lambda: not subprocess.run(["pgrep", "-f", pattern], capture_output=True).stdout, 20) is not None,
-              f"no session process outlives the test ({left})")
-        for pid in subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split():
-            os.kill(int(pid), signal.SIGKILL)
+        try:
+            for s in SUITES:
+                remove_suite(s)
+        finally:
+            stop_processes(helpers, fake)
+
+
+def stop_processes(helpers, fake):
+    """The helpers, the fake model and any session process left: stopped, whatever failed before."""
+    for p in helpers + [fake]:
+        if p.poll() is None:
+            p.kill()
+    # the session processes go when their helper does (stdin's end); any left are reported, then stopped
+    pattern = f"harness.mjs session --dir {OUT}/"
+    left = subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
+    check(until(lambda: not subprocess.run(["pgrep", "-f", pattern], capture_output=True).stdout, 20) is not None,
+          f"no session process outlives the test ({left})")
+    for pid in subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split():
+        os.kill(int(pid), signal.SIGKILL)
 
 
 def run(env, helper):
