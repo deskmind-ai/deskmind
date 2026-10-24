@@ -99,8 +99,9 @@ enum IslandFeedTests {
         func stopRecording(done: @escaping (URL?) -> Void) { pendingStop = done }
         func finishRecording(_ path: String?) { let d = pendingStop; pendingStop = nil; d?(path.map { URL(fileURLWithPath: $0) }) }
         func keep(_ r: GoalRecord, id: UUID, lang: ResolvedLang) {
-            kept.append((r, id))
-            saved[id] = SavedRun(sessionId: r.runId == nil ? nil : r.sessionId, runId: r.runId, ended: r.ended, folder: r.folder, movie: nil)
+            // (the same record written over, as RunHistory.put)
+            if let i = kept.firstIndex(where: { $0.1 == id }) { kept[i] = (r, id) } else { kept.append((r, id)) }
+            saved[id] = SavedRun(sessionId: r.runId == nil ? nil : r.sessionId, runId: r.runId, ended: r.ended, folder: r.folder, movie: saved[id]?.movie)
         }
         func setMovie(_ path: String, for id: UUID) { saved[id]?.movie = path }
     }
@@ -304,5 +305,8 @@ enum IslandFeedTests {
         for l in T.taskLines + T.endLines { r.m.client.feed(l) }   // the history lands
         let v = shown()
         check(v.sessionShown && v.task?.runId == T.rid && v.task?.resultCard != nil, "the history landed: its task with its result card")
+        check(services.kept.count == 1 && services.kept.first?.0.task?.runId == T.rid && services.kept.first?.0.ended == "stopped"
+              && GoalOutcome.record(services.kept.first!.0, lang: .en).finished == false, "the record written over with its task, its outcome its ending's")
+        check(surface.detailsRecord == id, "the details link still its record")
     }
 }

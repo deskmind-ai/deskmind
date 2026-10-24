@@ -373,6 +373,9 @@ struct GoalRunScreen: Equatable {
 }
 
 /// The record a goal leaves in the recent runs: its task as its session has it (ended), or why it failed.
+/// Its identity and outcome come from the lifecycle's ending (session, run, status — or why it failed), never from
+/// whether the task's lines have come; the task's details (summary, steps, changes) from its TaskState once present
+/// (Codex review at a621726: an ack before the history saved a succeeded task as errored, with nothing in it).
 struct GoalRecord: Equatable {
     var goal: String
     var folder: String?
@@ -384,6 +387,11 @@ struct GoalRecord: Equatable {
     /// The run it ended with (its lifecycle's `ended`): the record's session task — set whether or not the task's
     /// lines have come yet (a stop's ack may end it before the history does; Codex review at c03c9e5).
     var runId: String? = nil
+
+    /// Done (succeeded), by its ending.
+    var finished: Bool { ended == "succeeded" }
+    /// Errored, by its ending: failed, interrupted, or a failed task.
+    var errored: Bool { failed != nil || ended == "interrupted" || ended == "failed" }
 }
 
 /// The app's side of a goal's effects (the app: RunRecorder and RunHistory; a test: its own).
@@ -392,6 +400,8 @@ struct GoalRunEffects {
     var beginRecording: (_ goal: String, _ started: @escaping () -> Void) -> Void
     /// Stop it; `done` with the movie (nil: none).
     var stopRecording: (_ record: GoalRecord, _ done: @escaping (URL?) -> Void) -> Void
+    /// Write the goal's recent-runs record — at its ending, and once more when its task's details come after it
+    /// (the same record: written over, by the goal).
     var writeRecord: (GoalRecord) -> Void
     var after: (Double, @escaping () -> Void) -> Void
     /// The goal's state or its session's changed (the app: its island and notifications, IslandFeed.frame(goal) —
@@ -422,6 +432,8 @@ final class GoalRun: ObservableObject {
     private var watch: AnyCancellable?
     /// The newest deadline (a newer one replaces it).
     private var deadline = 0
+    /// Ended, its record waiting for its task's lines (GoalRecord's details).
+    private var awaitingDetails = false
     /// The newest resend of its `stop {client_id}` (a newer one replaces it).
     private var resendTimer = 0
     /// Its session's newest state, as the shell's `states` takes it: the sink runs before `states` is set, so what
@@ -473,6 +485,12 @@ final class GoalRun: ObservableObject {
     /// After a change: done with it (over) — its watch cancelled, it let go.
     private func changed(from before: GoalLifecycle.State) {
         guard GoalLifecycle.done(state), !GoalLifecycle.done(before) else { return }
+        // (ended before its task's lines came: kept watching until they do, or `detailsBound`, or its session goes)
+        if awaitingDetails { return }
+        release()
+    }
+
+    private func release() {
         watch = nil
         latest = nil
         let f = onDone
@@ -491,11 +509,17 @@ final class GoalRun: ObservableObject {
         case .open:
             // this goal's own session's state, whenever the shell takes a newer one (until it is done with it)
             watch = shell.$states.sink { [weak self] all in
-                guard let self, let sid = self.sessionId, let s = all[sid] else { return }
+                guard let self, let sid = self.sessionId else { return }
+                guard let s = all[sid] else {
+                    // (its session deleted while it waits for its task's lines: the record its ending gave stays)
+                    if self.awaitingDetails, self.latest != nil { self.awaitingDetails = false; self.release() }
+                    return
+                }
                 self.latest = s
                 self.see(s)
                 // (not once it is let go — that change already told: its end frame; the shell's state is older here)
                 if self.watch != nil { self.effects.changed(self) }
+                self.detailsCame()
             }
             shell.startTask(goal, scope: folder, clientId: cua, ticket: ticket) { [weak self] e in self?.send(e) }
         case .sendStop(let sid, let run):
@@ -522,16 +546,38 @@ final class GoalRun: ObservableObject {
         case .stopRecording:
             effects.stopRecording(recordOf()) { [weak self] url in self?.movie = url }
         case .writeRecord:
-            effects.writeRecord(recordOf())
+            let r = recordOf()
+            effects.writeRecord(r)
+            // ended with its task's lines not come yet (a stop's ack before the history): completed when they come
+            if r.ended != nil, r.task?.ended != true {
+                awaitingDetails = true
+                effects.after(Self.detailsBound) { [weak self] in
+                    guard let self, self.awaitingDetails else { return }
+                    self.awaitingDetails = false
+                    self.release()
+                }
+            }
         }
     }
 
     private func recordOf() -> GoalRecord {
-        var failed: String? = nil
-        var ended: String? = nil, run: String? = nil
+        var failed: String? = nil, ended: String? = nil, run: String? = nil
         if case .failed(let why) = state { failed = why }
         if case .ended(_, let r, let status) = state { ended = status; run = r }
         return GoalRecord(goal: goal, folder: folder, sessionId: sessionId, task: task?.task, failed: failed, ended: ended, runId: run)
+    }
+
+    /// How long an ended goal whose task's lines have not come yet waits for them, to complete its record (then it is
+    /// let go with the record its ending gave).
+    static let detailsBound: Double = 120
+
+    /// Its task's lines came after its ending: the record written again with them, once; then it is let go.
+    private func detailsCame() {
+        // (its task as it ended: the history brings its end too — the ack came after it was stored)
+        guard awaitingDetails, case .ended(_, let run, _) = state, let s = latest, s.task(run)?.ended == true else { return }
+        awaitingDetails = false
+        effects.writeRecord(recordOf())
+        release()
     }
 }
 

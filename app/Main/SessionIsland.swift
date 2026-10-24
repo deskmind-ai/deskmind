@@ -59,7 +59,8 @@ final class AppGoalServices: GoalRunServices {
                 // run reads its session by id and shows the task once its history lands)
                 sessionId: g.runId == nil ? nil : g.sessionId, runId: g.runId)
             r.ended = g.ended
-            RunHistory.shared.add(r)
+            // (written over in its place when its task's details come after its ending: RunHistory.put)
+            RunHistory.shared.put(r)
         }
     }
 }
