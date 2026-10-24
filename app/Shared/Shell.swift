@@ -831,11 +831,16 @@ final class ShellModel: ObservableObject {
     }
     /// The card left the screen (its view went: the window closed, another session shown, the card answered): its card
     /// mode ends with it, and its time on screen starts again when it is back.
+    ///
+    /// Only that card's state goes (its time on screen, and card mode when it is its): a card's appear and disappear
+    /// may come in any order — an animated replacement shows the new card before the old one goes (#111 Codex review
+    /// at 656d5a9) — so everything here is by card key. The whole reset (every card) is the window's, the app's and the
+    /// session's (windowLeft, leaveCardMode).
     func cardHidden(_ card: CardModel) {
         let k = Self.cardKey(card)
         visible.remove(k)
         shownAt[k] = nil
-        if keyCard == k { leaveCardMode() }
+        if keyCard == k { keyCard = nil }
     }
     /// Card mode ends: the card is no longer on screen in the key window — the window closed or is no longer the key
     /// one, another app came forward (leaving the app ends it, coordinator 10-24), another session shown. A new explicit
