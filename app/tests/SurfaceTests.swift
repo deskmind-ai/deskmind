@@ -600,9 +600,13 @@ enum SurfaceTests {
     }
 
     /// Codex delta review at 1f77d1a (2): the window's close button is GoalRuns' alone — closable exactly while no
-    /// goal is active, told on every change (start, end, failed and guarding, released), no view involved. (3): a
-    /// reopen is held while a goal is active and no card of its own waits. (minor) a released goal's request goes.
+    /// goal is active, told on every change (start, end, failing then failed, released), no view involved. (minor) a
+    /// released goal's request goes. Codex review at b767ca7 (P2): a reopen while a goal is active restores the window
+    /// (hands#69 gives the front back without a reopen); the old engine's run and the 0.5 window's task still hold it.
     static func goalClosableTests() {
+        check(Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: false, goalActive: true), "a goal active: the reopen restores")
+        check(!Activation.reopenRestores(oldRunWithoutCard: true, shellTaskWithoutCard: false, goalActive: false)
+              && !Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: true, goalActive: false), "an old run / a shell task without card: held, as before")
         do {    // start → end → released
             let r = Rig(); openOK(r.mock)
             var closable: [Bool] = [], released: [UUID] = []
@@ -610,14 +614,16 @@ enum SurfaceTests {
             let a = UUID()
             let g = runs.start(a) { r.goal() }
             check(closable == [false], "started: not closable: \(closable)")
-            check(runs.holdsReopen, "active, no card: a reopen is held (hands' give-back)")
+            check(Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: false, goalActive: runs.active != nil) && runs.active == a,
+                  "a goal active, no card: the user's reopen (Dock, live card) restores the window")
             for l in taskLines { r.m.client.feed(l) }
             r.m.client.feed(["kind": "ask", "session_id": sid, "run_id": rid, "seq": 2, "ask_id": "ask_g",
                              "card": ["kind": "missing", "text": "发给谁？", "free_text": false, "blocking": true,
                                       "options": [["kind": "value", "text": "小王"], ["kind": "cancel", "text": "先别做了"]]]])
-            check(g?.cardWaiting == true && !runs.holdsReopen, "its card waits: a reopen is the user's")
+            check(g?.task != nil && Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: false, goalActive: true),
+                  "its card waits: restores too")
             for l in endLines { r.m.client.feed(l) }
-            check(closable == [false, true] && released == [a] && !runs.holdsReopen, "ended: closable, released once: \(closable) \(released)")
+            check(closable == [false, true] && released == [a], "ended: closable, released once: \(closable) \(released)")
         }
         do {    // failing, its stop unanswered: not closable, kept; answered: closable, released once
             let r = Rig(); openOK(r.mock)
