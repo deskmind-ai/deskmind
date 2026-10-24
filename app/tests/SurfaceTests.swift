@@ -172,6 +172,7 @@ enum SurfaceTests {
         var records: [GoalRecord] = []
         var recordingStops = 0
         var recordingBegins = 0
+        var recordWrites = 0
         final class Held { var work: [() -> Void] = [] }
         /// The work queue's jobs while `holdWork` (an open or a send that has not answered yet).
         let held = Held()
@@ -193,7 +194,8 @@ enum SurfaceTests {
             GoalRun(goal: "把下载文件夹按类型整理", folder: "/tmp/dl", record: record, shell: m, effects: GoalRunEffects(
                 beginRecording: { [unowned self] _, started in recordingBegins += 1; started() },
                 stopRecording: { [unowned self] _, done in recordingStops += 1; done(nil) },
-                writeRecord: { [unowned self] r in records.append(r) },
+                // (the goal's one record, written over when its task's details come after its ending)
+                writeRecord: { [unowned self] r in recordWrites += 1; if records.isEmpty { records.append(r) } else { records[records.count - 1] = r } },
                 after: { [unowned self] d, f in timers.after(d, f) }))
         }
         var lines: [[String: Any]] { mock.requests.compactMap { $0["line"] as? [String: Any] } }
@@ -387,6 +389,40 @@ enum SurfaceTests {
             check(g.state == .failing(L.Why.gone, sid: sid), "exit before its task: failing")
             r.ack("already_ended", run: rid, status: "succeeded")
             ended(r, g, .ended(sid: sid, run: rid, status: "succeeded"), "failing(gone), then already_ended")
+        }
+        do {    // Codex review at a621726: the ack ends the goal before its history — the record is succeeded from the
+                // start (its ending), and gains its task's details once they come; then the goal is let go
+            let r = Rig(); openOK(r.mock)
+            let runs = GoalRuns()
+            let a = UUID()
+            guard let g = runs.start(a, make: { r.goal() }) else { check(false, "started"); return }
+            g.stop()
+            r.ack("already_ended", run: rid, status: "succeeded")
+            check(g.state == .ended(sid: sid, run: rid, status: "succeeded") && g.task == nil, "ended by the ack, no task yet: \(g.state)")
+            let first = r.records.first
+            check(first?.finished == true && first?.errored == false && first?.ended == "succeeded" && first?.runId == rid && first?.sessionId == sid,
+                  "the record at once: succeeded, its session and run")
+            check(GoalRunScreen(g.state, lang: .en).afterwards && g.watching && runs.run(a) != nil, "the screen ended now; the goal still watches for its task")
+            for l in taskLines + endLines { r.m.client.feed(l) }
+            let rec = r.records.first
+            check(r.records.count == 1 && r.recordWrites == 2 && rec?.task?.runId == rid && rec?.task?.ended == true && rec?.finished == true,
+                  "its history came: the record written over once with its task: \(r.recordWrites)")
+            check(!g.watching && runs.run(a) == nil, "then let go")
+            r.timers.advance(3600)
+            check(r.recordWrites == 2, "not written again")
+        }
+        do {    // the history never comes: the record stays as its ending gave it; let go after detailsBound (120 s)
+            let r = Rig(); openOK(r.mock)
+            let runs = GoalRuns()
+            let a = UUID()
+            guard let g = runs.start(a, make: { r.goal() }) else { check(false, "started"); return }
+            g.stop()
+            r.ack("already_ended", run: rid, status: "succeeded")
+            r.timers.advance(GoalRun.detailsBound - 1)
+            check(g.watching && runs.run(a) != nil, "waiting for its history until the bound")
+            r.timers.advance(1)
+            check(!g.watching && runs.run(a) == nil && r.recordWrites == 1, "the bound: let go, the record as its ending gave it")
+            check(r.records.first?.finished == true && r.records.first?.task == nil && r.records.first?.ended == "succeeded", "succeeded, by its ending")
         }
         do {    // its cua refused by the session after it was sent: failed at once, in the session's words; no bubble left
             let r = Rig(); openOK(r.mock)

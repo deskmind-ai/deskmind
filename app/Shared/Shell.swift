@@ -202,15 +202,21 @@ enum ShellText {
         }
         // (why it stopped is its end's own: status and cause — never how its result card closed later)
         switch t.status {
+        case "stopped" where t.cause == .lastStepUnknown: return L("Stopped. The last step may or may not have happened", lang: lang)
+        case "environment" where t.cause == .screenLocked: return L("Stopped: the screen is locked", lang: lang)
+        default: return ending(t.status, lang: lang)
+        }
+    }
+
+    /// An ending by its status alone.
+    static func ending(_ status: String?, lang: ResolvedLang) -> String {
+        switch status {
         case "succeeded": return L("Done", lang: lang)
         case "unconfirmed": return L("Done, but not confirmed. Please check", lang: lang)
         case "failed": return L("Didn't finish", lang: lang)
         case "cancelled": return L("Cancelled", lang: lang)
-        case "stopped":
-            if t.cause == .lastStepUnknown { return L("Stopped. The last step may or may not have happened", lang: lang) }
-            return L("Stopped", lang: lang)
-        case "environment":
-            return t.cause == .screenLocked ? L("Stopped: the screen is locked", lang: lang) : L("The Mac's state didn't allow it", lang: lang)
+        case "stopped": return L("Stopped", lang: lang)
+        case "environment": return L("The Mac's state didn't allow it", lang: lang)
         default: return L("Interrupted", lang: lang)
         }
     }
