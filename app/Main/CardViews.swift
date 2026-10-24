@@ -4,8 +4,8 @@
 // card. The result card uses the same view (its own phase is A3's).
 //
 // Focus (handoff §3.1): nothing here activates the app, brings a window forward or moves the keyboard focus (ShellTests
-// checks every Main/Card*.swift as it does MainSplitView.swift). The 1–9 keys (CardKeyMonitor) are read only while the
-// main window is the key window and no field is being typed in; they pick through the same path as a click.
+// checks the window's view files from build.sh). The 1–9 keys (CardKeyMonitor) act only in card mode — after the user
+// moved into the card (a click on it, Esc / Tab) — never by timing alone; they pick through the same path as a click.
 
 import AppKit
 import SwiftUI
@@ -36,6 +36,8 @@ struct CardView: View {
     private var layout: CardLayout { CardLayout(card) }
     private var wordsEnabled: Bool { shell.wordsEnabled(card, in: session) }
     private var seen: Bool { shell.bodySeen.contains(ShellModel.cardKey(card)) }
+    /// Its keys act now (card mode for it): their labels and hints are shown only then.
+    private var keysOn: Bool { shell.keysActive(card) }
 
     var body: some View {
         let layout = self.layout
@@ -106,7 +108,8 @@ struct CardView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(card.blocking && (phase.ending == nil || phase.isExpiredOffer) ? Brand.dot : Brand.line, lineWidth: 1.2))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Self.voiceOverLabel(card, phase: phase, lang: lang))
-        // (when it came on screen: its keys wait CardKeys.cardOnScreen)
+        // (a click anywhere on it is a move into it: card mode, its keys on — CardKeys; when it came on screen)
+        .simultaneousGesture(TapGesture().onEnded { shell.enterCardMode(card) })
         .onAppear { shell.cardShown(card) }
         .onDisappear { shell.cardHidden(card) }
     }
@@ -121,7 +124,7 @@ struct CardView: View {
             case .list:
                 Button(action: action) {
                     HStack(spacing: 8) {
-                        if let k = c.key { KeyCap(n: k) }
+                        if keysOn, let k = c.key { KeyCap(n: k) }
                         Text(b.text).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -130,7 +133,7 @@ struct CardView: View {
             case .button:
                 Button(action: action) {
                     HStack(spacing: 6) {
-                        if let k = c.key { KeyCap(n: k) }
+                        if keysOn, let k = c.key { KeyCap(n: k) }
                         Text(b.text)
                     }
                 }
@@ -140,7 +143,7 @@ struct CardView: View {
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)    // (InkButtonStyle does not dim: the card's own)
         .accessibilityLabel(b.text)
-        .accessibilityHint(b.role.needsWholeBody && !seen ? L("Read the whole card first: scroll to its end", lang: lang) : CardLayout.hint(c, lang: lang))
+        .accessibilityHint(b.role.needsWholeBody && !seen ? L("Read the whole card first: scroll to its end", lang: lang) : CardLayout.hint(c, keys: keysOn, lang: lang))
     }
 
     /// The answer held for its take-back: what was picked, the seconds left, and 「撤回」 (the words come back to the

@@ -25,7 +25,7 @@ enum CardLayoutTests {
         DecisionTests.group("layout.wholeCardTests"); wholeCardTests()
         DecisionTests.group("layout.factsTests"); factsTests()
         DecisionTests.group("layout.keyGateTests"); keyGateTests()
-        DecisionTests.group("layout.typingGuardTests"); typingGuardTests()
+        DecisionTests.group("layout.cardModeTests"); cardModeTests()
     }
 
     // MARK: samples
@@ -214,8 +214,9 @@ enum CardLayoutTests {
               "the action card: the action, its object, the site, every line of what goes out: \(String(describing: action.consent))")
         check(CardLayout(model(samples().first { $0.name == "ambiguity" }!.card)).consent == nil, "no consent on a choice card")
         // VoiceOver's card label: its state, its kind, its first sentence, its number of options (handoff §3.10)
-        let hint = CardLayout.hint(action.controls[0], lang: .zhHans)
-        check(hint == "同意，任务接着做。按 1", "an approve's hint says what it does and its key: \(hint)")
+        let hint = CardLayout.hint(action.controls[0], keys: true, lang: .zhHans)
+        check(hint == "同意，任务接着做。按 1" && CardLayout.hint(action.controls[0], lang: .zhHans) == "同意，任务接着做",
+              "an approve's hint says what it does, and its key only while keys act: \(hint)")
     }
 
     // MARK: - the keys
@@ -239,66 +240,123 @@ enum CardLayoutTests {
         check(main.contains("shell.keyDown(characters:"), "the chat column hands every key-down to the model")
     }
 
-    // MARK: - typing never lands on a card (#111 review at 8fc3cdb)
+    // MARK: - card mode: keys act only after an explicit move into the card (#111 reviews at 8fc3cdb and 86878f6)
 
-    /// The user types in the composer; a card arrives; the composer is disabled and SwiftUI may drop the focus, so the
-    /// next key-downs no longer go to a field. Digits typed on must not answer the card ("3" is 先别做了: at once, the task
-    /// ends). The guards are times, not the focus: a key picks only after `CardKeys.quiet` with no key-down at all, on a
-    /// card on screen for `CardKeys.cardOnScreen`.
-    static func typingGuardTests() {
-        func key(_ r: CardStoreTests.Rig, _ c: String, editing: Bool = false, repeating: Bool = false) -> Bool {
-            r.m.keyDown(characters: c, commandLike: false, mainWindowIsKey: true, editingText: editing, isRepeat: repeating)
+    /// The rows of ShellModel's card-mode table, through the model on the simulated helper. The user's moves: typing
+    /// (a field being edited, or not once the composer was disabled and the focus went), a click on the card, Esc / Tab;
+    /// a digit acts on the card only in card mode for that card.
+    static func cardModeTests() {
+        typealias Rig = CardStoreTests.Rig
+        func key(_ r: Rig, _ c: String, editing: Bool = false, repeating: Bool = false, cmd: Bool = false) -> Bool {
+            r.m.keyDown(characters: c, commandLike: cmd, mainWindowIsKey: true, editingText: editing, isRepeat: repeating)
         }
-        func arrive(_ r: CardStoreTests.Rig) -> CardModel {
-            r.ask("a1")
-            let m = r.model("a1")!
-            r.m.cardShown(m)                                      // (on screen now)
+        /// A card on screen (its whole body seen) — and, after `wait` seconds, the move given.
+        func arrive(_ r: Rig, _ id: String = "a1", kind: String = "action") -> CardModel {
+            r.ask(id, kind)
+            let m = r.model(id)!
+            r.m.cardShown(m)
             r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
             return m
         }
-        // typing in the composer (a field), the card comes, the focus is gone, the user types digits on at 0.2 s a key
-        let r = CardStoreTests.Rig()
-        for ch in "明天发周报给" { _ = key(r, String(ch), editing: true); r.timers.advance(0.2) }
-        _ = arrive(r)
+        // row 1: the composer was being typed in, the card came, the focus went; digits after any pause: never the card's
+        let a = Rig()
+        for ch in "明天发周报给" { _ = key(a, String(ch), editing: true); a.timers.advance(0.2) }
+        let ca = arrive(a)
         var picked = false
-        for ch in "2023年3月" { picked = key(r, String(ch)) || picked; r.timers.advance(0.2) }
-        r.timers.advance(CardStore.takeBack * 2)
-        check(!picked && r.wire.count("answer") == 0 && r.phase("a1") == .open, "digits typed on after the card came (focus gone): nothing picked, nothing sent")
-        // a pause, then a deliberate key: it picks (through the take-back)
-        r.timers.advance(CardKeys.quiet)
-        check(key(r, "1") && r.phase("a1")?.pending != nil, "after a pause of \(CardKeys.quiet) s: key 1 picks")
-        // a digit inside a burst renews the guard: 2 then 3 at 0.5 s apart after a pause — only the 2 picks
-        let b = CardStoreTests.Rig()
-        _ = arrive(b)
-        b.timers.advance(2)
-        check(key(b, "2"), "a first key after a pause picks")
-        b.timers.advance(0.5)
-        check(!key(b, "3") && b.wire.count("answer") == 0, "the next one 0.5 s later does not (先别做了 would go at once)")
-        // the card must have been on screen: a pause, the card comes, a key at once does nothing
-        let c = CardStoreTests.Rig()
-        c.timers.advance(5)
-        _ = arrive(c)
-        c.timers.advance(CardKeys.cardOnScreen / 2)
-        check(!key(c, "1") && c.phase("a1") == .open, "a key \(CardKeys.cardOnScreen / 2) s after the card came: nothing")
-        c.timers.advance(CardKeys.cardOnScreen + CardKeys.quiet)
-        check(key(c, "1"), "on screen \(CardKeys.cardOnScreen) s and quiet: it picks")
-        // a card never on screen (another session shown, the window hidden): no key picks on it
-        let d = CardStoreTests.Rig()
-        d.ask("a1")
-        d.timers.advance(5)
-        check(!key(d, "1"), "a card not on screen: nothing")
-        // auto-repeat: a held key never picks, and keeps the guard (it is typing)
-        let e = CardStoreTests.Rig()
-        _ = arrive(e)
-        e.timers.advance(5)
-        check(!key(e, "1", repeating: true) && e.phase("a1") == .open, "an auto-repeat: nothing")
-        e.timers.advance(0.1)
-        check(!key(e, "1"), "and the key right after it is still inside the burst")
-        // typing in a field (the card's own words): never a key
-        let f = CardStoreTests.Rig()
-        _ = arrive(f)
-        f.timers.advance(5)
-        check(!key(f, "1", editing: true), "typing in a field: the digit is typed")
-        check(CardKeys.cardOnScreen >= 0.8 && CardKeys.quiet >= 0.8 && CardKeys.cardOnScreen <= 2 && CardKeys.quiet <= 2, "the guards: about a second")
+        for ch in "2023年3月" { picked = key(a, String(ch)) || picked; a.timers.advance(0.2) }
+        a.timers.advance(1.1)
+        picked = key(a, "1") || picked                                 // (Codex: a 1.1 s pause, then 1)
+        a.timers.advance(5)
+        picked = key(a, "3") || picked
+        a.timers.advance(CardStore.takeBack * 2)
+        check(!picked && a.wire.count("answer") == 0 && a.phase("a1") == .open, "no move into the card: digits after any pause never reach it")
+        check(!a.m.keysActive(ca), "and its keys are not shown")
+        // row 1b: a field being edited, even in card mode
+        a.m.enterCardMode(ca)
+        check(a.m.keysActive(ca) && !key(a, "1", editing: true) && a.phase("a1") == .open, "in card mode, typing in a field: the digit is typed")
+        // row 2: an explicit move (a click on the card; Esc; Tab), the card on screen ≥ 1 s: the digit picks that option
+        for move in ["click", "esc", "tab"] {
+            let r = Rig()
+            let c = arrive(r)
+            r.timers.advance(CardKeys.cardOnScreen)
+            switch move {
+            case "click": r.m.enterCardMode(c)
+            case "esc": check(!key(r, "\u{1b}"), "Esc is not consumed")
+            default: check(!key(r, "\t"), "Tab is not consumed")
+            }
+            check(r.m.keysActive(c), "\(move): card mode, its keys shown")
+            check(key(r, "2") && r.phase("a1")?.pending == .option(runId: CardStoreTests.rid, askId: "a1", option: 1), "\(move): 2 picks 这一步不要 (held)")
+            check(!key(r, "2", repeating: true) && !key(r, "1", cmd: true), "\(move): an auto-repeat or ⌘1: nothing")
+        }
+        // a move made as the card appeared does not count (the card shown < 1 s)
+        let b = Rig()
+        let cb = arrive(b)
+        b.timers.advance(CardKeys.cardOnScreen / 2)
+        _ = key(b, "\u{1b}"); b.m.enterCardMode(cb)
+        check(!b.m.keysActive(cb) && !key(b, "1"), "a move within \(CardKeys.cardOnScreen) s of the card appearing: no card mode")
+        // the whole card first: approve's key picks nothing before the body's end was on screen
+        let w = Rig()
+        w.ask("a1")
+        let cw = w.model("a1")!
+        w.m.cardShown(cw); w.timers.advance(2); w.m.enterCardMode(cw)
+        _ = key(w, "1")
+        w.timers.advance(CardStore.takeBack)
+        check(w.wire.count("answer") == 0, "in card mode, approve before the whole card was seen: nothing")
+        // row 3: a pick held, another option's key replaces it, the take-back starts again
+        let c = Rig()
+        let cc = arrive(c)
+        c.timers.advance(2); c.m.enterCardMode(cc)
+        _ = key(c, "1")
+        c.timers.advance(0.5)
+        check(key(c, "2"), "a second key within the take-back is taken")
+        c.timers.advance(CardStore.takeBack - 0.1)
+        check(c.wire.count("answer") == 0, "the take-back started again at the second key")
+        c.timers.advance(0.2)
+        check(c.wire.answers("a1").map { $0["option"] as? Int } == [1], "only the replacement goes: \(c.wire.answers("a1"))")
+        // row 4: a pick held, the way out's key cancels now (Codex: 1 then 3 within 0.5 s)
+        let d = Rig()
+        let cd = arrive(d)
+        d.timers.advance(2); d.m.enterCardMode(cd)
+        _ = key(d, "1")
+        d.timers.advance(0.5)
+        _ = key(d, "3")
+        check(d.wire.answers("a1").map { $0["option"] as? Int } == [2], "the way out's key: sent at once: \(d.wire.answers("a1"))")
+        d.timers.advance(CardStore.takeBack * 2)
+        check(d.wire.answers("a1").count == 1, "and the held approve never goes")
+        // row 4b: 「先别做了」 clicked while a key's pick is held: the same
+        let d2 = Rig()
+        let cd2 = arrive(d2)
+        d2.timers.advance(2); d2.m.enterCardMode(cd2)
+        _ = key(d2, "1")
+        d2.m.click(cd2.buttons.first { $0.role == .cancel }!)
+        d2.timers.advance(CardStore.takeBack * 2)
+        check(d2.wire.answers("a1").map { $0["option"] as? Int } == [2], "先别做了 clicked: cancels at once")
+        // row 5: a new card while in card mode needs a new move
+        let e = Rig()
+        let ce = arrive(e)
+        e.timers.advance(2); e.m.enterCardMode(ce)
+        e.resumed("a1")                                              // (answered elsewhere; the task asks again)
+        let ce2 = arrive(e, "a2")
+        e.timers.advance(2)
+        check(!e.m.keysActive(ce2) && !key(e, "2") && e.phase("a2") == .open, "a new card: no keys until a move into it")
+        e.m.enterCardMode(ce2)
+        check(key(e, "2"), "after a click on it: keys")
+        // the label rule: a key's label is shown iff pressing it does what it says — a result card takes no keys
+        let u = Rig()
+        u.ask("a1"); u.resumed("a1")
+        u.emit("task_done", ["status": "succeeded", "reason": "", "summary": "",
+                             "result_card": ["kind": "result", "text": "改好了", "blocking": false, "free_text": false,
+                                             "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
+        guard let rc = u.state.task(CardStoreTests.rid)?.resultCard else { check(false, "the result card"); return }
+        let rm = CardModel(resultCard: rc, runId: CardStoreTests.rid)
+        u.m.cardShown(rm); u.timers.advance(2); u.m.enterCardMode(rm)
+        check(!u.m.keysActive(rm) && !key(u, "2") && u.wire.count("respond") == 0, "a result card: no keys shown, none act")
+        let rl = CardLayout(rm)
+        check(rl.controls.allSatisfy { !CardLayout.hint($0, keys: u.m.keysActive(rm), lang: .en).contains("Key") }, "and no key in its hints")
+        for r in [a, c] {   // (a card's label and its key agree: off without card mode, on in it)
+            let m = r.model("a1")!
+            check(CardLayout(m).controls.allSatisfy { CardLayout.hint($0, keys: r.m.keysActive(m), lang: .en).contains("Key") == r.m.keysActive(m) },
+                  "hints say a key exactly when keys act")
+        }
     }
 }

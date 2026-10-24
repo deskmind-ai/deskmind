@@ -730,6 +730,8 @@ final class ShellModel: ObservableObject {
         if !button.role.reachesNoModel && !cloudAllows() { return }
         let a = CardModel.answer(button)
         if a.askId == nil { act(cards.respond(a, sessionId: id, in: client.state(id)), in: id); return }
+        // (a click on an option is a click on its card: an explicit move into it, before the pick changes its phase)
+        if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
         pick(a, immediate: button.role == .cancel, in: id)
     }
 
@@ -742,27 +744,69 @@ final class ShellModel: ObservableObject {
         pick(a, immediate: false, in: id)
     }
 
-    /// When each card came on screen (CardView's appear; gone when it leaves), by card key; the last key-down the
-    /// window saw (any key).
+    // MARK: card keys (1–9): card mode
+    //
+    // A digit acts on a card only after the user explicitly moved into that card (#111 Codex review at 86878f6: two
+    // rounds of time-based guards each let typing in progress, or a fast correction, decide for the user; timing alone
+    // never turns keys on now). The explicit moves: a click on the card (anywhere on it, an option too), or Esc / Tab
+    // in the main window (out of whatever was being typed), each while the card takes picks and has been on screen for
+    // CardKeys.cardOnScreen. Card mode belongs to that card: a new card needs a new move.
+    //
+    // | state                                                   | 1–9                                              |
+    // |---------------------------------------------------------|--------------------------------------------------|
+    // | no explicit move to this card (composer typing, focus   | not the card's: typed, or nothing                |
+    // |   lost, a new card arrived)                             |                                                  |
+    // | card mode for this card, a field being typed in, ⌘⌃⌥,  | not the card's                                   |
+    // |   an auto-repeat                                        |                                                  |
+    // | card mode for this card                                 | picks that option (approve-type: once the whole  |
+    // |                                                         |   card was seen), held for the take-back         |
+    // | card mode, a pick held                                  | another option replaces it (the 3 s start again);|
+    // |                                                         |   the way out cancels at once                    |
+    //
+    // A key's label and its hint are shown exactly when card mode is on for that card (`keysActive`): a label is shown
+    // if and only if pressing it does what it says (so never on a result card, which takes no keys).
+
+    /// When each card came on screen (CardView's appear; gone when it leaves), by card key.
     private var shownAt: [String: Double] = [:]
-    private var lastKeyDown = -Double.infinity
+    /// The card the user moved into (card mode), by card key.
+    @Published private(set) var keyCard: String?
 
     func cardShown(_ card: CardModel) { let k = Self.cardKey(card); if shownAt[k] == nil { shownAt[k] = now() } }
     func cardHidden(_ card: CardModel) { shownAt[Self.cardKey(card)] = nil }
 
+    /// The pinned card that takes picks in the selected session, as a CardModel.
+    private func pinnedTakingPicks() -> CardModel? {
+        guard let id = selected, let s = states[id], let p = pinned(s), p.phase.takesPick else { return nil }
+        return CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+    }
+
+    /// An explicit move into `card` (a click on it, Esc / Tab): card mode for it — only for the pinned card while it
+    /// takes picks and has been on screen for CardKeys.cardOnScreen (a move made as the card appeared was not about it).
+    func enterCardMode(_ card: CardModel) {
+        let k = Self.cardKey(card)
+        guard let p = pinnedTakingPicks(), Self.cardKey(p) == k, let since = shownAt[k], now() - since >= CardKeys.cardOnScreen else { return }
+        if keyCard != k { keyCard = k }
+    }
+
+    /// Whether 1–9 act on `card` now (and its keys are shown): card mode is on for it and it is the pinned card that
+    /// takes picks.
+    func keysActive(_ card: CardModel) -> Bool {
+        guard let k = keyCard, k == Self.cardKey(card), let p = pinnedTakingPicks() else { return false }
+        return Self.cardKey(p) == k
+    }
+
     /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true when it picked on the pinned
-    /// card and is consumed. A digit picks only when it is a card key (CardKeys.number), no key-down at all came in
-    /// the `CardKeys.quiet` before it (typing in progress — wherever the focus is now), and the pinned card has been on
-    /// screen for `CardKeys.cardOnScreen`. Typing in progress never lands on a card (#107).
+    /// card and is consumed. Esc and Tab are explicit moves into the pinned card (never consumed); a digit picks only
+    /// in card mode for the pinned card (keysActive) and when it is a card key (CardKeys.number: no ⌘⌃⌥, no
+    /// auto-repeat, no field being typed in).
     func keyDown(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool) -> Bool {
-        let t = now()
-        let quietFor = t - lastKeyDown
-        lastKeyDown = t
+        if mainWindowIsKey, !commandLike, !isRepeat, characters == "\u{1b}" || characters == "\t" {
+            if let p = pinnedTakingPicks() { enterCardMode(p) }
+            return false
+        }
         guard let n = CardKeys.number(characters: characters, commandLike: commandLike, mainWindowIsKey: mainWindowIsKey,
                                       editingText: editingText, isRepeat: isRepeat),
-              quietFor >= CardKeys.quiet,
-              let id = selected, let s = states[id], let p = pinned(s),
-              let since = shownAt[Self.cardKey(runId: p.runId, askId: p.card.askId)], t - since >= CardKeys.cardOnScreen else { return false }
+              let p = pinnedTakingPicks(), keysActive(p) else { return false }
         return pressKey(n)
     }
 

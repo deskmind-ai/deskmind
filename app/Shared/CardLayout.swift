@@ -93,7 +93,8 @@ struct CardLayout: Equatable {
     func control(forKey n: Int) -> Control? { controls.first { $0.key == n } }
 
     /// VoiceOver's hint for a control, by its option's kind (handoff §3.10), with its key.
-    static func hint(_ c: Control, lang: ResolvedLang) -> String {
+    /// `keys`: the card's keys act now (ShellModel.keysActive) — the key is said only then.
+    static func hint(_ c: Control, keys: Bool = false, lang: ResolvedLang) -> String {
         let base: String
         switch c.button.role {
         case .approve: base = L("Agrees; the task goes on", lang: lang)
@@ -104,24 +105,18 @@ struct CardLayout: Equatable {
         case .undo: base = L("Undoes what the task changed", lang: lang)
         case .other: base = L("Answers with this option", lang: lang)
         }
-        guard let k = c.key else { return base }
+        guard keys, let k = c.key else { return base }
         return L("%@. Key %d", base, k, lang: lang)
     }
 }
 
 /// The 1–9 keys on a waiting card (handoff §3.7): only in the main window while it is the key window, with no modifier
-/// (⇧ aside), not an auto-repeat, and not while the user types in a field (the card's own field, the composer). Whether
-/// the user was typing a moment ago is not read from the focus (SwiftUI may drop it when the composer is disabled as a
-/// card arrives): ShellModel.keyDown adds the time guards (`cardOnScreen`, `quiet`).
+/// (⇧ aside), not an auto-repeat, and not while the user types in a field (the card's own field, the composer); and
+/// only in card mode (ShellModel.keyDown: the user moved into the card explicitly).
 enum CardKeys {
-    /// The card must have been on screen this long before a key picks on it (seconds): reading a new card and deciding
-    /// takes longer than this, while a keystroke that was already on its way when it appeared comes sooner.
+    /// A move into a card (ShellModel.enterCardMode) counts only once it has been on screen this long (seconds): a click
+    /// or an Esc made as the card appeared was not about it. Time alone never turns the keys on.
     static let cardOnScreen: Double = 1.0
-    /// And no key-down (any key, wherever it went) for this long before the digit: typing runs at roughly 0.1–0.3 s
-    /// between keys (40–100 words a minute), and even a slow typist rarely pauses a second inside a burst; a deliberate
-    /// answer key comes after a pause. A digit inside a burst is part of the burst — it never reaches the card, and it
-    /// renews the guard.
-    static let quiet: Double = 1.0
 
     static func number(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool = false) -> Int? {
         guard mainWindowIsKey, !editingText, !commandLike, !isRepeat, let c = characters, c.count == 1,
