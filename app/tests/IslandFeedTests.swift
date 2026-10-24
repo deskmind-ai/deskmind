@@ -145,13 +145,29 @@ enum IslandFeedTests {
             r.timers.advance(3600)
             check(surface.calls.count == n && !g.watching, "let go: no frame after: \(surface.calls.suffix(2))")
         }
+        do {    // the same goal's record: "Interrupted" from the goal, not "Working · step N" from its task; opened later,
+                // its task is shown ended so (not running), though the session still says it runs
+            let (r, _, services, g) = rig()
+            g.start()
+            for l in T.taskLines { r.m.client.feed(l) }
+            r.m.client.feed(["kind": "step", "session_id": T.sid, "run_id": T.rid, "seq": 2, "text": "click", "step_id": "s1", "human": "点「发送」"])
+            r.m.client.feed(["kind": "helper.session_exit", "session_id": T.sid, "code": 0, "last_seq": 1])
+            guard let kept = services.kept.first?.0 else { check(false, "a record kept"); return }
+            check(kept.ended == "interrupted" && kept.task?.ended == false, "the goal ended interrupted, its task not marked yet")
+            let o = GoalOutcome.record(kept, lang: .en)
+            check(o.summary == "Interrupted" && !o.finished && o.errored && o.task?.ended == true, "the record: Interrupted: \(o.summary)")
+            let opened = PastRun.task(sessionId: T.sid, runId: T.rid, endedAs: kept.ended, in: r.m.states)
+            check(r.m.states[T.sid]?.task(T.rid)?.running == true, "(the session still says it runs)")
+            check(opened?.task.running == false && opened.map { ShellText.task($0.task, lang: .en) } == "Interrupted"
+                  && opened?.task.resultCardState.undoEnabled == false, "opened later: ended, Interrupted, no undo")
+        }
         do {    // a recent run whose session (or task) is gone: its record's own content
             var states: [String: SessionState] = [:]
-            check(PastRun.task(sessionId: T.sid, runId: T.rid, in: states) == nil, "session deleted: none (the record's own steps and summary)")
+            check(PastRun.task(sessionId: T.sid, runId: T.rid, endedAs: nil, in: states) == nil, "session deleted: none (the record's own steps and summary)")
             states[T.sid] = SessionState(sessionId: T.sid)
-            check(PastRun.task(sessionId: T.sid, runId: T.rid, in: states) == nil, "its task gone: none")
+            check(PastRun.task(sessionId: T.sid, runId: T.rid, endedAs: nil, in: states) == nil, "its task gone: none")
             states[T.sid] = SessionReducer.reduce(SessionState(sessionId: T.sid), [SessionTests.taskR1, SessionTests.ex(1, #""kind":"start","raw":"x""#)])
-            check(PastRun.task(sessionId: T.sid, runId: "r1", in: states)?.task.runId == "r1", "there: shown as the session has it")
+            check(PastRun.task(sessionId: T.sid, runId: "r1", endedAs: nil, in: states)?.task.runId == "r1", "there: shown as the session has it")
         }
         let id = UUID(), other = UUID()
         check(IslandFeed.detailsRoute(record: id, showing: nil) == id && IslandFeed.detailsRoute(record: id, showing: other) == id,

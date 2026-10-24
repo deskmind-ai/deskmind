@@ -45,15 +45,19 @@ final class AppGoalServices: GoalRunServices {
     func setMovie(_ path: String, for id: UUID) { MainActor.assumeIsolated { RunHistory.shared.setMovie(path, for: id) } }
     func keep(_ g: GoalRecord, id: UUID, lang: ResolvedLang) {
         MainActor.assumeIsolated {
-            let t = g.task
-            RunHistory.shared.add(RunRecord(
+            // (its outcome from the goal's lifecycle, as the island and the screen: GoalOutcome)
+            let o = GoalOutcome.record(g, lang: lang)
+            let t = o.task
+            var r = RunRecord(
                 id: id, date: Date(), goal: g.goal, folder: g.folder, apps: [],
-                finished: t?.status == "succeeded", errored: t == nil || t?.status == nil || t?.status == "failed",
-                summary: t.map { ShellText.task($0, lang: lang) } ?? GoalRunScreen.why(g.failed ?? "", lang: lang),
+                finished: o.finished, errored: o.errored,
+                summary: o.summary,
                 answer: t?.answer ?? "",
                 steps: (t?.steps ?? []).map { RunRecord.Step(n: $0.n, human: $0.displayText, app: "", shot: $0.shot ?? "", describe: $0.text, detail: $0.why ?? "", ok: $0.status == .ok) },
                 created: t?.changes.created ?? [], modified: t?.changes.modified ?? [], deleted: t?.changes.deleted ?? [],
-                sessionId: t == nil ? nil : g.sessionId, runId: t?.runId))
+                sessionId: t == nil ? nil : g.sessionId, runId: t?.runId)
+            r.ended = g.ended
+            RunHistory.shared.add(r)
         }
     }
 }

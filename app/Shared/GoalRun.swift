@@ -297,6 +297,8 @@ struct GoalRecord: Equatable {
     var sessionId: String?
     var task: TaskState?
     var failed: String?
+    /// How the goal ended (its lifecycle's `ended` status; nil when it failed): its outcome, whatever its task says.
+    var ended: String? = nil
 }
 
 /// The app's side of a goal's effects (the app: RunRecorder and RunHistory; a test: its own).
@@ -426,8 +428,10 @@ final class GoalRun: ObservableObject {
 
     private func recordOf() -> GoalRecord {
         var failed: String? = nil
+        var ended: String? = nil
         if case .failed(let why, _) = state { failed = why }
-        return GoalRecord(goal: goal, folder: folder, sessionId: sessionId, task: task?.task, failed: failed)
+        if case .ended(_, _, let status) = state { ended = status }
+        return GoalRecord(goal: goal, folder: folder, sessionId: sessionId, task: task?.task, failed: failed, ended: ended)
     }
 }
 

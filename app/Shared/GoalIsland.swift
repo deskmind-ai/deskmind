@@ -99,10 +99,38 @@ extension GoalRunEffects {
 
 /// A past session task opened from the recent runs: its task as its session has it, or nil — the session or the task
 /// gone (deleted) — and then the record's own content is shown.
+/// `endedAs`: how its goal ended (the record's), which wins over a task that does not say so yet.
 enum PastRun {
-    static func task(sessionId: String, runId: String?, in states: [String: SessionState]) -> (session: SessionState, task: TaskState)? {
+    static func task(sessionId: String, runId: String?, endedAs: String?, in states: [String: SessionState]) -> (session: SessionState, task: TaskState)? {
         guard let s = states[sessionId] else { return nil }
-        if let r = runId { return s.task(r).map { (s, $0) } }
-        return s.tasks.last.map { (s, $0) }
+        let t = runId.flatMap { s.task($0) } ?? (runId == nil ? s.tasks.last : nil)
+        return t.map { (s, GoalOutcome.task($0, endedAs: endedAs)) }
+    }
+}
+
+/// A goal's outcome, from its lifecycle (the island and the screen read the same state, GoalRunScreen /
+/// IslandFeed.frame(goal)): the record and a shown task follow it too (#119 delta review at 49f1a36: a goal ended
+/// on its session's exit while its task did not say so yet; its record said "Working · step N").
+enum GoalOutcome {
+    /// The task as its goal ended: one the goal ended (`endedAs`) that does not say so yet is shown ended with that
+    /// status (no undo: its executor is not known to linger); one that says so, as it says.
+    static func task(_ t: TaskState, endedAs status: String?) -> TaskState {
+        guard let status, !t.ended else { return t }
+        var t = t
+        var e = SessionTaskEnd()
+        e.runId = t.runId; e.status = status; e.undo = "none"
+        t.end = e
+        return t
+    }
+
+    /// The record's summary and outcome: an ended goal's from its status (its task's own words when it says it
+    /// ended), a failed one's from why.
+    static func record(_ r: GoalRecord, lang: ResolvedLang) -> (summary: String, finished: Bool, errored: Bool, task: TaskState?) {
+        let t = r.task.map { task($0, endedAs: r.ended) }
+        guard let status = r.ended else {
+            return (t.map { ShellText.task($0, lang: lang) } ?? GoalRunScreen.why(r.failed ?? "", lang: lang), false, true, t)
+        }
+        return (t.map { ShellText.task($0, lang: lang) } ?? ShellText.ending(status, lang: lang),
+                status == "succeeded", status == "interrupted" || status == "failed", t)
     }
 }

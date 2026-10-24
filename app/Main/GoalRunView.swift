@@ -280,8 +280,11 @@ struct GoalRunView: View {
 
     /// The task shown: the goal's own (GoalRun), or a past one's from its session.
     private var shownTask: (session: SessionState, task: TaskState)? {
-        if let past { return PastRun.task(sessionId: past.sid, runId: past.run, in: shell.states) }
-        return goalBox.run?.task
+        if let past { return PastRun.task(sessionId: past.sid, runId: past.run, endedAs: record?.ended, in: shell.states) }
+        // (ended by the goal's lifecycle: its task shown so, whatever it says yet)
+        guard let g = goalBox.run, let (s, t) = g.task else { return nil }
+        if case .ended(_, _, let status) = g.state { return (s, GoalOutcome.task(t, endedAs: status)) }
+        return (s, t)
     }
 
     /// What the goal shows, from its lifecycle alone (no goal: another one is not over — said, and Back works).

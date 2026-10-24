@@ -80,6 +80,8 @@ struct RunRecord: Codable, Identifiable {
     /// session has it — its result card and undo included (absent in older records).
     var sessionId: String? = nil
     var runId: String? = nil
+    /// How its goal ended (GoalRecord.ended): opening it shows the task ended so, whatever the session says now.
+    var ended: String? = nil
 }
 
 @MainActor
