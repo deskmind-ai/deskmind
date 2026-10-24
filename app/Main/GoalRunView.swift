@@ -26,10 +26,10 @@ struct GoalRunView: View {
     @State private var sessionRunState = false
     /// A session task is shown (a goal started here, or a past one whose session still has it); a past one whose
     /// session or task is gone shows its record's own steps and summary instead (RunModel.show).
-    private var sessionRun: Bool { sessionRunState && !(past != nil && shownTask == nil) }
-    /// A past session task opened from the recent runs (or the island's Show Details): its session and run, shown as
+    private var sessionRun: Bool { sessionRunState && shown.sessionShown }
+    /// A past session task opened from the recent runs (or the island's Show Details): its record, shown as
     /// the session has it (its result card included). nil for a goal started here.
-    @State private var past: (sid: String, run: String?)?
+    @State private var past: RunRecord?
     @State private var started = false
     @State private var confirming: GoalRequest?
     @State private var next = ""
@@ -47,8 +47,8 @@ struct GoalRunView: View {
 
     var mood: Brand.Mood {
         if sessionRun {
-            guard let (s, t) = shownTask else { return screen.afterwards ? .notice : .idle }
-            if shell.pinned(s) != nil { return .notice }
+            guard let t = shown.task else { return screen.afterwards ? .notice : .idle }
+            if shown.pinned != nil { return .notice }
             if t.running { return .idle }
             return t.status == "succeeded" ? .done : .notice
         }
@@ -75,7 +75,7 @@ struct GoalRunView: View {
                 }
                 Spacer(minLength: 8)
                 if sessionRun {
-                    if let (_, t) = shownTask {
+                    if let t = shown.task {
                         Text(ShellText.task(t, lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.secondary)
                     }
                 } else {
@@ -125,7 +125,7 @@ struct GoalRunView: View {
 
             if !sessionRun { RunFailure(run: run) }
 
-            if let movie = sessionRun ? goalBox.run?.movie : run.movie {
+            if let movie = sessionRun ? shown.movie : run.movie {
                 HStack(spacing: 10) {
                     Image(systemName: "record.circle").foregroundStyle(Brand.dot)
                     Text(L("Recorded", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
@@ -180,10 +180,10 @@ struct GoalRunView: View {
             guard !started else { return }
             started = true
             if let request { begin(request) }
-            else if let record, let sid = record.sessionId {
+            else if let record, record.sessionId != nil {
                 // a session task kept in the recent runs: shown as the session has it (its result card included)
-                sessionRunState = true; past = (sid, record.runId)
-                shell.start(); shell.select(sid)
+                sessionRunState = true; past = record
+                shell.start(); shell.select(record.sessionId!)
                 // (its own content too: shown if the session or its task is gone — deleted)
                 run.show(record)
             }
@@ -284,43 +284,38 @@ struct GoalRunView: View {
         run.start(request: r.body)
     }
 
-    /// The task shown: the goal's own (GoalRun), or a past one's from its session.
-    private var shownTask: (session: SessionState, task: TaskState)? {
-        if let past { return PastRun.task(sessionId: past.sid, runId: past.run, endedAs: record?.ended, in: shell.states) }
-        // (ended by the goal's lifecycle: its task shown so, whatever it says yet)
-        guard let g = goalBox.run, let (s, t) = g.task else { return nil }
-        if case .ended(_, _, let status) = g.state { return (s, GoalOutcome.task(t, endedAs: status)) }
-        return (s, t)
+    /// What this screen shows: one value from its route (GoalShown) — the task, its own pinned card, the folder, the
+    /// recording, the ending. The view reads only this.
+    private var shown: GoalShown {
+        let route: GoalScreenRoute
+        if let past, let sid = past.sessionId {
+            route = .saved(sessionId: sid, runId: past.runId, ended: past.ended, folder: past.folder, movie: past.movie)
+        } else if let g = goalBox.run {
+            route = .live(state: g.state, task: g.task, sessionId: g.sessionId, folder: g.folder, movie: g.movie)
+        } else {
+            route = .busy
+        }
+        return GoalShown.of(route, states: shell.states, selected: shell.selected, pinned: { shell.pinned($0) }, lang: lang)
     }
 
-    /// What the goal shows, from its lifecycle alone (no goal: another one is not over — said, and Back works).
-    private var screen: GoalRunScreen {
-        if let past { return GoalRunScreen(.ended(sid: past.sid, run: past.run ?? "", status: ""), lang: lang) }
-        guard let g = goalBox.run else {
-            var s = GoalRunScreen(.failed(GoalLifecycle.Why.busy), lang: lang)
-            s.line = GoalRunScreen.why(GoalLifecycle.Why.busy, lang: lang)
-            return s
-        }
-        return GoalRunScreen(g.state, lang: lang)
-    }
+    private var screen: GoalRunScreen { shown.screen }
 
     /// The session task as the chat shows it: its row (steps, cards that are no longer pinned, its end, its result
     /// card with undo — ResultSection), the pinned card, and — once it ended — the answer, the changes and 👍👎.
     @ViewBuilder private var sessionContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if let (s, t) = shownTask {
+                if let s = shown.session, let t = shown.task {
                     TaskRow(shell: shell, task: t, session: s)
-                    if t.ended { FreeResult(task: Self.runTask(t, folder: request?.folder)) }
+                    if t.ended { FreeResult(task: Self.runTask(t, folder: shown.folder)) }
                 } else if let line = screen.line {
                     Text(line).font(.system(size: 13)).foregroundStyle(ShellColor.secondary).padding(.top, 60)
                 }
             }
             .padding(.horizontal, 28).padding(.bottom, 12)
         }
-        // (a card's click goes to the selected session — ShellModel.click — so the pinned card shows only while the
-        // goal's session is the selected one: never answered into another conversation)
-        if let (s, _) = shownTask, shell.selected == (past?.sid ?? goalBox.run?.sessionId), let p = shell.pinned(s) {
+        // (the shown task's own card only, while its session is the selected one: GoalShown)
+        if let s = shown.session, let p = shown.pinned {
             let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
             CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s, bodyCap: CardBody.maxHeight)
                 .id(ShellModel.cardKey(m))

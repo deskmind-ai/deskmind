@@ -134,3 +134,54 @@ enum GoalOutcome {
                 status == "succeeded", status == "interrupted" || status == "failed", t)
     }
 }
+
+/// Where a goal's screen comes from: a goal started here (live), a saved record of a session task, or no goal (another
+/// one is not over).
+enum GoalScreenRoute {
+    case live(state: GoalLifecycle.State, task: (session: SessionState, task: TaskState)?, sessionId: String?, folder: String?, movie: URL?)
+    case saved(sessionId: String, runId: String?, ended: String?, folder: String?, movie: String?)
+    case busy
+}
+
+/// What a goal's screen shows — one value for every route, every field from it (Codex review at a8cec0f: the task,
+/// the pinned card, the folder and the recording each came from a different source by route; an older run showed a
+/// newer task's card, a saved run lost its folder and its recording).
+struct GoalShown {
+    /// The task shown (its session's), ended as its goal ended (GoalOutcome); nil: none yet, or gone.
+    var session: SessionState?
+    var task: TaskState?
+    /// The pinned card shown under it: only the shown task's own (its run), and only while its session is the
+    /// selected one (a card's click goes to the selected session).
+    var pinned: (runId: String, card: CardState, phase: CardPhase)?
+    var folder: String?
+    var movie: URL?
+    /// Stop, Back, the line, the ending: from the goal's lifecycle (a saved one: ended).
+    var screen: GoalRunScreen
+    /// The session task is shown; false: a saved run whose session or task is gone — its record's own content.
+    var sessionShown: Bool
+
+    static func of(_ route: GoalScreenRoute, states: [String: SessionState], selected: String?,
+                   pinned: (SessionState) -> (runId: String, card: CardState, phase: CardPhase)?, lang: ResolvedLang) -> GoalShown {
+        var v: GoalShown
+        var sid: String?
+        switch route {
+        case .live(let state, let t, let id, let folder, let movie):
+            var task = t
+            if let (s, tk) = t, case .ended(_, _, let status) = state { task = (s, GoalOutcome.task(tk, endedAs: status)) }
+            v = GoalShown(session: task?.session, task: task?.task, pinned: nil, folder: folder, movie: movie,
+                          screen: GoalRunScreen(state, lang: lang), sessionShown: true)
+            sid = id
+        case .saved(let id, let run, let ended, let folder, let movie):
+            let t = PastRun.task(sessionId: id, runId: run, endedAs: ended, in: states)
+            v = GoalShown(session: t?.session, task: t?.task, pinned: nil, folder: folder, movie: movie.map { URL(fileURLWithPath: $0) },
+                          screen: GoalRunScreen(.ended(sid: id, run: run ?? "", status: ended ?? ""), lang: lang), sessionShown: t != nil)
+            sid = id
+        case .busy:
+            var s = GoalRunScreen(.failed(GoalLifecycle.Why.busy), lang: lang)
+            s.line = GoalRunScreen.why(GoalLifecycle.Why.busy, lang: lang)
+            return GoalShown(session: nil, task: nil, pinned: nil, folder: nil, movie: nil, screen: s, sessionShown: true)
+        }
+        if let s = v.session, let t = v.task, selected == sid, let p = pinned(s), p.runId == t.runId { v.pinned = p }
+        return v
+    }
+}

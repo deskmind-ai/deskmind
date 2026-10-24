@@ -14,6 +14,7 @@ enum IslandFeedTests {
         DecisionTests.group("island.tableTests"); tableTests()
         DecisionTests.group("island.notifyTests"); notifyTests()
         DecisionTests.group("island.wiringTests"); wiringTests()
+        DecisionTests.group("island.shownTests"); shownTests()
     }
 
     static let action = #""card":{"kind":"action","text":"要点「发送」吗？","options":[{"kind":"approve","text":"可以"},{"kind":"cancel","text":"先别做了"}],"free_text":false,"blocking":true}"#
@@ -174,5 +175,62 @@ enum IslandFeedTests {
               "Show Details: the task's record")
         check(IslandFeed.detailsRoute(record: id, showing: id) == nil && IslandFeed.detailsRoute(record: nil, showing: nil) == nil,
               "already shown, or none kept: the window as it is")
+    }
+
+    /// What a goal's screen shows (GoalShown.of), route × field — Codex review at a8cec0f: an older run showed a newer
+    /// task's card; a saved run lost its folder and its recording.
+    static func shownTests() {
+        typealias T = SurfaceTests
+        // the goal's task ended; then a newer task of the user's in the same session waits on a card
+        let r = T.Rig(); T.openOK(r.mock)
+        let g = r.goal(); g.start()
+        for l in T.taskLines + T.endLines { r.m.client.feed(l) }
+        let newer: [[String: Any]] = [
+            ["kind": "session.message", "session_id": T.sid, "seq": 4, "msg_id": "m_new", "role": "user", "text": "发给小王", "client_id": "c_new"],
+            ["kind": "session.task", "session_id": T.sid, "seq": 5, "msg_id": "t_new", "run_id": "r_new", "raw": "发给小王", "by": "model", "reply_to": "a_new"],
+            ["kind": "start", "session_id": T.sid, "run_id": "r_new", "seq": 1, "raw": "发给小王"],
+            ["kind": "ask", "session_id": T.sid, "run_id": "r_new", "seq": 2, "ask_id": "ask_new",
+             "card": ["kind": "action", "text": "要点「发送」吗？", "free_text": false, "blocking": true,
+                      "options": [["kind": "approve", "text": "可以"], ["kind": "cancel", "text": "先别做了"]]]],
+        ]
+        for l in newer { r.m.client.feed(l) }
+        r.m.selected = T.sid
+        check(r.m.states[T.sid].flatMap { r.m.pinned($0) }?.runId == "r_new", "(the session's pinned card is the newer task's)")
+        func shown(_ route: GoalScreenRoute) -> GoalShown {
+            GoalShown.of(route, states: r.m.states, selected: r.m.selected, pinned: { r.m.pinned($0) }, lang: .en)
+        }
+        let movie = "/tmp/rec/run.mov"
+        let saved = shown(.saved(sessionId: T.sid, runId: T.rid, ended: "succeeded", folder: "/tmp/dl", movie: movie))
+        // saved record, its session there
+        check(saved.sessionShown && saved.task?.runId == T.rid, "saved, session there: its own task")
+        check(saved.pinned == nil, "saved: a newer task's card is not shown under the older run (Codex 1)")
+        check(saved.folder == "/tmp/dl", "saved: the record's folder (Codex 2)")
+        check(saved.movie == URL(fileURLWithPath: movie), "saved: the record's recording (Codex 3)")
+        check(saved.screen.afterwards && !saved.screen.stopShown, "saved: ended (Back, no Stop)")
+        // saved record, session gone
+        let gone = shown(.saved(sessionId: "ses_deleted", runId: T.rid, ended: "succeeded", folder: "/tmp/dl", movie: movie))
+        check(!gone.sessionShown && gone.task == nil && gone.pinned == nil, "session gone: the record's own content")
+        check(gone.folder == "/tmp/dl" && gone.movie == URL(fileURLWithPath: movie), "session gone: still its folder and recording")
+        // live goal: its own task; the newer task's card not its own
+        let live = shown(.live(state: g.state, task: g.task, sessionId: g.sessionId, folder: "/tmp/dl", movie: URL(fileURLWithPath: movie)))
+        check(live.sessionShown && live.task?.runId == T.rid && live.pinned == nil, "live, ended: its own task, not the newer card")
+        check(live.folder == "/tmp/dl" && live.movie == URL(fileURLWithPath: movie), "live: its folder and recording")
+        // a live goal's own card: shown while its session is selected, not otherwise
+        let r2 = T.Rig(); T.openOK(r2.mock)
+        let g2 = r2.goal(); g2.start()
+        for l in T.taskLines { r2.m.client.feed(l) }
+        r2.m.client.feed(["kind": "ask", "session_id": T.sid, "run_id": T.rid, "seq": 2, "ask_id": "ask_g",
+                          "card": ["kind": "missing", "text": "发给谁？", "free_text": false, "blocking": true,
+                                   "options": [["kind": "value", "text": "小王"], ["kind": "cancel", "text": "先别做了"]]]])
+        func shown2(selected: String?) -> GoalShown {
+            GoalShown.of(.live(state: g2.state, task: g2.task, sessionId: g2.sessionId, folder: nil, movie: nil), states: r2.m.states,
+                         selected: selected, pinned: { r2.m.pinned($0) }, lang: .en)
+        }
+        check(shown2(selected: T.sid).pinned?.card.askId == "ask_g", "live: its own card while its session is selected")
+        check(shown2(selected: nil).pinned == nil, "another session selected: no card (a click goes to the selected one)")
+        check(shown2(selected: T.sid).screen.stopShown && shown2(selected: T.sid).screen.running, "live, running: Stop")
+        // no goal (another not over)
+        let busy = shown(.busy)
+        check(busy.task == nil && busy.screen.afterwards && busy.screen.line == GoalRunScreen.why(GoalLifecycle.Why.busy, lang: .en), "busy: said, Back works")
     }
 }
