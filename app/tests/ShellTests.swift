@@ -24,6 +24,7 @@ enum ShellTests {
         DecisionTests.group("shell.cloudOffTests"); cloudOffTests()
         DecisionTests.group("shell.cardBodyTests"); cardBodyTests()
         DecisionTests.group("shell.focusTests"); focusTests()
+        DecisionTests.group("shell.activationTests"); activationTests()
         DecisionTests.group("shell.idleReclaimTests"); idleReclaimTests()
         DecisionTests.group("shell.historyTests"); historyTests()
         DecisionTests.group("shell.cloudOffNoModelTests"); cloudOffNoModelTests()
@@ -723,6 +724,75 @@ enum ShellTests {
         check(CardModel.Role.undo.reachesNoModel && CardModel.Role.cancel.reachesNoModel && !CardModel.Role.approve.reachesNoModel
               && !CardModel.Role.choice.reachesNoModel && !CardModel.Role.delegate.reachesNoModel && !CardModel.Role.skipStep.reachesNoModel,
               "what reaches no model: the way out and undo")
+    }
+
+    /// No app activation, ever, unless the user directly acted on DeskMind (its own button, its live card, the Dock, a
+    /// notification). The guarantee is a type (Shared/Activation.swift): whatever brings DeskMind forward takes a
+    /// UserGesture, which only Activation's factories make. This check holds what the type cannot, over every source
+    /// the main app and the helper build from (build.sh): the raw AppKit calls that can activate or order a window
+    /// forward appear only inside the funnel and the background launcher (by file and function); the factories appear
+    /// only in user-event handlers (a button's action, the AppKit mouse-up, the delegate's reopen); every panel is
+    /// non-activating; every `open` of an app is in the background (-g). (rc.15 device check, 10-24: the activation
+    /// seen 2 s after a plan card came from the test script standing in for the user — scripts/rc_e2e/answer_asks.py
+    /// activates DeskMind before its click — not from the app; #115 review: an indirect call, a config that only looked
+    /// like a background one, must not pass either.)
+    static func activationTests() {
+        let app = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        guard let build = try? String(contentsOf: app.appendingPathComponent("build.sh"), encoding: .utf8) else { check(false, "build.sh readable"); return }
+        let lines = build.components(separatedBy: "\n")
+        var files: Set<String> = []
+        for marker in ["-o \"$MAIN/Contents/MacOS/DeskMind\"", "-o \"$HELPER/Contents/MacOS/DeskMindHands\""] {
+            guard let at = lines.firstIndex(where: { $0.contains(marker) }), at + 1 < lines.count else { check(false, "build.sh: \(marker)"); continue }
+            files.formUnion(lines[at + 1].split(separator: " ").map(String.init).filter { $0.hasSuffix(".swift") })
+        }
+        check(files.contains("Shared/Activation.swift") && files.contains("Helper/LiveCard.swift") && files.count > 40, "every source of both apps, the funnel among them: \(files.count)")
+        func enclosing(_ ls: [String], _ i: Int) -> String {
+            for j in stride(from: i, through: 0, by: -1) {
+                if let r = ls[j].range(of: "func ") { return String(ls[j][r.upperBound...].prefix { $0.isLetter || $0.isNumber || $0 == "_" }) }
+            }
+            return ""
+        }
+        // raw calls → where they may be (file:function)
+        let raw: [(String, Set<String>)] = [
+            ("NSApp.activate", ["Activation.swift:bringForward"]), (".activate(", ["Activation.swift:bringForward"]),
+            ("activateWithOptions", []), ("activateIgnoringOtherApps", []), ("NSApp.unhide", []),
+            ("makeKeyAndOrderFront", ["Activation.swift:bringForward"]), ("orderFrontRegardless", ["Activation.swift:showPanel"]),
+            ("openApplication(", ["Activation.swift:openApp", "Activation.swift:background"]),
+            ("/usr/bin/open", ["Activation.swift:bundleInBackground", "HelperInstaller.swift:launch"]),
+            ("UserGesture(", ["Activation.swift:onClick", "Activation.swift:mouseUp", "Activation.swift:reopen"]),
+        ]
+        // factories → the handlers they may be used in (a button's action: the line gives it as one)
+        var found: [String] = []
+        for f in files.sorted() {
+            guard let text = try? String(contentsOf: app.appendingPathComponent(f), encoding: .utf8) else { check(false, "\(f) readable"); continue }
+            let ls = text.components(separatedBy: "\n")
+            let name = (f as NSString).lastPathComponent
+            for (i, l) in ls.enumerated() {
+                let code = l.components(separatedBy: "//").first ?? ""
+                let at = "\(name):\(enclosing(ls, i))"
+                for (api, allowed) in raw where code.contains(api) && !(api == "UserGesture(" && code.contains("fileprivate init")) {
+                    if !allowed.contains(at) { found.append("\(f):\(i + 1) \(api) in \(enclosing(ls, i))") }
+                }
+                // (the launcher's own arguments are checked by what they are, below)
+                if code.contains("/usr/bin/open") && name != "Activation.swift" && !ls[i...min(ls.count - 1, i + 2)].joined().contains("-g") { found.append("\(f):\(i + 1): open without -g") }
+                if code.contains("Activation.onClick") && name != "Activation.swift" && !(code.contains("Button(") || code.contains("pill(")) {
+                    found.append("\(f):\(i + 1): Activation.onClick outside a button's action")
+                }
+                if code.contains("Activation.mouseUp") && enclosing(ls, i) != "mouseUp" { found.append("\(f):\(i + 1): Activation.mouseUp outside mouseUp") }
+                if code.contains("Activation.reopen") && enclosing(ls, i) != "applicationShouldHandleReopen" { found.append("\(f):\(i + 1): Activation.reopen outside the reopen") }
+                if code.contains("NSPanel(") && !ls[i...min(ls.count - 1, i + 1)].joined().contains(".nonactivatingPanel") { found.append("\(f):\(i + 1): an NSPanel without .nonactivatingPanel") }
+            }
+        }
+        check(found.isEmpty, "nothing activates an app outside a user's own action: \(found)")
+        // the background launcher's own configuration and arguments, as they are passed (#115 review at 6d3aee0: the
+        // scan allows the function; this holds what it does)
+        let cfg = Launch.backgroundConfig()
+        check(cfg.activates == false && cfg.addsToRecentItems == false && cfg.createsNewApplicationInstance == false,
+              "a background launch: activates false, no recent item, the running instance")
+        check(Launch.bundleArguments("x.y").first == "-g" && Launch.bundleArguments("x.y") == ["-g", "-b", "x.y"], "a background reopen: open -g -b")
+        let src = (try? String(contentsOf: app.appendingPathComponent("Shared/Activation.swift"), encoding: .utf8)) ?? ""
+        check(src.contains("openApplication(at: url, configuration: backgroundConfig())") && src.contains("open.arguments = bundleArguments(bundle)"),
+              "the launcher passes them as they are")
     }
 
     /// #107 re-review (2): 0.5.0 has no local-only mode. The 0.5 window's model settings show the cloud switch on and

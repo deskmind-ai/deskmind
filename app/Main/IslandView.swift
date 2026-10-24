@@ -16,7 +16,7 @@ struct IslandView: View {
     /// The notch, in this view's own coordinates (points from the top-left of the panel).
     let notch: CGRect
     let onStop: () -> Void
-    var onDetails: () -> Void = {}
+    var onDetails: (UserGesture) -> Void = { _ in }
     var onDismiss: () -> Void = {}
     @State private var hover = false
     /// Opened by a click, for when hover does not reach a panel of an app that is not in front.
@@ -123,11 +123,11 @@ struct IslandView: View {
                 Spacer()
                 if model.phase == .running {
                     // a card waits in the window: the way to it, besides the Dock and the notification
-                    if model.asking { pill(L("Open DeskMind", lang: lang), prominent: true) { RunOverlay.shared.openWindow() } }
+                    if model.asking { pill(L("Open DeskMind", lang: lang), prominent: true, action: Activation.onClick { RunOverlay.shared.openWindow($0) }) }
                     pill(L("Stop", lang: lang), prominent: !model.asking, action: onStop)
                 } else {
                     pill(L("Dismiss", lang: lang), action: onDismiss)
-                    pill(L("Show Details", lang: lang), prominent: true, action: onDetails)
+                    pill(L("Show Details", lang: lang), prominent: true, action: Activation.onClick(onDetails))
                 }
             }
         }
@@ -190,11 +190,9 @@ enum MainWindow {
     /// Restored if minimised, in front, as the key window: only for something the user did (the island's buttons, a
     /// reopen). False when there is no window.
     @discardableResult
-    static func comeBack() -> Bool {
+    static func comeBack(_ gesture: UserGesture) -> Bool {
         guard let w = window else { return false }
-        NSApp.activate()
-        if w.isMiniaturized { w.deminiaturize(nil) }
-        w.makeKeyAndOrderFront(nil)
+        Activation.bringForward(gesture, window: w)
         return true
     }
 }
@@ -224,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if RunModel.shared?.phase == .running && RunModel.shared?.ask == nil { return false }
             // The same in the 0.5 window: a session's task running, no card waiting (handoff §3.1).
             if ShellFlag.isOn() && ShellModel.shared?.taskRunningWithoutCard == true { return false }
-            if MainWindow.comeBack() { return false }
+            if MainWindow.comeBack(Activation.reopen(sender)) { return false }
             return true
         }
     }
