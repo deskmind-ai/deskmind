@@ -109,7 +109,8 @@ enum ShellE2E {
         check(until { on { m.states[sid]?.task(run)?.ended == true } }, "gone: its task, ended")
         let t = on { m.states[sid]?.task(run) }
         let line = t.map { ShellText.task($0, lang: .zhHans) } ?? ""
-        check(line == "已停下：DeskMind 的后台助手退出了", "gone: the task reads 「已停下」 with the reason: «\(line)» (status \(t?.status ?? "-"), closed \(t?.closed ?? "-"))")
+        // (why it stopped is its end's own — the harness gives the helper's going no cause; the closure is session_end)
+        check(line == "已停下" && t?.closed == "session_end", "gone: the task reads 「已停下」, closed with the session's end: «\(line)» (status \(t?.status ?? "-"), closed \(t?.closed ?? "-"))")
         check(t.map { !$0.resultCardState.undoEnabled && !$0.resultCardState.isOpen } ?? false, "gone: no undo to click (\(String(describing: t?.resultCardState)))")
         if let t, t.resultCard != nil {
             check(ShellText.resultLine(t, now: Date().timeIntervalSince1970, lang: .zhHans) == "撤回已过期：DeskMind 的后台助手退出了，撤回时间提前结束",

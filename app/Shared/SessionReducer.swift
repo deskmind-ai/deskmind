@@ -190,8 +190,13 @@ struct TaskState: Equatable {
     var respond: SessionTaskRespond? = nil
     /// result_card_closed: the executor closed its result card at its deadline (no undo from here).
     var cardClosed: String? = nil
-    /// The session refused this app's answer to the result card (not stored: undo_expired, no_task, busy …): its code.
+    /// The session refused this app's answer to the result card (not stored, so not in the history: a view hint only):
+    /// its code, and how many refusals came (CardStore lets a sent answer go when this count moves).
     var respondRefused: String? = nil
+    var respondRefusals = 0
+    /// The refusal codes after which the session holds the card closed (harness host.ts respond): undo_expired, no_task.
+    /// Any other (busy: not stored, the lock file; bad_control) leaves it answerable: the user tries again.
+    static let closingRefusals: Set<String> = ["undo_expired", "no_task"]
     /// The session seq of session.task: the task's place in the chat (nil until it comes).
     var sessionSeq: Int? = nil
     /// session.task_closed's why, and its stored seq.
@@ -249,10 +254,12 @@ struct TaskState: Equatable {
     /// |   log)                                                    |                                           |
     /// | task_respond undo                                         | undoing (never expired, never undone)     |
     /// | task_respond (another option)                             | answered                                  |
-    /// | the session refused our answer (undo_expired, no_task)    | closed(that code)                         |
     /// | result_card_closed                                        | closed(deadline)                          |
     /// | task_closed / the process gone                            | closed(linger / new_task / session_end /  |
     /// |                                                           |   session_exit)                           |
+    /// | the session refused our answer undo_expired / no_task (a  | closed(that code)                         |
+    /// |   hint, not stored: until the history's closure comes)    |                                           |
+    /// | (another refusal — busy, bad_control: still answerable)   | open (the line says to try again)         |
     /// | otherwise                                                 | open(undo: offered, until)                |
     var resultCardState: ResultCardState {
         guard let card = resultCard, !card.options.isEmpty else { return .none }
@@ -263,9 +270,10 @@ struct TaskState: Equatable {
         }
         if respond?.undo == true { return closedWhy != nil ? .undoUnknown(nil) : .undoing }
         if respond != nil { return .answered }
-        if let r = respondRefused { return .closed(r) }
+        // (the history's own word on the closure wins over a refusal, which is only a hint until it comes)
         if cardClosed != nil { return .closed("deadline") }
         if let why = closed { return .closed(why) }
+        if let r = respondRefused, Self.closingRefusals.contains(r) { return .closed(r) }
         return .open(undo: undoOffered, until: undoUntil)
     }
     /// session.task_undo as stored.
@@ -713,6 +721,7 @@ enum SessionReducer {
                 // the session refused this app's answer to a result card (no run named: the one that could still be answered)
                 if e.control == "respond", let i = s.tasks.lastIndex(where: { $0.resultCardState.isOpen }) {
                     s.tasks[i].respondRefused = e.code
+                    s.tasks[i].respondRefusals += 1
                 }
                 // the session refused 「现在回答」 (no run named on the refusal: the running task's expired card)
                 if e.control == "reask", let i = s.tasks.lastIndex(where: { $0.running }), let c = s.tasks[i].expiredCard {

@@ -200,8 +200,7 @@ enum ShellText {
             if !t.plan.isEmpty, let p = t.steps.last?.planStep { return L("Working · step %d of %d", p, t.plan.count, lang: lang) }
             return n > 0 ? L("Working · step %d", n, lang: lang) : L("Working", lang: lang)
         }
-        // (its process went with the helper or the session's end: the task stopped for that, and says so)
-        let helperGone = t.closed == "session_end" || t.closed == "session_exit"
+        // (why it stopped is its end's own: status and cause — never how its result card closed later)
         switch t.status {
         case "succeeded": return L("Done", lang: lang)
         case "unconfirmed": return L("Done, but not confirmed. Please check", lang: lang)
@@ -209,11 +208,10 @@ enum ShellText {
         case "cancelled": return L("Cancelled", lang: lang)
         case "stopped":
             if t.cause == .lastStepUnknown { return L("Stopped. The last step may or may not have happened", lang: lang) }
-            return helperGone ? L("Stopped: DeskMind's helper quit", lang: lang) : L("Stopped", lang: lang)
+            return L("Stopped", lang: lang)
         case "environment":
             return t.cause == .screenLocked ? L("Stopped: the screen is locked", lang: lang) : L("The Mac's state didn't allow it", lang: lang)
-        default:
-            return helperGone ? L("Interrupted: DeskMind's helper quit", lang: lang) : L("Interrupted", lang: lang)
+        default: return L("Interrupted", lang: lang)
         }
     }
 
@@ -233,6 +231,8 @@ enum ShellText {
         switch t.resultCardState {
         case .none, .answered: return nil
         case .open(let undo, let until):
+            // the session refused our answer and the card is still answerable (busy …): try again
+            if t.respondRefused != nil { return L("Your answer didn't reach the task. Try again", lang: lang) }
             guard undo, let until else { return nil }
             let m = max(0, Int(((until - now) / 60).rounded(.up)))
             return m > 0 ? L("Undo available for %d more min", m, lang: lang) : nil
@@ -245,10 +245,8 @@ enum ShellText {
             let base = L("The undo was cut off: some of it may not have been undone. Please check", lang: lang)
             return refused.map { base + " · " + $0 } ?? base
         case .closed(let why):
-            // (said when the harness offered undo, or when the card has none only because its process went: an end the
-            // session wrote with no task_done, a stop by the helper's going)
-            let gone = why == "session_end" || why == "session_exit" || why == "no_task"
-            guard t.undoOffered || (gone && t.resultCard != nil && t.undoUntil == nil) else { return nil }
+            // (only when undo was offered: a card that never had it says why itself, and never reads as expired)
+            guard t.undoOffered else { return nil }
             switch why {
             case "new_task": return L("Undo expired: another computer task started", lang: lang)
             case "session_end", "session_exit", "no_task":

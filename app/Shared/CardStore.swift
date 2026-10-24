@@ -94,6 +94,8 @@ struct CardStore: Equatable {
     struct Sent: Equatable {
         var sessionId: String
         var answer: CardAnswer
+        /// A result card's answer: the task's refusal count when it was sent (a refusal after it lets it go).
+        var refusals = 0
     }
 
     /// What `pick` asks the caller to do.
@@ -178,7 +180,7 @@ struct CardStore: Equatable {
         guard a.askId == nil, SessionClient.refusal(a, in: s) == nil else { return .none }
         let key = Self.key(a)
         guard sent[key] == nil else { return .none }
-        sent[key] = Sent(sessionId: sessionId, answer: a)
+        sent[key] = Sent(sessionId: sessionId, answer: a, refusals: s.task(a.runId)?.respondRefusals ?? 0)
         return .send(key: key, a)
     }
 
@@ -237,6 +239,8 @@ struct CardStore: Equatable {
         }
         for (k, p) in picks where p.sessionId == sessionId && !openCard(p.answer) { picks[k] = nil }
         for (k, v) in sent where v.sessionId == sessionId && !openCard(v.answer) { sent[k] = nil }
+        // (a result card's answer the session refused, the card still answerable: it takes a click again)
+        for (k, v) in sent where v.sessionId == sessionId && v.answer.askId == nil && (s?.task(v.answer.runId)?.respondRefusals ?? 0) > v.refusals { sent[k] = nil }
         for (k, sid) in reasks where sid == sessionId {
             let parts = k.split(separator: "/", maxSplits: 1).map(String.init)
             if parts.count != 2 || s?.task(parts[0])?.expiredCard?.askId != parts[1] { reasks[k] = nil }

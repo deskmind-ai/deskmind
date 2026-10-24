@@ -24,6 +24,7 @@ enum TaskResultTests {
         DecisionTests.group("result.lineTests"); lineTests()
         DecisionTests.group("result.contrastTests"); contrastTests()
         DecisionTests.group("result.viewTests"); viewTests()
+        RvA3Tests.run()
     }
 
     static let L = SessionTests.L
@@ -195,13 +196,33 @@ enum TaskResultTests {
             c.m.click(cu)
             check(c.wire.count("respond") == 0 && !c.m.buttonEnabled(cu, card: cm, in: c.state), "\(what): the undo button is off and sends nothing")
         }
-        // the session refuses the answer (undo_expired: past undo_until): the card closes, the button is off
+        // the session refuses the answer (undo_expired: past undo_until): the card closes, the button is off — a hint
+        // until the history's closure, whose reason then wins
         let x = rig()
         let (xm, xu) = undoButton(x)
         x.m.click(xu)
         x.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "undo_expired", "control": "respond", "text": "expired"])
         check(!x.m.buttonEnabled(xu, card: xm, in: x.state) && x.state.task(CardStoreTests.rid)?.resultCardState == .closed("undo_expired"),
               "refused undo_expired: closed, the button off")
+        x.feed(["kind": "session.task_closed", "session_id": CardStoreTests.sid, "seq": 4, "run_id": CardStoreTests.rid, "why": "new_task"])
+        check(x.state.task(CardStoreTests.rid)?.resultCardState == .closed("new_task")
+              && ShellText.resultLine(x.state.task(CardStoreTests.rid)!, now: 0, lang: .zhHans) == "撤回已过期：开始了新任务", "then the history's closure: its reason wins")
+        // (#114 review) busy / bad_control: not stored, the card still answerable — the button back, a retry hint, a
+        // second click sends again
+        for code in ["busy", "bad_control"] {
+            let b = rig()
+            let (bm, bu) = undoButton(b)
+            b.m.click(bu)
+            b.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": code, "control": "respond", "text": "the answer could not be stored: ENOSPC"])
+            let t = b.state.task(CardStoreTests.rid)!
+            check(t.resultCardState.undoEnabled && b.m.buttonEnabled(bu, card: bm, in: b.state), "\(code): still open, the undo button back (\(t.resultCardState))")
+            check(ShellText.resultLine(t, now: 2_000_000_000 - 120, lang: .zhHans) == "回答没有送到任务，请再试一次", "\(code): a retry hint, not 「撤回已过期」")
+            b.m.click(bu)
+            check(b.wire.count("respond") == 2, "\(code): the retry is sent (\(b.wire.count("respond")))")
+            // a restart: the refusal is not in the history — the card is open, as the history says
+            b.restart()
+            check(b.state.task(CardStoreTests.rid)?.resultCardState.undoEnabled == true, "\(code): after a restart, open from the history alone")
+        }
         // the clock never decides: undo_until long past, the state open: the button takes a click
         let p = CardStoreTests.Rig()
         p.emit("task_done", ["status": "succeeded", "reason": "", "summary": "s", "undo_until": 1,
@@ -225,11 +246,13 @@ enum TaskResultTests {
             ("failed", task([end("failed")]), "没做完"),
             ("cancelled", task([end("cancelled")]), L10n.zh["Cancelled"] ?? ""),
             ("stopped", task([end("stopped")]), "已停下"),
-            ("stopped, the helper gone", task([end("stopped"), closedEnd]), "已停下：DeskMind 的后台助手退出了"),
+            // (why it stopped is task_end's own; how its card closed later never changes it — #114 review)
+            ("stopped, its card closed later by the session's end", task([end("stopped"), closedEnd]), "已停下"),
+            ("stopped by the user", task([end("stopped", #","reason":"stopped by the app","cause":"user_stopped""#)]), "已停下"),
             ("locked", task([end("environment", #","cause":"screen_locked""#)]), L10n.zh["Stopped: the screen is locked"] ?? ""),
             ("last step unknown", task([end("stopped", #","cause":"last_step_unknown""#)]), L10n.zh["Stopped. The last step may or may not have happened"] ?? ""),
             ("interrupted", task([end("interrupted")]), "中断了"),
-            ("cut off by the helper's going", task([L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"last_seq":1}"#)]), "中断了：DeskMind 的后台助手退出了"),
+            ("cut off by its process's end", task([L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"last_seq":1}"#)]), "中断了"),
         ]
         for (name, t, want) in cases {
             let zh = ShellText.task(t, lang: .zhHans), en = ShellText.task(t, lang: .en)
@@ -254,8 +277,12 @@ enum TaskResultTests {
             ("the helper gone", task([done, endOpen, se(3, #""kind":"session.task_closed","run_id":"r1","why":"session_end""#)]), "撤回已过期：DeskMind 的后台助手退出了，撤回时间提前结束"),
             ("the process gone", task([done, endOpen, L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"last_seq":2}"#)]), "撤回已过期：DeskMind 的后台助手退出了，撤回时间提前结束"),
             ("no undo offered (its card says why)", task([ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","# + noUndoCard), end("succeeded")]), nil),
-            ("stopped as the helper went (no undo_until, the card says it will not wait)",
-             task([ex(2, #""kind":"task_done","status":"stopped","reason":"","summary":"s","# + noUndoCard), end("stopped"), closedEnd]), "撤回已过期：DeskMind 的后台助手退出了，撤回时间提前结束"),
+            // (undo never offered: no expiry line, whatever closed it — #114 review)
+            ("stopped as the helper went (no undo offered; the card says it will not wait)",
+             task([ex(2, #""kind":"task_done","status":"stopped","reason":"","summary":"s","# + noUndoCard), end("stopped"), closedEnd]), nil),
+            ("no undo offered, the session ended", task([ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","# + noUndoCard), end("succeeded"), closedEnd]), nil),
+            ("no undo offered, the process gone", task([ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","# + noUndoCard), end("succeeded"),
+                                                         L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"last_seq":2}"#)]), nil),
         ]
         let now = 2_000_000_000.0 - 4.5 * 60
         for (name, t, want) in results {
