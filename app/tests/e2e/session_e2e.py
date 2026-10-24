@@ -32,6 +32,42 @@ LONG = "".join(f"第{i}段。" for i in range(40))
 failures = 0
 
 
+# The defaults suites the window's model runs with in this test (ShellE2E: UserDefaults(suiteName:), on disk so that its
+# phases share them): removed at the end whatever happens (main's finally), and leftovers of runs that died before
+# theirs are swept at the start. Never the app's own domain (ai.deskmind.app).
+SUITES = []
+PREFS = os.path.expanduser("~/Library/Preferences")
+SUITE_PREFIXES = ("ai.deskmind.e2e.shell.", "ai.deskmind.e2e.shellgone.")
+
+
+def new_suite(prefix):
+    suite = f"{prefix}{os.getpid()}"
+    assert suite.startswith(SUITE_PREFIXES) and suite != "ai.deskmind.app"
+    SUITES.append(suite)
+    return suite
+
+
+def remove_suite(suite):
+    # cfprefsd first (it would write its copy back), then the file
+    subprocess.run(["defaults", "delete", suite], capture_output=True)
+    try:
+        os.remove(os.path.join(PREFS, suite + ".plist"))
+    except FileNotFoundError:
+        pass
+
+
+def sweep_suites():
+    """Suites of earlier runs whose process is gone (killed, crashed): removed."""
+    for f in os.listdir(PREFS) if os.path.isdir(PREFS) else []:
+        if not f.endswith(".plist"):
+            continue
+        name = f[:-len(".plist")]
+        for p in SUITE_PREFIXES:
+            rest = name[len(p):] if name.startswith(p) else ""
+            if rest.isdigit() and not alive(int(rest)):
+                remove_suite(name)
+
+
 def check(ok, what):
     global failures
     print(("PASS " if ok else "FAIL ") + what, flush=True)
@@ -158,6 +194,7 @@ def main():
     until(lambda: os.path.exists(port_file) and open(port_file).read().strip())
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"], "LOCAL_API_KEY": "test-key",
            "LOCAL_URL": f"http://127.0.0.1:{open(port_file).read().strip()}"}
+    sweep_suites()
     helper = start_helper(env)
     helpers = [helper]
     try:
@@ -177,7 +214,7 @@ def main():
             # Nothing asserts the models-off switch here but the shell's own start: phase a is a first run on a fresh
             # helper (off until told)
             os.makedirs(SHELL_DIR, exist_ok=True)
-            suite = f"ai.deskmind.e2e.shell.{os.getpid()}"
+            suite = new_suite("ai.deskmind.e2e.shell.")
             state = os.path.join(OUT, "shell-state")
             for phase in ["a", "b"]:
                 for p in helpers:
@@ -188,8 +225,9 @@ def main():
                                    env={**os.environ, "FAKE_MODEL_PORT": open(port_file).read().strip()})
                 print(r.stdout, end="")
                 check(r.returncode == 0, f"the 0.5 window's model against the helper, phase {phase} ({r.returncode} failures){r.stderr[-400:]}")
-            subprocess.run(["defaults", "delete", suite], capture_output=True)
     finally:
+        for s in SUITES:
+            remove_suite(s)
         for p in helpers + [fake]:
             if p.poll() is None:
                 p.kill()
@@ -555,11 +593,10 @@ def run(env, helper):
 
         # (M2 A3) the app's window reads that task back under the new helper: 「已停下」 with the reason, no undo to click
         if SHELL:
-            suite = f"ai.deskmind.e2e.shellgone.{os.getpid()}"
+            suite = new_suite("ai.deskmind.e2e.shellgone.")
             r = subprocess.run([SHELL, "gone", SOCK, CONFIG, suite, sid, run2], capture_output=True, text=True, timeout=120)
             print(r.stdout, end="")
             check(r.returncode == 0, f"the 0.5 window reads the task the helper's going stopped ({r.returncode} failures){r.stderr[-400:]}")
-            subprocess.run(["defaults", "delete", suite], capture_output=True)
 
         # a helper killed outright (SIGKILL) while its run's executor and a child of it still act: the lock names their
         # group, not the helper, so a new helper's run and a session's task are refused until all of it is gone

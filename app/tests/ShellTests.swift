@@ -11,6 +11,7 @@ enum ShellTests {
     }
 
     static func run() {
+        DecisionTests.group("shell.defaultsHygieneTests"); defaultsHygieneTests()
         DecisionTests.group("shell.flagTests"); flagTests()
         DecisionTests.group("shell.statusPriorityTests"); statusPriorityTests()
         DecisionTests.group("shell.composerTests"); composerTests()
@@ -83,12 +84,54 @@ enum ShellTests {
 
     typealias Mock = SessionTests.MockTransport
 
-    /// Defaults of a suite of their own, emptied: never the app's.
-    static func scratchDefaults() -> UserDefaults {
-        let name = "ai.deskmind.tests.shell.\(UUID().uuidString)"
-        let d = UserDefaults(suiteName: name)!
-        d.removePersistentDomain(forName: name)
-        return d
+    /// Defaults of their own, in memory: never the app's, and never on disk (a suite per call left a plist in
+    /// ~/Library/Preferences each time: 75,797 of them on one Mac by 10-25).
+    static func scratchDefaults() -> UserDefaults { MemoryDefaults() }
+
+    /// UserDefaults that keep everything in memory: reads and writes never reach cfprefsd or the disk. Every typed
+    /// getter (bool, string, dictionary …) goes through object(forKey:).
+    final class MemoryDefaults: UserDefaults {
+        private var store: [String: Any] = [:]
+        private let lock = NSLock()
+        static let domain = "ai.deskmind.tests.memory"     // (the superclass's name only: nothing is written to it)
+        init() { super.init(suiteName: Self.domain)! }
+        override func object(forKey k: String) -> Any? { lock.lock(); defer { lock.unlock() }; return store[k] }
+        override func set(_ v: Any?, forKey k: String) { lock.lock(); store[k] = v; lock.unlock() }
+        override func removeObject(forKey k: String) { lock.lock(); store[k] = nil; lock.unlock() }
+        override func set(_ v: Bool, forKey k: String) { set(v as Any?, forKey: k) }
+        override func set(_ v: Int, forKey k: String) { set(v as Any?, forKey: k) }
+        override func set(_ v: Double, forKey k: String) { set(v as Any?, forKey: k) }
+        override func set(_ v: Float, forKey k: String) { set(v as Any?, forKey: k) }
+        override func set(_ v: URL?, forKey k: String) { set(v as Any?, forKey: k) }
+        override func dictionaryRepresentation() -> [String: Any] { lock.lock(); defer { lock.unlock() }; return store }
+        override func removePersistentDomain(forName: String) { lock.lock(); store = [:]; lock.unlock() }
+        override func synchronize() -> Bool { true }
+    }
+
+    /// No test writes to the app's own defaults, and the unit tests write none to disk.
+    static func defaultsHygieneTests() {
+        check(Bundle.main.bundleIdentifier != "ai.deskmind.app", "the test process is not the app (its standard defaults are not the app's)")
+        let d = scratchDefaults()
+        d.set("x", forKey: "k"); d.set(true, forKey: "b"); d.set(["a": 1], forKey: "dict")
+        check(d.string(forKey: "k") == "x" && d.bool(forKey: "b") && (d.dictionary(forKey: "dict")?["a"] as? Int) == 1, "scratch defaults work")
+        d.removeObject(forKey: "k")
+        check(d.object(forKey: "k") == nil && d.dictionaryRepresentation().count == 2, "and remove")
+        _ = d.synchronize()
+        let prefs = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Preferences/\(MemoryDefaults.domain).plist")
+        usleep(200_000)
+        check(!FileManager.default.fileExists(atPath: prefs), "nothing on disk: \(prefs)")
+        // no test source opens the app's domain, or a disk suite but the e2e's own
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("tests")
+        let files = (FileManager.default.enumerator(atPath: dir.path)?.allObjects as? [String] ?? []).filter { $0.hasSuffix(".swift") || $0.hasSuffix(".py") || $0.hasSuffix(".sh") }
+        for f in files {
+            let t = (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? ""
+            let code = t.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") && !$0.trimmingCharacters(in: .whitespaces).hasPrefix("#") }.joined(separator: "\n")
+            // (the needles are built, so this file does not match itself)
+            let app = "ai.deskmind" + ".app", suite = "UserDefaults(" + "suiteName:"
+            check(!code.contains("suiteName: \"\(app)\"") && !code.contains("defaults write \(app)") && !code.contains("defaults delete \(app)"),
+                  "tests/\(f) never writes the app's defaults")
+            if f.hasSuffix(".swift") && f != "e2e/ShellE2E.swift" { check(!code.contains(suite), "tests/\(f) opens no disk suite (scratchDefaults: in memory)") }
+        }
     }
 
     /// A model whose work and deliveries run inline, on a mock helper; its take-back runs on `timers` (a test's clock).
