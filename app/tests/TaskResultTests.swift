@@ -181,7 +181,7 @@ enum TaskResultTests {
         let (m, undo) = undoButton(r)
         check(r.m.buttonEnabled(undo, card: m, in: r.state), "open, undo offered: the button takes a click")
         r.m.click(undo); r.m.click(undo)
-        check(r.wire.count("respond") == 1 && r.wire.lines.last?.line as NSDictionary? == ["type": "respond", "run_id": CardStoreTests.rid, "option": 1] as NSDictionary,
+        check(r.wire.count("respond") == 1 && r.wire.lines.last.map({ var l = $0.line; l["req_id"] = nil; return l }) as NSDictionary? == ["type": "respond", "run_id": CardStoreTests.rid, "option": 1] as NSDictionary,
               "two clicks: one respond with undo's index (\(r.wire.count("respond")))")
         check(!r.m.buttonEnabled(undo, card: m, in: r.state), "and the button is off while it is on its way")
         r.feed(["kind": "session.task_respond", "session_id": CardStoreTests.sid, "seq": 4, "run_id": CardStoreTests.rid, "option": 1, "undo": true])
@@ -198,27 +198,32 @@ enum TaskResultTests {
             c.m.click(cu)
             check(c.wire.count("respond") == 0 && !c.m.buttonEnabled(cu, card: cm, in: c.state), "\(what): the undo button is off and sends nothing")
         }
-        // the session refuses the answer (undo_expired: past undo_until): the card closes, the button is off — a hint
-        // until the history's closure, whose reason then wins
+        // the session refuses our own answer (its req_id echoed) undo_expired: a hint — the button off, 「撤回已过期」 —
+        // until the history's closure, whose reason then wins; the state itself stays the history's (open)
         let x = rig()
         let (xm, xu) = undoButton(x)
         x.m.click(xu)
-        x.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "undo_expired", "control": "respond", "text": "expired"])
-        check(!x.m.buttonEnabled(xu, card: xm, in: x.state) && x.state.task(CardStoreTests.rid)?.resultCardState == .closed("undo_expired"),
-              "refused undo_expired: closed, the button off")
+        let xreq = x.wire.lines.last?.line["req_id"] as? String
+        check(xreq != nil, "the respond carries a req_id: \(String(describing: x.wire.lines.last?.line))")
+        x.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "undo_expired", "control": "respond", "run_id": CardStoreTests.rid, "req_id": xreq ?? "", "text": "expired"])
+        check(!x.m.buttonEnabled(xu, card: xm, in: x.state) && x.state.task(CardStoreTests.rid)?.resultCardState.isOpen == true
+              && ShellText.resultLine(x.state.task(CardStoreTests.rid)!, hint: x.m.cards.hint(CardStoreTests.rid), now: 0, lang: .zhHans) == "撤回已过期",
+              "our own undo_expired: the button off, 「撤回已过期」 as a hint (the history still open)")
         x.feed(["kind": "session.task_closed", "session_id": CardStoreTests.sid, "seq": 4, "run_id": CardStoreTests.rid, "why": "new_task"])
-        check(x.state.task(CardStoreTests.rid)?.resultCardState == .closed("new_task")
-              && ShellText.resultLine(x.state.task(CardStoreTests.rid)!, now: 0, lang: .zhHans) == "撤回已过期：开始了新任务", "then the history's closure: its reason wins")
+        check(x.state.task(CardStoreTests.rid)?.resultCardState == .closed("new_task") && x.m.cards.hint(CardStoreTests.rid) == nil
+              && ShellText.resultLine(x.state.task(CardStoreTests.rid)!, hint: x.m.cards.hint(CardStoreTests.rid), now: 0, lang: .zhHans) == "撤回已过期：开始了新任务",
+              "then the history's closure: its reason wins")
         // (#114 review) busy / bad_control: not stored, the card still answerable — the button back, a retry hint, a
         // second click sends again
         for code in ["busy", "bad_control"] {
             let b = rig()
             let (bm, bu) = undoButton(b)
             b.m.click(bu)
-            b.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": code, "control": "respond", "text": "the answer could not be stored: ENOSPC"])
+            let req = b.wire.lines.last?.line["req_id"] as? String ?? ""
+            b.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": code, "control": "respond", "run_id": CardStoreTests.rid, "req_id": req, "text": "the answer could not be stored: ENOSPC"])
             let t = b.state.task(CardStoreTests.rid)!
             check(t.resultCardState.undoEnabled && b.m.buttonEnabled(bu, card: bm, in: b.state), "\(code): still open, the undo button back (\(t.resultCardState))")
-            check(ShellText.resultLine(t, now: 2_000_000_000 - 120, lang: .zhHans) == "回答没有送到任务，请再试一次", "\(code): a retry hint, not 「撤回已过期」")
+            check(ShellText.resultLine(t, hint: b.m.cards.hint(CardStoreTests.rid), now: 2_000_000_000 - 120, lang: .zhHans) == "回答没有送到任务，请再试一次", "\(code): a retry hint, not 「撤回已过期」")
             b.m.click(bu)
             check(b.wire.count("respond") == 2, "\(code): the retry is sent (\(b.wire.count("respond")))")
             // a restart: the refusal is not in the history — the card is open, as the history says
@@ -325,46 +330,80 @@ enum TaskResultTests {
         let buttons = task.components(separatedBy: "Button(").count - 1
         check(buttons >= 1 && task.components(separatedBy: ".accessibilityHint(").count - 1 >= buttons && task.components(separatedBy: ".accessibilityLabel(").count - 1 >= buttons,
               "VoiceOver: a label and a hint on each of the \(buttons) buttons")
-        check(task.contains("ShellText.resultLine(task, now: shell.now()") && task.contains("CardView(shell: shell, card: m"), "the result line and the card's buttons from the one state")
+        check(task.contains("ShellText.resultLine(task, hint: shell.cards.hint(task.runId), now: shell.now()") && task.contains("CardView(shell: shell, card: m"), "the result line and the card's buttons from the one state")
     }
 
     // MARK: - a refusal is the respond's it answers (#114 Codex review at 7553637)
 
     static func refusalMatchTests() {
-        // A's undo was sent; before its answer, the session moved on: B's card opens; then a refusal (no_task) comes —
-        // it answers A's respond, never B's card
-        let r = CardStoreTests.Rig()
-        r.emit("task_done", ["status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
-                             "result_card": ["kind": "result", "text": "a", "blocking": false, "free_text": false,
-                                             "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
-        r.feed(["kind": "session.task_end", "session_id": CardStoreTests.sid, "seq": 3, "run_id": CardStoreTests.rid, "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000])
-        let am = CardModel(resultCard: r.state.task(CardStoreTests.rid)!.resultCard!, runId: CardStoreTests.rid)
-        r.m.click(am.buttons.first { $0.role == .undo }!)
-        check(r.state.respondsInFlight == [CardStoreTests.rid], "A's respond is in flight: \(r.state.respondsInFlight)")
-        r.feed(["kind": "session.task_closed", "session_id": CardStoreTests.sid, "seq": 4, "run_id": CardStoreTests.rid, "why": "new_task"])
-        r.feed(["kind": "session.task", "session_id": CardStoreTests.sid, "seq": 5, "msg_id": "u2", "run_id": "r2", "raw": "再来", "by": "slash"])
-        r.feed(["kind": "task_done", "session_id": CardStoreTests.sid, "run_id": "r2", "seq": 1, "status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
-                "result_card": ["kind": "result", "text": "b", "blocking": false, "free_text": false,
-                                "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
-        r.feed(["kind": "session.task_end", "session_id": CardStoreTests.sid, "seq": 6, "run_id": "r2", "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000])
-        check(r.state.task("r2")?.resultCardState.undoEnabled == true, "(B's card open)")
-        r.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "no_task", "control": "respond", "text": "no result card of this session is waiting"])
-        let b = r.state.task("r2")!
-        check(b.resultCardState.undoEnabled && b.respondRefused == nil && ShellText.resultLine(b, now: 2_000_000_000 - 120, lang: .zhHans) == "还能撤回 2 分钟",
-              "the late refusal answers A's respond: B's card stays open, its undo on (\(b.resultCardState))")
-        check(r.state.respondsInFlight.isEmpty, "and nothing is in flight any more")
-        // a refusal with nothing in flight changes nothing
-        r.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "no_task", "control": "respond", "text": "x"])
-        check(r.state.task("r2")?.resultCardState.undoEnabled == true, "a refusal with no respond in flight: nothing changes")
-        // two in flight (A then B), A's stored answer held behind a gap, B's refusal arrives first: it waits, then is B's
-        var s = SessionReducer.reduce(SessionState(), begin + [ex(2, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"s","# + undoCard),
-                                                            se(2, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"s","undo":"open","undo_until":2000000000"#)])
-        s.respondsInFlight = ["r1", "r1"]
-        s = SessionReducer.reduce(s, se(4, #""kind":"session.task_closed","run_id":"r1","why":"linger""#))     // (held: seq 3 missing)
-        s = SessionReducer.reduce(s, se(nil, #""kind":"session.error","code":"busy","control":"respond","text":"x""#))
-        check(s.task("r1")?.respondRefused == nil && s.heldRespondRefusals.count == 1, "a refusal behind a gap waits for the stored lines before it")
-        s = SessionReducer.reduce(s, se(3, #""kind":"session.task_respond","run_id":"r1","option":1,"undo":true"#))
-        check(s.respondsInFlight.isEmpty && s.heldRespondRefusals.isEmpty, "the gap filled: the stored answer took the first, the refusal the second")
+        let sid = CardStoreTests.sid, rid = CardStoreTests.rid
+        func resultCard(_ r: CardStoreTests.Rig, run: String, seq: Int, endSeq: Int) {
+            r.feed(["kind": "task_done", "session_id": sid, "run_id": run, "seq": seq, "status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
+                    "result_card": ["kind": "result", "text": "t", "blocking": false, "free_text": false,
+                                    "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
+            r.feed(["kind": "session.task_end", "session_id": sid, "seq": endSeq, "run_id": run, "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000])
+        }
+        func undo(_ r: CardStoreTests.Rig, _ run: String) -> CardModel.Button {
+            CardModel(resultCard: r.state.task(run)!.resultCard!, runId: run).buttons.first { $0.role == .undo }!
+        }
+        func refusal(_ code: String, run: String?, req: String?) -> [String: Any] {
+            var e: [String: Any] = ["kind": "session.error", "session_id": sid, "code": code, "control": "respond", "text": "x"]
+            if let run { e["run_id"] = run }
+            if let req { e["req_id"] = req }
+            return e
+        }
+        // (Codex 1) another client's no_task for an old task A comes while our undo of B is in flight: B is untouched;
+        // then B's own busy (its req_id) gives B the retry hint, the button back
+        let a = CardStoreTests.Rig()
+        resultCard(a, run: rid, seq: 2, endSeq: 3)
+        a.feed(["kind": "session.task_closed", "session_id": sid, "seq": 4, "run_id": rid, "why": "new_task"])
+        a.feed(["kind": "session.task", "session_id": sid, "seq": 5, "msg_id": "u2", "run_id": "r2", "raw": "b", "by": "slash"])
+        resultCard(a, run: "r2", seq: 1, endSeq: 6)
+        a.m.click(undo(a, "r2"))
+        let breq = a.wire.lines.last?.line["req_id"] as? String ?? ""
+        a.m.client.feed(refusal("no_task", run: rid, req: "rq_another_client"))
+        check(a.state.task("r2")?.resultCardState.undoEnabled == true && a.m.cards.hint("r2") == nil && a.m.cards.issued[breq] != nil,
+              "another client's refusal: B untouched, B's own answer still awaited")
+        a.m.client.feed(refusal("busy", run: "r2", req: breq))
+        check(a.m.cards.hint("r2") == "busy" && a.m.buttonEnabled(undo(a, "r2"), card: CardModel(resultCard: a.state.task("r2")!.resultCard!, runId: "r2"), in: a.state),
+              "B's own busy: its retry hint, the button back")
+        a.m.click(undo(a, "r2"))
+        check(a.wire.count("respond") == 2 && a.m.cards.hint("r2") == nil, "and the retry goes (the hint goes with it)")
+        // (Codex 2) the registration races a task switch: the req_id is recorded before the line is written, on the
+        // UI queue, so whatever order the lines come in, B's own refusal finds B
+        let b = CardStoreTests.Rig()
+        resultCard(b, run: rid, seq: 2, endSeq: 3)
+        var seenWrite: [String: Any]? = nil
+        b.wire.onLine = { l in if l["type"] as? String == "respond" { seenWrite = l } }
+        b.m.click(undo(b, rid))
+        let req = seenWrite?["req_id"] as? String ?? ""
+        check(!req.isEmpty && b.m.cards.issued[req]?.runId == rid, "the req_id is recorded before the write: \(req)")
+        b.m.client.feed(refusal("busy", run: rid, req: req))
+        check(b.m.cards.hint(rid) == "busy" && b.m.cards.issued[req] == nil && b.m.cards.sent.isEmpty, "its own refusal, matched by req_id: the answer let go, retry possible")
+        // a foreign refusal (no req_id of ours) never changes a card, whatever its run or code
+        for (run, req2) in [(rid, "rq_x"), (nil, "rq_y"), (rid, nil)] as [(String?, String?)] {
+            let f = CardStoreTests.Rig()
+            resultCard(f, run: rid, seq: 2, endSeq: 3)
+            f.m.click(undo(f, rid))
+            for code in ["no_task", "undo_expired", "busy", "bad_control"] { f.m.client.feed(refusal(code, run: run, req: req2)) }
+            check(f.m.cards.hint(rid) == nil && f.m.cards.sent.count == 1 && f.state.task(rid)?.resultCardState.isOpen == true,
+                  "a foreign refusal (run \(run ?? "-"), req \(req2 ?? "-")): nothing changes")
+        }
+        // an old harness (no echo): refusals are ignored; the card waits for the history
+        let o = CardStoreTests.Rig()
+        resultCard(o, run: rid, seq: 2, endSeq: 3)
+        o.m.click(undo(o, rid))
+        o.m.client.feed(refusal("undo_expired", run: nil, req: nil))
+        check(o.m.cards.hint(rid) == nil && o.state.task(rid)?.resultCardState.isOpen == true, "an old harness's refusal: ignored")
+        o.feed(["kind": "session.task_closed", "session_id": sid, "seq": 4, "run_id": rid, "why": "linger"])
+        check(o.state.task(rid)?.resultCardState == .closed("linger") && o.m.cards.sent.isEmpty, "the history closes it")
+        // our answer taken (task_respond echoing the req_id): nothing more awaited
+        let t = CardStoreTests.Rig()
+        resultCard(t, run: rid, seq: 2, endSeq: 3)
+        t.m.click(undo(t, rid))
+        let treq = t.wire.lines.last?.line["req_id"] as? String ?? ""
+        t.feed(["kind": "session.task_respond", "session_id": sid, "seq": 4, "run_id": rid, "option": 1, "undo": true, "req_id": treq])
+        check(t.m.cards.issued.isEmpty && t.state.task(rid)?.resultCardState == .undoing, "task_respond with our req_id: answered, nothing awaited")
     }
 
     // MARK: - one predicate per option: enabled == a click sends == its key sends

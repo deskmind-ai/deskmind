@@ -227,12 +227,14 @@ enum ShellText {
     /// The result card's line, from its one state (ResultCardState): what came of the undo, or why it can no longer
     /// be done; the minutes left while it is open (display only — `now` is the clock, never a gate). Nothing when the
     /// harness offered no undo (its card says why) and nothing closed it for a reason worth saying.
-    static func resultLine(_ t: TaskState, now: Double, lang: ResolvedLang) -> String? {
+    static func resultLine(_ t: TaskState, hint: String? = nil, now: Double, lang: ResolvedLang) -> String? {
+        // a refusal this client's own answer got (CardStore.hint): until the history speaks
+        if t.resultCardState.isOpen, let h = hint {
+            return CardStore.closingRefusals.contains(h) ? L("Undo expired", lang: lang) : L("Your answer didn't reach the task. Try again", lang: lang)
+        }
         switch t.resultCardState {
         case .none, .answered: return nil
         case .open(let undo, let until):
-            // the session refused our answer and the card is still answerable (busy …): try again
-            if t.respondRefused != nil { return L("Your answer didn't reach the task. Try again", lang: lang) }
             guard undo, let until else { return nil }
             let m = max(0, Int(((until - now) / 60).rounded(.up)))
             return m > 0 ? L("Undo available for %d more min", m, lang: lang) : nil
@@ -1063,11 +1065,18 @@ final class ShellModel: ObservableObject {
         write(a, key: key, in: id)
     }
 
+    /// A fresh id for each answer line written (tests set their own).
+    var newReqId: () -> String = { "rq_" + UUID().uuidString.lowercased() }
+
+    /// Writes an answer with a fresh req_id, recorded in CardStore first (here, on the UI queue); a failed write takes
+    /// both back on the UI queue.
     private func write(_ a: CardAnswer, key: String, in id: String) {
+        let req = newReqId()
+        cards.issue(req, sessionId: id, key: key, answer: a)
         work { [weak self] in
             guard let self else { return }
-            let r = self.client.answer(a, in: id)
-            if r != .sent { self.deliver { self.cards.notSent(key, a) } }
+            let r = self.client.answer(a, in: id, reqId: req)
+            if r != .sent { self.deliver { self.cards.notSent(key, a); self.cards.unissue(req) } }
         }
     }
 

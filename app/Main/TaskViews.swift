@@ -79,7 +79,7 @@ struct ResultSection: View {
                     .id(ShellModel.cardKey(m))
                 // (the countdown refreshes each 30 s; whether undo can be clicked never reads the clock)
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    if let line = ShellText.resultLine(task, now: shell.now(), lang: lang) {
+                    if let line = ShellText.resultLine(task, hint: shell.cards.hint(task.runId), now: shell.now(), lang: lang) {
                         Text(line).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .accessibilityLabel(line)

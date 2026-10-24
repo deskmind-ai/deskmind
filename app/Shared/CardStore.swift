@@ -94,9 +94,24 @@ struct CardStore: Equatable {
     struct Sent: Equatable {
         var sessionId: String
         var answer: CardAnswer
-        /// A result card's answer: the task's refusal count when it was sent (a refusal after it lets it go).
-        var refusals = 0
     }
+
+    /// An answer line this client wrote, by its req_id (harness#71 echoes it on a refusal of that line and on
+    /// session.task_respond): recorded on the UI queue before the line is written, dropped when the write failed or
+    /// the session answered it. Only a refusal carrying one of these ever touches a card (#114 Codex review at
+    /// f38b3e5: refusals go to every watcher — matching them by order took another client's).
+    struct Issued: Equatable {
+        var sessionId: String
+        var key: String
+        var runId: String
+        var isResult: Bool
+    }
+    private(set) var issued: [String: Issued] = [:]
+    /// A result card's refusal this client's own answer got, by run: shown until the history speaks (the card's state
+    /// leaves open) or the user answers again. busy / bad_control: try again; undo_expired / no_task: closing, the card
+    /// takes no more answers from here until the history closes it.
+    private(set) var hints: [String: String] = [:]
+    static let closingRefusals: Set<String> = ["undo_expired", "no_task"]
 
     /// What `pick` asks the caller to do.
     enum Action: Equatable {
@@ -178,14 +193,24 @@ struct CardStore: Equatable {
     /// Whether `respond` would take `a` now: what ShellModel.canSend asks of a result card's option.
     func wouldRespond(_ a: CardAnswer, in s: SessionState) -> Bool {
         a.askId == nil && SessionClient.refusal(a, in: s) == nil && sent[Self.key(a)] == nil
+            && !(hints[a.runId].map(Self.closingRefusals.contains) ?? false)
     }
+
+    /// The line for `key` is about to be written with `reqId` (on the UI queue, before the write): a new answer, so an
+    /// older retry hint of its run goes.
+    mutating func issue(_ reqId: String, sessionId: String, key: String, answer a: CardAnswer) {
+        issued[reqId] = Issued(sessionId: sessionId, key: key, runId: a.runId, isResult: a.askId == nil)
+        if a.askId == nil { hints[a.runId] = nil }
+    }
+    /// The write of `reqId` did not go: nothing of it is awaited.
+    mutating func unissue(_ reqId: String) { issued[reqId] = nil }
 
     /// A result card's answer (respond): written now, once.
     mutating func respond(_ a: CardAnswer, sessionId: String, in s: SessionState) -> Action {
         guard a.askId == nil, SessionClient.refusal(a, in: s) == nil else { return .none }
         let key = Self.key(a)
         guard sent[key] == nil else { return .none }
-        sent[key] = Sent(sessionId: sessionId, answer: a, refusals: s.task(a.runId)?.respondRefusals ?? 0)
+        sent[key] = Sent(sessionId: sessionId, answer: a)
         return .send(key: key, a)
     }
 
@@ -244,8 +269,20 @@ struct CardStore: Equatable {
         }
         for (k, p) in picks where p.sessionId == sessionId && !openCard(p.answer) { picks[k] = nil }
         for (k, v) in sent where v.sessionId == sessionId && !openCard(v.answer) { sent[k] = nil }
-        // (a result card's answer the session refused, the card still answerable: it takes a click again)
-        for (k, v) in sent where v.sessionId == sessionId && v.answer.askId == nil && (s?.task(v.answer.runId)?.respondRefusals ?? 0) > v.refusals { sent[k] = nil }
+        if let s {
+            // the session took one of our lines (session.task_respond with its req_id): nothing more is awaited of it
+            for t in s.tasks { if let r = t.respond?.reqId, issued[r]?.sessionId == sessionId { issued[r] = nil } }
+            // a refusal of one of our own lines (its req_id is ours): its card's hint; a retryable one lets the answer go,
+            // so the user can try again. Any other refusal (another client's, one without a req_id) changes nothing.
+            for e in s.answerRefusals {
+                guard let r = e.reqId, let mine = issued[r], mine.sessionId == sessionId else { continue }
+                issued[r] = nil
+                if !Self.closingRefusals.contains(e.code) { sent[mine.key] = nil }
+                if mine.isResult, s.task(mine.runId)?.resultCardState.isOpen == true { hints[mine.runId] = e.code }
+            }
+            // a hint lasts until the history speaks: the card no longer open
+            for (run, _) in hints where s.task(run)?.resultCardState.isOpen != true { hints[run] = nil }
+        }
         for (k, sid) in reasks where sid == sessionId {
             let parts = k.split(separator: "/", maxSplits: 1).map(String.init)
             if parts.count != 2 || s?.task(parts[0])?.expiredCard?.askId != parts[1] { reasks[k] = nil }
@@ -257,5 +294,9 @@ struct CardStore: Equatable {
         picks = picks.filter { $0.value.sessionId != sessionId }
         sent = sent.filter { $0.value.sessionId != sessionId }
         reasks = reasks.filter { $0.value != sessionId }
+        issued = issued.filter { $0.value.sessionId != sessionId }
     }
+
+    /// The refusal hint of a run's result card (its code), if one of this client's answers got one.
+    func hint(_ runId: String) -> String? { hints[runId] }
 }

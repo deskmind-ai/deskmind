@@ -177,7 +177,8 @@ enum SessionControl: Equatable {
     case cua(String, scope: String? = nil)
     case stop(runId: String? = nil)
     case steer(String, runId: String? = nil)
-    case answer(CardAnswer)
+    /// `reqId`: this client's id for the line (harness#71 echoes it on a refusal of it and on session.task_respond).
+    case answer(CardAnswer, reqId: String? = nil)
     /// 「现在回答」 on a card that expired (ask_void timeout, harness H1): the task looks again and asks a new card.
     case reask(runId: String)
     case retry
@@ -194,7 +195,7 @@ enum SessionControl: Equatable {
         case .cua(let t, let scope): return ["type": "cua", "text": t].merging(scope.map { ["scope": $0] } ?? [:]) { a, _ in a }
         case .stop(let r): return ["type": "stop"].merging(r.map { ["run_id": $0] } ?? [:]) { a, _ in a }
         case .steer(let t, let r): return ["type": "steer", "text": t].merging(r.map { ["run_id": $0] } ?? [:]) { a, _ in a }
-        case .answer(let a): return a.control
+        case .answer(let a, let req): var o = a.control; if let req { o["req_id"] = req }; return o
         case .reask(let r): return ["type": "reask", "run_id": r]
         case .retry: return ["type": "retry"]
         case .queueEdit(let id, let t): return ["type": "queue_edit", "id": id, "text": t]
@@ -641,15 +642,7 @@ final class SessionClient {
     var newClientId: () -> String = { "c_" + UUID().uuidString.lowercased() }      // unique for the session's life (harness #59)
 
     /// Blocks while it reopens an ended session (up to a minute): call it off the main thread.
-    func send(_ control: SessionControl, to sessionId: String) -> SendResult {
-        // a result-card answer is recorded in flight before it goes (its refusal may come back before this returns), and
-        // taken off again when it did not go
-        guard case .answer(.respond(let run, _)) = control else { return send(control, to: sessionId, clientId: nil) }
-        mutate(sessionId) { $0.respondsInFlight.append(run) }
-        let r = send(control, to: sessionId, clientId: nil)
-        if r != .sent { mutate(sessionId) { st in if let k = st.respondsInFlight.lastIndex(of: run) { st.respondsInFlight.remove(at: k) } } }
-        return r
-    }
+    func send(_ control: SessionControl, to sessionId: String) -> SendResult { send(control, to: sessionId, clientId: nil) }
 
     /// `clientId`: the words' id when they are sent again (resend); new words get one.
     private func send(_ control: SessionControl, to sessionId: String, clientId: String?) -> SendResult {
@@ -678,7 +671,7 @@ final class SessionClient {
             return .refused(why)
         }
         if control.isTyping && !s.composerEnabled { return refusedBeforeHeld("card_open") }
-        if case .answer(let a) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
+        if case .answer(let a, _) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
         if case .reask(let r) = control, let why = Self.reaskRefusal(r, in: s) { return .refused(why) }
         if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return refusedBeforeHeld(why == "no task is running" ? "task_ended" : why) }
         if case .steer(_, nil) = control { return refusedBeforeHeld("task_ended") }    // no task to name: not sent
@@ -778,7 +771,7 @@ final class SessionClient {
         switch control {
         case .stop: return "the session is not running"
         case .steer: return s.runningTask == nil ? "no task is running" : nil
-        case .answer(let a): return refusal(a, in: s)
+        case .answer(let a, _): return refusal(a, in: s)
         case .reask(let r): return reaskRefusal(r, in: s)
         default: return nil
         }
@@ -814,7 +807,7 @@ final class SessionClient {
     }
 
     /// Answers a card (or the result card): sent only if that card can still be answered.
-    func answer(_ a: CardAnswer, in sessionId: String) -> SendResult { send(.answer(a), to: sessionId) }
+    func answer(_ a: CardAnswer, in sessionId: String, reqId: String? = nil) -> SendResult { send(.answer(a, reqId: reqId), to: sessionId) }
 
     /// A click on a card's button: it answers the button's own card (its run_id and ask_id), and is sent only while
     /// that card is the open one (or that run's result card is answerable): a stale card's button never answers a new
@@ -1372,7 +1365,7 @@ final class SessionClient {
     /// an option the app cannot find and an unknown kind count as resuming (fail closed). A result card's answer (undo,
     /// OK) never does: the session undoes from its receipts.
     static func needsModel(_ c: SessionControl, in s: SessionState) -> Bool {
-        guard case .answer(let a) = c else { return c.needsModel }
+        guard case .answer(let a, _) = c else { return c.needsModel }
         switch a {
         case .respond: return false
         case .text: return true

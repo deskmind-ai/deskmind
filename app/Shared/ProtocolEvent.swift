@@ -211,7 +211,10 @@ struct SessionErrorEvent: Codable, Equatable {
     var clientId: String?
     /// not_idle (the end_if_idle control, harness#62): which of busy / queue / task / recovering held, in that order.
     var why: [String]?
-    enum CodingKeys: String, CodingKey { case code, text, msgId = "msg_id", replyTo = "reply_to", control, clientId = "client_id", why }
+    /// A refusal of a respond / answer (harness#71): the req_id it carried, and its run when known.
+    var reqId: String?
+    var runId: String?
+    enum CodingKeys: String, CodingKey { case code, text, msgId = "msg_id", replyTo = "reply_to", control, clientId = "client_id", why, reqId = "req_id", runId = "run_id" }
 }
 
 struct SessionTaskEvent: Codable, Equatable {
@@ -292,7 +295,9 @@ struct SessionTaskRespond: Codable, Equatable {
     @LStr var runId: String = ""
     var option: Int?
     var undo: Bool?
-    enum CodingKeys: String, CodingKey { case runId = "run_id", option, undo }
+    /// The respond's req_id, echoed (harness#71).
+    var reqId: String?
+    enum CodingKeys: String, CodingKey { case runId = "run_id", option, undo, reqId = "req_id" }
 }
 
 struct SessionSteer: Codable, Equatable {

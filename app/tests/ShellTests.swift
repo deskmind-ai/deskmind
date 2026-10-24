@@ -129,7 +129,12 @@ enum ShellTests {
     static func isControl(_ r: [String: Any]) -> Bool {
         r["op"] as? String == SessionClient.Op.send && (r["line"] as? [String: Any])?["type"] as? String != "set_config"
     }
-    static func sent(_ mock: Mock) -> [String: Any]? { mock.requests.last(where: isControl)?["line"] as? [String: Any] }
+    /// The last control line sent (its req_id left out: a fresh id per answer, harness#71).
+    static func sent(_ mock: Mock) -> [String: Any]? {
+        guard var l = mock.requests.last(where: isControl)?["line"] as? [String: Any] else { return nil }
+        l["req_id"] = nil
+        return l
+    }
     static func sends(_ mock: Mock) -> Int { mock.requests.filter(isControl).count }
 
     // MARK: the flag
