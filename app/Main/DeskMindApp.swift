@@ -507,6 +507,12 @@ struct RootView: View {
             }
         }
         .background(Brand.paper)
+        // a window that opens (again) while a goal is not over: straight to that goal (its cards, its Stop)
+        .onAppear {
+            var showing: UUID? = nil
+            if case .run(let r) = screen { showing = r.id }
+            if let id = GoalRuns.reopenRoute(active: GoalRuns.app.active, showing: showing), let r = GoalRequests.byId[id] { screen = .run(r) }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             downloader.stashForQuit()
         }

@@ -798,8 +798,8 @@ final class ShellModel: ObservableObject {
             // a goal over meanwhile (its bound ran out while the open waited): its cua is never sent
             if ticket?.over == true { return }
             let r = self.client.send(control, to: id, clientId: clientId)
-            // over while the send went (it may have reopened the session): the task it starts is stopped
-            if r == .sent, ticket?.over == true { _ = self.client.send(.stop(), to: id) }
+            // (over while the send went: the goal's guard stops the task it starts, by its run — never a run-less
+            // stop here, which the session would take for whatever task runs)
             self.deliver {
                 switch r {
                 case .sent: report(.sent)
@@ -816,12 +816,10 @@ final class ShellModel: ObservableObject {
         if r == .unavailable { notice = L("DeskMind's helper didn't answer. Your message is kept below; send it again.", lang: lang()) }
     }
 
-    /// Stop for one session's own task (GoalRun): `runId`'s task, else — its task not come yet — the session's
-    /// stop with no run (the cua it was sent).
-    func stop(sessionId id: String, runId: String?) {
-        let control: SessionControl
-        if let runId { control = .stop(runId: runId); cards.stopping(runId) } else { control = .stop() }
-        work { [weak self] in _ = self?.client.send(control, to: id) }
+    /// Stop one task of one session by its run (GoalRun). Never run-less: the session would stop whatever task runs.
+    func stop(sessionId id: String, runId: String) {
+        cards.stopping(runId)
+        work { [weak self] in _ = self?.client.send(.stop(runId: runId), to: id) }
     }
 
     /// Stop (⌘.): the running task, else the reply that streams. Always available while there is one.
@@ -993,6 +991,17 @@ final class ShellModel: ObservableObject {
         let b = control.button
         guard b.runId == card.runId, b.askId == card.askId, b.askId != nil, selected == id else { return false }
         return canSend(b)
+    }
+
+    /// What CardKeyMonitor is given, wherever a pinned card is shown (the chat, a goal's screen): the one wiring.
+    var cardKeyHandlers: CardKeyHandlers {
+        CardKeyHandlers(
+            onKey: { [weak self] c, cmd, key, editing, rep, composing in
+                self?.keyDown(characters: c, commandLike: cmd, mainWindowIsKey: key, editingText: editing, isRepeat: rep, composing: composing) ?? false
+            },
+            onLeave: { [weak self] in self?.windowLeft() },
+            onReturn: { [weak self] in self?.windowReturned() },
+            onFocus: { [weak self] editing, composing in self?.focusChanged(editing: editing, composing: composing) })
     }
 
     /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true only when it acted on the
@@ -1438,4 +1447,13 @@ final class StoppableTransport: SessionTransport {
         inner.stream(body, onLine: { [weak self] l in onLine(l) && !(self?.isStopped() ?? false) },
                      onIdle: { [weak self] in onIdle() && !(self?.isStopped() ?? false) })
     }
+}
+
+/// The card keys' handlers (CardKeyMonitor's): a key-down with what its gate needs (true: consumed — it picked), the
+/// window left / back, where the typing is. ShellModel.cardKeyHandlers gives the one set every screen installs.
+struct CardKeyHandlers {
+    let onKey: (_ characters: String?, _ commandLike: Bool, _ mainWindowIsKey: Bool, _ editingText: Bool, _ isRepeat: Bool, _ composing: Bool) -> Bool
+    let onLeave: () -> Void
+    let onReturn: () -> Void
+    let onFocus: (_ editing: Bool, _ composing: Bool) -> Void
 }

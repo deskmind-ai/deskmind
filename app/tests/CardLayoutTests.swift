@@ -241,7 +241,8 @@ enum CardLayoutTests {
               "the key monitor: its own window only, and says whether a field is typed in")
         check(monitor.contains("e.isARepeat") && !monitor.contains("CardKeys.number("), "the monitor hands every key-down, with its repeat flag, to the model's gate")
         let main = (try? String(contentsOf: url.deletingLastPathComponent().appendingPathComponent("MainSplitView.swift"), encoding: .utf8)) ?? ""
-        check(main.contains("shell.keyDown(characters:"), "the chat column hands every key-down to the model")
+        // (the one wiring, ShellModel.cardKeyHandlers — its handlers are run in SurfaceTests.goalCardKeysTests)
+        check(main.contains("CardKeyMonitor(shell.cardKeyHandlers)"), "the chat column hands every key-down to the model")
     }
 
     // MARK: - card mode: keys act only after an explicit move into the card (#111 reviews at 8fc3cdb and 86878f6)
@@ -438,8 +439,7 @@ enum CardLayoutTests {
         check(monitor.contains("monitor.onLeave()") && monitor.contains("monitor.onReturn()") && monitor.contains("monitor.onFocus("),
               "it reports leaving, returning and where the typing is")
         let main = (try? String(contentsOf: url.deletingLastPathComponent().appendingPathComponent("MainSplitView.swift"), encoding: .utf8)) ?? ""
-        check(main.contains("onLeave: { shell.windowLeft() }") && main.contains("onReturn: { shell.windowReturned() }")
-              && main.contains("shell.focusChanged(editing: editing, composing: composing)"), "the chat column wires them to the model")
+        check(main.contains("CardKeyMonitor(shell.cardKeyHandlers)"), "the chat column wires them to the model (ShellModel.cardKeyHandlers)")
         // card mode belongs to the card by its run and ask_id: an older result card of the session shows no digits
         let o = CardStoreTests.Rig()
         o.ask("a0"); o.resumed("a0")

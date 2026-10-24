@@ -10,10 +10,12 @@
 // session cancelled — and keeps only its last state, for a view that comes back.
 //
 // Invariant (#118 delta review at 4ff4f6d): once a goal is over, nothing it started acts. Its cua is never sent after
-// it is over (GoalTicket: openThenSend checks it before the send, and stops the session if it became over while the
-// send went); a goal that fails with a session whose cua may be on its way stops that session, retires its cua (never
-// shown as a bubble to resend, never resent: SessionClient.retire) and guards the session for `sentBound` — a task
-// of its own cua that still comes is stopped by its run.
+// it is over (GoalTicket: openThenSend checks it before the send); a goal that fails — or is stopped — with a session
+// its cua may reach retires its cua (never shown as a bubble to resend, never resent: SessionClient.retire) and guards
+// the session for `sentBound`: a task of its own cua that still comes is stopped by its run.
+//
+// A goal never sends a run-less stop (Codex review at 84d72f3): the session takes it for whatever task runs there —
+// the user's own. Its stops always name its own task's run (Effect.sendStop's run is not optional).
 //
 // A task is the goal's only when it provably came from the goal's own cua (GoalLifecycle.task(of:in:): the stored
 // /cua message carries the cua's client_id, its session.task replies to that message). The user's own task in the
@@ -36,7 +38,7 @@
 // | opening(sid)           | sent                     | sent(sid)                | 60 s bound                      |
 // | opening(sid)           | taskStarted(run)         | running(sid, run)        | — (its lines before send's ok)  |
 // | sent(sid)              | taskStarted(run)         | running(sid, run)        | —                               |
-// | sent(sid)              | stop                     | sent(sid, stop asked)    | stop to sid (no run); 15 s bound|
+// | sent(sid)              | stop                     | sent(sid, stop asked)    | retire the cua; 15 s bound      |
 // | sent(sid)              | exited                   | failed(session gone), guarding sid | end; guard            |
 // | sent(sid)              | deadline (60 s)          | failed(task didn't start), guarding | end; guard           |
 // | sent(sid, stop asked)  | taskStarted(run)         | running(sid, run)        | stop(run) to sid                |
@@ -51,7 +53,7 @@
 // | any other pair         |                          | the same                 | —                               |
 //
 // end: stop the recording when this goal records, write the recent-runs record — entering ended or failed, once.
-// guard: stop to sid (no run), retire the cua, 60 s bound (failed keeps guarding sid until a task comes, the session
+// guard: retire the cua, 60 s bound (failed keeps guarding sid until a task comes, the session
 // goes, or the bound). What the screen shows comes from the state alone (GoalRunScreen): Stop is shown in sent and
 // running (greyed once asked in sent), hidden before; Back / Edit / Run again only in ended and failed — so a goal
 // starts a session only from idle, and no second one while it is not over.
@@ -92,7 +94,8 @@ enum GoalLifecycle {
     enum Effect: Equatable {
         case beginRecording
         case open
-        case sendStop(sid: String, run: String?)
+        /// Stop the goal's own task by its run (never run-less: the session would stop whatever task runs there).
+        case sendStop(sid: String, run: String)
         /// The goal's cua in `sid` is never resent nor shown as a bubble to resend (SessionClient.retire).
         case retire(sid: String)
         /// A deadline `seconds` from now; a newer one replaces it.
@@ -135,7 +138,7 @@ enum GoalLifecycle {
         /// Failed with its cua perhaps on its way to `sid`: stopped, retired, guarded.
         func fail(_ why: String, _ sid: String?) -> (State, [Effect]) {
             guard let sid else { return (.failed(why), end) }
-            return (.failed(why, guarding: sid), end + [.sendStop(sid: sid, run: nil), .retire(sid: sid), .deadline(seconds: sentBound)])
+            return (.failed(why, guarding: sid), end + [.retire(sid: sid), .deadline(seconds: sentBound)])
         }
         /// Failed with its cua refused: nothing on its way; the refused cua retired.
         func refusal(_ why: String, _ sid: String?) -> (State, [Effect]) {
@@ -160,7 +163,8 @@ enum GoalLifecycle {
         case (.sent(let sid, let asked), .taskStarted(let run)):
             return (.running(sid: sid, run: run), asked ? [.sendStop(sid: sid, run: run)] : [])
         case (.sent(let sid, false), .stop):
-            return (.sent(sid: sid, stopAsked: true), [.sendStop(sid: sid, run: nil), .deadline(seconds: stopBound)])
+            // (no task of its own yet: nothing stopped now — its cua retired; its task, once matched, stopped by its run)
+            return (.sent(sid: sid, stopAsked: true), [.retire(sid: sid), .deadline(seconds: stopBound)])
         case (.sent(let sid, _), .refused(let code)): return refusal(Why.refused(code), sid)
         case (.sent(let sid, _), .sessionRefused(let code, let text)): return refusal(Why.refused(code, text: text), sid)
         case (.sent(let sid, let asked), .exited): return fail(asked ? Why.stoppedBeforeStart : Why.gone, sid)
@@ -250,6 +254,9 @@ struct GoalRunScreen: Equatable {
     var stopLive: Bool
     /// Back, Edit, Run again and the next instruction.
     var afterwards: Bool
+    /// The window can be closed (only minimised while the goal is not over: its cards are answered there; as
+    /// RunModel's runs, MainWindow.setClosable).
+    var windowClosable: Bool { afterwards }
     /// The task, shown with the chat's TaskRow (and the pinned card): its run.
     var taskRun: String?
     /// The line shown while there is no task to show, or why it failed.
@@ -433,6 +440,16 @@ final class GoalRuns {
     private var finished: [UUID: (state: GoalLifecycle.State, sessionId: String?)] = [:]
 
     func run(_ id: UUID) -> GoalRun? { runs[id] }
+
+    /// The goal that is not over (one at a time), by its request.
+    var active: UUID? { runs.first { !GoalLifecycle.over($0.value.state) }?.key }
+
+    /// Where a window that opens (again) goes: the goal that is not over, unless it shows it already — so its cards
+    /// can be answered and it can be stopped (Codex review at 84d72f3: closing the window stranded it). nil: as it is.
+    static func reopenRoute(active: UUID?, showing: UUID?) -> UUID? {
+        guard let active, active != showing else { return nil }
+        return active
+    }
 
     /// The goal for a request: the one started for it (or, done, its last state), else a new one, started — or nil
     /// while another goal is not over (no second session then).
