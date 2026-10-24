@@ -751,6 +751,23 @@ final class ShellModel: ObservableObject {
         }
     }
 
+    /// A computer task of its own, from the home screen's GoalRunView (harness engine): a new session, opened, then
+    /// `cua` with the goal and its folder as the scope — the same session task the chat runs, so it shows with the
+    /// chat's task row, cards and result card (A3's one state, the same canSend / respond path). The new session
+    /// becomes the selected one once it is open.
+    func startTask(_ goal: String, scope: String?) {
+        newConversation()
+        let control = SessionControl.cua(goal, scope: scope)
+        guard cloudAllows() else { return }
+        openThenSend(control, text: goal)
+    }
+
+    /// The task a GoalRunView shows: the newest of the selected session.
+    var goalTask: (session: SessionState, task: TaskState)? {
+        guard let s = current, let t = s.tasks.last else { return nil }
+        return (s, t)
+    }
+
     /// The new conversation's first message: the session is opened (with the settings now), then the words sent. The
     /// words stay in the composer until the session is open (it takes no typing meanwhile: `opening`); not opened, they
     /// are still there; opened, they are the session's (sent, or an unsent bubble of it).
