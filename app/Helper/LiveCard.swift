@@ -245,7 +245,7 @@ final class LiveCard: NSObject {
                 p.setFrame(frame, display: true)
             }
         }
-        if !p.isVisible { p.alphaValue = 1; p.orderFrontRegardless() }
+        if !p.isVisible { p.alphaValue = 1; Activation.showPanel(p) }
         placeCursor(ripple: false)
     }
 
@@ -287,15 +287,17 @@ final class LiveCard: NSObject {
 
     fileprivate func stopRun() { onStop() }
 
-    /// A click on the card: a question waiting opens DeskMind, a capsule opens up.
-    fileprivate func clicked() {
+    /// A click on the card: a question waiting opens DeskMind (only with the user's own click: `gesture`), a capsule
+    /// opens up.
+    fileprivate func clicked(_ gesture: UserGesture?) {
         if read({ $0.runStatus == .waitingForUser }) {
+            guard let gesture else { return }
             let helper = Bundle.main.bundleURL   // …/DeskMind.app/Contents/Library/LoginItems/DeskMind Hands.app
             let main = helper.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
                 .deletingLastPathComponent()
             let url = main.pathExtension == "app" ? main
                 : NSWorkspace.shared.urlForApplication(withBundleIdentifier: "ai.deskmind.app")
-            if let url { NSWorkspace.shared.openApplication(at: url, configuration: .init()) }
+            if let url { Activation.openApp(gesture, at: url) }
         } else if read({ $0.collapsed }) {
             toggleCollapsed()
         }
@@ -459,7 +461,7 @@ extension LiveCard {
         case "larger": card.toggleLarge()
         case "collapse": card.toggleCollapsed()
         case "stop": card.stopRun()
-        case "click": card.clicked()
+        case "click": card.clicked(nil)      // (a test's press is no user's gesture: it never opens DeskMind)
         case "drop":
             if let p = card.panel, let point { p.setFrameOrigin(NSPoint(x: point.x - p.frame.width / 2, y: point.y - p.frame.height / 2)) }
             card.dropped()
@@ -755,7 +757,7 @@ private final class CardView: NSView {
     }
     override func mouseUp(with event: NSEvent) {
         defer { downAt = nil; dragging = false }
-        if dragging { card?.dropped() } else if event.clickCount == 1 { card?.clicked() }
+        if dragging { card?.dropped() } else if event.clickCount == 1 { card?.clicked(Activation.mouseUp(event)) }
     }
 }
 

@@ -112,7 +112,7 @@ final class DecisionPanel {
         if let p = panel, let screen = NSScreen.main {
             let f = screen.visibleFrame
             p.setFrameOrigin(NSPoint(x: f.maxX - p.frame.width - 16, y: f.maxY - p.frame.height - 80))
-            p.orderFrontRegardless()
+            Activation.showPanel(p)
         }
     }
 

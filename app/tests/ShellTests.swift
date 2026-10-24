@@ -726,12 +726,16 @@ enum ShellTests {
               "what reaches no model: the way out and undo")
     }
 
-    /// No app activation, ever, unless the user directly clicked DeskMind (a button of its own, the Dock, a
-    /// notification, the live card): over every source the main app and the helper build from (build.sh), each call
-    /// that can make an app frontmost sits in a function on this list, each such function is called only from a user's
-    /// action, every panel is non-activating, and every `open` of an app is in the background (-g). (rc.15 device
-    /// check, 10-24: an activation 2 s after a plan card was traced to the test script standing in for the user's
-    /// click — scripts/rc_e2e/answer_asks.py activates DeskMind before it clicks — not to the app; this keeps it so.)
+    /// No app activation, ever, unless the user directly acted on DeskMind (its own button, its live card, the Dock, a
+    /// notification). The guarantee is a type (Shared/Activation.swift): whatever brings DeskMind forward takes a
+    /// UserGesture, which only Activation's factories make. This check holds what the type cannot, over every source
+    /// the main app and the helper build from (build.sh): the raw AppKit calls that can activate or order a window
+    /// forward appear only inside the funnel and the background launcher (by file and function); the factories appear
+    /// only in user-event handlers (a button's action, the AppKit mouse-up, the delegate's reopen); every panel is
+    /// non-activating; every `open` of an app is in the background (-g). (rc.15 device check, 10-24: the activation
+    /// seen 2 s after a plan card came from the test script standing in for the user — scripts/rc_e2e/answer_asks.py
+    /// activates DeskMind before its click — not from the app; #115 review: an indirect call, a config that only looked
+    /// like a background one, must not pass either.)
     static func activationTests() {
         let app = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         guard let build = try? String(contentsOf: app.appendingPathComponent("build.sh"), encoding: .utf8) else { check(false, "build.sh readable"); return }
@@ -741,51 +745,44 @@ enum ShellTests {
             guard let at = lines.firstIndex(where: { $0.contains(marker) }), at + 1 < lines.count else { check(false, "build.sh: \(marker)"); continue }
             files.formUnion(lines[at + 1].split(separator: " ").map(String.init).filter { $0.hasSuffix(".swift") })
         }
-        check(files.contains("Helper/LiveCard.swift") && files.contains("Main/IslandView.swift") && files.count > 40, "every source of both apps: \(files.count)")
-        /// The function a line is in (the nearest `func` above it).
+        check(files.contains("Shared/Activation.swift") && files.contains("Helper/LiveCard.swift") && files.count > 40, "every source of both apps, the funnel among them: \(files.count)")
         func enclosing(_ ls: [String], _ i: Int) -> String {
             for j in stride(from: i, through: 0, by: -1) {
-                if let r = ls[j].range(of: "func ") {
-                    return String(ls[j][r.upperBound...].prefix { $0.isLetter || $0.isNumber || $0 == "_" })
-                }
+                if let r = ls[j].range(of: "func ") { return String(ls[j][r.upperBound...].prefix { $0.isLetter || $0.isNumber || $0 == "_" }) }
             }
             return ""
         }
-        // what can make an app frontmost → the functions allowed to do it (each a user's own action)
-        let activators = ["NSApp.activate", ".activate(", "activateWithOptions", "activateIgnoringOtherApps", "makeKeyAndOrderFront", "openApplication(", "NSApp.unhide"]
-        let allowed: Set<String> = ["IslandView.swift:comeBack", "LiveCard.swift:clicked"]
-        // the allowed functions' callers → the user's actions they are reached from
-        let callers: [String: Set<String>] = ["comeBack": ["showDetails", "openWindow", "applicationShouldHandleReopen"]]
+        // raw calls → where they may be (file:function)
+        let raw: [(String, Set<String>)] = [
+            ("NSApp.activate", ["Activation.swift:bringForward"]), (".activate(", ["Activation.swift:bringForward"]),
+            ("activateWithOptions", []), ("activateIgnoringOtherApps", []), ("NSApp.unhide", []),
+            ("makeKeyAndOrderFront", ["Activation.swift:bringForward"]), ("orderFrontRegardless", ["Activation.swift:showPanel"]),
+            ("openApplication(", ["Activation.swift:openApp", "Activation.swift:background"]),
+            ("/usr/bin/open", ["Activation.swift:bundleInBackground", "HelperInstaller.swift:launch"]),
+            ("UserGesture(", ["Activation.swift:onClick", "Activation.swift:mouseUp", "Activation.swift:reopen"]),
+        ]
+        // factories → the handlers they may be used in (a button's action: the line gives it as one)
         var found: [String] = []
-        var callSites: [String: [String]] = [:]
         for f in files.sorted() {
             guard let text = try? String(contentsOf: app.appendingPathComponent(f), encoding: .utf8) else { check(false, "\(f) readable"); continue }
             let ls = text.components(separatedBy: "\n")
+            let name = (f as NSString).lastPathComponent
             for (i, l) in ls.enumerated() {
                 let code = l.components(separatedBy: "//").first ?? ""
-                if activators.contains(where: { code.contains($0) }) {
-                    let at = "\((f as NSString).lastPathComponent):\(enclosing(ls, i))"
-                    // (an app opened with `activates = false` just above: in the background — the helper's launch)
-                    let background = code.contains("openApplication(") && ls[max(0, i - 5)..<i].contains { $0.contains(".activates = false") }
-                    if !allowed.contains(at) && !background { found.append("\(f):\(i + 1) in \(enclosing(ls, i))") }
+                let at = "\(name):\(enclosing(ls, i))"
+                for (api, allowed) in raw where code.contains(api) && !(api == "UserGesture(" && code.contains("fileprivate init")) {
+                    if !allowed.contains(at) { found.append("\(f):\(i + 1) \(api) in \(enclosing(ls, i))") }
                 }
-                for callee in callers.keys where code.contains("\(callee)()") && !code.contains("func \(callee)") {
-                    callSites[callee, default: []].append(enclosing(ls, i))
+                if code.contains("/usr/bin/open") && !ls[i...min(ls.count - 1, i + 2)].joined().contains("-g") { found.append("\(f):\(i + 1): open without -g") }
+                if code.contains("Activation.onClick") && name != "Activation.swift" && !(code.contains("Button(") || code.contains("pill(")) {
+                    found.append("\(f):\(i + 1): Activation.onClick outside a button's action")
                 }
-                // a panel that could take the front: never (non-activating, every one)
+                if code.contains("Activation.mouseUp") && enclosing(ls, i) != "mouseUp" { found.append("\(f):\(i + 1): Activation.mouseUp outside mouseUp") }
+                if code.contains("Activation.reopen") && enclosing(ls, i) != "applicationShouldHandleReopen" { found.append("\(f):\(i + 1): Activation.reopen outside the reopen") }
                 if code.contains("NSPanel(") && !ls[i...min(ls.count - 1, i + 1)].joined().contains(".nonactivatingPanel") { found.append("\(f):\(i + 1): an NSPanel without .nonactivatingPanel") }
-                // an app opened: in the background only
-                if code.contains("/usr/bin/open") {
-                    let near = ls[i...min(ls.count - 1, i + 2)].joined()
-                    if !near.contains("-g") { found.append("\(f):\(i + 1): /usr/bin/open without -g") }
-                }
             }
         }
         check(found.isEmpty, "nothing activates an app outside a user's own action: \(found)")
-        for (callee, sites) in callSites {
-            let wrong = sites.filter { !(callers[callee] ?? []).contains($0) }
-            check(!sites.isEmpty && wrong.isEmpty, "\(callee) is reached only from a user's action (\(callers[callee]!.sorted())): \(sites)")
-        }
     }
 
     /// #107 re-review (2): 0.5.0 has no local-only mode. The 0.5 window's model settings show the cloud switch on and
