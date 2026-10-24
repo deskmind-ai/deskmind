@@ -30,6 +30,8 @@ struct ChatMessage: Equatable {
     var replyTo: String? = nil
     var model: String? = nil
     var via: String? = nil
+    /// A user message's client_id: the app's line it came from (say / cua; harness#57).
+    var clientId: String? = nil
     var stopped = false
     var truncated = false
     /// The user asked for this answer again (session.retry): it is no longer in the model's context.
@@ -689,6 +691,7 @@ enum SessionReducer {
                 s.messages[i].replyTo = m.replyTo
                 s.messages[i].model = m.model
                 s.messages[i].via = m.via
+                s.messages[i].clientId = m.clientId
                 s.messages[i].stopped = m.stopped ?? false
                 s.messages[i].truncated = m.truncated ?? false
                 s.messages[i].t = line.t
@@ -701,7 +704,7 @@ enum SessionReducer {
                 s.droppedMessages.remove(m.msgId)
                 if m.role == "assistant" { dropEmptyStreaming(&s) }
                 s.messages.append(ChatMessage(id: m.msgId, role: m.role, text: m.text, streaming: false, replyTo: m.replyTo, model: m.model,
-                                              via: m.via, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
+                                              via: m.via, clientId: m.clientId, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
                 s.timeline.append(.message(m.msgId))
                 if let q = line.seq { place(&s, .message(m.msgId), seq: q) }
             }

@@ -165,14 +165,22 @@ enum SurfaceTests {
         mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": sid, "last_seq": 0], SessionClient.Op.send: ["ok": true]]
     }
     static let taskLines: [[String: Any]] = [
-        ["kind": "session.task", "session_id": sid, "seq": 1, "msg_id": "u1", "run_id": rid, "raw": "把下载文件夹按类型整理", "by": "slash"],
+        // (as the harness stores a /cua: its words, with the cua's client_id, then the task replying to them)
+        ["kind": "session.message", "session_id": sid, "seq": 1, "msg_id": "u1", "role": "user", "text": "把下载文件夹按类型整理", "via": "cua", "client_id": "c_1"],
+        ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t1", "run_id": rid, "raw": "把下载文件夹按类型整理", "by": "slash", "reply_to": "u1"],
         ["kind": "start", "session_id": sid, "run_id": rid, "seq": 1, "raw": "把下载文件夹按类型整理"],
     ]
     static let endLines: [[String: Any]] = [
         ["kind": "task_done", "session_id": sid, "run_id": rid, "seq": 2, "status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
          "result_card": ["kind": "result", "text": "做了：移动 3 个文件", "blocking": false, "free_text": false,
                          "options": [["kind": "approve", "text": "Fine"], ["kind": "undo", "text": "Undo"]]]],
-        ["kind": "session.task_end", "session_id": sid, "seq": 2, "run_id": rid, "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000],
+        ["kind": "session.task_end", "session_id": sid, "seq": 3, "run_id": rid, "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000],
+    ]
+    /// The user's own task in the goal's session (they typed there): not from the goal's cua.
+    static let userTaskLines: [[String: Any]] = [
+        ["kind": "session.message", "session_id": sid, "seq": 1, "msg_id": "m_user", "role": "user", "text": "顺便查下天气", "client_id": "c_user"],
+        ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t_user", "run_id": "r_user", "raw": "查天气", "by": "model", "reply_to": "a_user"],
+        ["kind": "start", "session_id": sid, "run_id": "r_user", "seq": 1, "raw": "查天气"],
     ]
     static let exitLine: [String: Any] = ["kind": "helper.session_exit", "session_id": sid, "code": 0]
 
@@ -321,7 +329,7 @@ enum SurfaceTests {
             let g = r.goal(); g.start(); g.stop()
             for l in taskLines { r.m.client.feed(l) }
             check(g.state == .running(sid: sid, run: rid) && r.sent("stop").last?["run_id"] as? String == rid, "the task came after Stop: stopped by its run")
-            r.m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 2, "run_id": rid, "status": "stopped", "summary": "", "undo": "none"])
+            r.m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 3, "run_id": rid, "status": "stopped", "summary": "", "undo": "none"])
             ended(r, g, .ended(sid: sid, run: rid, status: "stopped"), "stopped task")
         }
         do {    // a (stale) exit before its task, the cua then run by the reopened process: stopped by its run
@@ -343,6 +351,44 @@ enum SurfaceTests {
             ended(r, g, .ended(sid: sid, run: rid, status: "interrupted"), "the session went mid-task")
             check(r.records.first?.task?.ended == true, "interrupted: the record has the task as it ended")
             check(g.task.map { !$0.task.resultCardState.undoEnabled } ?? false, "interrupted: no undo")
+        }
+        do {    // sent: a task of the user's own in the goal's session is not the goal's
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            for l in userTaskLines { r.m.client.feed(l) }
+            check(g.state == .sent(sid: sid, stopAsked: false) && g.task == nil, "the user's task: not adopted: \(g.state)")
+            check(r.sent("stop").isEmpty, "and not stopped")
+        }
+        do {    // the guard: the user's own task left alone; the goal's own late task stopped
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.timers.advance(60)
+            check(g.state == .failed(L.Why.notStarted, guarding: sid), "no task in 60 s: guarded: \(g.state)")
+            let before = r.sent("stop").count
+            for l in userTaskLines { r.m.client.feed(l) }
+            check(r.sent("stop").count == before && !r.sent("stop").contains { $0["run_id"] as? String == "r_user" }, "guarding: the user's task is left alone")
+            check(g.state == .failed(L.Why.notStarted, guarding: sid), "still guarding: \(g.state)")
+            for l in taskLines.map({ l -> [String: Any] in
+                var l = l
+                if l["kind"] as? String == "session.message" { l["seq"] = 3; l["msg_id"] = "u2" }
+                if l["kind"] as? String == "session.task" { l["seq"] = 4; l["reply_to"] = "u2" }
+                return l
+            }) { r.m.client.feed(l) }
+            check(r.sent("stop").contains { $0["run_id"] as? String == rid } && g.state == .failed(L.Why.notStarted), "its own late task: stopped by its run")
+        }
+        do {    // a retired cua that the process's end makes unsent again: hidden, never resent
+            let r = Rig(holdWork: true); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.mock.onRequest = { op in if op == SessionClient.Op.send, r.sent("cua").count == 1, r.sent("stop").isEmpty { r.timers.advance(L.openingBound) } }
+            r.drain()
+            r.mock.onRequest = nil
+            check(r.m.client.state(sid).outbox.contains { $0.id == g.cua && $0.sending }, "the cua in flight when retired: still in the outbox, sending")
+            r.m.client.feed(exitLine)
+            let st = r.m.client.state(sid)
+            check(st.outbox.contains { $0.id == g.cua && !$0.sending && $0.refused == "exited" }, "the process's end makes it unsent (processGone)")
+            check(!st.shownOutbox.contains { $0.id == g.cua } && !st.unsent.contains { $0.id == g.cua }, "retired: never shown")
+            let cuas = r.sent("cua").count
+            check(r.m.client.resend(g.cua, in: sid) != .sent && r.sent("cua").count == cuas, "retired: never resent")
         }
     }
 
