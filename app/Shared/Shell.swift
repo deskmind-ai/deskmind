@@ -202,15 +202,21 @@ enum ShellText {
         }
         // (why it stopped is its end's own: status and cause — never how its result card closed later)
         switch t.status {
+        case "stopped" where t.cause == .lastStepUnknown: return L("Stopped. The last step may or may not have happened", lang: lang)
+        case "environment" where t.cause == .screenLocked: return L("Stopped: the screen is locked", lang: lang)
+        default: return ending(t.status, lang: lang)
+        }
+    }
+
+    /// An ending by its status alone.
+    static func ending(_ status: String?, lang: ResolvedLang) -> String {
+        switch status {
         case "succeeded": return L("Done", lang: lang)
         case "unconfirmed": return L("Done, but not confirmed. Please check", lang: lang)
         case "failed": return L("Didn't finish", lang: lang)
         case "cancelled": return L("Cancelled", lang: lang)
-        case "stopped":
-            if t.cause == .lastStepUnknown { return L("Stopped. The last step may or may not have happened", lang: lang) }
-            return L("Stopped", lang: lang)
-        case "environment":
-            return t.cause == .screenLocked ? L("Stopped: the screen is locked", lang: lang) : L("The Mac's state didn't allow it", lang: lang)
+        case "stopped": return L("Stopped", lang: lang)
+        case "environment": return L("The Mac's state didn't allow it", lang: lang)
         default: return L("Interrupted", lang: lang)
         }
     }
@@ -751,19 +757,39 @@ final class ShellModel: ObservableObject {
         }
     }
 
+    /// A computer task of its own, from the home screen's GoalRunView (harness engine): a new session, opened, then
+    /// `cua` with the goal and its folder as the scope — the same session task the chat runs, so it shows with the
+    /// chat's task row, cards and result card (A3's one state, the same canSend / respond path). The new session
+    /// becomes the selected one once it is open. What came of it goes to `report`, on the UI queue, each once: the
+    /// cloud switch's refusal, else the open (its session id, or failed), then the send (sent, refused, unavailable)
+    /// — GoalRun's lifecycle (Shared/GoalRun.swift) is driven by these, never by the selected session.
+    /// `clientId`: its cua's (the goal matches a refusal by it); `ticket`: the goal still wants it — over, the cua is
+    /// never sent, and a cua that went while it became over is followed by a stop.
+    func startTask(_ goal: String, scope: String?, clientId: String? = nil, ticket: GoalTicket? = nil,
+                   report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
+        newConversation()
+        let control = SessionControl.cua(goal, scope: scope)
+        guard cloudAllows() else { report(.cloudRefused); return }
+        openThenSend(control, text: goal, clientId: clientId, ticket: ticket, report: report)
+    }
+
     /// The new conversation's first message: the session is opened (with the settings now), then the words sent. The
     /// words stay in the composer until the session is open (it takes no typing meanwhile: `opening`); not opened, they
     /// are still there; opened, they are the session's (sent, or an unsent bubble of it).
-    private func openThenSend(_ control: SessionControl, text: String) {
-        guard !opening else { return }
+    private func openThenSend(_ control: SessionControl, text: String, clientId: String? = nil, ticket: GoalTicket? = nil,
+                              report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
+        guard !opening else { report(.openFailed); return }
         opening = true
         work { [weak self] in
             guard let self else { return }
+            // (a goal over before its open went: nothing is opened for it)
+            if ticket?.over == true { self.deliver { self.opening = false; report(.openFailed) }; return }
             // (with the settings stored when it goes: SessionClient.desired())
             guard let id = self.client.open() else {
                 self.deliver {
                     self.opening = false
                     self.notice = L("Couldn't start a conversation. Is DeskMind's helper running?", lang: self.lang())
+                    report(.openFailed)
                 }
                 return
             }
@@ -773,9 +799,20 @@ final class ShellModel: ObservableObject {
                 self.states[id] = self.client.state(id)
                 if self.selected == nil { self.selected = id }
                 self.rebuild()
+                report(.opened(sid: id))
             }
-            let r = self.client.send(control, to: id)
-            if r != .sent { self.deliver { self.notSent(r, text: text, in: id) } }
+            // a goal over meanwhile (its bound ran out while the open waited): its cua is never sent
+            if ticket?.over == true { return }
+            let r = self.client.send(control, to: id, clientId: clientId)
+            // (over while the send went: the goal's guard stops the task it starts, by its run — never a run-less
+            // stop here, which the session would take for whatever task runs)
+            self.deliver {
+                switch r {
+                case .sent: report(.sent)
+                case .refused(let code): self.notSent(r, text: text, in: id); report(.refused(code))
+                case .unavailable: self.notSent(r, text: text, in: id); report(.unavailable)
+                }
+            }
         }
     }
 
@@ -783,6 +820,23 @@ final class ShellModel: ObservableObject {
     /// never put back in the composer (a newer draft there stays as it is). No helper: said once too.
     private func notSent(_ r: SessionClient.SendResult, text: String, in id: String) {
         if r == .unavailable { notice = L("DeskMind's helper didn't answer. Your message is kept below; send it again.", lang: lang()) }
+    }
+
+    /// `stop {client_id}` (harness#72) to one session: the task the cua with that client id started, or — none yet —
+    /// the cua cancelled. `sent`: the helper took the line (true) or did not answer (false); the session's answer is
+    /// session.stop_ack, on its stream. The send reopens an exited session (it answers from its history).
+    func stopCua(sessionId id: String, clientId: String, sent: @escaping (Bool) -> Void) {
+        work { [weak self] in
+            guard let self else { return }
+            let r = self.client.send(.stopCua(clientId: clientId), to: id)
+            self.deliver { sent(r == .sent) }
+        }
+    }
+
+    /// Stop one task of one session by its run (GoalRun). Never run-less: the session would stop whatever task runs.
+    func stop(sessionId id: String, runId: String) {
+        cards.stopping(runId)
+        work { [weak self] in _ = self?.client.send(.stop(runId: runId), to: id) }
     }
 
     /// Stop (⌘.): the running task, else the reply that streams. Always available while there is one.
@@ -954,6 +1008,17 @@ final class ShellModel: ObservableObject {
         let b = control.button
         guard b.runId == card.runId, b.askId == card.askId, b.askId != nil, selected == id else { return false }
         return canSend(b)
+    }
+
+    /// What CardKeyMonitor is given, wherever a pinned card is shown (the chat, a goal's screen): the one wiring.
+    var cardKeyHandlers: CardKeyHandlers {
+        CardKeyHandlers(
+            onKey: { [weak self] c, cmd, key, editing, rep, composing in
+                self?.keyDown(characters: c, commandLike: cmd, mainWindowIsKey: key, editingText: editing, isRepeat: rep, composing: composing) ?? false
+            },
+            onLeave: { [weak self] in self?.windowLeft() },
+            onReturn: { [weak self] in self?.windowReturned() },
+            onFocus: { [weak self] editing, composing in self?.focusChanged(editing: editing, composing: composing) })
     }
 
     /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true only when it acted on the
@@ -1399,4 +1464,13 @@ final class StoppableTransport: SessionTransport {
         inner.stream(body, onLine: { [weak self] l in onLine(l) && !(self?.isStopped() ?? false) },
                      onIdle: { [weak self] in onIdle() && !(self?.isStopped() ?? false) })
     }
+}
+
+/// The card keys' handlers (CardKeyMonitor's): a key-down with what its gate needs (true: consumed — it picked), the
+/// window left / back, where the typing is. ShellModel.cardKeyHandlers gives the one set every screen installs.
+struct CardKeyHandlers {
+    let onKey: (_ characters: String?, _ commandLike: Bool, _ mainWindowIsKey: Bool, _ editingText: Bool, _ isRepeat: Bool, _ composing: Bool) -> Bool
+    let onLeave: () -> Void
+    let onReturn: () -> Void
+    let onFocus: (_ editing: Bool, _ composing: Bool) -> Void
 }

@@ -296,6 +296,13 @@ struct CardKeyMonitor: NSViewRepresentable {
     /// Where the typing is now (a field being edited, an input-method composition), on every window update.
     let onFocus: (_ editing: Bool, _ composing: Bool) -> Void
 
+    /// The one wiring (ShellModel.cardKeyHandlers): the chat and a goal's screen install the same.
+    init(_ h: CardKeyHandlers) { self.init(onKey: h.onKey, onLeave: h.onLeave, onReturn: h.onReturn, onFocus: h.onFocus) }
+    init(onKey: @escaping (_ characters: String?, _ commandLike: Bool, _ mainWindowIsKey: Bool, _ editingText: Bool, _ isRepeat: Bool, _ composing: Bool) -> Bool,
+         onLeave: @escaping () -> Void, onReturn: @escaping () -> Void, onFocus: @escaping (_ editing: Bool, _ composing: Bool) -> Void) {
+        self.onKey = onKey; self.onLeave = onLeave; self.onReturn = onReturn; self.onFocus = onFocus
+    }
+
     func makeNSView(context: Context) -> NSView { Watcher(self) }
     func updateNSView(_ v: NSView, context: Context) { (v as? Watcher)?.monitor = self }
     static func dismantleNSView(_ v: NSView, coordinator: ()) { (v as? Watcher)?.stop() }

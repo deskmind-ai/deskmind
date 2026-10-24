@@ -115,6 +115,7 @@ final class RunOverlay {
     }
 
     func show(title: String, line: String? = nil) {
+        detailsRecord = nil
         model.phase = .running; model.app = ""; model.step = 0; model.waiting = false; model.takenOver = false
         model.ending = nil; model.resultOpen = false; model.stoppedByUser = false
         generation += 1
@@ -217,7 +218,13 @@ final class RunOverlay {
     func showDetails(_ gesture: UserGesture) {
         dismiss()
         MainWindow.comeBack(gesture)
+        // a session task's: its GoalRunView (the window's content view opens its record)
+        if let id = detailsRecord { NotificationCenter.default.post(name: Self.showRecord, object: id) }
     }
+
+    /// The recent-runs record "Show Details" opens (a session task's, once it is kept); nil: the window as it is.
+    var detailsRecord: UUID?
+    static let showRecord = Notification.Name("ai.deskmind.showRecord")
 
     /// A card waits in the window (or not any more).
     func setAsking(_ on: Bool) {

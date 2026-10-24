@@ -30,6 +30,8 @@ struct ChatMessage: Equatable {
     var replyTo: String? = nil
     var model: String? = nil
     var via: String? = nil
+    /// A user message's client_id: the app's line it came from (say / cua; harness#57).
+    var clientId: String? = nil
     var stopped = false
     var truncated = false
     /// The user asked for this answer again (session.retry): it is no longer in the model's context.
@@ -146,6 +148,8 @@ struct TaskState: Equatable {
     var goal: String? = nil
     var by: String? = nil           // slash | model
     var replyTo: String? = nil
+    /// The client_id of the cua that started it (session.task, harness#72); nil for a retry's or the model's task.
+    var clientId: String? = nil
     var lang: String? = nil
     var startedAt: Double? = nil
     /// Between session.task / start and the first plan, step or card.
@@ -358,8 +362,17 @@ struct SessionState: Equatable {
     var awaitedStart: Int? = nil
     /// The awaited process's pid (the open reply's).
     var awaitedPid: Int? = nil
-    /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
-    var unsent: [Outgoing] { outbox.filter { !$0.sending } }
+    /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent). Never words
+    /// their sender retired (SessionClient.retire).
+    var unsent: [Outgoing] { outbox.filter { !$0.sending && !retired.contains($0.id) } }
+    /// Words their sender gave up on (a GoalRun over: its cua), by client id: never shown, never resent.
+    var retired: Set<String> = []
+    /// The answers to `stop {client_id}` (harness#72: session.stop_ack, not stored), by the cua's client id.
+    var stopAcks: [String: SessionStopAck] = [:]
+    /// Cuas a stop cancelled before any task came of them (session.cua_cancelled, stored).
+    var cancelledCuas: Set<String> = []
+    /// The outbox as the chat shows it: without retired words.
+    var shownOutbox: [Outgoing] { outbox.filter { !retired.contains($0.id) } }
     var errors: [StoredError] = []
 
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
@@ -684,6 +697,7 @@ enum SessionReducer {
                 s.messages[i].replyTo = m.replyTo
                 s.messages[i].model = m.model
                 s.messages[i].via = m.via
+                s.messages[i].clientId = m.clientId
                 s.messages[i].stopped = m.stopped ?? false
                 s.messages[i].truncated = m.truncated ?? false
                 s.messages[i].t = line.t
@@ -696,7 +710,7 @@ enum SessionReducer {
                 s.droppedMessages.remove(m.msgId)
                 if m.role == "assistant" { dropEmptyStreaming(&s) }
                 s.messages.append(ChatMessage(id: m.msgId, role: m.role, text: m.text, streaming: false, replyTo: m.replyTo, model: m.model,
-                                              via: m.via, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
+                                              via: m.via, clientId: m.clientId, stopped: m.stopped ?? false, truncated: m.truncated ?? false, t: line.t, seq: line.seq))
                 s.timeline.append(.message(m.msgId))
                 if let q = line.seq { place(&s, .message(m.msgId), seq: q) }
             }
@@ -730,6 +744,7 @@ enum SessionReducer {
             s.tasks[i].goal = e.goal
             s.tasks[i].by = e.by
             s.tasks[i].replyTo = e.replyTo
+            s.tasks[i].clientId = e.clientId
             s.tasks[i].startedAt = line.t ?? s.tasks[i].startedAt     // session.task's time, before or after the run's start
             if let seq = line.seq, s.tasks[i].sessionSeq == nil {
                 s.tasks[i].sessionSeq = seq
@@ -772,6 +787,11 @@ enum SessionReducer {
         case .duplicate(let d):
             // the session had taken these words already (their stored line has come, or comes in a replay)
             if !d.clientId.isEmpty { taken(&s, d.clientId) }
+        case .stopAck(let a):
+            // (not stored: kept by client id until a newer one; a stop sent again gets the same answer)
+            if !a.clientId.isEmpty { s.stopAcks[a.clientId] = a }
+        case .cuaCancelled(let c):
+            if !c.clientId.isEmpty { s.cancelledCuas.insert(c.clientId) }
         case .unknown(let k, _):
             s.unknownKinds.insert(k)
         default:

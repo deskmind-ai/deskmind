@@ -235,10 +235,7 @@ struct ChatColumn: View {
         GeometryReader { g in column(height: g.size.height) }
             .background(Brand.paper)
             // 1–9 pick the pinned card's options (only while this window is the key one and no field is typed in)
-            .background(CardKeyMonitor(onKey: { c, cmd, key, editing, rep, composing in
-                shell.keyDown(characters: c, commandLike: cmd, mainWindowIsKey: key, editingText: editing, isRepeat: rep, composing: composing)
-            }, onLeave: { shell.windowLeft() }, onReturn: { shell.windowReturned() },
-               onFocus: { editing, composing in shell.focusChanged(editing: editing, composing: composing) }))
+            .background(CardKeyMonitor(shell.cardKeyHandlers))
             .onChange(of: shell.current.flatMap { shell.pinned($0) }?.card.askId) { _, id in announce(shell.current, id) }
     }
 
@@ -322,7 +319,7 @@ struct ChatColumn: View {
                 }
             }
         }
-        ForEach(s.outbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
+        ForEach(s.shownOutbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
     }
 
     /// Above the composer: the open card (handoff §3.3, pinned while it waits; its body scrolls within `bodyCap`) and

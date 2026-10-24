@@ -76,6 +76,12 @@ struct RunRecord: Codable, Identifiable {
     let created: [String], modified: [String], deleted: [String]
     /// The run's recording, if it was recorded (absent in records written before recording existed).
     var movie: String?
+    /// A harness goal's session task (M2): its session and run, so that opening the record shows the task as the
+    /// session has it — its result card and undo included (absent in older records).
+    var sessionId: String? = nil
+    var runId: String? = nil
+    /// How its goal ended (GoalRecord.ended): opening it shows the task ended so, whatever the session says now.
+    var ended: String? = nil
 }
 
 @MainActor
@@ -108,9 +114,9 @@ final class RunHistory: ObservableObject {
         save()
     }
 
+    /// The movie saved after its record: set on the record if it is still there (deleted: nothing, never re-added).
     func setMovie(_ path: String, for id: UUID) {
-        guard let i = records.firstIndex(where: { $0.id == id }) else { return }
-        records[i].movie = path
+        guard KeptRecords.update(&records, id: id, { $0.movie = path }) else { return }
         save()
     }
 
