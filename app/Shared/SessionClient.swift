@@ -105,7 +105,8 @@ final class ModelsOffSync {
 
     /// Tells the helper the switch (as it is when the send goes), until it acks; `then` once it has.
     func push(then: (() -> Void)? = nil) {
-        lock.lock(); gen += 1; let g = gen; pending = true; if let then { waiting.append(then) }; lock.unlock()
+        let off = current()          // (read outside the lock: it reads the app's settings)
+        lock.lock(); if off { offEpoch_ += 1 }; gen += 1; let g = gen; pending = true; if let then { waiting.append(then) }; lock.unlock()
         queue.async { [weak self] in self?.attempt(g, delay: self?.firstDelay ?? 0.25) }
     }
 
@@ -142,6 +143,10 @@ final class ModelsOffSync {
 
     /// The switch as it is now (where every path reads it).
     func switchOff() -> Bool { current() }
+    /// How many times the switch was pushed while it read off: a value read before, different now, means the switch went
+    /// off in between (even if it is on again). Every write of the switch pushes (CloudModelSettings.engineIsCloud).
+    var offEpoch: Int { lock.lock(); defer { lock.unlock() }; return offEpoch_ }
+    private var offEpoch_ = 0
     /// A push not acked yet (a retry may be scheduled).
     var isPending: Bool { lock.lock(); defer { lock.unlock() }; return pending }
     /// A push unless one is under way already (it carries `then` too): repair paths, at most one per push.
@@ -214,10 +219,11 @@ enum SessionControl: Equatable {
         }
     }
 
-    /// A control that makes the model work (say, cua, retry, steer, queue_send_now): never written while the model is
-    /// off (the client's `modelOff`; the session would refuse it no_model).
+    /// A control that makes the model work (say, cua, retry, steer, queue_send_now, reask — 「现在回答」 has the task look
+    /// and decide again): never written while the model is off (the client's `modelOff`, read as it is sent; the helper
+    /// refuses the same list, SessionWire.needsModel). A card's answer depends on its option: SessionClient.needsModel.
     var needsModel: Bool {
-        switch self { case .say, .cua, .retry, .steer, .queueSendNow: return true; default: return false }
+        switch self { case .say, .cua, .retry, .steer, .queueSendNow, .reask: return true; default: return false }
     }
 
     /// Typing that the session refuses while a card waits (card_open): the composer is disabled then, and the client
@@ -398,9 +404,16 @@ final class SessionClient {
     var modelOff: Bool {
         // (the app's switch read outside this client's lock: never a call out while holding it)
         get { if let s = injectedSync { return s.switchOff() }; lock.lock(); defer { lock.unlock() }; return offStored }
-        set { lock.lock(); offStored = newValue; lock.unlock() }
+        set { lock.lock(); if newValue && !offStored { ownOffEpoch += 1 }; offStored = newValue; lock.unlock() }
     }
     private var offStored = false
+    private var ownOffEpoch = 0
+    /// Goes up whenever the switch goes off (ModelsOffSync.offEpoch; a test client's own): an answer held while it
+    /// went off is never sent, even once it is on again.
+    var offEpoch: Int {
+        if let s = injectedSync { return s.offEpoch }
+        lock.lock(); defer { lock.unlock() }; return ownOffEpoch
+    }
     private var off: Bool { injectedSync?.switchOff() ?? offStored }
     /// Sessions whose open request is out (a reconcile reaches them too).
     private var opening: Set<String> = []
@@ -696,7 +709,8 @@ final class SessionClient {
         }
         // the model off (now, not when the send began): a control that needs it is not written; the words stay the app's
         let modelGone = { [self] () -> SendResult? in
-            guard control.needsModel && modelOff else { return nil }
+            // (read now, as the line goes: never at the time the work was queued)
+            guard Self.needsModel(control, in: state(sessionId)) && modelOff else { return nil }
             if let id = words { mutate(sessionId) { st in if let i = st.outbox.firstIndex(where: { $0.id == id }) { st.outbox[i].sending = false; st.outbox[i].refused = "no_model" } } }
             return .refused("no_model")
         }
@@ -1345,6 +1359,21 @@ final class SessionClient {
     /// Why an answer must not be sent, or nil: a card answer goes only to the card that is open in that run (a click on
     /// a card that was voided, answered or replaced must never answer the open one, #103); a result-card answer only
     /// while the result card is still answerable (its executor lingers and it was not answered yet).
+    /// Whether a control would make the model work, read against the session's state as it is sent. A card's answer
+    /// resumes the task (the model with it) unless it is the way out (cancel): its option's kind, from the card; words,
+    /// an option the app cannot find and an unknown kind count as resuming (fail closed). A result card's answer (undo,
+    /// OK) never does: the session undoes from its receipts.
+    static func needsModel(_ c: SessionControl, in s: SessionState) -> Bool {
+        guard case .answer(let a) = c else { return c.needsModel }
+        switch a {
+        case .respond: return false
+        case .text: return true
+        case .option(let r, let ask, let i):
+            guard let card = s.task(r)?.cards.first(where: { $0.askId == ask }), card.card.options.indices.contains(i) else { return true }
+            return card.card.options[i].kind != "cancel"
+        }
+    }
+
     /// Why 「现在回答」 must not be sent, or nil: only for a task that still runs and waits on a card that expired.
     static func reaskRefusal(_ runId: String, in s: SessionState) -> String? {
         guard let task = s.task(runId) else { return "no such task" }
