@@ -10,7 +10,7 @@ OUT="${1:-$(mktemp -d -t deskmind-liveview)}"
 mkdir -p "$OUT"
 BIN="$OUT/LiveViewE2E"
 swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$BIN" \
-  Shared/L10n.swift Shared/LiveView.swift Helper/LiveCard.swift tests/e2e/LiveViewE2E.swift
+  Shared/L10n.swift Shared/Activation.swift Shared/LiveView.swift Helper/LiveCard.swift tests/e2e/LiveViewE2E.swift
 DOC="liveview-e2e-$$.txt"
 printf 'Date,Customer,Order,Amount\n2026-09-02,Mark Chen,R-1180,560\n2026-09-27,Lisa Wong,R-3307,96\n' > "$OUT/$DOC"
 open -g -a TextEdit "$OUT/$DOC"

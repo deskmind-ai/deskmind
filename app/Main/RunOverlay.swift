@@ -134,7 +134,7 @@ final class RunOverlay {
             let f = notch.map { Island.expandedFrame(notch: $0, screen: screen.frame) }
                 ?? Island.pillFrame(visible: screen.visibleFrame, size: CGSize(width: 560, height: 64))
             p.setFrame(f, display: true)
-            p.orderFrontRegardless()
+            Activation.showPanel(p)
         }
     }
 
@@ -146,12 +146,12 @@ final class RunOverlay {
         if let notch {
             host = NSHostingView(rootView: LocalizedRoot {
                 IslandView(model: model, notch: CGRect(origin: .zero, size: notch.size), onStop: stop,
-                           onDetails: { [weak self] in self?.showDetails() }, onDismiss: { [weak self] in self?.dismiss() })
+                           onDetails: { [weak self] g in self?.showDetails(g) }, onDismiss: { [weak self] in self?.dismiss() })
             })
         } else {
             host = NSHostingView(rootView: LocalizedRoot {
                 OverlayView(model: model, onStop: stop, onTakeOver: { [weak self] secs in self?.takeOver(seconds: secs) },
-                            onDetails: { [weak self] in self?.showDetails() }, onDismiss: { [weak self] in self?.dismiss() })
+                            onDetails: { [weak self] g in self?.showDetails(g) }, onDismiss: { [weak self] in self?.dismiss() })
             })
         }
         let size = notch == nil ? NSSize(width: 560, height: 64) : NSSize(width: Island.expanded.width, height: Island.expanded.height)
@@ -214,9 +214,9 @@ final class RunOverlay {
     }
 
     /// "Show Details": the window, on this run's result, in front; the result leaves the notch.
-    func showDetails() {
+    func showDetails(_ gesture: UserGesture) {
         dismiss()
-        MainWindow.comeBack()
+        MainWindow.comeBack(gesture)
     }
 
     /// A card waits in the window (or not any more).
@@ -226,7 +226,7 @@ final class RunOverlay {
     }
 
     /// "Open DeskMind" while a card waits: the window, restored and in front -- the user asked for it.
-    func openWindow() { MainWindow.comeBack() }
+    func openWindow(_ gesture: UserGesture) { MainWindow.comeBack(gesture) }
 
     static func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
@@ -244,7 +244,7 @@ struct OverlayView: View {
     @ObservedObject var model: OverlayModel
     let onStop: () -> Void
     let onTakeOver: (Double) -> Void
-    var onDetails: () -> Void = {}
+    var onDetails: (UserGesture) -> Void = { _ in }
     var onDismiss: () -> Void = {}
     @Environment(\.lang) private var lang
 
@@ -273,7 +273,7 @@ struct OverlayView: View {
                 ScreenShareButtons(model: model, compact: true)
             }
             if model.phase == .running && model.asking {
-                Button { RunOverlay.shared.openWindow() } label: {
+                Button(action: Activation.onClick { RunOverlay.shared.openWindow($0) }) {
                     Text(L("Open DeskMind", lang: lang)).font(.system(size: 12, weight: .semibold, design: .rounded))
                         .padding(.horizontal, 12).padding(.vertical, 5)
                         .foregroundStyle(Brand.paper).background(Capsule().fill(Brand.dot))
@@ -289,7 +289,7 @@ struct OverlayView: View {
                 .buttonStyle(.plain)
                 .help(L("Stop this task (or press ⌘. in the DeskMind window)", lang: lang))
             } else {
-                Button(action: onDetails) {
+                Button(action: Activation.onClick(onDetails)) {
                     Text(L("Show Details", lang: lang)).font(.system(size: 12, weight: .semibold, design: .rounded))
                         .padding(.horizontal, 12).padding(.vertical, 5)
                         .foregroundStyle(Brand.paper).background(Capsule().fill(Brand.ink))

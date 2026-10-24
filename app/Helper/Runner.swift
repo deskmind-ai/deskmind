@@ -439,10 +439,7 @@ enum Runner {
                 // Not running: launched in the background, and the run waits for its window (up to 15 s -- a music app
                 // takes several seconds to show one).
                 guard AppWindow.shouldLaunch(bundle: b, running: false) else { continue }
-                let open = Process()
-                open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                open.arguments = ["-g", "-b", b]
-                try? open.run(); open.waitUntilExit()
+                Launch.bundleInBackground(b)
                 var shown = 0
                 for _ in 0..<150 {
                     if let pid = NSRunningApplication.runningApplications(withBundleIdentifier: b).first?.processIdentifier {
@@ -466,10 +463,7 @@ enum Runner {
             let info = app.bundleURL.flatMap { Bundle(url: $0)?.infoDictionary }
             guard AppWindow.shouldReopen(bundle: b, running: true, ordinaryWindows: windows(),
                                          documentBased: AppWindow.documentBased(info: info)) else { continue }
-            let open = Process()
-            open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            open.arguments = ["-g", "-b", b]
-            try? open.run(); open.waitUntilExit()
+            Launch.bundleInBackground(b)
             for _ in 0..<30 where windows() == 0 { Thread.sleep(forTimeInterval: 0.1) }
             NSLog("DeskMind Hands: \(b) ran with no window; reopened it (\(windows()) now)")
         }

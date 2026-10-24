@@ -72,11 +72,7 @@ final class HelperModel: ObservableObject {
         } catch {
             note(L("Couldn't install the helper: %@", error.localizedDescription, lang: ResolvedLang.current))
         }
-        let cfg = NSWorkspace.OpenConfiguration()
-        cfg.activates = false
-        cfg.addsToRecentItems = false
-        cfg.createsNewApplicationInstance = false
-        NSWorkspace.shared.openApplication(at: helperURL, configuration: cfg) { _, error in
+        Launch.background(helperURL) { error in
             Task { @MainActor in
                 HelperModel.shared?.launching = false
                 if let error {

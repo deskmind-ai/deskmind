@@ -99,7 +99,7 @@ final class GrantPanelController {
         panel.isMovableByWindowBackground = true
         self.panel = panel
         place()
-        panel.orderFrontRegardless()
+        Activation.showPanel(panel)
         // System Settings takes a moment to open and the user may move it: stay docked under its window.
         follow = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { _ in
             Task { @MainActor in GrantPanelController.shared.place() }
