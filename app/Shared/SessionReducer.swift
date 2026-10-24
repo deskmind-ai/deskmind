@@ -358,8 +358,13 @@ struct SessionState: Equatable {
     var awaitedStart: Int? = nil
     /// The awaited process's pid (the open reply's).
     var awaitedPid: Int? = nil
-    /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
-    var unsent: [Outgoing] { outbox.filter { !$0.sending } }
+    /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent). Never words
+    /// their sender retired (SessionClient.retire).
+    var unsent: [Outgoing] { outbox.filter { !$0.sending && !retired.contains($0.id) } }
+    /// Words their sender gave up on (a GoalRun over: its cua), by client id: never shown, never resent.
+    var retired: Set<String> = []
+    /// The outbox as the chat shows it: without retired words.
+    var shownOutbox: [Outgoing] { outbox.filter { !retired.contains($0.id) } }
     var errors: [StoredError] = []
 
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
