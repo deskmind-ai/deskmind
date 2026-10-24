@@ -2,6 +2,7 @@
 // to ask (AskCard), and how it ended -- the answer for a question, the change list for a folder task. A past run from
 // the recent list opens here too, as it ended. Once it has ended, the next instruction can be typed right here.
 
+import Combine
 import SwiftUI
 
 struct GoalRunView: View {
@@ -18,12 +19,11 @@ struct GoalRunView: View {
     @EnvironmentObject var eyes: EyesDownloader
     @StateObject private var run = RunModel()
     /// A harness-engine goal runs as a session task (M2: one result card for every surface): the app's one ShellModel,
-    /// its new session selected; the task shows with the chat's TaskRow / CardView / ResultSection.
+    /// its new session selected; the task shows with the chat's TaskRow / CardView / ResultSection. Its lifecycle is
+    /// the goal's own (GoalRun, kept in GoalRuns.app: it outlives this view); the view only reads it (GoalRunScreen).
     @ObservedObject private var shell = ShellModel.live
+    @StateObject private var goalBox = GoalRunBox()
     @State private var sessionRun = false
-    @State private var sessionRecorded = false
-    @State private var sessionMovie: URL?
-    @State private var pickingRecording = false
     @State private var started = false
     @State private var confirming: GoalRequest?
     @State private var next = ""
@@ -41,7 +41,7 @@ struct GoalRunView: View {
 
     var mood: Brand.Mood {
         if sessionRun {
-            guard let (s, t) = shell.goalTask else { return .idle }
+            guard let (s, t) = goalBox.run?.task else { return screen.afterwards ? .notice : .idle }
             if shell.pinned(s) != nil { return .notice }
             if t.running { return .idle }
             return t.status == "succeeded" ? .done : .notice
@@ -69,7 +69,7 @@ struct GoalRunView: View {
                 }
                 Spacer(minLength: 8)
                 if sessionRun {
-                    if let (_, t) = shell.goalTask {
+                    if let (_, t) = goalBox.run?.task {
                         Text(ShellText.task(t, lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.secondary)
                     }
                 } else {
@@ -119,7 +119,7 @@ struct GoalRunView: View {
 
             if !sessionRun { RunFailure(run: run) }
 
-            if let movie = sessionRun ? sessionMovie : run.movie {
+            if let movie = sessionRun ? goalBox.run?.movie : run.movie {
                 HStack(spacing: 10) {
                     Image(systemName: "record.circle").foregroundStyle(Brand.dot)
                     Text(L("Recorded", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
@@ -131,18 +131,25 @@ struct GoalRunView: View {
                 .padding(.horizontal, 28).padding(.bottom, 6)
             }
 
-            if ended {
+            if sessionRun ? screen.afterwards : (run.phase == .done || run.phase == .failed) {
                 nextPrompt.padding(.horizontal, 28).padding(.top, 4)
             }
 
             HStack {
                 Button(L("Back", lang: lang)) { onBack() }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Brand.sage)
-                    .disabled(running || run.pickingRecording || pickingRecording)
+                    .disabled(sessionRun ? !screen.afterwards : (run.phase == .running || run.pickingRecording))
                 Spacer()
-                if running {
-                    Button(L("Stop", lang: lang)) { if sessionRun { shell.stop() } else { run.stop() } }.buttonStyle(InkButtonStyle(prominent: false))
+                if sessionRun && !screen.afterwards {
+                    // Stop reaches this goal's own session (its task, or — not come yet — the cua it was sent)
+                    if screen.stopShown {
+                        Button(L("Stop", lang: lang)) { goalBox.run?.stop() }.buttonStyle(InkButtonStyle(prominent: false))
+                            .keyboardShortcut(".", modifiers: .command)
+                            .disabled(!screen.stopLive)
+                    }
+                } else if !sessionRun && run.phase == .running {
+                    Button(L("Stop", lang: lang)) { run.stop() }.buttonStyle(InkButtonStyle(prominent: false))
                         .keyboardShortcut(".", modifiers: .command)
-                } else if run.pickingRecording || pickingRecording {
+                } else if run.pickingRecording {
                     EmptyView()
                 } else if let request {
                     Button(L("Edit", lang: lang)) { onEdit(request) }.buttonStyle(InkButtonStyle(prominent: false))
@@ -168,8 +175,6 @@ struct GoalRunView: View {
             started = true
             if let request { begin(request) } else if let record { run.show(record) }
         }
-        // a session task that ended: kept in the recent runs (once), its recording finished
-        .onChange(of: shell.goalTask?.task.ended) { _, ended in if sessionRun, ended == true { sessionEnded() } }
         .sheet(item: $confirming) { r in
             ConfirmSheet(request: r, onStart: { record in
                 confirming = nil
@@ -247,11 +252,10 @@ struct GoalRunView: View {
         if r.harness {
             sessionRun = true
             shell.start()
-            guard r.record else { shell.startTask(r.goal, scope: r.folder); return }
-            pickingRecording = true
-            RunRecorder.shared.begin(goal: r.goal, bundles: []) { _ in
-                pickingRecording = false
-                shell.startTask(r.goal, scope: r.folder)
+            // the goal already started for this request (this view came back), else a new one — none while another
+            // goal is not over (GoalRuns: no second session then)
+            goalBox.run = GoalRuns.app.start(r.id) {
+                GoalRun(goal: r.goal, folder: r.folder, record: r.record, shell: shell, effects: .app(lang: lang))
             }
             return
         }
@@ -259,26 +263,33 @@ struct GoalRunView: View {
         run.start(request: r.body)
     }
 
-    /// (the session opening counts as running; not opened — the helper down, cloud off — it does not: Back works)
-    private var running: Bool { sessionRun ? (shell.goalTask?.task.running ?? (shell.opening || pickingRecording)) : run.phase == .running }
-    private var ended: Bool { sessionRun ? (shell.goalTask?.task.ended ?? false) : (run.phase == .done || run.phase == .failed) }
+    /// What the goal shows, from its lifecycle alone (no goal: another one is not over — said, and Back works).
+    private var screen: GoalRunScreen {
+        guard let g = goalBox.run else {
+            var s = GoalRunScreen(.failed(GoalLifecycle.Why.busy), lang: lang)
+            s.line = GoalRunScreen.why(GoalLifecycle.Why.busy, lang: lang)
+            return s
+        }
+        return GoalRunScreen(g.state, lang: lang)
+    }
 
     /// The session task as the chat shows it: its row (steps, cards that are no longer pinned, its end, its result
     /// card with undo — ResultSection), the pinned card, and — once it ended — the answer, the changes and 👍👎.
     @ViewBuilder private var sessionContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if let (s, t) = shell.goalTask {
+                if let (s, t) = goalBox.run?.task {
                     TaskRow(shell: shell, task: t, session: s)
                     if t.ended { FreeResult(task: Self.runTask(t, folder: request?.folder)) }
-                } else {
-                    Text(shell.notice ?? (pickingRecording ? L("Starting the recording…", lang: lang) : L("Getting ready…", lang: lang)))
-                        .font(.system(size: 13)).foregroundStyle(ShellColor.secondary).padding(.top, 60)
+                } else if let line = screen.line {
+                    Text(line).font(.system(size: 13)).foregroundStyle(ShellColor.secondary).padding(.top, 60)
                 }
             }
             .padding(.horizontal, 28).padding(.bottom, 12)
         }
-        if let s = shell.current, let p = shell.pinned(s) {
+        // (a card's click goes to the selected session — ShellModel.click — so the pinned card shows only while the
+        // goal's session is the selected one: never answered into another conversation)
+        if let (s, _) = goalBox.run?.task, shell.selected == goalBox.run?.sessionId, let p = shell.pinned(s) {
             let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
             CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s, bodyCap: CardBody.maxHeight)
                 .id(ShellModel.cardKey(m))
@@ -299,23 +310,52 @@ struct GoalRunView: View {
         return r
     }
 
-    private func sessionEnded() {
-        guard !sessionRecorded, let r = request, let (_, t) = shell.goalTask else { return }
-        sessionRecorded = true
-        let id = UUID()
-        RunHistory.shared.add(RunRecord(
-            id: id, date: Date(), goal: r.goal, folder: r.folder, apps: [],
-            finished: t.status == "succeeded", errored: t.status == nil || t.status == "failed",
-            summary: ShellText.task(t, lang: lang), answer: t.answer ?? "",
-            steps: t.steps.map { RunRecord.Step(n: $0.n, human: $0.displayText, app: "", shot: $0.shot ?? "", describe: $0.text, detail: $0.why ?? "", ok: $0.status == .ok) },
-            created: t.changes.created, modified: t.changes.modified, deleted: t.changes.deleted))
-        if r.record {
-            RunRecorder.shared.stop { url in
-                sessionMovie = url
-                if let url { RunHistory.shared.setMovie(url.path, for: id) }
-            }
+}
+
+/// The view's handle on its goal (GoalRun lives in GoalRuns.app): the view redraws as the goal's state changes.
+final class GoalRunBox: ObservableObject {
+    var run: GoalRun? {
+        didSet {
+            objectWillChange.send()
+            sub = run?.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         }
     }
+    private var sub: AnyCancellable?
+}
+
+extension GoalRuns {
+    /// The app's goals (GoalRunView's), kept for as long as the app runs.
+    static let app = GoalRuns()
+}
+
+extension GoalRunEffects {
+    /// The app's: RunRecorder records (its begin's own 25 s bound), RunHistory keeps the record — once, at the end.
+    /// (GoalRun runs on the shell's UI queue, the main queue in the app: every closure is called there.)
+    @MainActor static func app(lang: ResolvedLang) -> GoalRunEffects {
+        let id = UUID()
+        return GoalRunEffects(
+            beginRecording: { goal, started in MainActor.assumeIsolated { RunRecorder.shared.begin(goal: goal, bundles: []) { _ in started() } } },
+            stopRecording: { _, done in
+                MainActor.assumeIsolated {
+                    RunRecorder.shared.stop { url in
+                        if let url { RunHistory.shared.setMovie(url.path, for: id) }
+                        done(url)
+                    }
+                }
+            },
+            writeRecord: { g in MainActor.assumeIsolated {
+                let t = g.task
+                RunHistory.shared.add(RunRecord(
+                    id: id, date: Date(), goal: g.goal, folder: g.folder, apps: [],
+                    finished: t?.status == "succeeded", errored: t == nil || t?.status == nil || t?.status == "failed",
+                    summary: t.map { ShellText.task($0, lang: lang) } ?? GoalRunScreen.why(g.failed ?? "", lang: lang),
+                    answer: t?.answer ?? "",
+                    steps: (t?.steps ?? []).map { RunRecord.Step(n: $0.n, human: $0.displayText, app: "", shot: $0.shot ?? "", describe: $0.text, detail: $0.why ?? "", ok: $0.status == .ok) },
+                    created: t?.changes.created ?? [], modified: t?.changes.modified ?? [], deleted: t?.changes.deleted ?? []))
+            } },
+            after: { seconds, f in DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: f) })
+    }
+
 }
 
 /// The apps a run uses (icon and name) and its folder, or that it has none.

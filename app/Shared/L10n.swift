@@ -504,6 +504,13 @@ enum L10n {
         "Read the whole card first: scroll to its end": "先看完整张卡：滚到它的末尾",
         "Couldn't start a conversation. Is DeskMind's helper running?": "没能开始对话。DeskMind 的后台助手在运行吗？",
         "DeskMind's helper didn't answer. Your message is kept below; send it again.": "后台助手没有回应，你的消息留在下面了，可以重新发送。",
+        // a goal from the home screen that never got its task (Shared/GoalRun.swift: GoalRunScreen)
+        "DeskMind's helper didn't answer. Try again.": "后台助手没有回应，请再试一次。",
+        "The task didn't start. Try again.": "任务没有开始，请再试一次。",
+        "Stopped before it started.": "还没开始就停下了。",
+        "The conversation ended before the task started.": "任务开始前对话就结束了。",
+        "The task couldn't be sent. Try again.": "任务没能发出去，请再试一次。",
+        "Another task is still running. Try again once it ends.": "另一个任务还在进行，等它结束后再试。",
         "DeskMind's helper isn't answering. Conversations come back when it does.": "后台助手没有回应。它恢复后，对话会回来。",
         "Waiting for you: %@": "等你：%@",
         "Stopped: the screen is locked": "已停下：屏幕锁上了",
