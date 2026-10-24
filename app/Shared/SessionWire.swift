@@ -15,13 +15,17 @@ enum SessionWire {
     /// (Gate), whoever asked for it.
     static let knownTypes: Set<String> = ["say", "cua", "steer", "answer", "respond", "stop", "retry", "attach",
                                           "queue_edit", "queue_cancel", "queue_send_now", "end",
-                                          "end_if_idle", "set_config"]     // (harness#62, #64)
+                                          "end_if_idle", "set_config",     // (harness#62, #64)
+                                          "reask"]                         // (harness H1: 「现在回答」 on an expired card)
     /// A control line that makes the model work (harness `no_model` refuses these when the session has no model): say,
-    /// cua, retry, steer, queue_send_now, and a set_config that is not null. The helper refuses them while cloud models
+    /// cua, retry, steer, queue_send_now, reask (the task looks and decides again), and a set_config that is not null.
+    /// Not here: answer (whether it resumes the task depends on its option's kind, which the helper does not see — the
+    /// app holds it back by the card it has, SessionClient.needsModel, and a session set to no model stops its task),
+    /// respond (undo runs from receipts), stop, attach, the queue's edit and cancel, end. The helper refuses them while cloud models
     /// are off (models.off), from any client.
     static func needsModel(_ o: [String: Any]) -> Bool {
         switch o["type"] as? String {
-        case "say", "cua", "retry", "steer", "queue_send_now": return true
+        case "say", "cua", "retry", "steer", "queue_send_now", "reask": return true
         case "set_config": return !(o["config"] is NSNull) && o["config"] != nil
         default: return false
         }
@@ -71,6 +75,9 @@ enum SessionWire {
             if o["text"] != nil && !has("text") { return (nil, "answer's text must be a string") }
         case "respond":
             if !integer("option") { return (nil, "respond needs option (an index)") }
+        case "reask":
+            // the task whose expired card is asked again (never "whichever runs": the card belongs to its run)
+            if !has("run_id") { return (nil, "reask needs run_id") }
         case "attach":
             if o["after_seq"] != nil && !integer("after_seq") { return (nil, "attach's after_seq must be a seq") }
         case "set_config":

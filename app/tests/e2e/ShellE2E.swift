@@ -68,7 +68,8 @@ enum ShellE2E {
         let transport = StoppableTransport(Recording(PathTransport(path: socket)))
         let m = ShellModel(client: SessionClient(transport: transport), defaults: UserDefaults(suiteName: suite)!,
                            config: { config }, lang: { .zhHans }, cloudOn: { cloud },
-                           work: { DispatchQueue.global().async(execute: $0) }, deliver: { ui.async(execute: $0) })
+                           takeBackAfter: { d, f in ui.asyncAfter(deadline: .now() + d, execute: f) },   // (the take-back on the model's own queue)
+                           work: { DispatchQueue.global().async(execute: $0) }, deliver: { ui.async(execute: $0) }, uiQueue: ui)
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         return m
     }
@@ -134,6 +135,8 @@ enum ShellE2E {
         check(on { if case .waitingForYou = m.rows.first(where: { $0.id == sid })!.status { return true }; return false }, "the dot: waiting for you")
         let pick = model.buttons.first { $0.role == .choice } ?? model.buttons[0]
         on { m.click(pick) }
+        // held for its take-back (3 s), then sent once
+        check(on { m.states[sid].flatMap { s in s.task(run)?.cards.first.map { m.phase(run, $0, in: s) } }?.pending != nil }, "the pick is held for its take-back")
         check(until { on { m.states[sid]?.task(run)?.cards.first?.outcome == .answered } }, "answered (resumed)")
         check(until(60) { on { m.states[sid]?.task(run)?.ended == true } }, "the task ended: \(on { m.states[sid]?.task(run)?.status ?? "-" })")
         let st = on { m.states[sid]!.task(run)! }

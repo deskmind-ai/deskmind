@@ -234,7 +234,7 @@ struct ChatColumn: View {
     var body: some View {
         GeometryReader { g in column(height: g.size.height) }
             .background(Brand.paper)
-            .onChange(of: shell.current?.openCard?.card.askId) { _, id in announce(shell.current, id) }
+            .onChange(of: shell.current.flatMap { shell.pinned($0) }?.card.askId) { _, id in announce(shell.current, id) }
     }
 
     /// Top to bottom: the header, the chat (which gives up height first), the pinned card and queue (bounded: their
@@ -324,24 +324,24 @@ struct ChatColumn: View {
     /// the queue (scrolls past a few).
     @ViewBuilder private func pinned(_ s: SessionState, bodyCap: Double) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let (run, card) = s.openCard {
-                let m = CardModel(card: card.card, runId: run, askId: card.askId)
-                CardView(shell: shell, card: m, outcome: card.outcome, askedAt: card.askedAt, session: s, bodyCap: bodyCap)
+            if let p = shell.pinned(s) {
+                let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+                CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s, bodyCap: bodyCap)
                     .id(ShellModel.cardKey(m))
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
             if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, bodyCap)) }
         }
         .padding(.horizontal, 22)
-        .animation(.easeOut(duration: 0.2), value: s.openCard?.card.askId)
+        .animation(.easeOut(duration: 0.2), value: shell.pinned(s)?.card.askId)
     }
 
     /// A new card is said aloud, without moving the focus (handoff §3.10).
     private func announce(_ s: SessionState?, _ id: String?) {
-        guard let id, id != announced, let (run, card) = s?.openCard else { return }
+        guard let id, id != announced, let s, let p = shell.pinned(s) else { return }
         announced = id
-        let m = CardModel(card: card.card, runId: run, askId: card.askId)
-        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, outcome: .open, lang: lang)).post()
+        let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, phase: p.phase, lang: lang)).post()
     }
 }
 
@@ -473,8 +473,10 @@ struct TaskRow: View {
                 Text(step.displayText).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2)
                     .accessibilityLabel(L("Current step: %@", step.displayText, lang: lang))
             }
-            ForEach(task.cards.filter { $0.outcome != .open }, id: \.askId) { c in
-                Text(cardLine(c)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary).lineLimit(2)
+            // (the pinned card is above the composer; the rest are a line each, in their phase)
+            ForEach(task.cards.filter { $0.askId != shell.pinned(session)?.card.askId }, id: \.askId) { c in
+                Text(ShellText.cardLine(shell.phase(task.runId, c, in: session), kind: c.card.kind, lang: lang))
+                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary).lineLimit(2)
             }
             if !task.running {
                 let summary = task.done?.summary ?? task.end?.summary ?? ""
@@ -482,7 +484,7 @@ struct TaskRow: View {
                 if let a = task.answer, !a.isEmpty, a != summary { Text(a).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
                 if let rc = task.resultCard, !(rc.options.isEmpty) {
                     let m = CardModel(resultCard: rc, runId: task.runId)
-                    CardView(shell: shell, card: m, outcome: .open, askedAt: nil, session: session, bodyCap: CardBody.maxHeight)
+                    CardView(shell: shell, card: m, phase: .open, askedAt: nil, session: session, bodyCap: CardBody.maxHeight)
                         .id(ShellModel.cardKey(m))
                 }
                 if let u = ShellText.undo(task.undo, lang: lang) {
@@ -494,20 +496,6 @@ struct TaskRow: View {
         .background(RoundedRectangle(cornerRadius: 12).strokeBorder(task.running ? Brand.dot.opacity(0.6) : Brand.line, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L("Computer task: %@", task.raw, lang: lang))
-    }
-
-    private func cardLine(_ c: CardState) -> String {
-        let kind = ShellText.cardKind(c.card.kind, lang: lang)
-        switch c.outcome {
-        case .answered: return L("Answered: %@", kind, lang: lang)
-        case .void(let why):
-            switch why {
-            case "steer": return L("No longer needed (you changed the request): %@", kind, lang: lang)
-            case "stop": return L("No longer needed (the task stopped): %@", kind, lang: lang)
-            default: return L("No longer needed (the task ended): %@", kind, lang: lang)
-            }
-        case .open: return kind
-        }
     }
 }
 
@@ -630,10 +618,13 @@ struct QueuedBubble: View {
 /// cap (a send list can be long) — scrolls inside `bodyCap`. An approve-type option (CardModel.Role.needsWholeBody)
 /// takes a click only once the body's end has been on screen (it fits, or it was scrolled to the end): never approve
 /// what was never shown (ShellModel.cardBody, from the scroll geometry alone).
+///
+/// It shows the card's one state (`phase`, CardStore): an answer held for its take-back says what was picked, with a
+/// countdown and 「撤回」; one sent waits greyed; an expired card keeps its text, drops its options and offers 「现在回答」.
 struct CardView: View {
     @ObservedObject var shell: ShellModel
     let card: CardModel
-    let outcome: CardState.Outcome
+    let phase: CardPhase
     let askedAt: Double?
     let session: SessionState
     let bodyCap: Double
@@ -650,8 +641,9 @@ struct CardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 6) {
-                if card.blocking && outcome == .open {
-                    Text(L("Waiting for you", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                if card.blocking && !card.isResult {
+                    Text(phase == .open ? L("Waiting for you", lang: lang) : ShellText.cardState(phase, lang: lang))
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(phase.ending == nil ? ShellColor.orangeText : ShellColor.secondary)
                 }
                 Text(ShellText.cardKind(card.kind.name, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
             }
@@ -662,7 +654,7 @@ struct CardView: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     let choices = card.buttons.filter { $0.role == .choice }
-                    if !choices.isEmpty {
+                    if !choices.isEmpty && phase.ending == nil {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(choices, id: \.index) { b in button(b) }
                         }
@@ -680,16 +672,20 @@ struct CardView: View {
                 if v.count == 2 { content = v[0]; offset = v[1]; reportBody() }
             }
             .onPreferenceChange(CardBodyVisible.self) { h in visible = h; reportBody() }
-            HStack(spacing: 8) {
-                ForEach(card.buttons.filter { $0.role != .choice }, id: \.index) { b in button(b) }
+            if phase.ending == nil {
+                HStack(spacing: 8) {
+                    ForEach(card.buttons.filter { $0.role != .choice }, id: \.index) { b in button(b) }
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
-            if outcome == .open && !seen && card.buttons.contains(where: { $0.role.needsWholeBody }) {
+            if let held = phase.pending, case .pending(_, let until) = phase { takeBackRow(held, until: until) }
+            if case .expired(_, let now) = phase { expiredRow(now) }
+            if phase.takesPick && !seen && card.buttons.contains(where: { $0.role.needsWholeBody }) {
                 // (neutral: it holds the card's own field too, for someone who wants to type)
                 Text(L("Read the whole card first: scroll to its end", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
             }
-            if card.allowsFreeText {
+            if card.allowsFreeText && phase.ending == nil {
                 HStack(spacing: 8) {
                     // (on a card with an approve-type option, words wait for the whole body as its approve does)
                     TextField(L("Or answer in your own words", lang: lang), text: $words, axis: .vertical)
@@ -706,9 +702,51 @@ struct CardView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(outcome == .open && card.blocking ? Brand.dot : Brand.line, lineWidth: 1.2))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(card.blocking && (phase.ending == nil || phase.isExpiredOffer) ? Brand.dot : Brand.line, lineWidth: 1.2))
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(Self.voiceOverLabel(card, outcome: outcome, lang: lang))
+        .accessibilityLabel(Self.voiceOverLabel(card, phase: phase, lang: lang))
+    }
+
+    /// The answer held for its take-back: what was picked, the seconds left, and 「撤回」 (the words come back to the
+    /// field). Picking another option starts over; 「先别做了」 and Stop are not held.
+    @ViewBuilder private func takeBackRow(_ held: CardAnswer, until: Double) -> some View {
+        HStack(spacing: 8) {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                let left = max(0, Int((until - shell.now()).rounded(.up)))
+                Text(L("Picked: %@ · sends in %d s", Self.picked(held, card: card), left, lang: lang))
+                    .font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+            }
+            Button(L("Take back", lang: lang)) {
+                if case .text(_, _, let w) = held { words = w }
+                shell.takeBack(card)
+            }
+            .buttonStyle(InkButtonStyle(prominent: false))
+            .accessibilityHint(L("Your pick is not sent; the card waits again", lang: lang))
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// An expired card: why, and 「现在回答」 while the task waits on it (it looks at the screen again and asks anew).
+    @ViewBuilder private func expiredRow(_ now: CardPhase.AnswerNow) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(L("Nobody answered in 10 minutes, so this card expired. The task waits where it was; nothing was done.", lang: lang))
+                .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if now == .offered || now == .asked, let ask = card.askId {
+                Button(now == .asked ? L("Looking again…", lang: lang) : L("Answer now", lang: lang)) { shell.answerNow(card.runId, askId: ask) }
+                    .buttonStyle(InkButtonStyle(prominent: true))
+                    .disabled(now == .asked)
+                    .accessibilityHint(L("The task looks at the screen again and asks you anew", lang: lang))
+            }
+        }
+    }
+
+    /// What a held answer picked, in the card's own words.
+    static func picked(_ a: CardAnswer, card: CardModel) -> String {
+        switch a {
+        case .option(_, _, let i), .respond(_, let i): return card.buttons.first { $0.index == i }?.text ?? ""
+        case .text(_, _, let w): return "「\(w)」"
+        }
     }
 
     @ViewBuilder private func button(_ b: CardModel.Button) -> some View {
@@ -745,13 +783,8 @@ struct CardView: View {
     }
 
     /// 「<状态>：<卡的种类>。<正文第一句>。<n> 个选项」 (handoff §3.10).
-    static func voiceOverLabel(_ card: CardModel, outcome: CardState.Outcome, lang: ResolvedLang) -> String {
-        let state: String
-        switch outcome {
-        case .open: state = L("Waiting for your answer", lang: lang)
-        case .answered: state = L("Answered", lang: lang)
-        case .void: state = L("No longer needed", lang: lang)
-        }
+    static func voiceOverLabel(_ card: CardModel, phase: CardPhase, lang: ResolvedLang) -> String {
+        let state = ShellText.cardState(phase, lang: lang)
         let kind = ShellText.cardKind(card.kind.name, lang: lang)
         return L("%@: %@. %@. %d options", state, kind, firstSentence(card.text), card.buttons.count, lang: lang)
     }
@@ -871,7 +904,7 @@ struct AgentPanel: View {
     /// flat when it stopped or went wrong.
     static func mood(_ s: SessionStatus) -> Brand.Mood {
         switch s {
-        case .waitingForYou: return .notice
+        case .waitingForYou, .cardExpired: return .notice
         case .done(_, let stopped): return stopped ? .rest : .done
         case .error, .locked, .stopping: return .rest
         case .acting, .thinking, .paused, .lookOnly, .idle: return .idle
