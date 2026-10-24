@@ -11,6 +11,7 @@
 // - viewsTests: the views read a card only through its phase.
 // Run from DecisionTests.main (build.sh).
 
+import Combine
 import Foundation
 
 enum CardStoreTests {
@@ -22,6 +23,7 @@ enum CardStoreTests {
         DecisionTests.group("cards.wireTests"); wireTests()
         DecisionTests.group("cards.movedOnTests"); movedOnTests()
         DecisionTests.group("cards.cloudOffTests"); cloudOffTests()
+        DecisionTests.group("cards.uiQueueTests"); uiQueueTests()
         DecisionTests.group("cards.tableTests"); tableTests()
         DecisionTests.group("cards.allOrdersTests"); allOrdersTests()
         DecisionTests.group("cards.propertyTests"); propertyTests()
@@ -244,10 +246,11 @@ enum CardStoreTests {
         var m: ShellModel!
         let feeder = Rig()
         init() {
-            sync = ModelsOffSync(transport: wire, current: { [unowned self] in !self.cloud })
+            // (weak: the sync's retries run on its own queue and may outlive the rig — an unowned read then crashed)
+            sync = ModelsOffSync(transport: wire, current: { [weak self] in !(self?.cloud ?? true) })
             m = ShellModel(client: SessionClient(transport: wire, modelsSync: sync), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
-                           lang: { .zhHans }, cloudOn: { [unowned self] in self.cloud }, takeBackAfter: timers.after, now: { [unowned self] in self.timers.now },
-                           work: { [unowned self] f in self.queued.append(f) }, deliver: { $0() })
+                           lang: { .zhHans }, cloudOn: { [weak self] in self?.cloud ?? true }, takeBackAfter: timers.after, now: { [weak self] in self?.timers.now ?? 0 },
+                           work: { [weak self] f in self?.queued.append(f) }, deliver: { $0() })
             m.selected = sid
             for l in feeder.fed { m.client.feed(l) }        // (the session and its task begun)
         }
@@ -331,6 +334,99 @@ enum CardStoreTests {
         check(!SessionClient.needsModel(.answer(.option(runId: rid, askId: "a2", option: 3)), in: st), "the way out: no model")
         check(SessionClient.needsModel(.answer(.text(runId: rid, askId: "a2", text: "x")), in: st), "words: resume the task")
         check(SessionClient.needsModel(.answer(.option(runId: rid, askId: "zz", option: 0)), in: st), "a card the app can't find: counted as resuming")
+    }
+
+    // MARK: - CardStore only on the UI queue (#110 Codex review at 4a411c2)
+
+    /// A model as the app has it: `deliver` hops to the main queue (pumped by the test), work inline on the caller.
+    final class MainRig {
+        let wire = Wire()
+        let timers = ShellTests.Timers()
+        private let lock = NSLock()
+        private var _cloud = true
+        var cloud: Bool { get { lock.lock(); defer { lock.unlock() }; return _cloud } set { lock.lock(); _cloud = newValue; lock.unlock() } }
+        var m: ShellModel!
+        let feeder = Rig()
+        init() {
+            m = ShellModel(client: SessionClient(transport: wire), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                           lang: { .zhHans }, cloudOn: { [weak self] in self?.cloud ?? true }, takeBackAfter: timers.after,
+                           now: { [weak self] in self?.timers.now ?? 0 }, work: { $0() }, deliver: { f in DispatchQueue.main.async(execute: f) })
+            m.selected = sid
+            for l in feeder.fed { m.client.feed(l) }
+            pump()
+        }
+        /// Lets the main queue run what was handed to it.
+        func pump() { for _ in 0..<5 { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) } }
+        func ask(_ id: String, _ kind: String = "action") { feeder.ask(id, kind); m.client.feed(feeder.fed.last!); pump() }
+        func card(_ id: String) -> CardModel { CardModel(card: m.states[sid]!.task(rid)!.cards.first { $0.askId == id }!.card, runId: rid, askId: id) }
+        /// `f` on another thread, waited for.
+        func elsewhere(_ f: @escaping () -> Void) { let done = DispatchSemaphore(value: 0); Thread { f(); done.signal() }.start(); done.wait() }
+    }
+
+    /// applySettings runs on the watch thread too (ShellModel.start): it must never touch CardStore there. Checked by
+    /// what the store holds right after a call from another thread (nothing changed until the main queue runs), by a
+    /// late clear after the switch is on again (it leaves the new pick), and under a race with clicks on main.
+    static func uiQueueTests() {
+        // a held approve; the switch goes off and applySettings runs on another thread: the store is not touched there
+        let a = MainRig()
+        a.ask("a1")
+        let c = a.card("a1")
+        a.m.cardBody(c, contentHeight: 1, visibleHeight: 1, offset: 0)
+        a.m.click(c.buttons[0])
+        check(a.m.cards.picks.count == 1, "(held)")
+        a.cloud = false
+        a.elsewhere { a.m.applySettings() }
+        check(a.m.cards.picks.count == 1, "applySettings on another thread: the store is not touched there (its clear waits for the main queue)")
+        a.pump()
+        check(a.m.cards.picks.isEmpty, "on the main queue: the held approve is dropped")
+        a.cloud = true
+        a.timers.advance(CardStore.takeBack)
+        check(a.wire.count("answer") == 0, "and never sent")
+        // a late clear: queued while off, run after the switch is on again and a new pick was made — the new pick stays
+        let b = MainRig()
+        b.ask("a1")
+        let cb = b.card("a1")
+        b.m.cardBody(cb, contentHeight: 1, visibleHeight: 1, offset: 0)
+        b.cloud = false
+        b.elsewhere { b.m.applySettings() }            // (its clear is queued, not run)
+        b.cloud = true
+        b.m.click(cb.buttons[0])                        // (picked after the switch came back)
+        b.pump()                                        // (the late clear runs now)
+        check(b.m.cards.picks.count == 1, "a late clear after the switch is on again: the new pick stays")
+        b.timers.advance(CardStore.takeBack)
+        check(b.wire.answers("a1").count == 1, "and goes at 3 s")
+        // the race (Codex's), made to happen every time: the watch thread's applySettings with the switch off while main
+        // holds a pick; at the moment that thread publishes a change of the store (objectWillChange, sent before the
+        // store is written), main answers the card with 先别做了; then 先别做了 again. A clear that wrote back a copy taken
+        // before main's `sent` erased it, and the card was answered twice. Exactly one answer.
+        let r = MainRig()
+        r.ask("a1", "ambiguity")
+        let cr = r.card("a1")
+        let pickIt = cr.buttons.first { $0.role == .choice }!, out = cr.buttons.first { $0.role == .cancel }!
+        r.m.click(pickIt)
+        check(r.m.cards.picks.count == 1, "(a pick held)")
+        let lock = NSLock()
+        var armed = true
+        let mainGo = DispatchSemaphore(value: 0), mainDone = DispatchSemaphore(value: 0), bgDone = DispatchSemaphore(value: 0)
+        let watch = r.m.objectWillChange.sink { _ in
+            guard !Thread.isMainThread, (lock.withLock { let a = armed; armed = false; return a }) else { return }
+            mainGo.signal(); _ = mainDone.wait(timeout: .now() + 5)
+        }
+        r.cloud = false
+        Thread { r.m.applySettings(); bgDone.signal() }.start()
+        let raced = mainGo.wait(timeout: .now() + 0.5) == .success
+        r.m.click(out)                                  // (inside the other thread's write when it publishes one)
+        if raced { mainDone.signal() }
+        bgDone.wait()
+        r.pump()
+        r.m.click(out)
+        r.pump()
+        watch.cancel()
+        check(r.wire.answers("a1").count == 1, "the watch thread's applySettings racing main's answer: one answer (\(r.wire.answers("a1").count)\(raced ? ", the other thread wrote the store" : ""))")
+        // the store is reached only through its UI-queue check
+        let src = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Shared/Shell.swift"), encoding: .utf8)) ?? ""
+        check(src.components(separatedBy: "cardStore").count - 1 == 3 && src.contains("get { onUI(); return cardStore }") && src.contains("set { onUI(); cardStore = newValue }")
+              && src.contains("dispatchPrecondition(condition: .onQueue(uiQueue))"), "CardStore: one stored copy, every read and write through the UI-queue check")
     }
 
     // MARK: - the table (plan §4.2), cell by cell

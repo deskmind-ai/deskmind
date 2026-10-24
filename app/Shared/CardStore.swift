@@ -177,8 +177,12 @@ struct CardStore: Equatable {
         return .send(key: key, a)
     }
 
-    /// The cloud switch went off: every held answer is dropped, never sent (turning it on again revives none).
-    mutating func cloudOff() { picks = [:] }
+    /// The cloud switch went off at off-epoch `epoch`: every answer held before it is dropped, never sent (turning it
+    /// on again revives none); one picked after it (the switch on again, same epoch) stays.
+    mutating func cloudOff(before epoch: Int) {
+        let stale = picks.filter { $0.value.offEpoch < epoch }
+        if !stale.isEmpty { picks = picks.filter { $0.value.offEpoch >= epoch } }
+    }
 
     /// The take-back: the held answer is dropped, never sent.
     mutating func takeBack(_ key: String) { picks[key] = nil }
