@@ -15,6 +15,7 @@ enum IslandFeedTests {
         DecisionTests.group("island.notifyTests"); notifyTests()
         DecisionTests.group("island.wiringTests"); wiringTests()
         DecisionTests.group("island.shownTests"); shownTests()
+        DecisionTests.group("island.savedMovieTests"); savedMovieTests()
     }
 
     static let action = #""card":{"kind":"action","text":"要点「发送」吗？","options":[{"kind":"approve","text":"可以"},{"kind":"cancel","text":"先别做了"}],"free_text":false,"blocking":true}"#
@@ -87,19 +88,27 @@ enum IslandFeedTests {
         func finish(passed: Bool, stopped: Bool, summary: String) { calls.append("finish:\(passed):\(summary)") }
         func notify(title: String, body: String) { calls.append("notify") }
     }
+    /// The recent runs as a test holds them: kept records by id, their movie set when the recording is saved; the
+    /// recording's stop answers when the test says (`finishRecording`), as RunRecorder's does — later.
     final class FakeServices: GoalRunServices {
         var kept: [(GoalRecord, UUID)] = []
+        var saved: [UUID: SavedRun] = [:]
+        var pendingStop: ((URL?) -> Void)?
         func beginRecording(goal: String, started: @escaping () -> Void) { started() }
-        func stopRecording(done: @escaping (URL?) -> Void) { done(nil) }
-        func keep(_ r: GoalRecord, id: UUID, lang: ResolvedLang) { kept.append((r, id)) }
-        func setMovie(_ path: String, for id: UUID) {}
+        func stopRecording(done: @escaping (URL?) -> Void) { pendingStop = done }
+        func finishRecording(_ path: String?) { let d = pendingStop; pendingStop = nil; d?(path.map { URL(fileURLWithPath: $0) }) }
+        func keep(_ r: GoalRecord, id: UUID, lang: ResolvedLang) {
+            kept.append((r, id))
+            saved[id] = SavedRun(sessionId: r.task == nil ? nil : r.sessionId, runId: r.task?.runId, ended: r.ended, folder: r.folder, movie: nil)
+        }
+        func setMovie(_ path: String, for id: UUID) { saved[id]?.movie = path }
     }
 
     /// The app's applier and effects (IslandApplier, GoalRunEffects.app) on a goal over the real ShellModel.
-    static func rig(holdDeliver: Bool = false) -> (SurfaceTests.Rig, FakeSurface, FakeServices, GoalRun) {
+    static func rig(holdDeliver: Bool = false, record: Bool = false, folder: String? = nil) -> (SurfaceTests.Rig, FakeSurface, FakeServices, GoalRun) {
         let r = SurfaceTests.Rig(holdDeliver: holdDeliver); SurfaceTests.openOK(r.mock)
         let surface = FakeSurface(), services = FakeServices()
-        let g = GoalRun(goal: "整理下载", folder: nil, record: false, shell: r.m,
+        let g = GoalRun(goal: "整理下载", folder: folder, record: record, shell: r.m,
                         effects: .app(lang: .en, services: services, surface: surface, after: { d, f in r.timers.after(d, f) }))
         return (r, surface, services, g)
     }
@@ -192,11 +201,16 @@ enum IslandFeedTests {
         for l in newer { r.m.client.feed(l) }
         r.m.selected = T.sid
         check(r.m.states[T.sid].flatMap { r.m.pinned($0) }?.runId == "r_new", "(the session's pinned card is the newer task's)")
-        func shown(_ route: GoalScreenRoute) -> GoalShown {
-            GoalShown.of(route, states: r.m.states, selected: r.m.selected, pinned: { r.m.pinned($0) }, lang: .en)
-        }
         let movie = "/tmp/rec/run.mov"
-        let saved = shown(.saved(sessionId: T.sid, runId: T.rid, ended: "succeeded", folder: "/tmp/dl", movie: movie))
+        let recA = UUID(), recGone = UUID()
+        let records: [UUID: SavedRun] = [
+            recA: SavedRun(sessionId: T.sid, runId: T.rid, ended: "succeeded", folder: "/tmp/dl", movie: movie),
+            recGone: SavedRun(sessionId: "ses_deleted", runId: T.rid, ended: "succeeded", folder: "/tmp/dl", movie: movie),
+        ]
+        func shown(_ route: GoalScreenRoute) -> GoalShown {
+            GoalShown.of(route, states: r.m.states, selected: r.m.selected, pinned: { r.m.pinned($0) }, saved: { records[$0] }, lang: .en)
+        }
+        let saved = shown(.saved(recA))
         // saved record, its session there
         check(saved.sessionShown && saved.task?.runId == T.rid, "saved, session there: its own task")
         check(saved.pinned == nil, "saved: a newer task's card is not shown under the older run (Codex 1)")
@@ -204,7 +218,7 @@ enum IslandFeedTests {
         check(saved.movie == URL(fileURLWithPath: movie), "saved: the record's recording (Codex 3)")
         check(saved.screen.afterwards && !saved.screen.stopShown, "saved: ended (Back, no Stop)")
         // saved record, session gone
-        let gone = shown(.saved(sessionId: "ses_deleted", runId: T.rid, ended: "succeeded", folder: "/tmp/dl", movie: movie))
+        let gone = shown(.saved(recGone))
         check(!gone.sessionShown && gone.task == nil && gone.pinned == nil, "session gone: the record's own content")
         check(gone.folder == "/tmp/dl" && gone.movie == URL(fileURLWithPath: movie), "session gone: still its folder and recording")
         // live goal: its own task; the newer task's card not its own
@@ -248,5 +262,24 @@ enum IslandFeedTests {
         g.start()
         check(surface.detailsRecord == nil && surface.calls.isEmpty, "B starts (no frame yet): A's link gone")
         _ = r
+    }
+
+    /// Codex review at 600f34d: Show Details after the task ended but before its recording was saved showed a record
+    /// with no movie, for good. A saved run is read through by its id: the movie appears as it lands.
+    static func savedMovieTests() {
+        typealias T = SurfaceTests
+        let (r, _, services, g) = rig(record: true, folder: "/tmp/dl")
+        g.start()
+        for l in T.taskLines + T.endLines { r.m.client.feed(l) }
+        guard let id = services.kept.first?.1 else { check(false, "the record kept"); return }
+        check(services.pendingStop != nil && services.saved[id]?.movie == nil, "ended: the record kept, its recording still being saved")
+        func shown() -> GoalShown {
+            GoalShown.of(.saved(id), states: r.m.states, selected: r.m.selected, pinned: { r.m.pinned($0) }, saved: { services.saved[$0] }, lang: .en)
+        }
+        let before = shown()                        // Show Details now: opened before the movie
+        check(before.movie == nil && before.folder == "/tmp/dl" && before.task?.runId == T.rid, "opened before the movie: none yet")
+        services.finishRecording("/tmp/rec/goal.mov")
+        check(shown().movie == URL(fileURLWithPath: "/tmp/rec/goal.mov"), "the recording saved: shown, without reopening")
+        check(g.movie == URL(fileURLWithPath: "/tmp/rec/goal.mov"), "(and the goal's own)")
     }
 }

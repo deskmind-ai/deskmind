@@ -29,7 +29,11 @@ struct GoalRunView: View {
     private var sessionRun: Bool { sessionRunState && shown.sessionShown }
     /// A past session task opened from the recent runs (or the island's Show Details): its record, shown as
     /// the session has it (its result card included). nil for a goal started here.
-    @State private var past: RunRecord?
+    @State private var past = false
+    /// The recent runs, observed: a record is read by its id each time, never held (its recording lands later).
+    @ObservedObject private var history = RunHistory.shared
+    /// `record` as the recent runs hold it now (its movie saved after it, any later change), else as it was passed.
+    private var liveRecord: RunRecord? { record.map { r in history.records.first { $0.id == r.id } ?? r } }
     @State private var started = false
     @State private var confirming: GoalRequest?
     @State private var next = ""
@@ -125,7 +129,8 @@ struct GoalRunView: View {
 
             if !sessionRun { RunFailure(run: run) }
 
-            if let movie = sessionRun ? shown.movie : run.movie {
+            // (a saved run's recording from its record as held now — never a snapshot — else the run's own)
+            if let movie = sessionRun ? shown.movie : (liveRecord?.movie.flatMap { FileManager.default.fileExists(atPath: $0) ? URL(fileURLWithPath: $0) : nil } ?? run.movie) {
                 HStack(spacing: 10) {
                     Image(systemName: "record.circle").foregroundStyle(Brand.dot)
                     Text(L("Recorded", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
@@ -182,7 +187,7 @@ struct GoalRunView: View {
             if let request { begin(request) }
             else if let record, record.sessionId != nil {
                 // a session task kept in the recent runs: shown as the session has it (its result card included)
-                sessionRunState = true; past = record
+                sessionRunState = true; past = true
                 shell.start(); shell.select(record.sessionId!)
                 // (its own content too: shown if the session or its task is gone — deleted)
                 run.show(record)
@@ -285,14 +290,15 @@ struct GoalRunView: View {
     /// recording, the ending. The view reads only this.
     private var shown: GoalShown {
         let route: GoalScreenRoute
-        if let past, let sid = past.sessionId {
-            route = .saved(sessionId: sid, runId: past.runId, ended: past.ended, folder: past.folder, movie: past.movie)
+        if past, let r = record {
+            route = .saved(r.id)
         } else if let g = goalBox.run {
             route = .live(state: g.state, task: g.task, sessionId: g.sessionId, folder: g.folder, movie: g.movie)
         } else {
             route = .busy
         }
-        return GoalShown.of(route, states: shell.states, selected: shell.selected, pinned: { shell.pinned($0) }, lang: lang)
+        return GoalShown.of(route, states: shell.states, selected: shell.selected, pinned: { shell.pinned($0) },
+                            saved: { id in history.records.first { $0.id == id }.map(SavedRun.init) }, lang: lang)
     }
 
     private var screen: GoalRunScreen { shown.screen }
@@ -306,7 +312,7 @@ struct GoalRunView: View {
                     // (its Stop is the goal's, by its run — a saved run's, by its own run: never the selected
                     // session's run-less stop)
                     TaskRow(shell: shell, task: t, session: s, stop: {
-                        if let g = goalBox.run { g.stop() } else if let sid = past?.sessionId { shell.stop(sessionId: sid, runId: t.runId) }
+                        if let g = goalBox.run { g.stop() } else if past, let sid = liveRecord?.sessionId { shell.stop(sessionId: sid, runId: t.runId) }
                     })
                     if t.ended { FreeResult(task: Self.runTask(t, folder: shown.folder)) }
                 } else if let line = screen.line {
@@ -490,4 +496,8 @@ struct WaitingCard: View {
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Brand.card))
         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Brand.dot.opacity(0.4), lineWidth: 1))
     }
+}
+
+extension SavedRun {
+    init(_ r: RunRecord) { self.init(sessionId: r.sessionId, runId: r.runId, ended: r.ended, folder: r.folder, movie: r.movie) }
 }

@@ -138,11 +138,22 @@ enum GoalOutcome {
     }
 }
 
+/// A saved run's record as the recent runs hold it now (RunHistory's RunRecord, read by id).
+struct SavedRun: Equatable {
+    var sessionId: String?
+    var runId: String?
+    var ended: String?
+    var folder: String?
+    var movie: String?
+}
+
 /// Where a goal's screen comes from: a goal started here (live), a saved record of a session task, or no goal (another
 /// one is not over).
 enum GoalScreenRoute {
     case live(state: GoalLifecycle.State, task: (session: SessionState, task: TaskState)?, sessionId: String?, folder: String?, movie: URL?)
-    case saved(sessionId: String, runId: String?, ended: String?, folder: String?, movie: String?)
+    /// A saved run, by its record's id: read through `saved` each time (never a snapshot — its recording, saved after
+    /// the record, appears as it lands: Codex review at 600f34d).
+    case saved(UUID)
     case busy
 }
 
@@ -164,7 +175,8 @@ struct GoalShown {
     var sessionShown: Bool
 
     static func of(_ route: GoalScreenRoute, states: [String: SessionState], selected: String?,
-                   pinned: (SessionState) -> (runId: String, card: CardState, phase: CardPhase)?, lang: ResolvedLang) -> GoalShown {
+                   pinned: (SessionState) -> (runId: String, card: CardState, phase: CardPhase)?,
+                   saved: (UUID) -> SavedRun? = { _ in nil }, lang: ResolvedLang) -> GoalShown {
         var v: GoalShown
         var sid: String?
         switch route {
@@ -174,11 +186,13 @@ struct GoalShown {
             v = GoalShown(session: task?.session, task: task?.task, pinned: nil, folder: folder, movie: movie,
                           screen: GoalRunScreen(state, lang: lang), sessionShown: true)
             sid = id
-        case .saved(let id, let run, let ended, let folder, let movie):
-            let t = PastRun.task(sessionId: id, runId: run, endedAs: ended, in: states)
-            v = GoalShown(session: t?.session, task: t?.task, pinned: nil, folder: folder, movie: movie.map { URL(fileURLWithPath: $0) },
-                          screen: GoalRunScreen(.ended(sid: id, run: run ?? "", status: ended ?? ""), lang: lang), sessionShown: t != nil)
-            sid = id
+        case .saved(let recordId):
+            let r = saved(recordId)
+            let id = r?.sessionId ?? ""
+            let t = r?.sessionId.flatMap { PastRun.task(sessionId: $0, runId: r?.runId, endedAs: r?.ended, in: states) }
+            v = GoalShown(session: t?.session, task: t?.task, pinned: nil, folder: r?.folder, movie: r?.movie.map { URL(fileURLWithPath: $0) },
+                          screen: GoalRunScreen(.ended(sid: id, run: r?.runId ?? "", status: r?.ended ?? ""), lang: lang), sessionShown: t != nil)
+            sid = r?.sessionId
         case .busy:
             var s = GoalRunScreen(.failed(GoalLifecycle.Why.busy), lang: lang)
             s.line = GoalRunScreen.why(GoalLifecycle.Why.busy, lang: lang)
