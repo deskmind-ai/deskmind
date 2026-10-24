@@ -17,6 +17,7 @@ enum IslandFeedTests {
         DecisionTests.group("island.shownTests"); shownTests()
         DecisionTests.group("island.savedMovieTests"); savedMovieTests()
         DecisionTests.group("island.ackBeforeHistoryTests"); ackBeforeHistoryTests()
+        DecisionTests.group("island.liveDetailsTests"); liveDetailsTests()
     }
 
     static let action = #""card":{"kind":"action","text":"要点「发送」吗？","options":[{"kind":"approve","text":"可以"},{"kind":"cancel","text":"先别做了"}],"free_text":false,"blocking":true}"#
@@ -78,6 +79,7 @@ enum IslandFeedTests {
 
     /// The island as a test sees it: every call, in order, and the details link.
     final class FakeSurface: IslandSurface {
+        var owner: ObjectIdentifier?
         var calls: [String] = []
         var detailsRecord: UUID? = nil
         var appActive = true
@@ -131,7 +133,7 @@ enum IslandFeedTests {
             for l in T.endLines { r.m.client.feed(l) }
             check(surface.calls.last == "finish:true:Done", "its end reaches the island: \(surface.calls)")
             check(services.kept.count == 1 && surface.detailsRecord == services.kept.first?.1, "Show Details: its kept record")
-            check(services.kept.first?.0.sessionId == T.sid && services.kept.first?.0.task?.runId == T.rid, "the record keeps its session and run")
+            check(services.kept.first?.0.sessionId == T.sid && services.kept.first?.0.runId == T.rid, "the record keeps its session and run")
         }
         do {    // its start and end in one update: the record is kept before the island's first frame, whose `show` clears
                 // the last link — the frame's link is set after it
@@ -165,17 +167,17 @@ enum IslandFeedTests {
             r.m.client.feed(["kind": "step", "session_id": T.sid, "run_id": T.rid, "seq": 2, "text": "click", "step_id": "s1", "human": "点「发送」"])
             r.m.client.feed(["kind": "helper.session_exit", "session_id": T.sid, "code": 0, "last_seq": 1])
             guard let kept = services.kept.first?.0 else { check(false, "a record kept"); return }
-            check(kept.ended == "interrupted" && kept.task?.ended == false, "the goal ended interrupted, its task not marked yet")
+            check(kept.ended == "interrupted" && g.task?.task.ended == false, "the goal ended interrupted, its task not marked yet")
             let o = GoalOutcome.record(kept, lang: .en)
-            check(o.summary == "Interrupted" && !o.finished && o.errored && o.task?.ended == true, "the record: Interrupted: \(o.summary)")
+            check(o.summary == "Interrupted" && !o.finished && o.errored, "the record: Interrupted: \(o.summary)")
             let opened = PastRun.task(sessionId: T.sid, runId: T.rid, endedAs: kept.ended, in: r.m.states)
             check(r.m.states[T.sid]?.task(T.rid)?.running == true, "(the session still says it runs)")
             check(opened?.task.running == false && opened.map { ShellText.task($0.task, lang: .en) } == "Interrupted"
                   && opened?.task.resultCardState.undoEnabled == false, "opened later: ended, Interrupted, no undo")
         }
-        do {    // a recent run whose session (or task) is gone: its record's own content
+        do {    // a recent run whose session (or task) is gone: none (its outcome and the "no longer available" line)
             var states: [String: SessionState] = [:]
-            check(PastRun.task(sessionId: T.sid, runId: T.rid, endedAs: nil, in: states) == nil, "session deleted: none (the record's own steps and summary)")
+            check(PastRun.task(sessionId: T.sid, runId: T.rid, endedAs: nil, in: states) == nil, "session deleted: none")
             states[T.sid] = SessionState(sessionId: T.sid)
             check(PastRun.task(sessionId: T.sid, runId: T.rid, endedAs: nil, in: states) == nil, "its task gone: none")
             states[T.sid] = SessionReducer.reduce(SessionState(sessionId: T.sid), [SessionTests.taskR1, SessionTests.ex(1, #""kind":"start","raw":"x""#)])
@@ -221,7 +223,9 @@ enum IslandFeedTests {
         check(saved.screen.afterwards && !saved.screen.stopShown, "saved: ended (Back, no Stop)")
         // saved record, session gone
         let gone = shown(.saved(recGone))
-        check(!gone.sessionShown && gone.task == nil && gone.pinned == nil, "session gone: the record's own content")
+        check(gone.task == nil && gone.pinned == nil, "session gone: no task")
+        check(gone.screen.line == "Done\nThe details of this run are no longer available." && gone.screen.afterwards,
+              "session gone: its outcome, and the details plainly no longer available: \(gone.screen.line ?? "")")
         check(gone.folder == "/tmp/dl" && gone.movie == URL(fileURLWithPath: movie), "session gone: still its folder and recording")
         // live goal: its own task; the newer task's card not its own
         let live = shown(.live(state: g.state, task: g.task, sessionId: g.sessionId, folder: "/tmp/dl", movie: URL(fileURLWithPath: movie)))
@@ -305,8 +309,55 @@ enum IslandFeedTests {
         for l in T.taskLines + T.endLines { r.m.client.feed(l) }   // the history lands
         let v = shown()
         check(v.sessionShown && v.task?.runId == T.rid && v.task?.resultCard != nil, "the history landed: its task with its result card")
-        check(services.kept.count == 1 && services.kept.first?.0.task?.runId == T.rid && services.kept.first?.0.ended == "stopped"
-              && GoalOutcome.record(services.kept.first!.0, lang: .en).finished == false, "the record written over with its task, its outcome its ending's")
+        check(services.kept.count == 1 && services.kept.first?.0.runId == T.rid && services.kept.first?.0.ended == "stopped"
+              && GoalOutcome.record(services.kept.first!.0, lang: .en).finished == false, "the record written once, its outcome its ending's")
         check(surface.detailsRecord == id, "the details link still its record")
+    }
+
+    /// Codex review at e1f5ebf: the record copies nothing of the task — a replay that sends task_end before the
+    /// steps shows them all, read live; Codex review at 2b46101: an ended goal never changes the island again.
+    static func liveDetailsTests() {
+        typealias T = SurfaceTests
+        do {    // task_end before the steps in a replay: opening the record shows all its steps
+            let (r, _, services, g) = rig()
+            g.start(); g.stop()
+            r.ack("already_ended", run: T.rid, status: "succeeded")
+            guard let id = services.kept.first?.1 else { check(false, "kept"); return }
+            for l in [T.taskLines[0], T.taskLines[1], T.endLines[1], T.taskLines[2],
+                      ["kind": "step", "session_id": T.sid, "run_id": T.rid, "seq": 2, "text": "a", "step_id": "s1", "human": "一"] as [String: Any],
+                      ["kind": "step", "session_id": T.sid, "run_id": T.rid, "seq": 3, "text": "b", "step_id": "s2", "human": "二"] as [String: Any]] {
+                r.m.client.feed(l)
+            }
+            let v = GoalShown.of(.saved(id), states: r.m.states, selected: r.m.selected, pinned: { r.m.pinned($0) }, saved: { services.saved[$0] }, lang: .en)
+            check(v.task?.steps.count == 2, "opened: all its steps, live: \(v.task?.steps.count ?? -1)")
+            check(services.kept.count == 1, "the record written once, at the ending")
+        }
+        do {    // A ends by an ack before its history; B starts and ends; A's history lands: the island and Show Details B's
+            let r = SurfaceTests.Rig(); SurfaceTests.openOK(r.mock)
+            let surface = FakeSurface(), services = FakeServices()
+            func goal() -> GoalRun {
+                GoalRun(goal: "g", folder: nil, record: false, shell: r.m,
+                        effects: .app(lang: .en, services: services, surface: surface, after: { d, f in r.timers.after(d, f) }))
+            }
+            let a = goal(); a.start(); a.stop()
+            r.ack("already_ended", run: T.rid, status: "succeeded")
+            let recA = services.kept.first?.1
+            check(surface.detailsRecord == recA && recA != nil, "A ended: its link")
+            // B, in a session of its own
+            r.mock.replies[SessionClient.Op.open] = ["ok": true, "session_id": "ses_b", "last_seq": 0]
+            r.m.client.newClientId = { "c_b" }
+            let b = goal(); b.start()
+            for l: [String: Any] in [
+                ["kind": "session.message", "session_id": "ses_b", "seq": 1, "msg_id": "ub", "role": "user", "text": "b", "via": "cua", "client_id": "c_b"],
+                ["kind": "session.task", "session_id": "ses_b", "seq": 2, "msg_id": "tb", "run_id": "r_b", "raw": "b", "by": "slash", "reply_to": "ub", "client_id": "c_b"],
+                ["kind": "start", "session_id": "ses_b", "run_id": "r_b", "seq": 1, "raw": "b"],
+                ["kind": "session.task_end", "session_id": "ses_b", "seq": 3, "run_id": "r_b", "status": "succeeded", "summary": "s", "undo": "none"],
+            ] { r.m.client.feed(l) }
+            let recB = services.kept.last?.1
+            check(b.state == .ended(sid: "ses_b", run: "r_b", status: "succeeded") && recB != recA && surface.detailsRecord == recB, "B ended: its link")
+            let calls = surface.calls.count
+            for l in T.taskLines + T.endLines { r.m.client.feed(l) }    // A's history lands late
+            check(surface.detailsRecord == recB && surface.calls.count == calls, "A's late history: nothing on the island; Show Details opens B")
+        }
     }
 }

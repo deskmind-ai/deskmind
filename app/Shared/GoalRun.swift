@@ -372,15 +372,15 @@ struct GoalRunScreen: Equatable {
     }
 }
 
-/// The record a goal leaves in the recent runs: its task as its session has it (ended), or why it failed.
-/// Its identity and outcome come from the lifecycle's ending (session, run, status — or why it failed), never from
-/// whether the task's lines have come; the task's details (summary, steps, changes) from its TaskState once present
-/// (Codex review at a621726: an ack before the history saved a succeeded task as errored, with nothing in it).
+/// The record a goal leaves in the recent runs: its identity and outcome only — session, run, the ending's status (or
+/// why it failed), folder, goal — written once, at its ending. It never copies the task's details (steps, summary,
+/// changes): they are read live from the session by session and run when the record is shown (GoalShown). Three
+/// bugs came of copying them (a621726: an ack before the history; e1f5ebf: task_end before the steps in a replay, a
+/// late write that re-added a deleted record); there is no copy any more.
 struct GoalRecord: Equatable {
     var goal: String
     var folder: String?
     var sessionId: String?
-    var task: TaskState?
     var failed: String?
     /// How the goal ended (its lifecycle's `ended` status; nil when it failed): its outcome, whatever its task says.
     var ended: String? = nil
@@ -392,6 +392,10 @@ struct GoalRecord: Equatable {
     var finished: Bool { ended == "succeeded" }
     /// Errored, by its ending: failed, interrupted, or a failed task.
     var errored: Bool { failed != nil || ended == "interrupted" || ended == "failed" }
+    /// What the recent runs say of it: its ending's words, else why it failed.
+    func endingText(lang: ResolvedLang) -> String {
+        ended.map { ShellText.ending($0, lang: lang) } ?? GoalRunScreen.why(failed ?? "", lang: lang)
+    }
 }
 
 /// The app's side of a goal's effects (the app: RunRecorder and RunHistory; a test: its own).
@@ -400,8 +404,7 @@ struct GoalRunEffects {
     var beginRecording: (_ goal: String, _ started: @escaping () -> Void) -> Void
     /// Stop it; `done` with the movie (nil: none).
     var stopRecording: (_ record: GoalRecord, _ done: @escaping (URL?) -> Void) -> Void
-    /// Write the goal's recent-runs record — at its ending, and once more when its task's details come after it
-    /// (the same record: written over, by the goal).
+    /// Write the goal's recent-runs record — once, at its ending.
     var writeRecord: (GoalRecord) -> Void
     var after: (Double, @escaping () -> Void) -> Void
     /// The goal's state or its session's changed (the app: its island and notifications, IslandFeed.frame(goal) —
@@ -432,8 +435,6 @@ final class GoalRun: ObservableObject {
     private var watch: AnyCancellable?
     /// The newest deadline (a newer one replaces it).
     private var deadline = 0
-    /// Ended, its record waiting for its task's lines (GoalRecord's details).
-    private var awaitingDetails = false
     /// The newest resend of its `stop {client_id}` (a newer one replaces it).
     private var resendTimer = 0
     /// Its session's newest state, as the shell's `states` takes it: the sink runs before `states` is set, so what
@@ -485,8 +486,6 @@ final class GoalRun: ObservableObject {
     /// After a change: done with it (over) — its watch cancelled, it let go.
     private func changed(from before: GoalLifecycle.State) {
         guard GoalLifecycle.done(state), !GoalLifecycle.done(before) else { return }
-        // (ended before its task's lines came: kept watching until they do, or `detailsBound`, or its session goes)
-        if awaitingDetails { return }
         release()
     }
 
@@ -509,17 +508,11 @@ final class GoalRun: ObservableObject {
         case .open:
             // this goal's own session's state, whenever the shell takes a newer one (until it is done with it)
             watch = shell.$states.sink { [weak self] all in
-                guard let self, let sid = self.sessionId else { return }
-                guard let s = all[sid] else {
-                    // (its session deleted while it waits for its task's lines: the record its ending gave stays)
-                    if self.awaitingDetails, self.latest != nil { self.awaitingDetails = false; self.release() }
-                    return
-                }
+                guard let self, let sid = self.sessionId, let s = all[sid] else { return }
                 self.latest = s
                 self.see(s)
-                // (not once it is let go — that change already told: its end frame; the shell's state is older here)
-                if self.watch != nil { self.effects.changed(self) }
-                self.detailsCame()
+                // (never once it is over: an ended goal changes the island no more — Codex review at 2b46101)
+                if self.watch != nil, !GoalLifecycle.over(self.state) { self.effects.changed(self) }
             }
             shell.startTask(goal, scope: folder, clientId: cua, ticket: ticket) { [weak self] e in self?.send(e) }
         case .sendStop(let sid, let run):
@@ -546,17 +539,8 @@ final class GoalRun: ObservableObject {
         case .stopRecording:
             effects.stopRecording(recordOf()) { [weak self] url in self?.movie = url }
         case .writeRecord:
-            let r = recordOf()
-            effects.writeRecord(r)
-            // ended with its task's lines not come yet (a stop's ack before the history): completed when they come
-            if r.ended != nil, r.task?.ended != true {
-                awaitingDetails = true
-                effects.after(Self.detailsBound) { [weak self] in
-                    guard let self, self.awaitingDetails else { return }
-                    self.awaitingDetails = false
-                    self.release()
-                }
-            }
+            // (once, at its ending: nothing is written to the recent runs after it but the movie's path)
+            effects.writeRecord(recordOf())
         }
     }
 
@@ -564,20 +548,7 @@ final class GoalRun: ObservableObject {
         var failed: String? = nil, ended: String? = nil, run: String? = nil
         if case .failed(let why) = state { failed = why }
         if case .ended(_, let r, let status) = state { ended = status; run = r }
-        return GoalRecord(goal: goal, folder: folder, sessionId: sessionId, task: task?.task, failed: failed, ended: ended, runId: run)
-    }
-
-    /// How long an ended goal whose task's lines have not come yet waits for them, to complete its record (then it is
-    /// let go with the record its ending gave).
-    static let detailsBound: Double = 120
-
-    /// Its task's lines came after its ending: the record written again with them, once; then it is let go.
-    private func detailsCame() {
-        // (its task as it ended: the history brings its end too — the ack came after it was stored)
-        guard awaitingDetails, case .ended(_, let run, _) = state, let s = latest, s.task(run)?.ended == true else { return }
-        awaitingDetails = false
-        effects.writeRecord(recordOf())
-        release()
+        return GoalRecord(goal: goal, folder: folder, sessionId: sessionId, failed: failed, ended: ended, runId: run)
     }
 }
 
@@ -637,5 +608,16 @@ final class GoalRuns {
         r.start()
         activeChanged()
         return r
+    }
+}
+
+/// Changes to a kept record after it was written (its movie, saved later): in place, and only while it is there — a
+/// record the user deleted is never added again by a late update.
+enum KeptRecords {
+    @discardableResult
+    static func update<R: Identifiable>(_ records: inout [R], id: R.ID, _ change: (inout R) -> Void) -> Bool {
+        guard let i = records.firstIndex(where: { $0.id == id }) else { return false }
+        change(&records[i])
+        return true
     }
 }

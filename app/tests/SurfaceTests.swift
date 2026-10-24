@@ -268,8 +268,8 @@ enum SurfaceTests {
               "Stop: its run, to its session, nothing selected: \(stops)")
         for l in endLines { r.m.client.feed(l) }
         check(g.state == .ended(sid: sid, run: rid, status: "succeeded"), "ended: \(g.state)")
-        check(r.recordingStops == 1 && r.records.count == 1 && r.records.first?.task?.runId == rid && r.records.first?.sessionId == sid
-              && r.records.first?.task?.status == "succeeded" && r.records.first?.task?.ended == true,
+        check(r.recordingStops == 1 && r.records.count == 1 && r.records.first?.runId == rid && r.records.first?.sessionId == sid
+              && r.records.first?.ended == "succeeded" && r.records.first?.finished == true,
               "the recording stopped and the record written, once: \(r.recordingStops) \(r.records.map(\.sessionId))")
         guard let (s, t) = g.task else { check(false, "the goal's task is there"); return }
         check(t.resultCardState.undoEnabled, "its result card, from the session's state: \(t.resultCardState)")
@@ -385,7 +385,7 @@ enum SurfaceTests {
             ended(r, g, .ended(sid: sid, run: rid, status: "succeeded"), "failing, then already_ended")
             check(g.task?.task.runId == rid && g.task?.task.resultCardState.undoEnabled == true, "its task row, its result card with undo")
             check(GoalRunScreen(g.state, lang: .en).taskRun == rid && GoalRunScreen(g.state, lang: .en).line == nil, "not \"didn't start\"")
-            check(r.records.first?.task?.runId == rid && r.records.first?.failed == nil, "the record: its task, not a failure")
+            check(r.records.first?.runId == rid && r.records.first?.ended == "succeeded" && r.records.first?.failed == nil, "the record: its run, succeeded, not a failure")
         }
         do {    // the same after sent + exited: failing(gone), then already_ended(succeeded)
             let r = Rig(); openOK(r.mock)
@@ -395,8 +395,9 @@ enum SurfaceTests {
             r.ack("already_ended", run: rid, status: "succeeded")
             ended(r, g, .ended(sid: sid, run: rid, status: "succeeded"), "failing(gone), then already_ended")
         }
-        do {    // Codex review at a621726: the ack ends the goal before its history — the record is succeeded from the
-                // start (its ending), and gains its task's details once they come; then the goal is let go
+        do {    // Codex review at a621726 / e1f5ebf: the ack ends the goal before its history — the record is succeeded
+                // from the start (its ending), written once; the goal is let go at its ending; its history landing later
+                // (task_end before the steps, as a replay sends them) writes nothing — the task is read live
             let r = Rig(); openOK(r.mock)
             let runs = GoalRuns()
             let a = UUID()
@@ -407,27 +408,21 @@ enum SurfaceTests {
             let first = r.records.first
             check(first?.finished == true && first?.errored == false && first?.ended == "succeeded" && first?.runId == rid && first?.sessionId == sid,
                   "the record at once: succeeded, its session and run")
-            check(GoalRunScreen(g.state, lang: .en).afterwards && g.watching && runs.run(a) != nil, "the screen ended now; the goal still watches for its task")
-            for l in taskLines + endLines { r.m.client.feed(l) }
-            let rec = r.records.first
-            check(r.records.count == 1 && r.recordWrites == 2 && rec?.task?.runId == rid && rec?.task?.ended == true && rec?.finished == true,
-                  "its history came: the record written over once with its task: \(r.recordWrites)")
-            check(!g.watching && runs.run(a) == nil, "then let go")
-            r.timers.advance(3600)
-            check(r.recordWrites == 2, "not written again")
+            check(first?.endingText(lang: .en) == "Done", "its ending's words")
+            check(!g.watching && runs.run(a) == nil, "let go at its ending")
+            r.m.client.feed(taskLines[0]); r.m.client.feed(taskLines[1])
+            r.m.client.feed(endLines[1])                                     // task_end before the steps (a replay)
+            r.m.client.feed(taskLines[2])
+            r.m.client.feed(["kind": "step", "session_id": sid, "run_id": rid, "seq": 2, "text": "click", "step_id": "s1", "human": "点「整理」"])
+            check(r.recordWrites == 1, "nothing written after the ending: \(r.recordWrites)")
+            check(r.m.states[sid]?.task(rid)?.steps.count == 1, "its steps are the session's, live (1 step)")
         }
-        do {    // the history never comes: the record stays as its ending gave it; let go after detailsBound (120 s)
-            let r = Rig(); openOK(r.mock)
-            let runs = GoalRuns()
-            let a = UUID()
-            guard let g = runs.start(a, make: { r.goal() }) else { check(false, "started"); return }
-            g.stop()
-            r.ack("already_ended", run: rid, status: "succeeded")
-            r.timers.advance(GoalRun.detailsBound - 1)
-            check(g.watching && runs.run(a) != nil, "waiting for its history until the bound")
-            r.timers.advance(1)
-            check(!g.watching && runs.run(a) == nil && r.recordWrites == 1, "the bound: let go, the record as its ending gave it")
-            check(r.records.first?.finished == true && r.records.first?.task == nil && r.records.first?.ended == "succeeded", "succeeded, by its ending")
+        do {    // the record kept-records update: a late change to a deleted record never re-adds it
+            struct Rec: Identifiable { var id: Int; var movie: String? }
+            var list = [Rec(id: 1), Rec(id: 2)]
+            check(KeptRecords.update(&list, id: 2) { $0.movie = "/m.mov" } && list[1].movie == "/m.mov", "present: updated in place")
+            list.removeAll { $0.id == 2 }                                   // the user deleted it
+            check(!KeptRecords.update(&list, id: 2) { $0.movie = "/late.mov" } && list.count == 1, "deleted: nothing, not re-added")
         }
         do {    // its cua refused by the session after it was sent: failed at once, in the session's words; no bubble left
             let r = Rig(); openOK(r.mock)
@@ -546,7 +541,7 @@ enum SurfaceTests {
             for l in taskLines { r.m.client.feed(l) }
             r.m.client.feed(exitLine)
             ended(r, g, .ended(sid: sid, run: rid, status: "interrupted"), "the session went mid-task")
-            check(r.records.first?.task?.ended == true, "interrupted: the record has the task as it ended")
+            check(r.records.first?.ended == "interrupted" && r.records.first?.errored == true, "interrupted: the record says so")
             check(g.task.map { !$0.task.resultCardState.undoEnabled } ?? false, "interrupted: no undo")
         }
         do {    // sent: a task of the user's own in the goal's session is not the goal's

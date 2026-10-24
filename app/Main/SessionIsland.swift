@@ -7,6 +7,7 @@ import AppKit
 /// RunOverlay, as the island a goal's frames are applied to. (Called on the main queue: GoalRun runs there.)
 final class RunOverlaySurface: IslandSurface {
     static let shared = RunOverlaySurface()
+    var owner: ObjectIdentifier?
 
     func requestNotifications() { MainActor.assumeIsolated { RunOverlay.requestNotificationPermission() } }
     func show(title: String, line: String, onStop: @escaping () -> Void) {
@@ -45,22 +46,16 @@ final class AppGoalServices: GoalRunServices {
     func setMovie(_ path: String, for id: UUID) { MainActor.assumeIsolated { RunHistory.shared.setMovie(path, for: id) } }
     func keep(_ g: GoalRecord, id: UUID, lang: ResolvedLang) {
         MainActor.assumeIsolated {
-            // (its outcome from the goal's lifecycle, as the island and the screen: GoalOutcome)
+            // identity and outcome only, from the goal's ending (GoalOutcome); never a copy of its task's details —
+            // the saved run reads its session by session and run (GoalShown)
             let o = GoalOutcome.record(g, lang: lang)
-            let t = o.task
             var r = RunRecord(
                 id: id, date: Date(), goal: g.goal, folder: g.folder, apps: [],
-                finished: o.finished, errored: o.errored,
-                summary: o.summary,
-                answer: t?.answer ?? "",
-                steps: (t?.steps ?? []).map { RunRecord.Step(n: $0.n, human: $0.displayText, app: "", shot: $0.shot ?? "", describe: $0.text, detail: $0.why ?? "", ok: $0.status == .ok) },
-                created: t?.changes.created ?? [], modified: t?.changes.modified ?? [], deleted: t?.changes.deleted ?? [],
-                // (its session and run from the goal's ending, not from whether the task's lines have come: the saved
-                // run reads its session by id and shows the task once its history lands)
+                finished: o.finished, errored: o.errored, summary: o.summary,
+                answer: "", steps: [], created: [], modified: [], deleted: [],
                 sessionId: g.runId == nil ? nil : g.sessionId, runId: g.runId)
             r.ended = g.ended
-            // (written over in its place when its task's details come after its ending: RunHistory.put)
-            RunHistory.shared.put(r)
+            RunHistory.shared.add(r)
         }
     }
 }

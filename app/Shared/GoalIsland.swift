@@ -11,6 +11,9 @@ import Foundation
 
 /// The island and notifications (the app: RunOverlay; a test: its own).
 protocol IslandSurface: AnyObject {
+    /// The goal whose frames it takes: the active one, else the one that ended last (Codex review at 2b46101: an
+    /// ended goal's late frame set the link back to it while the island showed the next one).
+    var owner: ObjectIdentifier? { get set }
     func requestNotifications()
     /// Shown for a new task: the last task's details link goes.
     func show(title: String, line: String, onStop: @escaping () -> Void)
@@ -94,8 +97,9 @@ extension GoalRunEffects {
             changed: { g in
                 // a goal that starts: the island's link to an earlier goal's record goes (Show Details never opens it
                 // over this one)
-                if !kept.started, g.state != .idle { kept.started = true; surface.detailsRecord = nil }
-                guard let f = IslandFeed.frame(g, record: kept.record, lang: lang) else { return }
+                // — and the island is this goal's from now on: an earlier goal's frames no longer reach it
+                if !kept.started, g.state != .idle { kept.started = true; surface.detailsRecord = nil; surface.owner = ObjectIdentifier(g) }
+                guard surface.owner == ObjectIdentifier(g), let f = IslandFeed.frame(g, record: kept.record, lang: lang) else { return }
                 island.apply(f, title: g.goal, lang: lang, onStop: { [weak g] in g?.stop() })
             })
     }
@@ -127,15 +131,9 @@ enum GoalOutcome {
         return t
     }
 
-    /// The record's summary and outcome: an ended goal's from its status (its task's own words when it says it
-    /// ended), a failed one's from why.
-    static func record(_ r: GoalRecord, lang: ResolvedLang) -> (summary: String, finished: Bool, errored: Bool, task: TaskState?) {
-        let t = r.task.map { task($0, endedAs: r.ended) }
-        guard let status = r.ended else {
-            return (t.map { ShellText.task($0, lang: lang) } ?? GoalRunScreen.why(r.failed ?? "", lang: lang), false, true, t)
-        }
-        return (t.map { ShellText.task($0, lang: lang) } ?? ShellText.ending(status, lang: lang),
-                status == "succeeded", status == "interrupted" || status == "failed", t)
+    /// The record's summary and outcome, from the goal's ending alone (GoalRecord: no copy of its task).
+    static func record(_ r: GoalRecord, lang: ResolvedLang) -> (summary: String, finished: Bool, errored: Bool) {
+        (r.endingText(lang: lang), r.finished, r.errored)
     }
 }
 
@@ -172,7 +170,7 @@ struct GoalShown {
     var movie: URL?
     /// Stop, Back, the line, the ending: from the goal's lifecycle (a saved one: ended).
     var screen: GoalRunScreen
-    /// The session task is shown; false: a saved run whose session or task is gone — its record's own content.
+    /// The session screen is shown (a saved run whose session or task is gone too: its outcome and the line).
     var sessionShown: Bool
 
     static func of(_ route: GoalScreenRoute, states: [String: SessionState], selected: String?,
@@ -191,8 +189,15 @@ struct GoalShown {
             let r = saved(recordId)
             let id = r?.sessionId ?? ""
             let t = r?.sessionId.flatMap { PastRun.task(sessionId: $0, runId: r?.runId, endedAs: r?.ended, in: states) }
+            var screen = GoalRunScreen(.ended(sid: id, run: r?.runId ?? "", status: r?.ended ?? ""), lang: lang)
+            // its session or task gone: its outcome, and plainly that the details are no longer there (the record
+            // keeps no copy of them)
+            if t == nil {
+                screen.line = (r?.ended.map { ShellText.ending($0, lang: lang) } ?? "") + "\n"
+                    + L("The details of this run are no longer available.", lang: lang)
+            }
             v = GoalShown(session: t?.session, task: t?.task, pinned: nil, folder: r?.folder, movie: r?.movie.map { URL(fileURLWithPath: $0) },
-                          screen: GoalRunScreen(.ended(sid: id, run: r?.runId ?? "", status: r?.ended ?? ""), lang: lang), sessionShown: t != nil)
+                          screen: screen, sessionShown: true)
             sid = r?.sessionId
         case .busy:
             var s = GoalRunScreen(.failed(GoalLifecycle.Why.busy), lang: lang)
