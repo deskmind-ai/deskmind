@@ -110,10 +110,13 @@ enum SurfaceTests {
         row(.stopping(sid: "s", misses: 5), .stopUnsent, .stopping(sid: "s", misses: 6), [.resend(seconds: 30)], "backoff capped at 30 s")
         row(.stopping(sid: "s", misses: 3), .stopSent, .stopping(sid: "s"), [], "the helper took it: not unanswered any more")
         // failing: the session's answer ends it as failed
-        for e: L.Event in [.stopAck(result: "none", run: nil, status: nil), .stopAck(result: "stopped", run: "r", status: "stopped"),
-                           .stopAck(result: "already_ended", run: "r", status: "failed"), .sessionRefused(code: "cancelled", text: "")] {
-            row(.failing(L.Why.notStarted, sid: "s"), e, .failed(L.Why.notStarted), end + [.retire(sid: "s")], "failing, answered: failed")
+        for e: L.Event in [.stopAck(result: "none", run: nil, status: nil), .sessionRefused(code: "cancelled", text: "")] {
+            row(.failing(L.Why.notStarted, sid: "s"), e, .failed(L.Why.notStarted), end + [.retire(sid: "s")], "failing, none / refused: failed")
         }
+        row(.failing(L.Why.notStarted, sid: "s"), .stopAck(result: "already_ended", run: "r", status: "succeeded"),
+            .ended(sid: "s", run: "r", status: "succeeded"), end, "failing, already_ended: it ran after all — ended as it ended")
+        row(.failing(L.Why.gone, sid: "s"), .stopAck(result: "stopped", run: "r", status: "stopped"),
+            .ended(sid: "s", run: "r", status: "stopped"), end, "failing, stopped: ended (stopped)")
         for e: L.Event in [.deadline, .exited, .stop, .taskStarted(run: "r")] {
             row(.failing(L.Why.notStarted, sid: "s"), e, .failing(L.Why.notStarted, sid: "s"), [], "failing: no local ending (\(e))")
         }
@@ -350,8 +353,8 @@ enum SurfaceTests {
             check(g.state == .failing(L.Why.noAnswer, sid: sid), "its task came: the stop covers it, still waiting for the answer")
             r.m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 3, "run_id": rid, "status": "stopped", "summary": "", "undo": "none"])
             r.ack("stopped", run: rid, status: "stopped")
-            ended(r, g, .failed(L.Why.noAnswer), "the send after the bound")
-            check(!r.m.client.state(sid).shownOutbox.contains { $0.id == g.cua }, "its cua retired: not shown in the chat")
+            ended(r, g, .ended(sid: sid, run: rid, status: "stopped"), "the send after the bound: its task ran, stopped")
+            check(g.task?.task.runId == rid, "its task row")
         }
         do {    // sent, no task in 60 s: stop {client_id}; failed only once the session answers
             let r = Rig(); openOK(r.mock)
@@ -363,6 +366,27 @@ enum SurfaceTests {
             waiting(r, g, "no task in 60 s")
             r.ack("none")
             ended(r, g, .failed(L.Why.notStarted), "no task in 60 s")
+        }
+        do {    // delta review at 3e5e33f: the stream lagged over 60 s while its task ran — failing, then the session answers
+                // already_ended(succeeded): ended as it ended, its task row, result card and undo from the session
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.timers.advance(60)
+            check(g.state == .failing(L.Why.notStarted, sid: sid), "60 s, no task seen: failing")
+            for l in taskLines + endLines { r.m.client.feed(l) }
+            r.ack("already_ended", run: rid, status: "succeeded")
+            ended(r, g, .ended(sid: sid, run: rid, status: "succeeded"), "failing, then already_ended")
+            check(g.task?.task.runId == rid && g.task?.task.resultCardState.undoEnabled == true, "its task row, its result card with undo")
+            check(GoalRunScreen(g.state, lang: .en).taskRun == rid && GoalRunScreen(g.state, lang: .en).line == nil, "not \"didn't start\"")
+            check(r.records.first?.task?.runId == rid && r.records.first?.failed == nil, "the record: its task, not a failure")
+        }
+        do {    // the same after sent + exited: failing(gone), then already_ended(succeeded)
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.m.client.feed(exitLine)
+            check(g.state == .failing(L.Why.gone, sid: sid), "exit before its task: failing")
+            r.ack("already_ended", run: rid, status: "succeeded")
+            ended(r, g, .ended(sid: sid, run: rid, status: "succeeded"), "failing(gone), then already_ended")
         }
         do {    // its cua refused by the session after it was sent: failed at once, in the session's words; no bubble left
             let r = Rig(); openOK(r.mock)
@@ -472,7 +496,8 @@ enum SurfaceTests {
             r.m.client.feed(["kind": "session.start", "session_id": sid, "resumed": true, "last_seq": 0])
             for l in taskLines { r.m.client.feed(l) }
             r.ack("stopped", run: rid, status: "stopped")
-            ended(r, g, .failed(L.Why.gone), "a stale exit")
+            ended(r, g, .ended(sid: sid, run: rid, status: "stopped"), "a stale exit, its task stopped")
+            check(g.task?.task.runId == rid, "its task row")
         }
         do {    // the session gone mid-task: interrupted, no undo
             let r = Rig(); openOK(r.mock)

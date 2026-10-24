@@ -52,7 +52,8 @@
 // | stopping(sid, run)          | taskEnded(status)              | ended(sid, run, status)     | end                         |
 // | stopping                    | ack stopped / already_ended    | ended(sid, its run, status) | end                         |
 // | stopping                    | ack none / own cua refused     | failed(stopped before start)| end; retire                 |
-// | failing(why, sid)           | ack (any) / own cua refused    | failed(why)                 | end; retire                 |
+// | failing(why, sid)           | ack stopped / already_ended    | ended(sid, its run, status) | end (it ran after all)      |
+// | failing(why, sid)           | ack none / own cua refused     | failed(why)                 | end; retire                 |
 // | failing(why, sid)           | taskStarted(run)               | failing                     | — (stop{cid} covers it)     |
 // | stopping / failing          | resend (every 15 s)            | the same                    | stop{cid}; resend           |
 // | stopping / failing          | stopUnsent (helper no answer)  | misses + 1                  | retry: 2, 4, 8, 16, 30 s    |
@@ -221,8 +222,13 @@ enum GoalLifecycle {
         case (.stopping(let sid, _, _), .refused), (.stopping(let sid, _, _), .sessionRefused):
             return (.failed(Why.stoppedBeforeStart), end + [.retire(sid: sid)])
 
-        // failing: the session's answer (whatever it is) ends it as failed
-        case (.failing(let why, let sid, _), .stopAck), (.failing(let why, let sid, _), .refused), (.failing(let why, let sid, _), .sessionRefused):
+        // failing: an answer that names its task — it did run (the stream lagged, or the exit was stale) — ends it as
+        // that task ended, as stopping does (its row, result card and undo from the session; delta review at
+        // 3e5e33f); `none` or its own cua refused: failed(why)
+        case (.failing(let why, let sid, _), .stopAck(let result, let run, let status)):
+            if result != "none", let run { return (.ended(sid: sid, run: run, status: status ?? "stopped"), end) }
+            return (.failed(why), end + [.retire(sid: sid)])
+        case (.failing(let why, let sid, _), .refused), (.failing(let why, let sid, _), .sessionRefused):
             return (.failed(why), end + [.retire(sid: sid)])
 
         // stopping / failing: sent again until answered; a helper that does not take it, with backoff
