@@ -495,6 +495,9 @@ final class SessionClient {
     var now: () -> Date = Date.init
     /// Called after a line changed a session's state (on the thread that fed it).
     var onChange: ((String, SessionState) -> Void)?
+    /// A session's refusal of a respond / answer that carries a req_id (harness#71), each as it comes (on the thread
+    /// that fed it; never kept here): the window matches it to its own line or drops it.
+    var onAnswerRefusal: ((String, SessionErrorEvent) -> Void)?
 
     init(transport: SessionTransport = HelperSessionTransport(), modelsSync: ModelsOffSync? = nil) {
         self.transport = transport
@@ -1344,6 +1347,9 @@ final class SessionClient {
         if trigger { reconcileSession(id) }
         // (no whole-state comparison per line: in a long session that cost more than the line itself)
         if applied == .applied || applied == .held { onChange?(id, after) }
+        if case .sessionError(let e) = line.event, line.seq == nil, e.control == "respond" || e.control == "answer", e.reqId != nil {
+            onAnswerRefusal?(id, e)
+        }
         return applied
     }
 

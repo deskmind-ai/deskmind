@@ -202,6 +202,16 @@ struct CardStore: Equatable {
         issued[reqId] = Issued(sessionId: sessionId, key: key, runId: a.runId, isResult: a.askId == nil)
         if a.askId == nil { hints[a.runId] = nil }
     }
+    /// A refusal of one of our own lines (its req_id is ours: ShellModel lets no other through), taken as it comes and
+    /// not kept: its card's hint; a retryable one lets the answer go, so the user can try again. Any other refusal —
+    /// another client's, one without a req_id — changes nothing.
+    mutating func refused(_ e: SessionErrorEvent, sessionId: String, in s: SessionState) {
+        guard let r = e.reqId, let mine = issued[r], mine.sessionId == sessionId else { return }
+        issued[r] = nil
+        if !Self.closingRefusals.contains(e.code) { sent[mine.key] = nil }
+        if mine.isResult, s.task(mine.runId)?.resultCardState.isOpen == true { hints[mine.runId] = e.code }
+    }
+
     /// The write of `reqId` did not go: nothing of it is awaited.
     mutating func unissue(_ reqId: String) { issued[reqId] = nil }
 
@@ -272,14 +282,6 @@ struct CardStore: Equatable {
         if let s {
             // the session took one of our lines (session.task_respond with its req_id): nothing more is awaited of it
             for t in s.tasks { if let r = t.respond?.reqId, issued[r]?.sessionId == sessionId { issued[r] = nil } }
-            // a refusal of one of our own lines (its req_id is ours): its card's hint; a retryable one lets the answer go,
-            // so the user can try again. Any other refusal (another client's, one without a req_id) changes nothing.
-            for e in s.answerRefusals {
-                guard let r = e.reqId, let mine = issued[r], mine.sessionId == sessionId else { continue }
-                issued[r] = nil
-                if !Self.closingRefusals.contains(e.code) { sent[mine.key] = nil }
-                if mine.isResult, s.task(mine.runId)?.resultCardState.isOpen == true { hints[mine.runId] = e.code }
-            }
             // a hint lasts until the history speaks: the card no longer open
             for (run, _) in hints where s.task(run)?.resultCardState.isOpen != true { hints[run] = nil }
         }

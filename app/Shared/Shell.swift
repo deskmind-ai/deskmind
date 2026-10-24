@@ -481,6 +481,8 @@ final class ShellModel: ObservableObject {
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
+        // each refusal of an answer as it comes: one of ours goes to the UI queue to be matched; any other is dropped here
+        client.onAnswerRefusal = { [weak self] id, e in self?.answerRefused(id, e) }
         // the settings as stored now, read by the client whenever it opens or converges a session (never a copy)
         client.settingsSource = { [weak self] in
             guard let self else { return (nil, nil) }
@@ -628,7 +630,7 @@ final class ShellModel: ObservableObject {
                 guard let self else { return }
                 var c = self.cards
                 c.settle(id, self.client.state(id))
-                if c != self.cards { self.cards = c }
+                if c != self.cards { self.cards = c; self.syncOwnReqs() }
             }
         }
         // the open session's problems are seen as they come (once per new stored line or process end: never a loop of
@@ -1065,6 +1067,24 @@ final class ShellModel: ObservableObject {
         write(a, key: key, in: id)
     }
 
+    /// The req_ids CardStore awaits, mirrored for the feeding thread (which may not read CardStore): a refusal whose
+    /// req_id is not one of them is dropped as it comes, and none is ever kept in a buffer that could evict ours.
+    private let reqLock = NSLock()
+    private var ownReqs: Set<String> = []
+    private func syncOwnReqs() { let now = Set(cards.issued.keys); reqLock.lock(); ownReqs = now; reqLock.unlock() }
+
+    /// A session's refusal of a respond / answer (any thread): ours goes to the UI queue and is matched there, once.
+    private func answerRefused(_ id: String, _ e: SessionErrorEvent) {
+        guard let r = e.reqId else { return }
+        reqLock.lock(); let mine = ownReqs.contains(r); reqLock.unlock()
+        guard mine else { return }
+        onUIQueue { [weak self] in
+            guard let self else { return }
+            self.cards.refused(e, sessionId: id, in: self.client.state(id))
+            self.syncOwnReqs()
+        }
+    }
+
     /// A fresh id for each answer line written (tests set their own).
     var newReqId: () -> String = { "rq_" + UUID().uuidString.lowercased() }
 
@@ -1073,10 +1093,11 @@ final class ShellModel: ObservableObject {
     private func write(_ a: CardAnswer, key: String, in id: String) {
         let req = newReqId()
         cards.issue(req, sessionId: id, key: key, answer: a)
+        syncOwnReqs()
         work { [weak self] in
             guard let self else { return }
             let r = self.client.answer(a, in: id, reqId: req)
-            if r != .sent { self.deliver { self.cards.notSent(key, a); self.cards.unissue(req) } }
+            if r != .sent { self.deliver { self.cards.notSent(key, a); self.cards.unissue(req); self.syncOwnReqs() } }
         }
     }
 

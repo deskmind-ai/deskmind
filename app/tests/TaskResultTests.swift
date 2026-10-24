@@ -397,6 +397,24 @@ enum TaskResultTests {
         check(o.m.cards.hint(rid) == nil && o.state.task(rid)?.resultCardState.isOpen == true, "an old harness's refusal: ignored")
         o.feed(["kind": "session.task_closed", "session_id": sid, "seq": 4, "run_id": rid, "why": "linger"])
         check(o.state.task(rid)?.resultCardState == .closed("linger") && o.m.cards.sent.isEmpty, "the history closes it")
+        // (#114 review at b307da0) our busy, then 70 foreign refusals, all before the window's flush: ours is matched as it
+        // comes — never evicted from a buffer — the retry hint shows and the answer is let go
+        let mr = CardStoreTests.MainRig()
+        mr.m.client.feed(["kind": "task_done", "session_id": sid, "run_id": rid, "seq": 2, "status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
+                          "result_card": ["kind": "result", "text": "t", "blocking": false, "free_text": false,
+                                          "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
+        mr.m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 3, "run_id": rid, "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000])
+        mr.pump()
+        let mu = CardModel(resultCard: mr.m.states[sid]!.task(rid)!.resultCard!, runId: rid).buttons.first { $0.role == .undo }!
+        mr.m.click(mu)
+        let mreq = mr.wire.lines.last?.line["req_id"] as? String ?? ""
+        mr.m.client.feed(refusal("busy", run: rid, req: mreq))
+        for k in 0..<70 { mr.m.client.feed(refusal("no_task", run: "r_other", req: "rq_foreign_\(k)")) }
+        mr.pump()
+        check(mr.m.cards.hint(rid) == "busy" && mr.m.cards.sent.isEmpty && mr.m.cards.issued.isEmpty,
+              "our busy before 70 foreign refusals, one flush: the retry hint, the answer let go (\(String(describing: mr.m.cards.hint(rid))), sent \(mr.m.cards.sent.count))")
+        mr.m.click(mu)
+        check(mr.wire.count("respond") == 2, "and the retry goes")
         // our answer taken (task_respond echoing the req_id): nothing more awaited
         let t = CardStoreTests.Rig()
         resultCard(t, run: rid, seq: 2, endSeq: 3)

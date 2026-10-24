@@ -361,9 +361,7 @@ struct SessionState: Equatable {
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
-    /// Refusals of a respond / answer that carried a req_id (harness#71), as they came (the newest 64): CardStore takes
-    /// the ones whose req_id is its own; any other (another client's, an old harness's without one) changes nothing.
-    var answerRefusals: [SessionErrorEvent] = []
+
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
     var lastRefusal: SessionErrorEvent? = nil
     /// The session's settings as it stored them last (session.config): its model configuration (nil: no model) and
@@ -712,11 +710,6 @@ enum SessionReducer {
                 place(&s, .error(seq), seq: seq)
             } else {
                 s.lastRefusal = e
-                // a refusal of a respond or an answer that names its req_id: kept for CardStore to match (never applied here)
-                if e.control == "respond" || e.control == "answer", e.reqId != nil {
-                    s.answerRefusals.append(e)
-                    if s.answerRefusals.count > 64 { s.answerRefusals.removeFirst(s.answerRefusals.count - 64) }
-                }
                 // the session refused 「现在回答」 (no run named on the refusal: the running task's expired card)
                 if e.control == "reask", let i = s.tasks.lastIndex(where: { $0.running }), let c = s.tasks[i].expiredCard {
                     s.tasks[i].movedOn.insert(c.askId)
