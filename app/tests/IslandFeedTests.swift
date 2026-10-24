@@ -16,6 +16,7 @@ enum IslandFeedTests {
         DecisionTests.group("island.wiringTests"); wiringTests()
         DecisionTests.group("island.shownTests"); shownTests()
         DecisionTests.group("island.savedMovieTests"); savedMovieTests()
+        DecisionTests.group("island.ackBeforeHistoryTests"); ackBeforeHistoryTests()
     }
 
     static let action = #""card":{"kind":"action","text":"要点「发送」吗？","options":[{"kind":"approve","text":"可以"},{"kind":"cancel","text":"先别做了"}],"free_text":false,"blocking":true}"#
@@ -99,7 +100,7 @@ enum IslandFeedTests {
         func finishRecording(_ path: String?) { let d = pendingStop; pendingStop = nil; d?(path.map { URL(fileURLWithPath: $0) }) }
         func keep(_ r: GoalRecord, id: UUID, lang: ResolvedLang) {
             kept.append((r, id))
-            saved[id] = SavedRun(sessionId: r.task == nil ? nil : r.sessionId, runId: r.task?.runId, ended: r.ended, folder: r.folder, movie: nil)
+            saved[id] = SavedRun(sessionId: r.runId == nil ? nil : r.sessionId, runId: r.runId, ended: r.ended, folder: r.folder, movie: nil)
         }
         func setMovie(_ path: String, for id: UUID) { saved[id]?.movie = path }
     }
@@ -281,5 +282,27 @@ enum IslandFeedTests {
         services.finishRecording("/tmp/rec/goal.mov")
         check(shown().movie == URL(fileURLWithPath: "/tmp/rec/goal.mov"), "the recording saved: shown, without reopening")
         check(g.movie == URL(fileURLWithPath: "/tmp/rec/goal.mov"), "(and the goal's own)")
+    }
+
+    /// Codex review at c03c9e5: a stop's ack ended the goal before the history brought its task; the record then had
+    /// no session or run, no details link, and the saved run never showed the result card. Both come from the goal's
+    /// ending now.
+    static func ackBeforeHistoryTests() {
+        typealias T = SurfaceTests
+        let (r, surface, services, g) = rig()
+        g.start(); g.stop()
+        r.ack("stopped", run: T.rid, status: "stopped")      // before any session.task
+        check(g.state == .ended(sid: T.sid, run: T.rid, status: "stopped") && g.task == nil, "ended by the ack, no task yet: \(g.state)")
+        guard let (rec, id) = services.kept.first else { check(false, "the record kept"); return }
+        check(rec.sessionId == T.sid && rec.runId == T.rid, "the record: its session and run from the start")
+        check(services.saved[id]?.sessionId == T.sid && services.saved[id]?.runId == T.rid, "kept with its session and run")
+        check(surface.detailsRecord == id, "the details link set: \(String(describing: surface.detailsRecord))")
+        func shown() -> GoalShown {
+            GoalShown.of(.saved(id), states: r.m.states, selected: r.m.selected, pinned: { r.m.pinned($0) }, saved: { services.saved[$0] }, lang: .en)
+        }
+        check(shown().task == nil, "opened now: no task yet")
+        for l in T.taskLines + T.endLines { r.m.client.feed(l) }   // the history lands
+        let v = shown()
+        check(v.sessionShown && v.task?.runId == T.rid && v.task?.resultCard != nil, "the history landed: its task with its result card")
     }
 }

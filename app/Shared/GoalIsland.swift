@@ -87,7 +87,8 @@ extension GoalRunEffects {
             writeRecord: { g in
                 services.keep(g, id: id, lang: lang)
                 // the island's Show Details opens this task's GoalRunView (its record keeps the session and the run)
-                if g.task != nil { kept.record = id }
+                // (from the goal's ending — its run — never from whether its task's lines have come)
+                if g.runId != nil { kept.record = id }
             },
             after: after,
             changed: { g in

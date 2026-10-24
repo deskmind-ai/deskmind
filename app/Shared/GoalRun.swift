@@ -381,6 +381,9 @@ struct GoalRecord: Equatable {
     var failed: String?
     /// How the goal ended (its lifecycle's `ended` status; nil when it failed): its outcome, whatever its task says.
     var ended: String? = nil
+    /// The run it ended with (its lifecycle's `ended`): the record's session task — set whether or not the task's
+    /// lines have come yet (a stop's ack may end it before the history does; Codex review at c03c9e5).
+    var runId: String? = nil
 }
 
 /// The app's side of a goal's effects (the app: RunRecorder and RunHistory; a test: its own).
@@ -525,10 +528,10 @@ final class GoalRun: ObservableObject {
 
     private func recordOf() -> GoalRecord {
         var failed: String? = nil
-        var ended: String? = nil
+        var ended: String? = nil, run: String? = nil
         if case .failed(let why) = state { failed = why }
-        if case .ended(_, _, let status) = state { ended = status }
-        return GoalRecord(goal: goal, folder: folder, sessionId: sessionId, task: task?.task, failed: failed, ended: ended)
+        if case .ended(_, let r, let status) = state { ended = status; run = r }
+        return GoalRecord(goal: goal, folder: folder, sessionId: sessionId, task: task?.task, failed: failed, ended: ended, runId: run)
     }
 }
 
