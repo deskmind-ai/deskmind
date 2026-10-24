@@ -188,7 +188,12 @@ struct GoalRunView: View {
                 run.show(record)
             }
             else if let record { run.show(record) }
+            if sessionRun { MainWindow.setClosable(screen.windowClosable) }
         }
+        // the window is only minimised while the goal is not over (its cards are answered here), as RunModel's runs
+        .onChange(of: screen.windowClosable) { _, on in if sessionRun { MainWindow.setClosable(on) } }
+        // 1–9, Esc / Tab on the pinned card: the chat's own key monitor and wiring (ShellModel.cardKeyHandlers)
+        .background(CardKeyMonitor(shell.cardKeyHandlers))
         .sheet(item: $confirming) { r in
             ConfirmSheet(request: r, onStart: { record in
                 confirming = nil
@@ -268,6 +273,7 @@ struct GoalRunView: View {
             shell.start()
             // the goal already started for this request (this view came back), else a new one — none while another
             // goal is not over (GoalRuns: no second session then)
+            GoalRequests.byId[r.id] = r
             goalBox.run = GoalRuns.app.start(r.id) {
                 GoalRun(goal: r.goal, folder: r.folder, record: r.record, shell: shell, effects: .app(lang: lang, services: AppGoalServices.shared, surface: RunOverlaySurface.shared,
                                                                                          after: { seconds, f in DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: f) }))
@@ -351,6 +357,11 @@ final class GoalRunBox: ObservableObject {
 extension GoalRuns {
     /// The app's goals (GoalRunView's), kept for as long as the app runs.
     static let app = GoalRuns()
+}
+
+/// The requests of the app's goals, by id: a window that opens again goes to the goal not over (GoalRuns.reopenRoute).
+enum GoalRequests {
+    @MainActor static var byId: [UUID: GoalRequest] = [:]
 }
 
 /// The apps a run uses (icon and name) and its folder, or that it has none.

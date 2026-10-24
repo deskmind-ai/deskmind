@@ -31,6 +31,8 @@ enum SurfaceTests {
         DecisionTests.group("surface.goalSessionTests"); goalSessionTests()
         DecisionTests.group("surface.goalFailureTests"); goalFailureTests()
         DecisionTests.group("surface.goalScreenTests"); goalScreenTests()
+        DecisionTests.group("surface.goalReopenTests"); goalReopenTests()
+        DecisionTests.group("surface.goalCardKeysTests"); goalCardKeysTests()
     }
 
     typealias L = GoalLifecycle
@@ -49,7 +51,7 @@ enum SurfaceTests {
               "the opening waits longer than the open and a send that reopens: \(L.openingBound)")
         let open: [L.Effect] = [.deadline(seconds: bound), .open]
         /// failed with its cua perhaps on its way to "s": stopped, retired, guarded 60 s
-        let guarded: [L.Effect] = end + [.sendStop(sid: "s", run: nil), .retire(sid: "s"), .deadline(seconds: 60)]
+        let guarded: [L.Effect] = end + [.retire(sid: "s"), .deadline(seconds: 60)]
         row(.idle, .start(record: true), .recordingStart, [.beginRecording], "recorded: the recording first")
         row(.idle, .start(record: false), .opening(sid: nil), open, "not recorded: open at once, its bound")
         row(.recordingStart, .recordingStarted, .opening(sid: nil), open, "the recording started (or could not): open")
@@ -69,7 +71,7 @@ enum SurfaceTests {
         row(.opening(sid: nil), .stop, .opening(sid: nil), [], "Stop while opening: hidden, nothing")
         row(.recordingStart, .stop, .recordingStart, [], "Stop while recording starts: hidden, nothing")
         row(.sent(sid: "s", stopAsked: false), .taskStarted(run: "r"), .running(sid: "s", run: "r"), [], "its task")
-        row(.sent(sid: "s", stopAsked: false), .stop, .sent(sid: "s", stopAsked: true), [.sendStop(sid: "s", run: nil), .deadline(seconds: 15)],
+        row(.sent(sid: "s", stopAsked: false), .stop, .sent(sid: "s", stopAsked: true), [.retire(sid: "s"), .deadline(seconds: 15)],
             "Stop before the task: stop to its session, 15 s")
         row(.sent(sid: "s", stopAsked: true), .stop, .sent(sid: "s", stopAsked: true), [], "Stop again: nothing more")
         row(.sent(sid: "s", stopAsked: true), .taskStarted(run: "r"), .running(sid: "s", run: "r"), [.sendStop(sid: "s", run: "r")],
@@ -140,7 +142,8 @@ enum SurfaceTests {
             client.newClientId = { "c_1" }
             let held = held
             m = ShellModel(client: client, defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" }, lang: { .zhHans },
-                           cloudOn: { cloudOn }, work: { f in if holdWork { held.work.append(f) } else { f() } },
+                           cloudOn: { cloudOn }, takeBackAfter: timers.after, now: { [timers] in timers.now },
+                           work: { f in if holdWork { held.work.append(f) } else { f() } },
                            deliver: { f in if holdDeliver { held.deliver.append(f) } else { f() } })
         }
         /// The held jobs run, in order (and those they queue).
@@ -162,6 +165,8 @@ enum SurfaceTests {
         var lines: [[String: Any]] { mock.requests.compactMap { $0["line"] as? [String: Any] } }
         func sent(_ type: String) -> [[String: Any]] { lines.filter { $0["type"] as? String == type } }
         var opens: Int { mock.requests.filter { $0["op"] as? String == SessionClient.Op.open }.count }
+        /// Stops sent with no run: a goal never sends one (Codex review at 84d72f3).
+        var runlessStops: Int { sent("stop").filter { $0["run_id"] == nil }.count }
     }
 
     static let sid = "ses_goal", rid = "r_goal"
@@ -242,6 +247,7 @@ enum SurfaceTests {
             if case .failed(let why, _) = want { final = .failed(why) }
             check(r.records.count == 1 && r.recordingStops == stops && g.state == final, "\(what): nothing more after: \(g.state)")
             check(!g.watching, "\(what): let go of its session")
+            check(r.runlessStops == 0, "\(what): no run-less stop")
         }
         let bound = L.openingBound
         do {    // the open fails (no helper)
@@ -285,9 +291,7 @@ enum SurfaceTests {
             r.drain()
             r.mock.onRequest = nil
             check(g.state == .failed(L.Why.noAnswer, guarding: sid), "the bound ran out while the send went: \(g.state)")
-            let sent = r.linesSent
-            let cua = sent.firstIndex { $0.line["type"] as? String == "cua" }, stop = sent.lastIndex { $0.line["type"] as? String == "stop" }
-            check(cua != nil && stop != nil && stop! > cua! && sent[stop!].sid == sid, "the cua that went is followed by a stop to its session: \(sent.map { $0.line["type"] ?? "" })")
+            check(r.runlessStops == 0, "no run-less stop after the cua that went (the session would take it for any task)")
             check(!r.m.client.state(sid).shownOutbox.contains { $0.id == g.cua }, "its cua retired: not shown in the chat")
             for l in taskLines { r.m.client.feed(l) }
             r.drain()
@@ -322,8 +326,8 @@ enum SurfaceTests {
             let r = Rig(); openOK(r.mock)
             let g = r.goal(); g.start()
             g.stop()
-            let stop = r.mock.requests.last { ($0["line"] as? [String: Any])?["type"] as? String == "stop" }
-            check(stop?["session_id"] as? String == sid && (stop?["line"] as? [String: Any])?["run_id"] == nil, "Stop before the task: to its session, no run: \(String(describing: stop))")
+            check(r.sent("stop").isEmpty, "Stop before the task: nothing stopped yet (no task of its own)")
+            check(!r.m.client.state(sid).shownOutbox.contains { $0.id == g.cua }, "Stop before the task: its cua retired")
             check(GoalRunScreen(g.state, lang: .en).stopShown && !GoalRunScreen(g.state, lang: .en).stopLive, "Stop asked: greyed")
             r.timers.advance(15)
             ended(r, g, .failed(L.Why.stoppedBeforeStart, guarding: sid), "stopped before it started")
@@ -394,6 +398,25 @@ enum SurfaceTests {
             let cuas = r.sent("cua").count
             check(r.m.client.resend(g.cua, in: sid) != .sent && r.sent("cua").count == cuas, "retired: never resent")
         }
+        do {    // Codex's repro (84d72f3): the user's own task runs in the goal's session; the goal is stopped before its
+                // task, then times out — the user's task is never stopped (no run-less stop, no stop by its run)
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            for l in userTaskLines { r.m.client.feed(l) }
+            g.stop()
+            r.timers.advance(15)
+            check(g.state == .failed(L.Why.stoppedBeforeStart, guarding: sid), "stopped, nothing of its own came: \(g.state)")
+            r.timers.advance(60)
+            check(r.sent("stop").isEmpty, "the user's task left alone: no stop at all: \(r.sent("stop"))")
+            check(r.records.count == 1 && !g.watching, "the goal over, let go")
+        }
+        do {    // the same with a timeout in sent (no Stop)
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            for l in userTaskLines { r.m.client.feed(l) }
+            r.timers.advance(120)
+            check(g.state == .failed(L.Why.notStarted) && r.sent("stop").isEmpty, "timed out: the user's task left alone: \(r.sent("stop"))")
+        }
     }
 
     // MARK: what the view shows
@@ -447,6 +470,56 @@ enum SurfaceTests {
             check(w == nil && runs2.run(id) == nil, "ended, no view: released")
         }
     }
+    /// Codex review at 84d72f3 (1): the window is only minimised while a goal is not over; a window that opens again
+    /// goes straight to the goal not over.
+    static func goalReopenTests() {
+        for (st, closable) in [(L.State.recordingStart, false), (.opening(sid: nil), false), (.sent(sid: "s", stopAsked: false), false),
+                               (.sent(sid: "s", stopAsked: true), false), (.running(sid: "s", run: "r"), false),
+                               (.failed(L.Why.gone, guarding: "s"), true), (.ended(sid: "s", run: "r", status: "succeeded"), true)] {
+            check(GoalRunScreen(st, lang: .en).windowClosable == closable, "\(st): the window closable: \(closable)")
+        }
+        let a = UUID(), b = UUID()
+        check(GoalRuns.reopenRoute(active: a, showing: nil) == a && GoalRuns.reopenRoute(active: a, showing: b) == a, "reopened: to the goal not over")
+        check(GoalRuns.reopenRoute(active: a, showing: a) == nil && GoalRuns.reopenRoute(active: nil, showing: nil) == nil, "shown already, or none: as it is")
+        let r = Rig(); openOK(r.mock)
+        let runs = GoalRuns()
+        let g = runs.start(a) { r.goal() }
+        check(runs.active == a, "a goal sent, not over: active")
+        for l in taskLines { r.m.client.feed(l) }
+        check(runs.active == a, "running: active")
+        for l in endLines { r.m.client.feed(l) }
+        check(g?.state == .ended(sid: sid, run: rid, status: "succeeded") && runs.active == nil, "ended: none active (Home as usual)")
+    }
+
+    /// Codex review at 84d72f3 (3): the goal's pinned card takes 1–9 and Esc / Tab through the chat's one wiring
+    /// (ShellModel.cardKeyHandlers, which the goal screen's CardKeyMonitor installs too).
+    static func goalCardKeysTests() {
+        let r = Rig(); openOK(r.mock)
+        let g = r.goal(); g.start()
+        for l in taskLines { r.m.client.feed(l) }
+        r.m.client.feed(["kind": "ask", "session_id": sid, "run_id": rid, "seq": 2, "ask_id": "ask_g",
+                         "card": ["kind": "missing", "text": "发给谁？", "free_text": false, "blocking": true,
+                                  "options": [["kind": "value", "text": "小王"], ["kind": "cancel", "text": "先别做了"]]]])
+        guard let (s, _) = g.task, let p = r.m.pinned(s) else { check(false, "the goal's card is pinned"); return }
+        let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+        r.m.cardShown(m)
+        r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+        r.timers.advance(5)
+        let keys = r.m.cardKeyHandlers
+        _ = keys.onKey("\t", false, true, false, false, false)
+        check(r.m.keysActive(m), "Tab: the goal's card takes its keys")
+        keys.onLeave()
+        check(!r.m.keysActive(m), "the window left: its keys end (onLeave)")
+        keys.onReturn()
+        r.timers.advance(2)
+        _ = keys.onKey("\t", false, true, false, false, false)
+        check(keys.onKey("1", false, true, false, false, false), "1: its first option picked")
+        r.timers.advance(5)
+        let answers = r.sent("answer")
+        check(answers.count == 1 && answers.first?["ask_id"] as? String == "ask_g", "its answer sent once: \(answers)")
+    }
+
+
 }
 
 extension GoalRunScreen {

@@ -515,6 +515,12 @@ struct RootView: View {
                   let r = RunHistory.shared.records.first(where: { $0.id == id }) else { return }
             go(.record(r))
         }
+        // a window that opens (again) while a goal is not over: straight to that goal (its cards, its Stop)
+        .onAppear {
+            var showing: UUID? = nil
+            if case .run(let r) = screen { showing = r.id }
+            if let id = GoalRuns.reopenRoute(active: GoalRuns.app.active, showing: showing), let r = GoalRequests.byId[id] { screen = .run(r) }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             downloader.stashForQuit()
         }
