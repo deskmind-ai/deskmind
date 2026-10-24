@@ -254,9 +254,6 @@ struct GoalRunScreen: Equatable {
     var stopLive: Bool
     /// Back, Edit, Run again and the next instruction.
     var afterwards: Bool
-    /// The window can be closed (only minimised while the goal is not over: its cards are answered there; as
-    /// RunModel's runs, MainWindow.setClosable).
-    var windowClosable: Bool { afterwards }
     /// The task, shown with the chat's TaskRow (and the pinned card): its run.
     var taskRun: String?
     /// The line shown while there is no task to show, or why it failed.
@@ -333,6 +330,8 @@ final class GoalRun: ObservableObject {
     let ticket = GoalTicket()
     /// Called once, when it is over and guards nothing (GoalRuns lets it go then).
     var onDone: (() -> Void)?
+    /// Called after every change of its state (GoalRuns: whether a goal is active).
+    var onStateChanged: (() -> Void)?
     private let effects: GoalRunEffects
     private var watch: AnyCancellable?
     /// The newest deadline (a newer one replaces it).
@@ -378,6 +377,13 @@ final class GoalRun: ObservableObject {
         // (a session that already says more: its task may have come with the open)
         if n != before, let sid = sessionId, let s = latest ?? shell.states[sid] { see(s) }
         changed(from: before)
+        if n != before { onStateChanged?() }
+    }
+
+    /// A card of its own task waits on the user (pinned in its session).
+    var cardWaiting: Bool {
+        guard let (s, t) = task, let p = shell.pinned(s) else { return false }
+        return p.runId == t.runId
     }
 
     /// After a change: done with it (over, guarding nothing) — its watch cancelled, it let go.
@@ -438,6 +444,30 @@ final class GoalRun: ObservableObject {
 final class GoalRuns {
     private(set) var runs: [UUID: GoalRun] = [:]
     private var finished: [UUID: (state: GoalLifecycle.State, sessionId: String?)] = [:]
+    /// The window's close button, owned here for goals (Codex delta review at 1f77d1a: views drove it; a view that
+    /// went or another that came left it wrong): closable exactly while no goal is active. Told on every change.
+    private let setClosable: (Bool) -> Void
+    /// A goal let go (its request no longer needed to route to it).
+    private let released: (UUID) -> Void
+    private var closable: Bool?
+
+    init(setClosable: @escaping (Bool) -> Void = { _ in }, released: @escaping (UUID) -> Void = { _ in }) {
+        self.setClosable = setClosable; self.released = released
+    }
+
+    private func activeChanged() {
+        let c = active == nil
+        guard c != closable else { return }
+        closable = c
+        setClosable(c)
+    }
+
+    /// A reopen while a goal is active and no card of its own waits is most likely hands giving the front back after
+    /// a foreground step (`open -b`): the window is not restored then (the island is the way in).
+    var holdsReopen: Bool {
+        guard let id = active, let r = runs[id] else { return false }
+        return !r.cardWaiting
+    }
 
     func run(_ id: UUID) -> GoalRun? { runs[id] }
 
@@ -463,8 +493,12 @@ final class GoalRuns {
             guard let self, let r else { return }
             self.finished[id] = (r.state, r.sessionId)
             self.runs[id] = nil
+            self.released(id)
+            self.activeChanged()
         }
+        r.onStateChanged = { [weak self] in self?.activeChanged() }
         r.start()
+        activeChanged()
         return r
     }
 }

@@ -509,6 +509,7 @@ struct RootView: View {
         .background(Brand.paper)
         // a window that opens (again) while a goal is not over: straight to that goal (its cards, its Stop)
         .onAppear {
+            MainWindow.applyClosable()      // (a window that came anew: as the run and the goal hold it)
             var showing: UUID? = nil
             if case .run(let r) = screen { showing = r.id }
             if let id = GoalRuns.reopenRoute(active: GoalRuns.app.active, showing: showing), let r = GoalRequests.byId[id] { screen = .run(r) }
