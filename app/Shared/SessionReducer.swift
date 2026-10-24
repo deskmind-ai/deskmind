@@ -148,6 +148,8 @@ struct TaskState: Equatable {
     var goal: String? = nil
     var by: String? = nil           // slash | model
     var replyTo: String? = nil
+    /// The client_id of the cua that started it (session.task, harness#72); nil for a retry's or the model's task.
+    var clientId: String? = nil
     var lang: String? = nil
     var startedAt: Double? = nil
     /// Between session.task / start and the first plan, step or card.
@@ -742,6 +744,7 @@ enum SessionReducer {
             s.tasks[i].goal = e.goal
             s.tasks[i].by = e.by
             s.tasks[i].replyTo = e.replyTo
+            s.tasks[i].clientId = e.clientId
             s.tasks[i].startedAt = line.t ?? s.tasks[i].startedAt     // session.task's time, before or after the run's start
             if let seq = line.seq, s.tasks[i].sessionSeq == nil {
                 s.tasks[i].sessionSeq = seq

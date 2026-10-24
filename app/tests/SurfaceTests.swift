@@ -216,7 +216,7 @@ enum SurfaceTests {
     static let taskLines: [[String: Any]] = [
         // (as the harness stores a /cua: its words, with the cua's client_id, then the task replying to them)
         ["kind": "session.message", "session_id": sid, "seq": 1, "msg_id": "u1", "role": "user", "text": "把下载文件夹按类型整理", "via": "cua", "client_id": "c_1"],
-        ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t1", "run_id": rid, "raw": "把下载文件夹按类型整理", "by": "slash", "reply_to": "u1"],
+        ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t1", "run_id": rid, "raw": "把下载文件夹按类型整理", "by": "slash", "reply_to": "u1", "client_id": "c_1"],
         ["kind": "start", "session_id": sid, "run_id": rid, "seq": 1, "raw": "把下载文件夹按类型整理"],
     ]
     static let endLines: [[String: Any]] = [
@@ -489,6 +489,19 @@ enum SurfaceTests {
             for l in userTaskLines { r.m.client.feed(l) }
             check(g.state == .sent(sid: sid) && g.task == nil, "the user's task: not adopted: \(g.state)")
             check(r.sent("stop").isEmpty, "and not stopped")
+        }
+        do {    // Codex on harness#72: a retry's task replies to the same message as the goal's cua — never the goal's
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.m.client.feed(taskLines[0])           // the /cua's stored message (client_id c_1)
+            r.m.client.feed(["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t_retry", "run_id": "r_retry", "raw": "x",
+                             "by": "model", "reply_to": "u1"])
+            check(g.state == .sent(sid: sid) && g.task == nil, "a retry's task (same reply_to, no client_id): not adopted: \(g.state)")
+            g.stop()
+            check(!r.sent("stop").contains { $0["run_id"] as? String == "r_retry" }, "and never stopped by its run")
+            r.m.client.feed(["kind": "session.task", "session_id": sid, "seq": 3, "msg_id": "t1", "run_id": rid, "raw": "x", "by": "slash",
+                             "reply_to": "u1", "client_id": "c_1"])
+            check(g.state == .stopping(sid: sid, run: rid), "its own (its client_id): the one it stops: \(g.state)")
         }
         do {    // stopping: the user's own task in the same session is neither its task nor stopped
             let r = Rig(); openOK(r.mock)
