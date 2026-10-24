@@ -197,19 +197,71 @@ enum ShellText {
             if t.userActive { return L("You're using the Mac, paused", lang: lang) }
             if t.lookOnly { return L("Checking the result (looking only)", lang: lang) }
             let n = t.steps.count
+            if !t.plan.isEmpty, let p = t.steps.last?.planStep { return L("Working · step %d of %d", p, t.plan.count, lang: lang) }
             return n > 0 ? L("Working · step %d", n, lang: lang) : L("Working", lang: lang)
         }
+        // (its process went with the helper or the session's end: the task stopped for that, and says so)
+        let helperGone = t.closed == "session_end" || t.closed == "session_exit"
         switch t.status {
         case "succeeded": return L("Done", lang: lang)
         case "unconfirmed": return L("Done, but not confirmed. Please check", lang: lang)
         case "failed": return L("Didn't finish", lang: lang)
         case "cancelled": return L("Cancelled", lang: lang)
         case "stopped":
-            return t.cause == .lastStepUnknown ? L("Stopped. The last step may or may not have happened", lang: lang) : L("Stopped", lang: lang)
+            if t.cause == .lastStepUnknown { return L("Stopped. The last step may or may not have happened", lang: lang) }
+            return helperGone ? L("Stopped: DeskMind's helper quit", lang: lang) : L("Stopped", lang: lang)
         case "environment":
             return t.cause == .screenLocked ? L("Stopped: the screen is locked", lang: lang) : L("The Mac's state didn't allow it", lang: lang)
-        default: return L("Interrupted", lang: lang)
+        default:
+            return helperGone ? L("Interrupted: DeskMind's helper quit", lang: lang) : L("Interrupted", lang: lang)
         }
+    }
+
+    /// Who started the task: the user's /cua, or the model.
+    static func origin(_ t: TaskState, lang: ResolvedLang) -> String? {
+        switch t.by {
+        case "slash": return L("Started by you (/cua)", lang: lang)
+        case "model": return L("Started by DeskMind", lang: lang)
+        default: return nil
+        }
+    }
+
+    /// The result card's line, from its one state (ResultCardState): what came of the undo, or why it can no longer
+    /// be done; the minutes left while it is open (display only — `now` is the clock, never a gate). Nothing when the
+    /// harness offered no undo (its card says why) and nothing closed it for a reason worth saying.
+    static func resultLine(_ t: TaskState, now: Double, lang: ResolvedLang) -> String? {
+        switch t.resultCardState {
+        case .none, .answered: return nil
+        case .open(let undo, let until):
+            guard undo, let until else { return nil }
+            let m = max(0, Int(((until - now) / 60).rounded(.up)))
+            return m > 0 ? L("Undo available for %d more min", m, lang: lang) : nil
+        case .undoing: return L("Undoing…", lang: lang)
+        case .undone(let n, let m, let refused):
+            guard let r = refused else { return L("Undid %d of %d", n, m, lang: lang) }
+            return L("Undid %d of %d, then stopped: %@", n, m, r, lang: lang)
+        case .undoExpired: return L("Undo expired: its time ran out", lang: lang)
+        case .undoUnknown(let refused):
+            let base = L("The undo was cut off: some of it may not have been undone. Please check", lang: lang)
+            return refused.map { base + " · " + $0 } ?? base
+        case .closed(let why):
+            // (said when the harness offered undo, or when the card has none only because its process went: an end the
+            // session wrote with no task_done, a stop by the helper's going)
+            let gone = why == "session_end" || why == "session_exit" || why == "no_task"
+            guard t.undoOffered || (gone && t.resultCard != nil && t.undoUntil == nil) else { return nil }
+            switch why {
+            case "new_task": return L("Undo expired: another computer task started", lang: lang)
+            case "session_end", "session_exit", "no_task":
+                return L("Undo expired: DeskMind's helper quit, so the undo window ended early", lang: lang)
+            case "linger", "deadline": return L("Undo expired: its time ran out", lang: lang)
+            default: return L("Undo expired", lang: lang)
+            }
+        }
+    }
+
+    /// The undo button's VoiceOver hint, by the state.
+    static func undoHint(_ s: ResultCardState, lang: ResolvedLang) -> String {
+        s.undoEnabled ? L("Undoes what the task changed", lang: lang) : L("Undo is not available now", lang: lang)
     }
 
     /// What an undo came to, when there is something to say.

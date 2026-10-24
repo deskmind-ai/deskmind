@@ -130,7 +130,7 @@ struct CloudModelSheet: View {
                 .disabled(ModelChoice.switchLocked(inShell: inShell, saved: savedCloud))
             if !ModelChoice.offersLocalOnly(inShell: inShell) {
                 Text(L("Conversations in DeskMind 0.5 need a cloud model.", lang: lang))
-                    .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
+                    .font(.system(size: 11)).foregroundStyle(Color(hex: ShellPalette.secondary)).fixedSize(horizontal: false, vertical: true)
             }
             if useCloud {
                 Picker(L("Service", lang: lang), selection: $provider) {
@@ -154,7 +154,7 @@ struct CloudModelSheet: View {
                 Text(inShell
                      ? L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is stored in models.env in Application Support, readable by you only.", lang: lang)
                      : L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.", lang: lang))
-                    .font(.system(size: 11)).foregroundStyle(Brand.sage).fixedSize(horizontal: false, vertical: true)
+                    .font(.system(size: 11)).foregroundStyle(Color(hex: ShellPalette.secondary)).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Spacer()

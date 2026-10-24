@@ -1389,9 +1389,14 @@ final class SessionClient {
             if open.askId != askId { return "stale card: \(askId) is not the open card \(open.askId)" }
             return nil
         }
+        // the result card's one state (TaskState.resultCardState): answerable only while open; its undo only while the
+        // harness offers it
         guard task.resultCard != nil else { return "no result card" }
-        if task.closed != nil { return "the result card is closed" }
-        if task.resultResponse != nil || task.respond != nil { return "the result card was answered" }
+        let state = task.resultCardState
+        guard state.isOpen else { return "the result card is not open (\(state))" }
+        if case .respond(_, let i) = a, task.resultCard?.options.indices.contains(i) == true, task.resultCard?.options[i].kind == "undo", !state.undoEnabled {
+            return "undo is not offered"
+        }
         return nil
     }
 }

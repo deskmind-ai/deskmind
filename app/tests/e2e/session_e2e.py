@@ -553,6 +553,14 @@ def run(env, helper):
         check(bool(run_seqs(w6, run_id)) and ui() == [], f"its old tasks replayed under the new helper drive neither the card nor the recording ({ui()[:3]})")
         w6.close()
 
+        # (M2 A3) the app's window reads that task back under the new helper: 「已停下」 with the reason, no undo to click
+        if SHELL:
+            suite = f"ai.deskmind.e2e.shellgone.{os.getpid()}"
+            r = subprocess.run([SHELL, "gone", SOCK, CONFIG, suite, sid, run2], capture_output=True, text=True, timeout=120)
+            print(r.stdout, end="")
+            check(r.returncode == 0, f"the 0.5 window reads the task the helper's going stopped ({r.returncode} failures){r.stderr[-400:]}")
+            subprocess.run(["defaults", "delete", suite], capture_output=True)
+
         # a helper killed outright (SIGKILL) while its run's executor and a child of it still act: the lock names their
         # group, not the helper, so a new helper's run and a session's task are refused until all of it is gone
         hold = subprocess.Popen([BIN, "holdrun", DIR], stdout=subprocess.PIPE, text=True)

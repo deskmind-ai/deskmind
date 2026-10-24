@@ -233,7 +233,7 @@ struct CardStore: Equatable {
         func openCard(_ a: CardAnswer) -> Bool {
             guard let s, let t = s.task(a.runId) else { return false }
             if let id = a.askId { return t.openCard?.askId == id }
-            return t.resultResponse == nil && t.sessionUndo == nil && t.closed == nil && t.respond == nil
+            return t.resultCardState.isOpen
         }
         for (k, p) in picks where p.sessionId == sessionId && !openCard(p.answer) { picks[k] = nil }
         for (k, v) in sent where v.sessionId == sessionId && !openCard(v.answer) { sent[k] = nil }

@@ -248,7 +248,13 @@ struct SessionTaskEnd: Codable, Equatable {
     var answer: String?
     var changes: Changes?
     var steers: [String]?
-    enum CodingKeys: String, CodingKey { case runId = "run_id", status, summary, undo, reason, cause, answer, changes, steers }
+    /// With `undo: open`: when the undo ends by itself (seconds since 1970) — for display only (M2 H2).
+    var undoUntil: Double?
+    /// The result card the session wrote itself, for an end with no task_done that changed something (M2 H2): only 「好的」.
+    var resultCard: CardEvent?
+    enum CodingKeys: String, CodingKey {
+        case runId = "run_id", status, summary, undo, reason, cause, answer, changes, steers, undoUntil = "undo_until", resultCard = "result_card"
+    }
 }
 
 struct SessionTaskClosed: Codable, Equatable {
@@ -539,10 +545,16 @@ struct TaskDone: Codable, Equatable {
     var changes: Changes?
     var usage: Usage?
     var usageIncomplete: Bool?
+    /// The executor waits for the result card until then (seconds since 1970); none: it will not wait — no undo (M2 H2).
+    var undoUntil: Double?
     enum CodingKeys: String, CodingKey {
-        case status, reason, summary, cause, resultCard = "result_card", answer, changes, usage, usageIncomplete = "usage_incomplete"
+        case status, reason, summary, cause, resultCard = "result_card", answer, changes, usage, usageIncomplete = "usage_incomplete", undoUntil = "undo_until"
     }
 }
+
+/// The executor closed its result card at its deadline (M2 H2): no undo from here; a respond after it is answered
+/// "expired".
+struct ResultCardClosed: Codable, Equatable { @LStr var why: String = "" }
 
 struct ResultResponse: Codable, Equatable {
     var picked: String?
@@ -594,6 +606,7 @@ enum ProtocolEvent: Equatable {
     case judge(JudgeEvent)
     case taskDone(TaskDone)
     case resultResponse(ResultResponse)
+    case resultCardClosed(ResultCardClosed)
     /// A kind this app does not know, or a known kind whose fields could not be read: the whole line, as it came.
     case unknown(kind: String, raw: JSONValue)
 
@@ -634,6 +647,7 @@ enum ProtocolEvent: Equatable {
         case .judge: return "judge"
         case .taskDone: return "task_done"
         case .resultResponse: return "result_response"
+        case .resultCardClosed: return "result_card_closed"
         case .unknown(let k, _): return k
         }
     }
@@ -694,6 +708,7 @@ extension ProtocolEvent: Codable {
         case "judge": self = read(ProtocolEvent.judge)
         case "task_done": self = read(ProtocolEvent.taskDone)
         case "result_response": self = read(ProtocolEvent.resultResponse)
+        case "result_card_closed": self = read(ProtocolEvent.resultCardClosed)
         default: self = .unknown(kind: kind, raw: raw)
         }
     }
@@ -736,6 +751,7 @@ extension ProtocolEvent: Codable {
         case .judge(let v): try v.encode(to: encoder)
         case .taskDone(let v): try v.encode(to: encoder)
         case .resultResponse(let v): try v.encode(to: encoder)
+        case .resultCardClosed(let v): try v.encode(to: encoder)
         }
         var c = encoder.container(keyedBy: Key.self)
         try c.encode(kind, forKey: Key("kind"))
