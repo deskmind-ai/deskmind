@@ -224,6 +224,7 @@ enum DecisionTests {
         SessionTests.run()
         ShellTests.run()
         CardStoreTests.run()
+        CardLayoutTests.run()
         group("sessionWireTests"); sessionWireTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.
         check(AppWindow.shouldReopen(bundle: "com.netease.163music", running: true, ordinaryWindows: 0, documentBased: false), "a music app with its window closed")

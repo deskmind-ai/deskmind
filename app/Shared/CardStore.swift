@@ -168,6 +168,11 @@ struct CardStore: Equatable {
         return .hold(key: key, token: tokens)
     }
 
+    /// Whether `pick` would take `a` now (the card is the open one in `s`, nothing written for it): what keyWorks asks.
+    func wouldPick(_ a: CardAnswer, askId: String, in s: SessionState) -> Bool {
+        a.askId == askId && SessionClient.refusal(a, in: s) == nil && sent[Self.key(a)] == nil
+    }
+
     /// A result card's answer (respond): written now, once.
     mutating func respond(_ a: CardAnswer, sessionId: String, in s: SessionState) -> Action {
         guard a.askId == nil, SessionClient.refusal(a, in: s) == nil else { return .none }
