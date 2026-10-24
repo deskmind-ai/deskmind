@@ -762,7 +762,8 @@ enum CardStoreTests {
                 problem = "an answer for \(id) the user did not pick (or took back) in this life"; return
             }
             var want = a; want["type"] = "answer"; want["run_id"] = rid; want["ask_id"] = id
-            if !(want as NSDictionary).isEqual(to: l) { problem = "\(id): wrote \(l), the last pick was \(a)"; return }
+            var got = l; got["req_id"] = nil                // (a fresh id per line)
+            if !(want as NSDictionary).isEqual(to: got) { problem = "\(id): wrote \(l), the last pick was \(a)"; return }
             if !last.immediate && r.timers.now < last.at + CardStore.takeBack - 1e-9 { problem = "\(id): sent before its take-back ran out"; return }
             // the app never answers a card whose ending it already has (the run's lines applied so far)
             if let c = r.cardState(id), c.explicit != nil { problem = "\(id): answered after the app had its ending \(c.outcome)" }

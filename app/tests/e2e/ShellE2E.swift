@@ -14,6 +14,9 @@
 //       model-bound control written; back on, a message answered; delete removes it from the list and from the disk;
 //       the window turned off while a task's card waits, cloud turned off from the old window (models.off): nulled,
 //       the task stopped, no model call
+//   ShellE2E gone <socket> <config> <defaults suite> <session id> <run id>
+//       (M2 A3) the helper was killed while the session's task waited on its card, and a new helper serves the folder:
+//       the app's window shows the task 「已停下」 with the reason (DeskMind's helper quit), and no undo to click
 //
 // No window, no real model, nothing driven on this Mac (the simulated computer). Prints PASS or FAIL per check; the
 // exit status is the number of failures. Built with PathTransport.swift.
@@ -84,12 +87,36 @@ enum ShellE2E {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
         let a = CommandLine.arguments
+        if a.count == 7, a[1] == "gone" {
+            config = a[3]
+            phaseGone(socket: a[2], suite: a[4], sid: a[5], run: a[6])
+            exit(Int32(failures))
+        }
         guard a.count == 7, a[1] == "a" || a[1] == "b" else {
             print("usage: ShellE2E a|b <socket> <config> <defaults suite> <support dir> <state file>"); exit(2)
         }
         config = a[3]
         if a[1] == "a" { phaseA(socket: a[2], suite: a[4], stateFile: a[6]) } else { phaseB(socket: a[2], suite: a[4], dir: a[5], stateFile: a[6]) }
         exit(Int32(failures))
+    }
+
+    /// M2 A3: a task whose helper was killed mid-task, read back under a new helper.
+    static func phaseGone(socket: String, suite: String, sid: String, run: String) {
+        let m = makeModel(socket: socket, suite: suite)
+        on { m.start() }
+        check(until { on { m.rows.contains { $0.id == sid } } }, "gone: the session is in the list")
+        on { m.select(sid) }
+        check(until { on { m.states[sid]?.task(run)?.ended == true } }, "gone: its task, ended")
+        let t = on { m.states[sid]?.task(run) }
+        let line = t.map { ShellText.task($0, lang: .zhHans) } ?? ""
+        // (why it stopped is its end's own — the harness gives the helper's going no cause; the closure is session_end)
+        check(line == "已停下" && t?.closed == "session_end", "gone: the task reads 「已停下」, closed with the session's end: «\(line)» (status \(t?.status ?? "-"), closed \(t?.closed ?? "-"))")
+        check(t.map { !$0.resultCardState.undoEnabled && !$0.resultCardState.isOpen } ?? false, "gone: no undo to click (\(String(describing: t?.resultCardState)))")
+        if let t, t.resultCard != nil {
+            check(ShellText.resultLine(t, now: Date().timeIntervalSince1970, lang: .zhHans) == "撤回已过期：DeskMind 的后台助手退出了，撤回时间提前结束",
+                  "gone: its result card says the undo expired with the helper")
+        }
+        quit(m)
     }
 
     static func assistant(_ m: ShellModel, _ id: String) -> [ChatMessage] {

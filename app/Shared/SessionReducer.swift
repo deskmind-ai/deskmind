@@ -188,6 +188,9 @@ struct TaskState: Equatable {
     /// session.task_respond: the result card was answered (stored before the answer went to the executor); its `undo`
     /// says the undo was asked for.
     var respond: SessionTaskRespond? = nil
+    /// result_card_closed: the executor closed its result card at its deadline (no undo from here).
+    var cardClosed: String? = nil
+
     /// The session seq of session.task: the task's place in the chat (nil until it comes).
     var sessionSeq: Int? = nil
     /// session.task_closed's why, and its stored seq.
@@ -206,17 +209,65 @@ struct TaskState: Equatable {
     /// that lost it, must not show an undo under way for good); else the result card answered otherwise; else
     /// offered by session.task_end's `undo` ("open" / "none") when it came, by the result card's options before; an
     /// offer whose executor closed (session.task_closed) is expired.
+    ///
+    /// (M2 A3: the older summary of `resultCardState`, kept for its readers; both come from the same facts.)
     var undo: UndoState {
-        if let d = sessionUndo ?? responseUndo { return d }
-        if respond?.undo == true { return closedWhy != nil ? .unknown(nil) : .undoing }
-        let offered: Bool
-        if let u = end?.undo, u == "open" || u == "none" { offered = u == "open" }
-        else { offered = done?.resultCard?.options.contains { $0.kind == "undo" } == true }
-        guard offered else { return .none }
-        if resultResponse != nil || respond != nil { return .declined }
-        if let why = closed { return .expired(why) }
-        return .available
+        switch resultCardState {
+        case .none: return .none
+        case .open(let u, _): return u ? .available : .none
+        case .undoing: return .undoing
+        case .undone(let n, let m, let r): return .done(undone: n, total: m, refused: r)
+        case .undoUnknown(let r): return .unknown(r)
+        case .undoExpired: return .expired("deadline")
+        case .answered: return undoOffered ? .declined : .none
+        case .closed(let why): return undoOffered ? .expired(why) : .none
+        }
     }
+    /// The result card: task_done's, else the one the session wrote on an end with no task_done (M2 H2).
+    var resultCard: CardEvent? { done?.resultCard ?? (done == nil ? end?.resultCard : nil) }
+    /// The harness offered undo: session.task_end's `undo` when it came; before it, task_done's card has an undo
+    /// option and the executor waits for it (undo_until; none: it will not wait, no undo — M2 H2).
+    var undoOffered: Bool {
+        if let u = end?.undo, u == "open" || u == "none" { return u == "open" }
+        return done?.resultCard?.options.contains { $0.kind == "undo" } == true && done?.undoUntil != nil
+    }
+    /// Until when the undo lasts (display only: whether it can be clicked is the state's).
+    var undoUntil: Double? { end?.undoUntil ?? done?.undoUntil }
+
+    /// The result card's one state, from the session's record (harness host.ts resultCard: open → undoing | closed),
+    /// whichever order the facts came in. The outcome of an undo is the harness's record of it (session.task_undo)
+    /// only; the executor's result_response alone keeps it 「撤回中」 until that record comes.
+    ///
+    /// | facts (first that holds)                                  | state                                     |
+    /// |-----------------------------------------------------------|-------------------------------------------|
+    /// | no result card (none, or no options)                       | none                                      |
+    /// | task_undo unknown                                         | undoUnknown(why)                          |
+    /// | task_undo refused "expired", nothing undone               | undoExpired                               |
+    /// | task_undo                                                 | undone(n, total, refused)                 |
+    /// | task_respond undo, the run closed (no task_undo: an older | undoUnknown                               |
+    /// |   log)                                                    |                                           |
+    /// | task_respond undo                                         | undoing (never expired, never undone)     |
+    /// | task_respond (another option)                             | answered                                  |
+    /// | result_card_closed                                        | closed(deadline)                          |
+    /// | task_closed / the process gone                            | closed(linger / new_task / session_end /  |
+    /// |                                                           |   session_exit)                           |
+    /// (A refusal of our answer is no history: CardStore matches it by req_id and shows it as a hint — ResultHint.)
+    /// | otherwise                                                 | open(undo: offered, until)                |
+    var resultCardState: ResultCardState {
+        guard let card = resultCard, !card.options.isEmpty else { return .none }
+        if let u = sessionUndoRecord {
+            if u.unknown == true { return .undoUnknown(u.refused) }
+            if u.refused == "expired" && (u.undone ?? 0) == 0 { return .undoExpired }
+            return .undone(undone: u.undone ?? 0, total: u.total ?? 0, refused: u.refused)
+        }
+        if respond?.undo == true { return closedWhy != nil ? .undoUnknown(nil) : .undoing }
+        if respond != nil { return .answered }
+        if cardClosed != nil { return .closed("deadline") }
+        if let why = closed { return .closed(why) }
+        return .open(undo: undoOffered, until: undoUntil)
+    }
+    /// session.task_undo as stored.
+    var sessionUndoRecord: SessionTaskUndo? = nil
     /// Why the task ended, structured: task_done's, else session.task_end's.
     var cause: TaskCause? { done?.cause ?? end?.cause }
     /// What it changed: task_done's (with the windows it made from the running total), else session.task_end's when
@@ -260,7 +311,6 @@ struct TaskState: Equatable {
     }
     /// The task's final status: task_done's, else session.task_end's (`interrupted` when no task_done was ever written).
     var status: String? { done?.status ?? end?.status }
-    var resultCard: CardEvent? { done?.resultCard }
     func step(_ id: String) -> StepState? { steps.first { $0.id == id } }
 }
 
@@ -311,6 +361,7 @@ struct SessionState: Equatable {
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
+
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
     var lastRefusal: SessionErrorEvent? = nil
     /// The session's settings as it stored them last (session.config): its model configuration (nil: no model) and
@@ -390,6 +441,7 @@ enum SessionReducer {
             deferred()
             while let next = s.pendingSession.removeValue(forKey: s.lastSeq + 1) { applySession(&s, next); deferred() }
             s.pendingSession = s.pendingSession.filter { $0.key > s.lastSeq }
+
             return .applied
         } else {
             if case .unknown(let k, _) = ev { s.unknownKinds.insert(k) }
@@ -694,9 +746,11 @@ enum SessionReducer {
         case .taskUndo(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].sessionUndo = e.unknown == true ? .unknown(e.refused) : .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
+            s.tasks[i].sessionUndoRecord = e
         case .taskRespond(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].respond = e
+
         case .sessionConfig(let e):
             s.settings = e
             if e.by == "set_config" { s.settingsRefused = nil }
@@ -871,6 +925,8 @@ enum SessionReducer {
         case .taskDone(let d):
             task.done = d
             task.doneAt = t
+        case .resultCardClosed(let c):
+            task.cardClosed = c.why
         case .resultResponse(let r):
             task.resultResponse = r
             if let undone = r.undone { task.responseUndo = .done(undone: undone, total: r.total ?? undone, refused: r.refused) }

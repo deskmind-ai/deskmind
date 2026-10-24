@@ -197,19 +197,71 @@ enum ShellText {
             if t.userActive { return L("You're using the Mac, paused", lang: lang) }
             if t.lookOnly { return L("Checking the result (looking only)", lang: lang) }
             let n = t.steps.count
+            if !t.plan.isEmpty, let p = t.steps.last?.planStep { return L("Working · step %d of %d", p, t.plan.count, lang: lang) }
             return n > 0 ? L("Working · step %d", n, lang: lang) : L("Working", lang: lang)
         }
+        // (why it stopped is its end's own: status and cause — never how its result card closed later)
         switch t.status {
         case "succeeded": return L("Done", lang: lang)
         case "unconfirmed": return L("Done, but not confirmed. Please check", lang: lang)
         case "failed": return L("Didn't finish", lang: lang)
         case "cancelled": return L("Cancelled", lang: lang)
         case "stopped":
-            return t.cause == .lastStepUnknown ? L("Stopped. The last step may or may not have happened", lang: lang) : L("Stopped", lang: lang)
+            if t.cause == .lastStepUnknown { return L("Stopped. The last step may or may not have happened", lang: lang) }
+            return L("Stopped", lang: lang)
         case "environment":
             return t.cause == .screenLocked ? L("Stopped: the screen is locked", lang: lang) : L("The Mac's state didn't allow it", lang: lang)
         default: return L("Interrupted", lang: lang)
         }
+    }
+
+    /// Who started the task: the user's /cua, or the model.
+    static func origin(_ t: TaskState, lang: ResolvedLang) -> String? {
+        switch t.by {
+        case "slash": return L("Started by you (/cua)", lang: lang)
+        case "model": return L("Started by DeskMind", lang: lang)
+        default: return nil
+        }
+    }
+
+    /// The result card's line, from its one state (ResultCardState): what came of the undo, or why it can no longer
+    /// be done; the minutes left while it is open (display only — `now` is the clock, never a gate). Nothing when the
+    /// harness offered no undo (its card says why) and nothing closed it for a reason worth saying.
+    static func resultLine(_ t: TaskState, hint: String? = nil, now: Double, lang: ResolvedLang) -> String? {
+        // a refusal this client's own answer got (CardStore.hint): until the history speaks
+        if t.resultCardState.isOpen, let h = hint {
+            return CardStore.closingRefusals.contains(h) ? L("Undo expired", lang: lang) : L("Your answer didn't reach the task. Try again", lang: lang)
+        }
+        switch t.resultCardState {
+        case .none, .answered: return nil
+        case .open(let undo, let until):
+            guard undo, let until else { return nil }
+            let m = max(0, Int(((until - now) / 60).rounded(.up)))
+            return m > 0 ? L("Undo available for %d more min", m, lang: lang) : nil
+        case .undoing: return L("Undoing…", lang: lang)
+        case .undone(let n, let m, let refused):
+            guard let r = refused else { return L("Undid %d of %d", n, m, lang: lang) }
+            return L("Undid %d of %d, then stopped: %@", n, m, r, lang: lang)
+        case .undoExpired: return L("Undo expired: its time ran out", lang: lang)
+        case .undoUnknown(let refused):
+            let base = L("The undo was cut off: some of it may not have been undone. Please check", lang: lang)
+            return refused.map { base + " · " + $0 } ?? base
+        case .closed(let why):
+            // (only when undo was offered: a card that never had it says why itself, and never reads as expired)
+            guard t.undoOffered else { return nil }
+            switch why {
+            case "new_task": return L("Undo expired: another computer task started", lang: lang)
+            case "session_end", "session_exit", "no_task":
+                return L("Undo expired: DeskMind's helper quit, so the undo window ended early", lang: lang)
+            case "linger", "deadline": return L("Undo expired: its time ran out", lang: lang)
+            default: return L("Undo expired", lang: lang)
+            }
+        }
+    }
+
+    /// The undo button's VoiceOver hint, by the state.
+    static func undoHint(_ s: ResultCardState, lang: ResolvedLang) -> String {
+        s.undoEnabled ? L("Undoes what the task changed", lang: lang) : L("Undo is not available now", lang: lang)
     }
 
     /// What an undo came to, when there is something to say.
@@ -429,6 +481,8 @@ final class ShellModel: ObservableObject {
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
+        // each refusal of an answer as it comes: one of ours goes to the UI queue to be matched; any other is dropped here
+        client.onAnswerRefusal = { [weak self] id, e in self?.answerRefused(id, e) }
         // the settings as stored now, read by the client whenever it opens or converges a session (never a copy)
         client.settingsSource = { [weak self] in
             guard let self else { return (nil, nil) }
@@ -576,7 +630,7 @@ final class ShellModel: ObservableObject {
                 guard let self else { return }
                 var c = self.cards
                 c.settle(id, self.client.state(id))
-                if c != self.cards { self.cards = c }
+                if c != self.cards { self.cards = c; self.syncOwnReqs() }
             }
         }
         // the open session's problems are seen as they come (once per new stored line or process end: never a loop of
@@ -761,11 +815,11 @@ final class ShellModel: ObservableObject {
     func click(_ button: CardModel.Button) -> Bool {
         guard let id = selected else { return false }
         if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
-        // an approve-type option only once the card's whole body has been on screen (never approve what was not seen)
-        if button.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: button.runId, askId: button.askId)) { return false }
-        // cloud models off: only what reaches no model is held back — the way out and undo (the session undoes from
-        // its receipts, no model) always go; an answer that resumes the task would make the model go on
-        if !button.role.reachesNoModel && !cloudAllows() { return false }
+        // the one predicate (canSend): what it says is what happens
+        guard canSend(button) else {
+            if !button.role.reachesNoModel && !cloudOn() { _ = cloudAllows() }     // (says why: the cloud model is off)
+            return false
+        }
         let a = CardModel.answer(button)
         if a.askId == nil { return act(cards.respond(a, sessionId: id, in: client.state(id)), in: id) }
         return pick(a, immediate: button.role == .cancel, in: id)
@@ -898,11 +952,8 @@ final class ShellModel: ObservableObject {
     func keyWorks(_ card: CardModel, _ control: CardLayout.Control) -> Bool {
         guard control.key != nil, !editingText, !composing, keysActive(card), let id = selected else { return false }
         let b = control.button
-        guard b.runId == card.runId, b.askId == card.askId, let ask = b.askId else { return false }
-        if b.role.needsWholeBody && !bodySeen.contains(Self.cardKey(card)) { return false }
-        if !b.role.reachesNoModel && !cloudOn() { return false }
-        let a = CardModel.answer(b)
-        return cards.wouldPick(a, askId: ask, in: client.state(id))
+        guard b.runId == card.runId, b.askId == card.askId, b.askId != nil, selected == id else { return false }
+        return canSend(b)
     }
 
     /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true only when it acted on the
@@ -969,8 +1020,23 @@ final class ShellModel: ObservableObject {
     }
 
     /// Whether this button takes a click now: its card can be answered, and an approve-type option's card was seen whole.
-    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool {
-        answerable(card, in: s) && (!b.role.needsWholeBody || bodySeen.contains(Self.cardKey(card)))
+    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b) }
+
+    /// THE predicate for one option of one card (#114 Codex review at 7553637): whether pressing it now sends its answer
+    /// (or holds it for the take-back). The button's enabled state, its VoiceOver state, the key path (keyWorks) and the
+    /// click all read this, and nothing else decides: the card takes this option now (an ask card: it is the open one
+    /// and takes a pick; a result card: it is open, the option is one it offers — undo only while offered — and no answer
+    /// of ours is on its way), an approve-type option only once the whole card was seen, a model-reaching option only
+    /// while cloud models are on. Read against the client's newest state, the one CardStore checks as it writes.
+    func canSend(_ b: CardModel.Button) -> Bool {
+        guard let id = selected else { return false }
+        let s = client.state(id)
+        if b.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: b.runId, askId: b.askId)) { return false }
+        if !b.role.reachesNoModel && !cloudOn() { return false }
+        let a = CardModel.answer(b)
+        guard let ask = b.askId else { return cards.wouldRespond(a, in: s) }
+        guard let t = s.task(b.runId), let c = t.cards.first(where: { $0.askId == ask }), cards.phase(c, of: t).takesPick else { return false }
+        return cards.wouldPick(a, askId: ask, in: s)
     }
 
     /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run
@@ -1001,11 +1067,37 @@ final class ShellModel: ObservableObject {
         write(a, key: key, in: id)
     }
 
+    /// The req_ids CardStore awaits, mirrored for the feeding thread (which may not read CardStore): a refusal whose
+    /// req_id is not one of them is dropped as it comes, and none is ever kept in a buffer that could evict ours.
+    private let reqLock = NSLock()
+    private var ownReqs: Set<String> = []
+    private func syncOwnReqs() { let now = Set(cards.issued.keys); reqLock.lock(); ownReqs = now; reqLock.unlock() }
+
+    /// A session's refusal of a respond / answer (any thread): ours goes to the UI queue and is matched there, once.
+    private func answerRefused(_ id: String, _ e: SessionErrorEvent) {
+        guard let r = e.reqId else { return }
+        reqLock.lock(); let mine = ownReqs.contains(r); reqLock.unlock()
+        guard mine else { return }
+        onUIQueue { [weak self] in
+            guard let self else { return }
+            self.cards.refused(e, sessionId: id, in: self.client.state(id))
+            self.syncOwnReqs()
+        }
+    }
+
+    /// A fresh id for each answer line written (tests set their own).
+    var newReqId: () -> String = { "rq_" + UUID().uuidString.lowercased() }
+
+    /// Writes an answer with a fresh req_id, recorded in CardStore first (here, on the UI queue); a failed write takes
+    /// both back on the UI queue.
     private func write(_ a: CardAnswer, key: String, in id: String) {
+        let req = newReqId()
+        cards.issue(req, sessionId: id, key: key, answer: a)
+        syncOwnReqs()
         work { [weak self] in
             guard let self else { return }
-            let r = self.client.answer(a, in: id)
-            if r != .sent { self.deliver { self.cards.notSent(key, a) } }
+            let r = self.client.answer(a, in: id, reqId: req)
+            if r != .sent { self.deliver { self.cards.notSent(key, a); self.cards.unissue(req); self.syncOwnReqs() } }
         }
     }
 

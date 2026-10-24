@@ -200,8 +200,10 @@ enum SessionTests {
         let n = "task-undo"
         let s0 = after(n, isKind("session.task"))!
         check(s0.messages.first?.via == "cua" && s0.tasks[0].by == "slash", "/cua: via cua, by slash")
-        let done = after(n, isKind("task_done"))!
+        // (a recording from before H2: its task_done has no undo_until, so the offer is session.task_end's)
+        let done = after(n, isKind("session.task_end"))!
         let t = done.tasks[0]
+        check(after(n, isKind("task_done"))!.tasks[0].undo == UndoState.none, "task_done with no undo_until (the executor will not wait): no undo yet (M2 H2)")
         check(t.undo == .available && t.changes.created == ["a.txt"], "undo offered: \(t.undo)")
         let card = CardModel(resultCard: t.resultCard!, runId: t.runId)
         check(card.isResult && card.askId == nil && !card.allowsFreeText && card.kind == .result, "the result card")
@@ -210,7 +212,9 @@ enum SessionTests {
         check(card.answer(undo) == .respond(runId: t.runId, option: 1), "undo sends respond with its index")
         check(card.answer(undo)!.control as NSDictionary == ["type": "respond", "run_id": t.runId, "option": 1] as NSDictionary, "respond line")
         check(SessionClient.refusal(card.answer(undo)!, in: done) == nil, "the result card can be answered")
-        let undone = after(n, isKind("result_response"))!
+        // the outcome is the harness's record (session.task_undo) only: the executor's result_response alone is 「撤回中」 (M2 A3)
+        check(!after(n, isKind("result_response"))!.tasks[0].undo.finished, "result_response before task_undo: not shown as done (the recording predates task_respond)")
+        let undone = after(n, isKind("session.task_undo"))!
         check(undone.tasks[0].undo == .done(undone: 1, total: 1, refused: nil), "undone 1/1: \(undone.tasks[0].undo)")
         check(SessionClient.refusal(card.answer(undo)!, in: undone) != nil, "answered once: no second answer")
         let s = final(n)
@@ -609,7 +613,7 @@ enum SessionTests {
               "closed while a card waited: the card void, the composer on: \(String(describing: asked.task("r1")?.cards.first?.outcome))")
         check(SessionClient.refusal(.option(runId: "r1", askId: "a1", option: 0), in: asked) != nil, "its card is not answered")
         // explicit ends still win, whichever order they come in
-        let done = ex(3, #""kind":"task_done","status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#)
+        let done = ex(3, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#)
         let a = SessionReducer.reduce(SessionState(), [taskR1, start, step, closed, done])
         let b = SessionReducer.reduce(SessionState(), [taskR1, closed, start, step, done])
         check(a.task("r1")?.status == "succeeded" && a.task("r1")?.cutOff == false && a.task("r1")?.undo == .expired("linger"), "task_done after task_closed: its end, undo expired")
@@ -668,8 +672,10 @@ enum SessionTests {
         check(closed.task("r1")?.undo == .unknown(nil) && closed.task("r1")?.undo.finished == false,
               "task_closed after task_respond, no undo result: unknown: \(String(describing: closed.task("r1")?.undo))")
         // its result after all (the executor's result_response, another stream, later): done
+        // the executor's result_response after the closure, with no task_undo: not shown as done — the outcome is the
+        // harness's record only (M2 A3); the reopen records it
         let late = SessionReducer.reduce(closed, ex(3, #""kind":"result_response","picked":"undo","effect":"undone","undone":1,"total":1"#))
-        check(late.task("r1")?.undo == .done(undone: 1, total: 1, refused: nil), "its result after the closure: done")
+        check(late.task("r1")?.undo == .unknown(nil), "a result_response after the closure, no task_undo: still unknown until the record")
         // reopened: the undo recorded as unknown — not done, not "nothing undone"
         let reopened = SessionReducer.reduce(exited, [se(nil, #""kind":"session.start","resumed":true,"last_seq":3"#), se(4, #""kind":"session.task_undo","run_id":"r1","undone":0,"total":0,"refused":"the undo was cut off","unknown":true"#),
                                                       se(5, #""kind":"session.task_closed","run_id":"r1","why":"session_end""#)])
@@ -752,7 +758,7 @@ enum SessionTests {
 
     static func undoOrderTests() {
         let start = ex(1, #""kind":"start","raw":"x""#)
-        let done = ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]}"#)
+        let done = ex(2, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]}"#)
         let endNone = se(2, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"","undo":"none""#)
         let endOpen = se(2, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"","undo":"open""#)
         let closed = se(3, #""kind":"session.task_closed","run_id":"r1","why":"session_end""#)
@@ -828,7 +834,7 @@ enum SessionTests {
         check(SessionClient.refusal(.option(runId: "r1", askId: "a1", option: 0), in: s) != nil, "its card is not answered")
         check(s.status != .waitingForYou(cardKind: "action") && s.status != .thinking, "the dot no longer waits: \(s.status)")
         // a lingering result card goes with the process
-        let done = ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#)
+        let done = ex(2, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#)
         let lingering = SessionReducer.reduce(SessionState(), [taskR1, start, done, exit])
         check(lingering.task("r1")?.undo == .expired("session_exit") && SessionClient.refusal(.respond(runId: "r1", option: 0), in: lingering) != nil, "undo expired with the process")
         check(SessionReducer.reduce(s, se(nil, #""kind":"session.start","resumed":true"#)).exited == nil, "a new session.start clears it")
@@ -1215,7 +1221,7 @@ enum SessionTests {
             r("r1", 4, #""kind":"resumed","ask_id":"a1""#), r("r1", 5, #""kind":"consent","picked":"action""#), r("r1", 6, #""kind":"step","text":"x","step_id":"s1","plan_step":1"#),
             r("r1", 7, #""kind":"step_result","step_id":"s1","status":"ok""#), r("r1", 8, #""kind":"changes","created":["a.txt"],"created_windows":["w1"]"#),
             r("r1", 9, #""kind":"answer_given","text":"好了""#),
-            r("r1", 10, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]},"changes":{"created":["a.txt"]}"#),
+            r("r1", 10, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"s","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]},"changes":{"created":["a.txt"]}"#),
             se(3, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"s","undo":"open","changes":{"created":["a.txt"]},"answer":"好了""#),
             r("r1", 11, #""kind":"result_response","picked":"undo","undone":1,"total":1"#),
             se(4, #""kind":"session.task_undo","run_id":"r1","undone":1,"total":1"#),
@@ -1266,7 +1272,7 @@ enum SessionTests {
             se(2, #""kind":"session.task_closed","run_id":"r1","why":"linger""#),
             se(3, #""kind":"session.task","msg_id":"m2","run_id":"r2","raw":"b","by":"slash""#),
             r("r2", 1, #""kind":"start","raw":"b""#), r("r2", 2, #""kind":"step","text":"z","step_id":"s1""#), r("r2", 3, #""kind":"step_result","step_id":"s1","status":"ok""#),
-            r("r2", 4, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#),
+            r("r2", 4, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"s","result_card":{"kind":"result","text":"r","options":[{"kind":"undo","text":"undo"}]}"#),
             se(4, #""kind":"session.task_closed","run_id":"r2","why":"linger""#),
         ]
         // an undo asked for (session.task_respond) and its process gone before any result; then, on reopen, the undo
@@ -1276,7 +1282,7 @@ enum SessionTests {
             se(1, #""kind":"session.task","msg_id":"m1","run_id":"r1","raw":"a","by":"slash""#),
             r("r1", 1, #""kind":"start","raw":"a""#), r("r1", 2, #""kind":"step","text":"x","step_id":"s1""#), r("r1", 3, #""kind":"step_result","step_id":"s1","status":"ok""#),
             r("r1", 4, #""kind":"changes","created":["a.txt"]"#),
-            r("r1", 5, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","# + undoCard + #","changes":{"created":["a.txt"]}"#),
+            r("r1", 5, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"s","# + undoCard + #","changes":{"created":["a.txt"]}"#),
             se(2, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"s","undo":"open","changes":{"created":["a.txt"]}"#),
             se(3, #""kind":"session.task_respond","run_id":"r1","option":0,"undo":true"#),
             L(#"{"kind":"helper.session_exit","session_id":"s","code":3,"last_seq":3}"#),
@@ -1398,7 +1404,7 @@ enum SessionTests {
     static func rereviewTests() {
         let exit = L(#"{"kind":"helper.session_exit","session_id":"s","code":9}"#)
         let start = ex(1, #""kind":"start","raw":"x""#)
-        let done = ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]}"#)
+        let done = ex(2, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"","result_card":{"kind":"result","text":"r","options":[{"kind":"approve","text":"ok"},{"kind":"undo","text":"undo"}]}"#)
         let end = se(2, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"","undo":"open""#)
         // 1. the exit closes every task's result card, whether its task_done came before or comes after
         for (how, order) in [("done, end, exit", [taskR1, start, done, end, exit]), ("end, exit, done", [taskR1, start, end, exit, done]),
