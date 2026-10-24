@@ -454,6 +454,7 @@ final class ShellModel: ObservableObject {
     func refreshSettings() {
         let off = !cloudOn()
         if cloudOff != off { cloudOff = off }
+        if keysCloudOn == off { keysCloudOn = !off }
     }
 
     /// Cloud models are off: nothing goes to a session (said once above the composer; the chat's row offers the
@@ -768,72 +769,124 @@ final class ShellModel: ObservableObject {
     // | card mode, a pick held                                  | another option replaces it (the 3 s start again);|
     // |                                                         |   the way out cancels at once                    |
     //
-    // A key's label and its hint are shown exactly when card mode is on for that card (`keysActive`): a label is shown
-    // if and only if pressing it does what it says (so never on a result card, which takes no keys).
+    // A key's label, the 「按 n」 of its hint and the dispatcher read one predicate, `keyWorks`, which holds every gate
+    // the key path has (#111 review at ba3eec8): card mode for this card (by run and ask_id), the card on screen in the
+    // key window of the active app for CardKeys.cardOnScreen since it was last (re)shown there, it takes a pick (the
+    // client's newest state: not answered, sent, expired or voided), the control has a key, an approve-type option only
+    // once the whole card was seen, a model-reaching option only while cloud models are on, no field being edited and
+    // no input-method composition. keyDown parses the event (a digit, no ⌘⌃⌥, not repeated) and then acts exactly when
+    // keyWorks says so. Every input of those gates is published, so the labels follow it.
 
-    /// When each card came on screen (CardView's appear; gone when it leaves), by card key.
+    /// Cards whose view is on screen (CardView's appear / disappear), by card key.
+    private var visible: Set<String> = []
+    /// Since when each visible card has been on screen in the key window of the active app (set when it appears there,
+    /// or when the window becomes key / the app active / the window is restored with it on screen; cleared when it
+    /// leaves): the 1 s counts from then.
     private var shownAt: [String: Double] = [:]
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
+    /// The main window is the key window of the active app (CardKeyMonitor's notifications; true until told otherwise).
+    @Published private(set) var windowKey = true
+    /// A field in the main window is being edited / an input method composes there (CardKeyMonitor: on every key-down
+    /// and on every window update).
+    @Published private(set) var editingText = false
+    @Published private(set) var composing = false
+    /// Published so that labels follow the cloud switch (`cloudOn` is read live; this changes with it).
+    @Published private(set) var keysCloudOn = true
 
-    func cardShown(_ card: CardModel) { let k = Self.cardKey(card); if shownAt[k] == nil { shownAt[k] = now() } }
+    func cardShown(_ card: CardModel) {
+        let k = Self.cardKey(card)
+        visible.insert(k)
+        if windowKey && shownAt[k] == nil { shownAt[k] = now() }
+    }
     /// The card left the screen (its view went: the window closed, another session shown, the card answered): its card
     /// mode ends with it, and its time on screen starts again when it is back.
     func cardHidden(_ card: CardModel) {
         let k = Self.cardKey(card)
+        visible.remove(k)
         shownAt[k] = nil
         if keyCard == k { leaveCardMode() }
     }
     /// Card mode ends: the card is no longer on screen in the key window — the window closed or is no longer the key
-    /// one, another app came forward (owner/coordinator 10-24: leaving the app ends it), another session shown. A new
-    /// explicit move is needed, and the 1 s on screen counts again from when the card is back.
-    func leaveCardMode() { if keyCard != nil { keyCard = nil } }
+    /// one, another app came forward (leaving the app ends it, coordinator 10-24), another session shown. A new explicit
+    /// move is needed, and the 1 s counts again from when it is back (windowReturned).
+    func leaveCardMode() {
+        if keyCard != nil { keyCard = nil }
+        shownAt = [:]
+    }
+    /// The main window is no longer the key window of the active app (resigned key, closed, minimised, the app went
+    /// back): card mode ends; the cards on screen are not counted as shown until it returns.
+    func windowLeft() {
+        if windowKey { windowKey = false }
+        leaveCardMode()
+    }
+    /// The main window is the key window of the active app again (became key, the app active, restored): the cards on
+    /// screen count as shown from now.
+    func windowReturned() {
+        if !windowKey { windowKey = true }
+        let t = now()
+        for k in visible where shownAt[k] == nil { shownAt[k] = t }
+    }
+    /// Where the typing is in the main window (the monitor, on each key-down and window update).
+    func focusChanged(editing: Bool, composing c: Bool) {
+        if editingText != editing { editingText = editing }
+        if composing != c { composing = c }
+    }
 
-    /// The pinned card that takes picks in the selected session, as a CardModel.
+    /// The pinned card that takes picks in the selected session (the client's newest state), as a CardModel.
     private func pinnedTakingPicks() -> CardModel? {
-        guard let id = selected, let s = states[id], let p = pinned(s), p.phase.takesPick else { return nil }
+        guard let id = selected else { return nil }
+        let s = client.state(id)
+        guard let p = pinned(s), p.phase.takesPick else { return nil }
         return CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
     }
 
     /// An explicit move into `card` (a click on it, Esc / Tab): card mode for it — only for the pinned card while it
-    /// takes picks and has been on screen for CardKeys.cardOnScreen (a move made as the card appeared was not about it).
+    /// takes picks and has been on screen in the key window for CardKeys.cardOnScreen (a move made as the card
+    /// appeared, or right after the window came back, was not about it).
     func enterCardMode(_ card: CardModel) {
         let k = Self.cardKey(card)
-        guard let p = pinnedTakingPicks(), Self.cardKey(p) == k, let since = shownAt[k], now() - since >= CardKeys.cardOnScreen else { return }
+        guard windowKey, let p = pinnedTakingPicks(), Self.cardKey(p) == k, let since = shownAt[k], now() - since >= CardKeys.cardOnScreen else { return }
         if keyCard != k { keyCard = k }
     }
 
     /// Card mode is on for `card` (by its run and ask_id: never another card of the session, an older result card
-    /// included), it is the pinned card that takes picks, and it is on screen.
+    /// included), it is the pinned card that takes picks, on screen in the key window.
     func keysActive(_ card: CardModel) -> Bool {
         let k = Self.cardKey(card)
-        guard keyCard == k, shownAt[k] != nil, let p = pinnedTakingPicks() else { return false }
+        guard windowKey, keyCard == k, shownAt[k] != nil, let p = pinnedTakingPicks() else { return false }
         return Self.cardKey(p) == k
     }
 
-    /// THE predicate for a key: whether pressing `control`'s key on `card` picks it now. The key's label, the "Key n"
-    /// of its VoiceOver hint and the dispatcher (keyDown) all read this, so a label is shown if and only if its key
-    /// does what it says: card mode for the card, the control has a key, and its click would act (an approve-type one
-    /// once the whole card was seen; the card still takes a pick).
+    /// THE predicate for a key: whether pressing `control`'s key on `card` picks it now — every gate of the key path
+    /// (see above). The label, the hint's 「按 n」 and keyDown read only this.
     func keyWorks(_ card: CardModel, _ control: CardLayout.Control) -> Bool {
-        guard control.key != nil, keysActive(card), let id = selected, let s = states[id] else { return false }
-        return buttonEnabled(control.button, card: card, in: s)
+        guard control.key != nil, !editingText, !composing, keysActive(card), let id = selected else { return false }
+        let b = control.button
+        guard b.runId == card.runId, b.askId == card.askId, let ask = b.askId else { return false }
+        if b.role.needsWholeBody && !bodySeen.contains(Self.cardKey(card)) { return false }
+        if !b.role.reachesNoModel && !cloudOn() { return false }
+        let a = CardModel.answer(b)
+        return cards.wouldPick(a, askId: ask, in: client.state(id))
     }
 
     /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true only when it acted on the
-    /// pinned card (it is consumed then; otherwise it passes on). Esc and Tab (⇧Tab too), with no ⌘⌃⌥, not repeated,
-    /// with no field being edited and no input-method composition under way, are explicit moves into the pinned card
-    /// (never consumed: Esc in a field cancels the input method's candidates there, and is not a move). A digit acts
-    /// only when keyWorks says its control does.
-    func keyDown(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool, composing: Bool = false) -> Bool {
+    /// pinned card (it is consumed then; otherwise it passes on). It first records where the typing is (the event's
+    /// own: a field being edited, a composition, the window key). Esc and Tab (⇧Tab too), with no ⌘⌃⌥, not repeated,
+    /// no field being edited and no composition, are explicit moves into the pinned card (never consumed: Esc in a
+    /// field cancels the input method's candidates there, and is not a move). A digit (no ⌘⌃⌥, not repeated) acts
+    /// exactly when keyWorks says its control does.
+    func keyDown(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText editing: Bool, isRepeat: Bool, composing c: Bool = false) -> Bool {
+        focusChanged(editing: editing, composing: c)
+        if mainWindowIsKey { if !windowKey { windowReturned() } } else { windowLeft() }
         if characters == "\u{1b}" || characters == "\t" || characters == "\u{19}" {
-            if mainWindowIsKey, !commandLike, !isRepeat, !editingText, !composing, let p = pinnedTakingPicks() { enterCardMode(p) }
+            if !commandLike, !isRepeat, !editingText, !composing, let p = pinnedTakingPicks() { enterCardMode(p) }
             return false
         }
-        guard !composing, let n = CardKeys.number(characters: characters, commandLike: commandLike, mainWindowIsKey: mainWindowIsKey,
-                                                  editingText: editingText, isRepeat: isRepeat),
-              let p = pinnedTakingPicks(), let c = CardLayout(p).control(forKey: n), keyWorks(p, c) else { return false }
-        return click(c.button)
+        guard let n = CardKeys.digit(characters: characters, commandLike: commandLike, isRepeat: isRepeat),
+              let p = pinnedTakingPicks(), let ctl = CardLayout(p).control(forKey: n), keyWorks(p, ctl), let id = selected else { return false }
+        // (keyWorks said yes: act, with no gate of its own)
+        return pick(CardModel.answer(ctl.button), immediate: ctl.button.role == .cancel, in: id)
     }
 
     /// Key `n` (1–9, CardKeys) on the pinned card: its n-th control as shown (CardLayout), picked as a click is — held for

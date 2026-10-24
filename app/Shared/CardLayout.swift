@@ -119,8 +119,14 @@ enum CardKeys {
     static let cardOnScreen: Double = 1.0
 
     static func number(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool = false) -> Int? {
-        guard mainWindowIsKey, !editingText, !commandLike, !isRepeat, let c = characters, c.count == 1,
-              let n = Int(c), (1...CardLayout.maxKeys).contains(n) else { return nil }
+        guard mainWindowIsKey, !editingText else { return nil }
+        return digit(characters: characters, commandLike: commandLike, isRepeat: isRepeat)
+    }
+
+    /// The event alone: a digit 1–9, no ⌘⌃⌥, not an auto-repeat (where the typing is and the card's state are
+    /// ShellModel.keyWorks's).
+    static func digit(characters: String?, commandLike: Bool, isRepeat: Bool) -> Int? {
+        guard !commandLike, !isRepeat, let c = characters, c.count == 1, let n = Int(c), (1...CardLayout.maxKeys).contains(n) else { return nil }
         return n
     }
 }

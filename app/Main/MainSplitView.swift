@@ -237,7 +237,8 @@ struct ChatColumn: View {
             // 1–9 pick the pinned card's options (only while this window is the key one and no field is typed in)
             .background(CardKeyMonitor(onKey: { c, cmd, key, editing, rep, composing in
                 shell.keyDown(characters: c, commandLike: cmd, mainWindowIsKey: key, editingText: editing, isRepeat: rep, composing: composing)
-            }, onLeave: { shell.leaveCardMode() }))
+            }, onLeave: { shell.windowLeft() }, onReturn: { shell.windowReturned() },
+               onFocus: { editing, composing in shell.focusChanged(editing: editing, composing: composing) }))
             .onChange(of: shell.current.flatMap { shell.pinned($0) }?.card.askId) { _, id in announce(shell.current, id) }
     }
 

@@ -29,6 +29,7 @@ enum CardLayoutTests {
         DecisionTests.group("layout.cardModeEndsTests"); cardModeEndsTests()
         DecisionTests.group("layout.labelIsKeyTests"); labelIsKeyTests()
         DecisionTests.group("layout.escTabTests"); escTabTests()
+        DecisionTests.group("layout.gateFlipTests"); gateFlipTests()
     }
 
     // MARK: samples
@@ -410,11 +411,16 @@ enum CardLayoutTests {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let monitor = text.components(separatedBy: "struct CardKeyMonitor").dropFirst().first ?? ""
-        check(monitor.contains("NSWindow.didResignKeyNotification") && monitor.contains("NSWindow.willCloseNotification")
-              && monitor.contains("NSApplication.didResignActiveNotification") && monitor.contains("self?.onLeave()"),
-              "the monitor ends card mode when its window resigns key or closes, or the app goes to the back")
+        for n in ["NSWindow.didResignKeyNotification", "NSWindow.willCloseNotification", "NSWindow.didMiniaturizeNotification",
+                  "NSApplication.didResignActiveNotification", "NSWindow.didBecomeKeyNotification", "NSWindow.didDeminiaturizeNotification",
+                  "NSApplication.didBecomeActiveNotification", "NSWindow.didUpdateNotification"] {
+            check(monitor.contains(n), "the monitor observes \(n)")
+        }
+        check(monitor.contains("monitor.onLeave()") && monitor.contains("monitor.onReturn()") && monitor.contains("monitor.onFocus("),
+              "it reports leaving, returning and where the typing is")
         let main = (try? String(contentsOf: url.deletingLastPathComponent().appendingPathComponent("MainSplitView.swift"), encoding: .utf8)) ?? ""
-        check(main.contains("onLeave: { shell.leaveCardMode() }"), "the chat column wires it to the model")
+        check(main.contains("onLeave: { shell.windowLeft() }") && main.contains("onReturn: { shell.windowReturned() }")
+              && main.contains("shell.focusChanged(editing: editing, composing: composing)"), "the chat column wires them to the model")
         // card mode belongs to the card by its run and ask_id: an older result card of the session shows no digits
         let o = CardStoreTests.Rig()
         o.ask("a0"); o.resumed("a0")
@@ -506,5 +512,82 @@ enum CardLayoutTests {
         let ck = modeArrive(k)
         k.timers.advance(5); k.m.enterCardMode(ck)
         check(!modeKey(k, "1", composing: true), "a digit while an input method composes: not the card's")
+    }
+
+    // MARK: - every gate of the key path is keyWorks's (#111 review at ba3eec8, its repros adopted)
+
+    /// One rig with every gate of a key open (card mode on the pinned card, on screen in the key window for 1 s, seen
+    /// whole, cloud on, no field edited, no composition), then each gate flipped in turn: for every control of the
+    /// card, the label (keyWorks), whether the key-down was consumed and whether anything was picked or sent agree. A
+    /// gate the dispatcher had outside keyWorks would show here as label ≠ consumed or consumed ≠ acted.
+    static func gateFlipTests() {
+        let gates = ["none", "no card mode", "a newer card", "card hidden", "window left", "window back 0.1 s",
+                     "field edited", "composing", "cloud off", "not seen whole", "answered", "sent", "expired", "a pick of it held"]
+        for kind in ["action", "ambiguity", "plan", "missing"] {
+            for gate in gates {
+                let o = CardStoreTests.OffRig()
+                o.feed { $0.ask("a1", kind) }
+                var m = o.card("a1")
+                o.m.cardShown(m)
+                if gate != "not seen whole" { o.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0) }
+                o.timers.advance(2)
+                if gate != "no card mode" { _ = o.m.keyDown(characters: "\u{1b}", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false) }
+                var editing = false, composing = false
+                switch gate {
+                case "a newer card":
+                    o.feed { $0.void("a1", "steer"); $0.ask("a2", kind) }
+                    m = o.card("a2"); o.m.cardShown(m); o.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0); o.timers.advance(2)
+                case "card hidden": o.m.cardHidden(m)
+                case "window left": o.m.windowLeft()
+                case "window back 0.1 s":
+                    o.m.windowLeft(); o.timers.advance(30); o.m.windowReturned(); o.timers.advance(0.1)
+                    _ = o.m.keyDown(characters: "\u{1b}", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false)
+                case "field edited": editing = true; o.m.focusChanged(editing: true, composing: false)
+                case "composing": composing = true; editing = true; o.m.focusChanged(editing: true, composing: true)
+                case "cloud off": o.set(cloud: false); o.m.refreshSettings(); o.runWork()
+                case "answered": o.feed { $0.resumed("a1") }
+                case "sent": o.m.click(m.buttons.first { $0.role == .cancel }!); o.runWork()
+                case "expired": o.feed { $0.void("a1", CardState.timeout) }
+                case "a pick of it held": o.m.click(m.buttons.first { $0.role != .cancel && !$0.role.needsWholeBody } ?? m.buttons[0])
+                default: break
+                }
+                for c in CardLayout(m).controls where c.key != nil {
+                    // each control on its own copy of the state: replay this gate's rig up to here
+                    let label = o.m.keyWorks(m, c)
+                    let answersBefore = o.answers(), heldBefore = o.m.cards.picks
+                    let consumed = o.m.keyDown(characters: String(c.key!), commandLike: false, mainWindowIsKey: gate != "window left",
+                                               editingText: editing, isRepeat: false, composing: composing)
+                    o.runWork()
+                    let acted = o.answers() > answersBefore || o.m.cards.picks != heldBefore
+                    check(label == consumed && consumed == acted,
+                          "\(kind), \(gate), key \(c.key!) (\(c.button.kind)): label \(label), consumed \(consumed), acted \(acted)")
+                    if gate == "none" || gate == "a pick of it held" { break }      // (one act changes the state; the first control decides)
+                }
+            }
+        }
+        // (repro B1) leaving and coming back restarts the 1 s: an Esc 0.1 s after the return enters nothing
+        let r = CardStoreTests.Rig()
+        let c = modeArrive(r)
+        r.timers.advance(2); r.m.enterCardMode(c)
+        r.m.windowLeft(); r.timers.advance(30); r.m.windowReturned(); r.timers.advance(0.1)
+        _ = modeKey(r, "\u{1b}")
+        check(!r.m.keysActive(c), "back in the window 0.1 s: an Esc enters no card mode")
+        r.timers.advance(CardKeys.cardOnScreen); _ = modeKey(r, "\u{1b}")
+        check(r.m.keysActive(c), "after 1 s back: it does")
+        // (repro B3) Tab enters card mode, then the focus is in a field: no labels, the digit is typed
+        let t = CardStoreTests.Rig()
+        let ct = modeArrive(t)
+        t.timers.advance(2)
+        _ = modeKey(t, "\t")
+        t.m.focusChanged(editing: true, composing: false)
+        let ctl = CardLayout(ct).controls.first { $0.key != nil }!
+        check(!t.m.keyWorks(ct, ctl) && !modeKey(t, String(ctl.key!), editing: true), "after Tab, the focus in a field: no label, the key is typed")
+        t.m.focusChanged(editing: false, composing: false)
+        check(t.m.keyWorks(ct, ctl), "the focus out of the field again: the label is back (card mode kept)")
+        // the dispatcher has no gate of its own: after keyWorks it picks
+        let src = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Shared/Shell.swift"), encoding: .utf8)) ?? ""
+        let body = src.components(separatedBy: "    func keyDown(").dropFirst().first?.components(separatedBy: "\n    }\n").first ?? ""
+        check(body.contains("keyWorks(p, ctl)") && body.contains("return pick(") && !body.contains("click(") && !body.contains("bodySeen") && !body.contains("cloudAllows"),
+              "keyDown: keyWorks, then pick — no other gate")
     }
 }

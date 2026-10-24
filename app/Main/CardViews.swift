@@ -289,22 +289,28 @@ struct ConsentFields: View {
 struct CardKeyMonitor: NSViewRepresentable {
     /// Every key-down of this window, with what the gate needs; true: consumed (it picked).
     let onKey: (_ characters: String?, _ commandLike: Bool, _ mainWindowIsKey: Bool, _ editingText: Bool, _ isRepeat: Bool, _ composing: Bool) -> Bool
-    /// The window stopped being the key one, closed, or the app went to the back: card mode ends.
+    /// The window stopped being the key window of the active app (resigned key, closed, minimised, the app went back).
     let onLeave: () -> Void
+    /// It is the key window of the active app again (became key, the app active, restored).
+    let onReturn: () -> Void
+    /// Where the typing is now (a field being edited, an input-method composition), on every window update.
+    let onFocus: (_ editing: Bool, _ composing: Bool) -> Void
 
-    func makeNSView(context: Context) -> NSView { Watcher(onKey: onKey, onLeave: onLeave) }
-    func updateNSView(_ v: NSView, context: Context) { (v as? Watcher)?.onKey = onKey; (v as? Watcher)?.onLeave = onLeave }
+    func makeNSView(context: Context) -> NSView { Watcher(self) }
+    func updateNSView(_ v: NSView, context: Context) { (v as? Watcher)?.monitor = self }
     static func dismantleNSView(_ v: NSView, coordinator: ()) { (v as? Watcher)?.stop() }
 
     final class Watcher: NSView {
-        var onKey: (String?, Bool, Bool, Bool, Bool, Bool) -> Bool
-        var onLeave: () -> Void
-        private var monitor: Any?
+        var monitor: CardKeyMonitor
+        private var events: Any?
         private var observers: [NSObjectProtocol] = []
-        init(onKey: @escaping (String?, Bool, Bool, Bool, Bool, Bool) -> Bool, onLeave: @escaping () -> Void) {
-            self.onKey = onKey; self.onLeave = onLeave; super.init(frame: .zero)
-        }
+        init(_ m: CardKeyMonitor) { monitor = m; super.init(frame: .zero) }
         required init?(coder: NSCoder) { nil }
+
+        /// The window's typing state: a field being edited, a composition under way.
+        private static func typing(_ w: NSWindow) -> (editing: Bool, composing: Bool) {
+            (w.firstResponder is NSText, (w.firstResponder as? NSTextInputClient)?.hasMarkedText() ?? false)
+        }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -312,22 +318,39 @@ struct CardKeyMonitor: NSViewRepresentable {
             guard let win = window else { return }
             // (observed, never acted on: nothing here moves the focus or a window)
             let c = NotificationCenter.default
-            for (name, object) in [(NSWindow.didResignKeyNotification, win as AnyObject?), (NSWindow.willCloseNotification, win),
-                                   (NSApplication.didResignActiveNotification, nil)] {
-                observers.append(c.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in self?.onLeave() })
+            let leave: [(Notification.Name, AnyObject?)] = [(NSWindow.didResignKeyNotification, win), (NSWindow.willCloseNotification, win),
+                                                             (NSWindow.didMiniaturizeNotification, win), (NSApplication.didResignActiveNotification, nil)]
+            for (name, object) in leave {
+                observers.append(c.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in self?.monitor.onLeave() })
             }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
+            let back: [(Notification.Name, AnyObject?)] = [(NSWindow.didBecomeKeyNotification, win), (NSWindow.didDeminiaturizeNotification, win),
+                                                            (NSApplication.didBecomeActiveNotification, nil)]
+            for (name, object) in back {
+                observers.append(c.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in self?.returned() })
+            }
+            observers.append(c.addObserver(forName: NSWindow.didUpdateNotification, object: win, queue: .main) { [weak self] _ in
+                guard let self, let w = self.window else { return }
+                let t = Self.typing(w)
+                self.monitor.onFocus(t.editing, t.composing)
+            })
+            returned()
+            events = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
                 guard let self, let w = self.window, e.window === w else { return e }
-                // (every key-down goes to the model, a digit or not: the typing guard counts them all)
-                let composing = (w.firstResponder as? NSTextInputClient)?.hasMarkedText() ?? false     // (an input method's candidates up)
-                let picked = self.onKey(e.charactersIgnoringModifiers, !e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-                                        w.isKeyWindow, w.firstResponder is NSText, e.isARepeat, composing)
+                let t = Self.typing(w)
+                let picked = self.monitor.onKey(e.charactersIgnoringModifiers, !e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                                                w.isKeyWindow && NSApp.isActive, t.editing, e.isARepeat, t.composing)
                 return picked ? nil : e
             }
         }
 
+        /// Back as the key window of the active app — or, when it is not (yet), still away.
+        private func returned() {
+            guard let w = window else { return }
+            if w.isKeyWindow && NSApp.isActive && !w.isMiniaturized { monitor.onReturn() } else { monitor.onLeave() }
+        }
+
         func stop() {
-            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+            if let m = events { NSEvent.removeMonitor(m); events = nil }
             for o in observers { NotificationCenter.default.removeObserver(o) }
             observers = []
         }
