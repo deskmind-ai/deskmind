@@ -13,7 +13,11 @@
 // it is over (GoalTicket: openThenSend checks it before the send, and stops the session if it became over while the
 // send went); a goal that fails with a session whose cua may be on its way stops that session, retires its cua (never
 // shown as a bubble to resend, never resent: SessionClient.retire) and guards the session for `sentBound` — a task
-// that still comes is stopped by its run.
+// of its own cua that still comes is stopped by its run.
+//
+// A task is the goal's only when it provably came from the goal's own cua (GoalLifecycle.task(of:in:): the stored
+// /cua message carries the cua's client_id, its session.task replies to that message). The user's own task in the
+// same session is never adopted, stopped or shown as the goal's (#118 delta review at 221a7f3).
 //
 // | state                  | event                    | next                     | effects                         |
 // |------------------------|--------------------------|--------------------------|---------------------------------|
@@ -191,8 +195,7 @@ enum GoalLifecycle {
         }
         switch st {
         case .opening(_?), .sent:
-            // a new session of its own: its first task is the goal's
-            if let t = s.tasks.first { return .taskStarted(run: t.runId) }
+            if let t = task(of: cua, in: s) { return .taskStarted(run: t.runId) }
             if let r = refusedCua() { return r }
             if case .sent = st, s.exited != nil { return .exited }
             return nil
@@ -204,11 +207,20 @@ enum GoalLifecycle {
         case .failed(_, _?):
             // (an exit does not end the guard: it may be stale, the cua run by the process the send reopened — the
             // guard ends with a task, a refusal or its bound)
-            if let t = s.tasks.first { return t.running ? .taskStarted(run: t.runId) : .exited }
+            if let t = task(of: cua, in: s) { return t.running ? .taskStarted(run: t.runId) : .exited }
             return refusedCua()
         default:
             return nil
         }
+    }
+
+    /// The task the goal's own cua started, and only that: the harness stores the /cua's words as a user message
+    /// with the cua's client_id, and its session.task replies to that message (reply_to). A task with no such link —
+    /// the user's own in the same session (they type there, or /cua) — is never the goal's: never adopted, never
+    /// stopped, never shown as the goal's (#118 delta review at 221a7f3). The one matcher: opening, sent, the guard.
+    static func task(of cua: String, in s: SessionState) -> TaskState? {
+        guard let m = s.messages.first(where: { $0.role == "user" && $0.clientId == cua }) else { return nil }
+        return s.tasks.first { $0.replyTo == m.id }
     }
 
     static func over(_ s: State) -> Bool {
