@@ -773,7 +773,8 @@ enum ShellTests {
                 for (api, allowed) in raw where code.contains(api) && !(api == "UserGesture(" && code.contains("fileprivate init")) {
                     if !allowed.contains(at) { found.append("\(f):\(i + 1) \(api) in \(enclosing(ls, i))") }
                 }
-                if code.contains("/usr/bin/open") && !ls[i...min(ls.count - 1, i + 2)].joined().contains("-g") { found.append("\(f):\(i + 1): open without -g") }
+                // (the launcher's own arguments are checked by what they are, below)
+                if code.contains("/usr/bin/open") && name != "Activation.swift" && !ls[i...min(ls.count - 1, i + 2)].joined().contains("-g") { found.append("\(f):\(i + 1): open without -g") }
                 if code.contains("Activation.onClick") && name != "Activation.swift" && !(code.contains("Button(") || code.contains("pill(")) {
                     found.append("\(f):\(i + 1): Activation.onClick outside a button's action")
                 }
@@ -783,6 +784,15 @@ enum ShellTests {
             }
         }
         check(found.isEmpty, "nothing activates an app outside a user's own action: \(found)")
+        // the background launcher's own configuration and arguments, as they are passed (#115 review at 6d3aee0: the
+        // scan allows the function; this holds what it does)
+        let cfg = Launch.backgroundConfig()
+        check(cfg.activates == false && cfg.addsToRecentItems == false && cfg.createsNewApplicationInstance == false,
+              "a background launch: activates false, no recent item, the running instance")
+        check(Launch.bundleArguments("x.y").first == "-g" && Launch.bundleArguments("x.y") == ["-g", "-b", "x.y"], "a background reopen: open -g -b")
+        let src = (try? String(contentsOf: app.appendingPathComponent("Shared/Activation.swift"), encoding: .utf8)) ?? ""
+        check(src.contains("openApplication(at: url, configuration: backgroundConfig())") && src.contains("open.arguments = bundleArguments(bundle)"),
+              "the launcher passes them as they are")
     }
 
     /// #107 re-review (2): 0.5.0 has no local-only mode. The 0.5 window's model settings show the cloud switch on and

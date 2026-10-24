@@ -62,18 +62,27 @@ enum Activation {
 enum Launch {
     /// Launches the app at `url` in the background (its configuration is this function's: activates = false).
     static func background(_ url: URL, completion: @escaping (Error?) -> Void) {
+        NSWorkspace.shared.openApplication(at: url, configuration: backgroundConfig()) { _, error in completion(error) }
+    }
+
+    /// The one configuration a background launch uses, as it is passed (ShellTests checks it): never in front, not in
+    /// the recent items, the running instance when there is one.
+    static func backgroundConfig() -> NSWorkspace.OpenConfiguration {
         let cfg = NSWorkspace.OpenConfiguration()
         cfg.activates = false
         cfg.addsToRecentItems = false
         cfg.createsNewApplicationInstance = false
-        NSWorkspace.shared.openApplication(at: url, configuration: cfg) { _, error in completion(error) }
+        return cfg
     }
+
+    /// The `open` arguments of a background reopen of `bundle` (bundleInBackground passes them as they are).
+    static func bundleArguments(_ bundle: String) -> [String] { ["-g", "-b", bundle] }
 
     /// `open -g -b <bundle>`, waited for: launches the app, or reopens its windows, without bringing it forward.
     static func bundleInBackground(_ bundle: String) {
         let open = Process()
         open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        open.arguments = ["-g", "-b", bundle]
+        open.arguments = bundleArguments(bundle)
         try? open.run(); open.waitUntilExit()
     }
 }
