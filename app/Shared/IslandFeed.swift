@@ -59,6 +59,20 @@ enum IslandFeed {
         return f
     }
 
+    /// The frame for a GoalRun's own task (never the selected session's), with its session's pinned card; nil before
+    /// its task came.
+    static func frame(_ g: GoalRun, lang: ResolvedLang) -> IslandFrame? {
+        guard let (s, t) = g.task else { return nil }
+        return frame(t, pinned: g.shell.pinned(s).map { (card: $0.card, phase: $0.phase) }, lang: lang)
+    }
+
+    /// The record the island's "Show Details" opens: the session task's kept record, unless the window shows it
+    /// already (nil: the window as it is).
+    static func detailsRoute(record: UUID?, showing: UUID?) -> UUID? {
+        guard let record, record != showing else { return nil }
+        return record
+    }
+
     /// The notification a new frame calls for: a card that newly waits (by its id), when DeskMind is not the active
     /// app or the user typed elsewhere a moment ago; nil otherwise. (The end's notification is RunOverlay.finish's.)
     static func cardNotification(from old: IslandFrame?, to new: IslandFrame, appActive: Bool, userTyping: Bool, lang: ResolvedLang) -> (title: String, body: String)? {

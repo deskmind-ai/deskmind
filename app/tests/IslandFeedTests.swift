@@ -1,5 +1,6 @@
 // M2 PR B: a session task's island and notifications come from its one state through IslandFeed — a table, session
-// state → island frame and notification — and GoalRunView / SessionIsland / "Show Details" are wired to it.
+// state → island frame and notification — and a goal's island follows its own task (GoalRun's `changed`), Show
+// Details opens its record (IslandFeed.detailsRoute).
 // Run from DecisionTests.main (build.sh).
 
 import Foundation
@@ -72,16 +73,27 @@ enum IslandFeedTests {
               "the end: not this one (RunOverlay.finish says it)")
     }
 
+    /// The island follows the goal's own task (GoalRun, never the selected session's), through the goal's `changed`
+    /// hook — which outlives the view — up to its end frame; Show Details opens the kept record, once.
     static func wiringTests() {
-        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        func code(_ f: String) -> String { (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? "" }
-        let goal = code("Main/GoalRunView.swift"), isl = code("Main/SessionIsland.swift"), ov = code("Main/RunOverlay.swift"), app = code("Main/DeskMindApp.swift")
-        check(goal.contains("IslandFeed.frame(t, pinned: p") && goal.contains("island.apply(f, title: goal"), "GoalRunView: the session task's frames, applied")
-        check(isl.contains("IslandFeed.cardNotification(") && isl.contains("o.show(") && isl.contains("o.update(") && isl.contains("o.setAsking(") && isl.contains("o.finish(")
-              && !isl.contains("TaskState") && !isl.contains("SessionState"), "SessionIsland: only the feed's frames reach RunOverlay (no second state)")
-        check(ov.contains("NotificationCenter.default.post(name: Self.showRecord, object: id)") && app.contains("publisher(for: RunOverlay.showRecord)") && app.contains("go(.record(r))"),
-              "Show Details: opens the task's GoalRunView (its record)")
-        check(goal.contains("let sid = record.sessionId") && goal.contains("shell.select(sid)") && goal.contains("sessionId: shell.selected, runId: t.runId"),
-              "a session task's record keeps its session and run, and opens as the session has it")
+        typealias T = SurfaceTests
+        var frames: [IslandFrame] = []
+        let r = T.Rig(); T.openOK(r.mock)
+        let g = r.goal(changed: { g in if let f = IslandFeed.frame(g, lang: .zhHans) { frames.append(f) } })
+        g.start()
+        check(frames.isEmpty, "no task yet: no island")
+        for l in T.taskLines { r.m.client.feed(l) }
+        check(frames.last?.phase == .running, "its task: the island shows it: \(String(describing: frames.last))")
+        r.m.selected = nil
+        r.m.client.feed(["kind": "session.task", "session_id": "ses_other", "seq": 1, "msg_id": "o1", "run_id": "r_other", "raw": "x", "by": "slash"])
+        check(IslandFeed.frame(g, lang: .zhHans) != nil && frames.last?.phase == .running, "another session selected: still its own task")
+        for l in T.endLines { r.m.client.feed(l) }
+        check(frames.last?.phase == .ended(passed: true, stopped: false), "its end reaches the island: \(String(describing: frames.last?.phase))")
+        let id = UUID(), other = UUID()
+        check(IslandFeed.detailsRoute(record: id, showing: nil) == id && IslandFeed.detailsRoute(record: id, showing: other) == id,
+              "Show Details: the task's record")
+        check(IslandFeed.detailsRoute(record: id, showing: id) == nil && IslandFeed.detailsRoute(record: nil, showing: nil) == nil,
+              "already shown, or none kept: the window as it is")
+        check(r.records.first?.sessionId == T.sid && r.records.first?.task?.runId == T.rid, "the record keeps its session and run")
     }
 }
