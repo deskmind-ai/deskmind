@@ -170,11 +170,7 @@ enum IslandFeedTests {
             states[T.sid] = SessionReducer.reduce(SessionState(sessionId: T.sid), [SessionTests.taskR1, SessionTests.ex(1, #""kind":"start","raw":"x""#)])
             check(PastRun.task(sessionId: T.sid, runId: "r1", endedAs: nil, in: states)?.task.runId == "r1", "there: shown as the session has it")
         }
-        let id = UUID(), other = UUID()
-        check(IslandFeed.detailsRoute(record: id, showing: nil) == id && IslandFeed.detailsRoute(record: id, showing: other) == id,
-              "Show Details: the task's record")
-        check(IslandFeed.detailsRoute(record: id, showing: id) == nil && IslandFeed.detailsRoute(record: nil, showing: nil) == nil,
-              "already shown, or none kept: the window as it is")
+        routeTests()
     }
 
     /// What a goal's screen shows (GoalShown.of), route × field — Codex review at a8cec0f: an older run showed a newer
@@ -232,5 +228,25 @@ enum IslandFeedTests {
         // no goal (another not over)
         let busy = shown(.busy)
         check(busy.task == nil && busy.screen.afterwards && busy.screen.line == GoalRunScreen.why(GoalLifecycle.Why.busy, lang: .en), "busy: said, Back works")
+    }
+
+    /// One route for Show Details and a reopened window (IslandFeed.route) — delta review at 3e59da9: goal A's island
+    /// lingered with Show Details while goal B ran; the click pulled the window off B to A's record.
+    static func routeTests() {
+        let a = UUID(), b = UUID(), recA = UUID()
+        typealias R = IslandFeed
+        check(R.route(active: b, details: recA, showingGoal: b, showingRecord: nil) == nil, "B active and shown: Show Details of A stays on B")
+        check(R.route(active: b, details: recA, showingGoal: nil, showingRecord: recA) == .goal(b), "B active, A's record shown: to B")
+        check(R.route(active: b, details: nil, showingGoal: nil, showingRecord: nil) == .goal(b), "reopened while B is active: to B")
+        check(R.route(active: nil, details: recA, showingGoal: nil, showingRecord: nil) == .record(recA), "none active: Show Details opens the record")
+        check(R.route(active: nil, details: recA, showingGoal: a, showingRecord: nil) == .record(recA), "(from an ended goal's screen too)")
+        check(R.route(active: nil, details: recA, showingGoal: nil, showingRecord: recA) == nil, "shown already: as it is")
+        check(R.route(active: nil, details: nil, showingGoal: nil, showingRecord: nil) == nil, "nothing: as it is")
+        // a goal that starts clears the island's link to an earlier goal's record (before its own first frame)
+        let (r, surface, _, g) = rig()
+        surface.detailsRecord = recA
+        g.start()
+        check(surface.detailsRecord == nil && surface.calls.isEmpty, "B starts (no frame yet): A's link gone")
+        _ = r
     }
 }

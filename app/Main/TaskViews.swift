@@ -16,6 +16,9 @@ struct TaskRow: View {
     @ObservedObject var shell: ShellModel
     let task: TaskState
     let session: SessionState
+    /// Its Stop: the chat's (the selected session's task); a goal's screen gives the goal's own (GoalRun.stop: by its
+    /// run, never run-less).
+    var stop: (() -> Void)? = nil
     @Environment(\.lang) private var lang
 
     var body: some View {
@@ -32,7 +35,7 @@ struct TaskRow: View {
                 }
                 Spacer()
                 if task.running {
-                    Button(L("Stop", lang: lang)) { shell.stop() }
+                    Button(L("Stop", lang: lang)) { if let stop { stop() } else { shell.stop() } }
                         .buttonStyle(InkButtonStyle(prominent: false))
                         .disabled(task.stopping)
                         .accessibilityLabel(L("Stop", lang: lang))

@@ -179,7 +179,21 @@ enum MainWindow {
     /// While a run is running the window cannot be closed (its close button is off; ⌘W beeps), only minimised: card
     /// questions are answered in it, and closing it ended the run's view and model.
     static func setClosable(_ on: Bool) {
-        window?.standardWindowButton(.closeButton)?.isEnabled = on
+        runHolds = !on
+        applyClosable()
+    }
+
+    /// A goal is active (GoalRuns.app owns this: no view sets it).
+    static func setGoalClosable(_ on: Bool) {
+        goalHolds = !on
+        applyClosable()
+    }
+
+    private static var runHolds = false
+    private static var goalHolds = false
+    /// The close button as the run (RunModel) and the goal (GoalRuns) hold it — again for a window that came anew.
+    static func applyClosable() {
+        window?.standardWindowButton(.closeButton)?.isEnabled = !runHolds && !goalHolds
     }
 
     /// A key was pressed in the last `seconds`, in any app (the HID system's own count; no keys are read).
@@ -222,6 +236,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if RunModel.shared?.phase == .running && RunModel.shared?.ask == nil { return false }
             // The same in the 0.5 window: a session's task running, no card waiting (handoff §3.1).
             if ShellFlag.isOn() && ShellModel.shared?.taskRunningWithoutCard == true { return false }
+            // The same for a goal from the home screen (a session task driven by hands through the harness)
+            if GoalRuns.app.holdsReopen { return false }
             if MainWindow.comeBack(Activation.reopen(sender)) { return false }
             return true
         }

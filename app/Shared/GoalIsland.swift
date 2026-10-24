@@ -73,7 +73,7 @@ extension GoalRunEffects {
     static func app(lang: ResolvedLang, services: GoalRunServices, surface: IslandSurface,
                     after: @escaping (Double, @escaping () -> Void) -> Void) -> GoalRunEffects {
         let id = UUID()
-        final class Kept { var record: UUID? }
+        final class Kept { var record: UUID?; var started = false }
         let kept = Kept()
         let island = IslandApplier(surface)
         return GoalRunEffects(
@@ -91,6 +91,9 @@ extension GoalRunEffects {
             },
             after: after,
             changed: { g in
+                // a goal that starts: the island's link to an earlier goal's record goes (Show Details never opens it
+                // over this one)
+                if !kept.started, g.state != .idle { kept.started = true; surface.detailsRecord = nil }
                 guard let f = IslandFeed.frame(g, record: kept.record, lang: lang) else { return }
                 island.apply(f, title: g.goal, lang: lang, onStop: { [weak g] in g?.stop() })
             })

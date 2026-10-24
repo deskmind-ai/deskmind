@@ -84,11 +84,15 @@ enum IslandFeed {
         return f
     }
 
-    /// The record the island's "Show Details" opens: the session task's kept record, unless the window shows it
-    /// already (nil: the window as it is).
-    static func detailsRoute(record: UUID?, showing: UUID?) -> UUID? {
-        guard let record, record != showing else { return nil }
-        return record
+    /// Where the window goes, asked by the island's "Show Details" (`details`: the kept record it links to) or by a
+    /// window that opens again (`details` nil) — one function: while a goal is active, always to that goal (its
+    /// cards, its Stop: never pulled off it to an older record — delta review at 3e59da9); else to the record; nil
+    /// when the window shows it already.
+    enum Route: Equatable { case goal(UUID), record(UUID) }
+    static func route(active: UUID?, details: UUID?, showingGoal: UUID?, showingRecord: UUID?) -> Route? {
+        if let active { return active == showingGoal ? nil : .goal(active) }
+        guard let details, details != showingRecord else { return nil }
+        return .record(details)
     }
 
     /// The notification a new frame calls for: a card that newly waits (by its id), when DeskMind is not the active

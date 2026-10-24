@@ -32,6 +32,8 @@ enum SurfaceTests {
         DecisionTests.group("surface.goalFailureTests"); goalFailureTests()
         DecisionTests.group("surface.goalScreenTests"); goalScreenTests()
         DecisionTests.group("surface.goalReopenTests"); goalReopenTests()
+        DecisionTests.group("surface.goalClosableTests"); goalClosableTests()
+        DecisionTests.group("surface.goalStopTests"); goalStopTests()
         DecisionTests.group("surface.goalCardKeysTests"); goalCardKeysTests()
     }
 
@@ -473,11 +475,6 @@ enum SurfaceTests {
     /// Codex review at 84d72f3 (1): the window is only minimised while a goal is not over; a window that opens again
     /// goes straight to the goal not over.
     static func goalReopenTests() {
-        for (st, closable) in [(L.State.recordingStart, false), (.opening(sid: nil), false), (.sent(sid: "s", stopAsked: false), false),
-                               (.sent(sid: "s", stopAsked: true), false), (.running(sid: "s", run: "r"), false),
-                               (.failed(L.Why.gone, guarding: "s"), true), (.ended(sid: "s", run: "r", status: "succeeded"), true)] {
-            check(GoalRunScreen(st, lang: .en).windowClosable == closable, "\(st): the window closable: \(closable)")
-        }
         let a = UUID(), b = UUID()
         check(GoalRuns.reopenRoute(active: a, showing: nil) == a && GoalRuns.reopenRoute(active: a, showing: b) == a, "reopened: to the goal not over")
         check(GoalRuns.reopenRoute(active: a, showing: a) == nil && GoalRuns.reopenRoute(active: nil, showing: nil) == nil, "shown already, or none: as it is")
@@ -489,6 +486,65 @@ enum SurfaceTests {
         check(runs.active == a, "running: active")
         for l in endLines { r.m.client.feed(l) }
         check(g?.state == .ended(sid: sid, run: rid, status: "succeeded") && runs.active == nil, "ended: none active (Home as usual)")
+    }
+
+    /// Codex delta review at 1f77d1a (2): the window's close button is GoalRuns' alone — closable exactly while no
+    /// goal is active, told on every change (start, end, failed and guarding, released), no view involved. (3): a
+    /// reopen is held while a goal is active and no card of its own waits. (minor) a released goal's request goes.
+    static func goalClosableTests() {
+        do {    // start → end → released
+            let r = Rig(); openOK(r.mock)
+            var closable: [Bool] = [], released: [UUID] = []
+            let runs = GoalRuns(setClosable: { closable.append($0) }, released: { released.append($0) })
+            let a = UUID()
+            let g = runs.start(a) { r.goal() }
+            check(closable == [false], "started: not closable: \(closable)")
+            check(runs.holdsReopen, "active, no card: a reopen is held (hands' give-back)")
+            for l in taskLines { r.m.client.feed(l) }
+            r.m.client.feed(["kind": "ask", "session_id": sid, "run_id": rid, "seq": 2, "ask_id": "ask_g",
+                             "card": ["kind": "missing", "text": "发给谁？", "free_text": false, "blocking": true,
+                                      "options": [["kind": "value", "text": "小王"], ["kind": "cancel", "text": "先别做了"]]]])
+            check(g?.cardWaiting == true && !runs.holdsReopen, "its card waits: a reopen is the user's")
+            for l in endLines { r.m.client.feed(l) }
+            check(closable == [false, true] && released == [a] && !runs.holdsReopen, "ended: closable, released once: \(closable) \(released)")
+        }
+        do {    // failed and guarding: closable at the failure; released after the guard, no further change
+            let r = Rig(); openOK(r.mock)
+            var closable: [Bool] = [], released: [UUID] = []
+            let runs = GoalRuns(setClosable: { closable.append($0) }, released: { released.append($0) })
+            let a = UUID()
+            let g = runs.start(a) { r.goal() }
+            r.timers.advance(60)
+            check(g?.state == .failed(L.Why.notStarted, guarding: sid) && closable == [false, true] && released.isEmpty,
+                  "failed, guarding: closable, still kept: \(closable)")
+            r.timers.advance(60)
+            check(closable == [false, true] && released == [a], "guard over: released, closable unchanged")
+            let b = UUID()
+            _ = runs.start(b) { r.goal() }
+            check(closable == [false, true, false], "the next goal: not closable again")
+        }
+    }
+
+    /// Codex delta review at 1f77d1a (4): every Stop on the goal screen is the goal's (GoalRun.stop — TaskRow's Stop,
+    /// the screen's button and ⌘., the island's): in every state, with the user's own task streaming in its session,
+    /// never a run-less stop.
+    static func goalStopTests() {
+        let r = Rig(); openOK(r.mock)
+        let g = r.goal(); g.start()
+        for l in userTaskLines { r.m.client.feed(l) }
+        g.stop()                                    // sent
+        for l in taskLines.map({ l -> [String: Any] in
+            var l = l
+            if l["kind"] as? String == "session.message" { l["seq"] = 3 }
+            if l["kind"] as? String == "session.task" { l["seq"] = 4 }
+            return l
+        }) { r.m.client.feed(l) }
+        g.stop()                                    // running
+        r.m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 5, "run_id": rid, "status": "stopped", "summary": "", "undo": "none"])
+        g.stop()                                    // ended
+        check(r.runlessStops == 0 && !r.sent("stop").contains { $0["run_id"] as? String == "r_user" },
+              "the goal screen's Stop: never run-less, never the user's task: \(r.sent("stop"))")
+        check(r.sent("stop").allSatisfy { $0["run_id"] as? String == rid } && !r.sent("stop").isEmpty, "only its own task, by its run")
     }
 
     /// Codex review at 84d72f3 (3): the goal's pinned card takes 1–9 and Esc / Tab through the chat's one wiring

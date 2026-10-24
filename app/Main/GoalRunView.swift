@@ -188,10 +188,7 @@ struct GoalRunView: View {
                 run.show(record)
             }
             else if let record { run.show(record) }
-            if sessionRun { MainWindow.setClosable(screen.windowClosable) }
         }
-        // the window is only minimised while the goal is not over (its cards are answered here), as RunModel's runs
-        .onChange(of: screen.windowClosable) { _, on in if sessionRun { MainWindow.setClosable(on) } }
         // 1–9, Esc / Tab on the pinned card: the chat's own key monitor and wiring (ShellModel.cardKeyHandlers)
         .background(CardKeyMonitor(shell.cardKeyHandlers))
         .sheet(item: $confirming) { r in
@@ -306,7 +303,11 @@ struct GoalRunView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if let s = shown.session, let t = shown.task {
-                    TaskRow(shell: shell, task: t, session: s)
+                    // (its Stop is the goal's, by its run — a saved run's, by its own run: never the selected
+                    // session's run-less stop)
+                    TaskRow(shell: shell, task: t, session: s, stop: {
+                        if let g = goalBox.run { g.stop() } else if let sid = past?.sessionId { shell.stop(sessionId: sid, runId: t.runId) }
+                    })
                     if t.ended { FreeResult(task: Self.runTask(t, folder: shown.folder)) }
                 } else if let line = screen.line {
                     Text(line).font(.system(size: 13)).foregroundStyle(ShellColor.secondary).padding(.top, 60)
@@ -350,8 +351,9 @@ final class GoalRunBox: ObservableObject {
 }
 
 extension GoalRuns {
-    /// The app's goals (GoalRunView's), kept for as long as the app runs.
-    static let app = GoalRuns()
+    /// The app's goals (GoalRunView's), kept for as long as the app runs. It owns the window's close button for goals.
+    static let app = GoalRuns(setClosable: { on in MainActor.assumeIsolated { MainWindow.setGoalClosable(on) } },
+                              released: { id in MainActor.assumeIsolated { GoalRequests.byId[id] = nil } })
 }
 
 /// The requests of the app's goals, by id: a window that opens again goes to the goal not over (GoalRuns.reopenRoute).
