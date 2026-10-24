@@ -44,18 +44,25 @@ enum SurfaceTests {
             check(n == want && f == fx, "\(what): \(s) × \(e) → \(n) \(f)")
         }
         let end: [L.Effect] = [.stopRecording, .writeRecord]
-        let open: [L.Effect] = [.deadline(seconds: 70), .open]
+        let bound = SessionClient.openTimeout + SessionClient.sendTimeout + 5
+        check(L.openingBound == bound && bound > SessionClient.openTimeout + SessionClient.sendTimeout,
+              "the opening waits longer than the open and a send that reopens: \(L.openingBound)")
+        let open: [L.Effect] = [.deadline(seconds: bound), .open]
+        /// failed with its cua perhaps on its way to "s": stopped, retired, guarded 60 s
+        let guarded: [L.Effect] = end + [.sendStop(sid: "s", run: nil), .retire(sid: "s"), .deadline(seconds: 60)]
         row(.idle, .start(record: true), .recordingStart, [.beginRecording], "recorded: the recording first")
-        row(.idle, .start(record: false), .opening(sid: nil), open, "not recorded: open at once, 70 s bound")
+        row(.idle, .start(record: false), .opening(sid: nil), open, "not recorded: open at once, its bound")
         row(.recordingStart, .recordingStarted, .opening(sid: nil), open, "the recording started (or could not): open")
         row(.opening(sid: nil), .opened(sid: "s"), .opening(sid: "s"), [], "opened: its session id")
         row(.opening(sid: nil), .cloudRefused, .failed(L.Why.cloudOff), end, "cloud off")
         row(.opening(sid: nil), .openFailed, .failed(L.Why.noHelper), end, "the open failed")
-        row(.opening(sid: "s"), .refused("no_model"), .failed(L.Why.refused("no_model")), end, "cua refused")
-        row(.opening(sid: "s"), .unavailable, .failed(L.Why.noHelper), end, "the helper unavailable")
-        row(.opening(sid: nil), .deadline, .failed(L.Why.noAnswer), end, "no answer in 70 s")
-        row(.opening(sid: "s"), .deadline, .failed(L.Why.noAnswer), end, "opened, the send never answered in 70 s")
-        row(.opening(sid: "s"), .deadline, rec: false, .failed(L.Why.noAnswer), [.writeRecord], "not recorded: no recording to stop")
+        row(.opening(sid: "s"), .refused("no_model"), .failed(L.Why.refused("no_model")), end + [.retire(sid: "s")], "cua refused by the send: retired")
+        row(.opening(sid: "s"), .sessionRefused(code: "computer_busy", text: "另一个对话在用电脑"), .failed(L.Why.refused("computer_busy", text: "另一个对话在用电脑")),
+            end + [.retire(sid: "s")], "cua refused by the session (before the send's ok)")
+        row(.opening(sid: "s"), .unavailable, .failed(L.Why.noHelper, guarding: "s"), guarded, "the helper unavailable: the cua may be on its way")
+        row(.opening(sid: nil), .deadline, .failed(L.Why.noAnswer), end, "no answer: nothing opened yet (the cua is never sent: GoalTicket)")
+        row(.opening(sid: "s"), .deadline, .failed(L.Why.noAnswer, guarding: "s"), guarded, "opened, the send never answered: guarded")
+        row(.opening(sid: nil), .deadline, rec: false, .failed(L.Why.noAnswer), [.writeRecord], "not recorded: no recording to stop")
         row(.opening(sid: "s"), .sent, .sent(sid: "s", stopAsked: false), [.deadline(seconds: 60)], "sent: 60 s for its task")
         row(.opening(sid: "s"), .taskStarted(run: "r"), .running(sid: "s", run: "r"), [], "its task's lines before the send's ok")
         row(.opening(sid: nil), .sent, .opening(sid: nil), [], "(sent with no session id: nothing)")
@@ -67,26 +74,51 @@ enum SurfaceTests {
         row(.sent(sid: "s", stopAsked: true), .stop, .sent(sid: "s", stopAsked: true), [], "Stop again: nothing more")
         row(.sent(sid: "s", stopAsked: true), .taskStarted(run: "r"), .running(sid: "s", run: "r"), [.sendStop(sid: "s", run: "r")],
             "the task came after Stop: stopped by its run")
-        row(.sent(sid: "s", stopAsked: true), .deadline, .failed(L.Why.stoppedBeforeStart), end, "stopped, nothing in 15 s")
-        row(.sent(sid: "s", stopAsked: true), .exited, .failed(L.Why.stoppedBeforeStart), end, "stopped, the session went")
-        row(.sent(sid: "s", stopAsked: false), .exited, .failed(L.Why.gone), end, "the session went before its task")
-        row(.sent(sid: "s", stopAsked: false), .deadline, .failed(L.Why.notStarted), end, "no task in 60 s")
+        row(.sent(sid: "s", stopAsked: false), .sessionRefused(code: "computer_busy", text: "t"), .failed(L.Why.refused("computer_busy", text: "t")),
+            end + [.retire(sid: "s")], "its cua refused by the session: at once")
+        row(.sent(sid: "s", stopAsked: true), .deadline, .failed(L.Why.stoppedBeforeStart, guarding: "s"), guarded, "stopped, nothing in 15 s")
+        row(.sent(sid: "s", stopAsked: true), .exited, .failed(L.Why.stoppedBeforeStart, guarding: "s"), guarded, "stopped, the session went")
+        row(.sent(sid: "s", stopAsked: false), .exited, .failed(L.Why.gone, guarding: "s"), guarded, "the session went before its task (perhaps a stale exit)")
+        row(.sent(sid: "s", stopAsked: false), .deadline, .failed(L.Why.notStarted, guarding: "s"), guarded, "no task in 60 s")
         row(.running(sid: "s", run: "r"), .stop, .running(sid: "s", run: "r"), [.sendStop(sid: "s", run: "r")], "Stop: its run, its session")
         row(.running(sid: "s", run: "r"), .deadline, .running(sid: "s", run: "r"), [], "an older deadline: nothing")
         row(.running(sid: "s", run: "r"), .taskEnded(status: "succeeded"), .ended(sid: "s", run: "r", status: "succeeded"), end, "its end")
         row(.running(sid: "s", run: "r"), .exited, .ended(sid: "s", run: "r", status: "interrupted"), end, "the session went mid-task: interrupted")
+        // failed, guarding: a task that still comes is stopped by its run, once; the rest lets the guard go
+        row(.failed(L.Why.gone, guarding: "s"), .taskStarted(run: "r"), .failed(L.Why.gone), [.sendStop(sid: "s", run: "r")], "a late task: stopped")
+        for e: L.Event in [.exited, .deadline, .refused("x"), .sessionRefused(code: "x", text: "")] {
+            row(.failed(L.Why.gone, guarding: "s"), e, .failed(L.Why.gone), [], "guard over")
+        }
+        for e: L.Event in [.start(record: true), .recordingStarted, .opened(sid: "x"), .openFailed, .cloudRefused, .sent, .unavailable,
+                           .taskEnded(status: "failed"), .stop] {
+            row(.failed(L.Why.gone, guarding: "s"), e, .failed(L.Why.gone, guarding: "s"), [], "guarding: nothing else")
+        }
         // over: nothing changes it, nothing is done again
         let events: [L.Event] = [.start(record: true), .recordingStarted, .opened(sid: "x"), .openFailed, .cloudRefused, .sent, .refused("x"),
-                                 .unavailable, .taskStarted(run: "x"), .taskEnded(status: "failed"), .exited, .stop, .deadline]
+                                 .sessionRefused(code: "x", text: ""), .unavailable, .taskStarted(run: "x"), .taskEnded(status: "failed"),
+                                 .exited, .stop, .deadline]
         for s: L.State in [.ended(sid: "s", run: "r", status: "succeeded"), .failed(L.Why.noAnswer)] {
             for e in events { row(s, e, s, [], "over") }
         }
-        // its own session's state as events: the first task, its end, the process gone
+        // its own session's state as events: the first task, its end, the process gone, its own cua refused
         var ss = SessionState()
-        check(L.observed(.sent(sid: "s", stopAsked: false), ss) == nil, "no task yet: nothing")
-        ss.exited = 0
-        check(L.observed(.sent(sid: "s", stopAsked: false), ss) == .exited, "gone before the task")
-        check(L.observed(.opening(sid: "s"), ss) == nil, "(opening: the send says what came of it)")
+        check(L.observed(.sent(sid: "s", stopAsked: false), ss, cua: "c_1") == nil, "no task yet: nothing")
+        ss.outbox = [Outgoing(id: "c_other", text: "x", control: "say", sending: false, refused: "busy")]
+        ss.lastRefusal = SessionErrorEvent(code: "busy", text: "x", clientId: "c_other")
+        check(L.observed(.sent(sid: "s", stopAsked: false), ss, cua: "c_1") == nil, "another refusal: not its own")
+        ss.outbox.append(Outgoing(id: "c_1", text: "g", control: "cua", sending: false, refused: "exited"))
+        check(L.observed(.sent(sid: "s", stopAsked: false), ss, cua: "c_1") == nil, "its process's end is not a refusal")
+        ss.outbox[1].refused = "computer_busy"
+        ss.lastRefusal = SessionErrorEvent(code: "computer_busy", text: "另一个对话在用电脑", clientId: "c_1")
+        check(L.observed(.sent(sid: "s", stopAsked: false), ss, cua: "c_1") == .sessionRefused(code: "computer_busy", text: "另一个对话在用电脑"),
+              "its own cua refused, with the session's words")
+        ss = SessionState(); ss.exited = 0
+        check(L.observed(.sent(sid: "s", stopAsked: false), ss, cua: "c_1") == .exited, "gone before the task")
+        check(L.observed(.opening(sid: "s"), ss, cua: "c_1") == nil, "(opening: the send says what came of it)")
+        check(L.observed(.failed(L.Why.gone, guarding: "s"), ss, cua: "c_1") == nil, "guarding: an exit (perhaps stale) does not end it")
+        check(GoalRunScreen.why(L.Why.refused("computer_busy", text: "另一个对话在用电脑"), lang: .zhHans) == "另一个对话在用电脑"
+              && GoalRunScreen.why(L.Why.refused("computer_busy"), lang: .en) == "Not sent: another conversation is using the Mac",
+              "a refusal shown in the session's words, else what its code means")
     }
 
     // MARK: through the real model
@@ -99,12 +131,22 @@ enum SurfaceTests {
         var records: [GoalRecord] = []
         var recordingStops = 0
         var recordingBegins = 0
+        final class Held { var work: [() -> Void] = [] }
+        /// The work queue's jobs while `holdWork` (an open or a send that has not answered yet).
+        let held = Held()
         init(_ mock: Mock = Mock(), cloudOn: Bool = true, holdWork: Bool = false) {
             self.mock = mock
             let client = SessionClient(transport: mock)
             client.newClientId = { "c_1" }
+            let held = held
             m = ShellModel(client: client, defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" }, lang: { .zhHans },
-                           cloudOn: { cloudOn }, work: { f in if !holdWork { f() } }, deliver: { $0() })
+                           cloudOn: { cloudOn }, work: { f in if holdWork { held.work.append(f) } else { f() } }, deliver: { $0() })
+        }
+        /// The held jobs run, in order (and those they queue).
+        func drain() { while !held.work.isEmpty { held.work.removeFirst()() } }
+        /// The lines sent, in order, with their session.
+        var linesSent: [(sid: String?, line: [String: Any])] {
+            mock.requests.compactMap { r in (r["line"] as? [String: Any]).map { (r["session_id"] as? String, $0) } }
         }
         func goal(record: Bool = true) -> GoalRun {
             GoalRun(goal: "把下载文件夹按类型整理", folder: "/tmp/dl", record: record, shell: m, effects: GoalRunEffects(
@@ -177,28 +219,35 @@ enum SurfaceTests {
     }
 
     static func goalFailureTests() {
+        /// Over as `want`: the record once, the recording stopped, Back and no Stop; later, nothing more — and once it
+        /// guards nothing, its watch of the session gone.
         func ended(_ r: Rig, _ g: GoalRun, _ want: L.State, stops: Int = 1, _ what: String) {
             check(g.state == want, "\(what): \(g.state)")
             check(r.records.count == 1 && r.recordingStops == stops, "\(what): the record once, the recording stopped: \(r.records.count) \(r.recordingStops)")
             check(GoalRunScreen(g.state, lang: .en).afterwards && !GoalRunScreen(g.state, lang: .en).stopShown, "\(what): Back works, no Stop")
             r.timers.advance(3600); g.stop()
-            check(r.records.count == 1 && r.recordingStops == stops && g.state == want, "\(what): nothing more after")
+            var final = want
+            if case .failed(let why, _) = want { final = .failed(why) }
+            check(r.records.count == 1 && r.recordingStops == stops && g.state == final, "\(what): nothing more after: \(g.state)")
+            check(!g.watching, "\(what): let go of its session")
         }
+        let bound = L.openingBound
         do {    // the open fails (no helper)
             let r = Rig(); r.mock.replies = [:]
             let g = r.goal(); g.start()
             ended(r, g, .failed(L.Why.noHelper), "open fails")
             check(r.sent("cua").isEmpty, "open fails: nothing sent")
         }
-        do {    // cua refused (the helper holds cloud models off)
+        do {    // cua refused by the send (the helper holds cloud models off): its bubble retired
             let r = Rig(); r.mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": sid, "last_seq": 0], SessionClient.Op.send: ["ok": true, "code": "no_model"]]
             let g = r.goal(); g.start()
             ended(r, g, .failed(L.Why.refused("no_model")), "cua refused")
+            check(r.m.client.state(sid).shownOutbox.isEmpty && r.m.client.state(sid).unsent.isEmpty, "cua refused: no bubble to resend")
         }
-        do {    // the helper unavailable on the send
+        do {    // the helper unavailable on the send: the cua may have gone — its session stopped, guarded
             let r = Rig(); r.mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": sid, "last_seq": 0], SessionClient.Op.send: ["ok": false]]
             let g = r.goal(); g.start()
-            ended(r, g, .failed(L.Why.noHelper), "unavailable")
+            ended(r, g, .failed(L.Why.noHelper, guarding: sid), "unavailable")
         }
         do {    // cloud models off: refused before anything opens; not recorded: no recording to stop
             let r = Rig(cloudOn: false); openOK(r.mock)
@@ -206,21 +255,56 @@ enum SurfaceTests {
             ended(r, g, .failed(L.Why.cloudOff), stops: 0, "cloud off")
             check(r.opens == 0 && r.sent("cua").isEmpty && r.recordingBegins == 0, "cloud off: nothing opened")
         }
-        do {    // the open never answers: 70 s
+        do {    // the open never answers in its bound; it answers after: the cua is never sent
             let r = Rig(holdWork: true); openOK(r.mock)
             let g = r.goal(); g.start()
-            r.timers.advance(69)
-            check(g.state == .opening(sid: nil), "opening for 69 s: \(g.state)")
+            r.timers.advance(bound - 1)
+            check(g.state == .opening(sid: nil), "opening until its bound: \(g.state)")
             r.timers.advance(1)
-            ended(r, g, .failed(L.Why.noAnswer), "no answer in 70 s")
+            check(g.state == .failed(L.Why.noAnswer), "no answer in its bound: \(g.state)")
+            r.drain()
+            check(r.sent("cua").isEmpty, "the open answered after the goal failed: its cua never sent: \(r.sent("cua"))")
+            ended(r, g, .failed(L.Why.noAnswer), "no answer")
         }
-        do {    // sent, no task: 60 s (the opening's 70 s bound replaced, never firing on top)
+        do {    // opened, the send in flight when the bound runs out (it answers after, the cua sent): stopped
+            let r = Rig(holdWork: true); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.mock.onRequest = { op in if op == SessionClient.Op.send, r.sent("cua").count == 1, r.sent("stop").isEmpty { r.timers.advance(bound) } }
+            r.drain()
+            r.mock.onRequest = nil
+            check(g.state == .failed(L.Why.noAnswer, guarding: sid), "the bound ran out while the send went: \(g.state)")
+            let sent = r.linesSent
+            let cua = sent.firstIndex { $0.line["type"] as? String == "cua" }, stop = sent.lastIndex { $0.line["type"] as? String == "stop" }
+            check(cua != nil && stop != nil && stop! > cua! && sent[stop!].sid == sid, "the cua that went is followed by a stop to its session: \(sent.map { $0.line["type"] ?? "" })")
+            check(!r.m.client.state(sid).shownOutbox.contains { $0.id == g.cua }, "its cua retired: not shown in the chat")
+            for l in taskLines { r.m.client.feed(l) }
+            r.drain()
+            check(r.sent("stop").contains { $0["run_id"] as? String == rid }, "its task that still came: stopped by its run")
+            ended(r, g, .failed(L.Why.noAnswer), "the send after the bound")
+        }
+        do {    // sent, no task: 60 s (the opening's bound replaced, never firing on top)
             let r = Rig(); openOK(r.mock)
             let g = r.goal(); g.start()
             r.timers.advance(59)
             check(g.state == .sent(sid: sid, stopAsked: false), "sent, 59 s: \(g.state)")
             r.timers.advance(1)
-            ended(r, g, .failed(L.Why.notStarted), "no task in 60 s")
+            ended(r, g, .failed(L.Why.notStarted, guarding: sid), "no task in 60 s")
+        }
+        do {    // its cua refused by the session after it was sent: failed at once, in the session's words; no bubble left
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.m.client.feed(["kind": "session.error", "session_id": sid, "code": "computer_busy", "text": "另一个对话在用电脑", "control": "cua", "client_id": g.cua])
+            ended(r, g, .failed(L.Why.refused("computer_busy", text: "另一个对话在用电脑")), "cua refused by the session")
+            check(GoalRunScreen(g.state, lang: .zhHans).line == "另一个对话在用电脑", "the session's words shown")
+            let st = r.m.client.state(sid)
+            check(st.unsent.isEmpty && st.shownOutbox.isEmpty, "its refused cua: no bubble in the chat")
+            check(r.m.client.resend(g.cua, in: sid) != .sent && r.sent("cua").count == 1, "and never resent")
+        }
+        do {    // another refusal in its session (not its cua): nothing
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.m.client.feed(["kind": "session.error", "session_id": sid, "code": "busy", "text": "x", "control": "say", "client_id": "c_other"])
+            check(g.state == .sent(sid: sid, stopAsked: false), "another refusal: still waiting for its task: \(g.state)")
         }
         do {    // Stop before the task, nothing after: 15 s
             let r = Rig(); openOK(r.mock)
@@ -230,7 +314,7 @@ enum SurfaceTests {
             check(stop?["session_id"] as? String == sid && (stop?["line"] as? [String: Any])?["run_id"] == nil, "Stop before the task: to its session, no run: \(String(describing: stop))")
             check(GoalRunScreen(g.state, lang: .en).stopShown && !GoalRunScreen(g.state, lang: .en).stopLive, "Stop asked: greyed")
             r.timers.advance(15)
-            ended(r, g, .failed(L.Why.stoppedBeforeStart), "stopped before it started")
+            ended(r, g, .failed(L.Why.stoppedBeforeStart, guarding: sid), "stopped before it started")
         }
         do {    // Stop before the task, then the task comes: stopped by its run; its end ends the goal
             let r = Rig(); openOK(r.mock)
@@ -240,11 +324,16 @@ enum SurfaceTests {
             r.m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 2, "run_id": rid, "status": "stopped", "summary": "", "undo": "none"])
             ended(r, g, .ended(sid: sid, run: rid, status: "stopped"), "stopped task")
         }
-        do {    // the session gone before its task
+        do {    // a (stale) exit before its task, the cua then run by the reopened process: stopped by its run
             let r = Rig(); openOK(r.mock)
             let g = r.goal(); g.start()
             r.m.client.feed(exitLine)
-            ended(r, g, .failed(L.Why.gone), "the session went before its task")
+            // (its stop with no run reaches no process: the client keeps it — the guard is what stops a task that comes)
+            check(g.state == .failed(L.Why.gone, guarding: sid), "gone before its task: guarded: \(g.state)")
+            r.m.client.feed(["kind": "session.start", "session_id": sid, "resumed": true, "last_seq": 0])
+            for l in taskLines { r.m.client.feed(l) }
+            check(r.sent("stop").contains { $0["run_id"] as? String == rid } && g.state == .failed(L.Why.gone), "the task that came anyway: stopped by its run")
+            check(!g.watching && r.records.count == 1, "then let go; the record once")
         }
         do {    // the session gone mid-task: interrupted, no undo
             let r = Rig(); openOK(r.mock)
@@ -284,8 +373,29 @@ enum SurfaceTests {
         check(runs.start(b) { r.goal() } == nil && r.opens == 1, "another while it runs: none, no second session")
         check(runs.start(a) { r.goal() } === g && r.opens == 1, "its view back: the same goal")
         r.timers.advance(60)
+        check(g?.state == .failed(L.Why.notStarted, guarding: sid) && runs.run(a) != nil, "failed, guarding its session: still kept")
         let g2 = runs.start(b) { r.goal() }
         check(g2 != nil && g2 !== g && r.opens == 2, "once it is over: the next")
+        // let go once done: its watch cancelled, nothing kept but its last state
+        r.timers.advance(60)
+        check(runs.run(a) == nil && g?.watching == false, "done (guard over): let go, its watch cancelled")
+        do {
+            let back = runs.start(a) { r.goal() }
+            check(back?.state == .failed(L.Why.notStarted) && back?.watching == false && r.opens == 2, "its view back: its last state, never run again")
+        }
+        do {    // ended: nothing holds it once no view does
+            let r2 = Rig(); openOK(r2.mock)
+            let runs2 = GoalRuns(), id = UUID()
+            weak var w: GoalRun?
+            do {
+                let g = runs2.start(id) { r2.goal() }
+                w = g
+                for l in taskLines + endLines { r2.m.client.feed(l) }
+                check(g?.state == .ended(sid: sid, run: rid, status: "succeeded") && g?.watching == false, "ended: its watch cancelled")
+                check(g?.task?.task.ended == true, "and its task still read, from the shell")
+            }
+            check(w == nil && runs2.run(id) == nil, "ended, no view: released")
+        }
     }
 }
 

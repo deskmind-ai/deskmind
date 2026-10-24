@@ -322,7 +322,7 @@ struct ChatColumn: View {
                 }
             }
         }
-        ForEach(s.outbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
+        ForEach(s.shownOutbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
     }
 
     /// Above the composer: the open card (handoff §3.3, pinned while it waits; its body scrolls within `bodyCap`) and

@@ -48,7 +48,7 @@ protocol SessionTransport: AnyObject {
 final class HelperSessionTransport: SessionTransport {
     /// (session.open waits for a process still closing, then for the new one's first line: up to about 40 s)
     func request(_ body: [String: Any]) -> [String: Any]? {
-        DeskMindIPC.request(body, timeout: body["op"] as? String == SessionClient.Op.open ? 60 : 20)
+        DeskMindIPC.request(body, timeout: body["op"] as? String == SessionClient.Op.open ? SessionClient.openTimeout : SessionClient.requestTimeout)
     }
     func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool {
         DeskMindIPC.streamWhile(body, idle: SessionClient.idleTick, onIdle: onIdle, onLine)
@@ -292,6 +292,12 @@ struct SessionSummary: Equatable {
 }
 
 final class SessionClient {
+    /// How long the helper is waited for: an open (it waits for a process still closing, then the new one's first
+    /// line), any other request. A send may reopen the session first and send its line twice (`sendTimeout`).
+    static let openTimeout: Double = 60
+    static let requestTimeout: Double = 20
+    static let sendTimeout: Double = openTimeout + 2 * requestTimeout
+
     enum Op {
         static let open = "session.open"
         static let send = "session.send"
@@ -667,8 +673,9 @@ final class SessionClient {
     /// Blocks while it reopens an ended session (up to a minute): call it off the main thread.
     func send(_ control: SessionControl, to sessionId: String) -> SendResult { send(control, to: sessionId, clientId: nil) }
 
-    /// `clientId`: the words' id when they are sent again (resend); new words get one.
-    private func send(_ control: SessionControl, to sessionId: String, clientId: String?) -> SendResult {
+    /// `clientId`: the words' id — when they are sent again (resend), or chosen by the sender (a GoalRun's cua, which
+    /// it matches a refusal by); else new words get one.
+    func send(_ control: SessionControl, to sessionId: String, clientId: String?) -> SendResult {
         let serial = sessionLock(sessionId)
         serial.lock(); defer { serial.unlock() }
         let s = state(sessionId)
@@ -813,6 +820,15 @@ final class SessionClient {
             return .refused("task_ended")
         }
         return send(control, to: sessionId, clientId: item.id)
+    }
+
+    /// Words whose sender gave up on them (a GoalRun that is over: its cua): dropped now if not sending, and never shown
+    /// as a bubble nor resent after — whatever later makes them unsent (a refusal, the process's end).
+    func retire(_ id: String, in sessionId: String) {
+        mutate(sessionId) { st in
+            st.retired.insert(id)
+            st.outbox.removeAll { $0.id == id && !$0.sending }
+        }
     }
 
     /// The user lets an unsent message go.

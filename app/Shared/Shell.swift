@@ -757,21 +757,27 @@ final class ShellModel: ObservableObject {
     /// becomes the selected one once it is open. What came of it goes to `report`, on the UI queue, each once: the
     /// cloud switch's refusal, else the open (its session id, or failed), then the send (sent, refused, unavailable)
     /// — GoalRun's lifecycle (Shared/GoalRun.swift) is driven by these, never by the selected session.
-    func startTask(_ goal: String, scope: String?, report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
+    /// `clientId`: its cua's (the goal matches a refusal by it); `ticket`: the goal still wants it — over, the cua is
+    /// never sent, and a cua that went while it became over is followed by a stop.
+    func startTask(_ goal: String, scope: String?, clientId: String? = nil, ticket: GoalTicket? = nil,
+                   report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
         newConversation()
         let control = SessionControl.cua(goal, scope: scope)
         guard cloudAllows() else { report(.cloudRefused); return }
-        openThenSend(control, text: goal, report: report)
+        openThenSend(control, text: goal, clientId: clientId, ticket: ticket, report: report)
     }
 
     /// The new conversation's first message: the session is opened (with the settings now), then the words sent. The
     /// words stay in the composer until the session is open (it takes no typing meanwhile: `opening`); not opened, they
     /// are still there; opened, they are the session's (sent, or an unsent bubble of it).
-    private func openThenSend(_ control: SessionControl, text: String, report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
+    private func openThenSend(_ control: SessionControl, text: String, clientId: String? = nil, ticket: GoalTicket? = nil,
+                              report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
         guard !opening else { report(.openFailed); return }
         opening = true
         work { [weak self] in
             guard let self else { return }
+            // (a goal over before its open went: nothing is opened for it)
+            if ticket?.over == true { self.deliver { self.opening = false }; return }
             // (with the settings stored when it goes: SessionClient.desired())
             guard let id = self.client.open() else {
                 self.deliver {
@@ -789,7 +795,11 @@ final class ShellModel: ObservableObject {
                 self.rebuild()
                 report(.opened(sid: id))
             }
-            let r = self.client.send(control, to: id)
+            // a goal over meanwhile (its bound ran out while the open waited): its cua is never sent
+            if ticket?.over == true { return }
+            let r = self.client.send(control, to: id, clientId: clientId)
+            // over while the send went (it may have reopened the session): the task it starts is stopped
+            if r == .sent, ticket?.over == true { _ = self.client.send(.stop(), to: id) }
             self.deliver {
                 switch r {
                 case .sent: report(.sent)
