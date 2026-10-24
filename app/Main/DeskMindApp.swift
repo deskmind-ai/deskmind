@@ -507,6 +507,12 @@ struct RootView: View {
             }
         }
         .background(Brand.paper)
+        // the island's Show Details on a session task: its GoalRunView, from its record
+        .onReceive(NotificationCenter.default.publisher(for: RunOverlay.showRecord)) { n in
+            guard let id = n.object as? UUID, let r = RunHistory.shared.records.first(where: { $0.id == id }) else { return }
+            if case .record(let cur) = screen, cur.id == id { return }
+            go(.record(r))
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             downloader.stashForQuit()
         }

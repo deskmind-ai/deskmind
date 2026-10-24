@@ -24,6 +24,25 @@ struct GoalRunView: View {
     @State private var sessionRecorded = false
     @State private var sessionMovie: URL?
     @State private var pickingRecording = false
+    /// A past session task opened from the recent runs (or the island's Show Details): its run; nil — the newest.
+    @State private var focusRun: String?
+    /// The session task's island and notifications (IslandFeed's frames applied to RunOverlay); nil for a past one.
+    @State private var island: SessionIsland?
+    @State private var recordID: UUID?
+
+    /// The session task shown: the selected session's run `focusRun`, else its newest.
+    private var goalTask: (session: SessionState, task: TaskState)? {
+        guard let s = shell.current else { return nil }
+        if let r = focusRun { return s.task(r).map { (s, $0) } }
+        return s.tasks.last.map { (s, $0) }
+    }
+
+    /// The island's frame for it, from its one state (IslandFeed).
+    private var islandFrame: IslandFrame? {
+        guard let (s, t) = goalTask else { return nil }
+        let p = shell.pinned(s).map { (card: $0.card, phase: $0.phase) }
+        return IslandFeed.frame(t, pinned: p, lang: ResolvedLang.current)
+    }
     @State private var started = false
     @State private var confirming: GoalRequest?
     @State private var next = ""
@@ -41,7 +60,7 @@ struct GoalRunView: View {
 
     var mood: Brand.Mood {
         if sessionRun {
-            guard let (s, t) = shell.goalTask else { return .idle }
+            guard let (s, t) = goalTask else { return .idle }
             if shell.pinned(s) != nil { return .notice }
             if t.running { return .idle }
             return t.status == "succeeded" ? .done : .notice
@@ -69,7 +88,7 @@ struct GoalRunView: View {
                 }
                 Spacer(minLength: 8)
                 if sessionRun {
-                    if let (_, t) = shell.goalTask {
+                    if let (_, t) = goalTask {
                         Text(ShellText.task(t, lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.secondary)
                     }
                 } else {
@@ -166,10 +185,18 @@ struct GoalRunView: View {
         .onAppear {
             guard !started else { return }
             started = true
-            if let request { begin(request) } else if let record { run.show(record) }
+            if let request { begin(request) }
+            else if let record, let sid = record.sessionId {
+                // a session task kept in the recent runs: shown as the session has it (its result card included)
+                sessionRun = true; sessionRecorded = true; focusRun = record.runId
+                shell.start(); shell.select(sid)
+            }
+            else if let record { run.show(record) }
         }
+        // the island and the notifications follow the session task's state (one adapter, no second state)
+        .onChange(of: islandFrame) { _, f in if let f, let island { island.apply(f, title: goal, onStop: { shell.stop() }) } }
         // a session task that ended: kept in the recent runs (once), its recording finished
-        .onChange(of: shell.goalTask?.task.ended) { _, ended in if sessionRun, ended == true { sessionEnded() } }
+        .onChange(of: goalTask?.task.ended) { _, ended in if sessionRun, ended == true { sessionEnded() } }
         .sheet(item: $confirming) { r in
             ConfirmSheet(request: r, onStart: { record in
                 confirming = nil
@@ -246,6 +273,7 @@ struct GoalRunView: View {
         // the harness engine: a session task (the chat's); the old engine (hands) keeps its own run
         if r.harness {
             sessionRun = true
+            island = SessionIsland()
             shell.start()
             guard r.record else { shell.startTask(r.goal, scope: r.folder); return }
             pickingRecording = true
@@ -260,15 +288,15 @@ struct GoalRunView: View {
     }
 
     /// (the session opening counts as running; not opened — the helper down, cloud off — it does not: Back works)
-    private var running: Bool { sessionRun ? (shell.goalTask?.task.running ?? (shell.opening || pickingRecording)) : run.phase == .running }
-    private var ended: Bool { sessionRun ? (shell.goalTask?.task.ended ?? false) : (run.phase == .done || run.phase == .failed) }
+    private var running: Bool { sessionRun ? (goalTask?.task.running ?? (shell.opening || pickingRecording)) : run.phase == .running }
+    private var ended: Bool { sessionRun ? (goalTask?.task.ended ?? false) : (run.phase == .done || run.phase == .failed) }
 
     /// The session task as the chat shows it: its row (steps, cards that are no longer pinned, its end, its result
     /// card with undo — ResultSection), the pinned card, and — once it ended — the answer, the changes and 👍👎.
     @ViewBuilder private var sessionContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                if let (s, t) = shell.goalTask {
+                if let (s, t) = goalTask {
                     TaskRow(shell: shell, task: t, session: s)
                     if t.ended { FreeResult(task: Self.runTask(t, folder: request?.folder)) }
                 } else {
@@ -300,15 +328,19 @@ struct GoalRunView: View {
     }
 
     private func sessionEnded() {
-        guard !sessionRecorded, let r = request, let (_, t) = shell.goalTask else { return }
+        guard !sessionRecorded, let r = request, let (_, t) = goalTask else { return }
         sessionRecorded = true
         let id = UUID()
+        recordID = id
+        // the island's Show Details opens this task's GoalRunView (its record keeps the session and the run)
+        RunOverlay.shared.detailsRecord = id
         RunHistory.shared.add(RunRecord(
             id: id, date: Date(), goal: r.goal, folder: r.folder, apps: [],
             finished: t.status == "succeeded", errored: t.status == nil || t.status == "failed",
             summary: ShellText.task(t, lang: lang), answer: t.answer ?? "",
             steps: t.steps.map { RunRecord.Step(n: $0.n, human: $0.displayText, app: "", shot: $0.shot ?? "", describe: $0.text, detail: $0.why ?? "", ok: $0.status == .ok) },
-            created: t.changes.created, modified: t.changes.modified, deleted: t.changes.deleted))
+            created: t.changes.created, modified: t.changes.modified, deleted: t.changes.deleted,
+            sessionId: shell.selected, runId: t.runId))
         if r.record {
             RunRecorder.shared.stop { url in
                 sessionMovie = url
