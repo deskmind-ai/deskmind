@@ -221,7 +221,7 @@ enum SurfaceTests {
     static let taskLines: [[String: Any]] = [
         // (as the harness stores a /cua: its words, with the cua's client_id, then the task replying to them)
         ["kind": "session.message", "session_id": sid, "seq": 1, "msg_id": "u1", "role": "user", "text": "把下载文件夹按类型整理", "via": "cua", "client_id": "c_1"],
-        ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t1", "run_id": rid, "raw": "把下载文件夹按类型整理", "by": "slash", "reply_to": "u1"],
+        ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t1", "run_id": rid, "raw": "把下载文件夹按类型整理", "by": "slash", "reply_to": "u1", "client_id": "c_1"],
         ["kind": "start", "session_id": sid, "run_id": rid, "seq": 1, "raw": "把下载文件夹按类型整理"],
     ]
     static let endLines: [[String: Any]] = [
@@ -495,6 +495,19 @@ enum SurfaceTests {
             check(g.state == .sent(sid: sid) && g.task == nil, "the user's task: not adopted: \(g.state)")
             check(r.sent("stop").isEmpty, "and not stopped")
         }
+        do {    // Codex on harness#72: a retry's task replies to the same message as the goal's cua — never the goal's
+            let r = Rig(); openOK(r.mock)
+            let g = r.goal(); g.start()
+            r.m.client.feed(taskLines[0])           // the /cua's stored message (client_id c_1)
+            r.m.client.feed(["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "t_retry", "run_id": "r_retry", "raw": "x",
+                             "by": "model", "reply_to": "u1"])
+            check(g.state == .sent(sid: sid) && g.task == nil, "a retry's task (same reply_to, no client_id): not adopted: \(g.state)")
+            g.stop()
+            check(!r.sent("stop").contains { $0["run_id"] as? String == "r_retry" }, "and never stopped by its run")
+            r.m.client.feed(["kind": "session.task", "session_id": sid, "seq": 3, "msg_id": "t1", "run_id": rid, "raw": "x", "by": "slash",
+                             "reply_to": "u1", "client_id": "c_1"])
+            check(g.state == .stopping(sid: sid, run: rid), "its own (its client_id): the one it stops: \(g.state)")
+        }
         do {    // stopping: the user's own task in the same session is neither its task nor stopped
             let r = Rig(); openOK(r.mock)
             let g = r.goal(); g.start(); g.stop()
@@ -605,9 +618,13 @@ enum SurfaceTests {
     }
 
     /// Codex delta review at 1f77d1a (2): the window's close button is GoalRuns' alone — closable exactly while no
-    /// goal is active, told on every change (start, end, failing then failed, released), no view involved. (3): a
-    /// reopen is held while a goal is active and no card of its own waits. (minor) a released goal's request goes.
+    /// goal is active, told on every change (start, end, failing then failed, released), no view involved. (minor) a
+    /// released goal's request goes. Codex review at b767ca7 (P2): a reopen while a goal is active restores the window
+    /// (hands#69 gives the front back without a reopen); the old engine's run and the 0.5 window's task still hold it.
     static func goalClosableTests() {
+        check(Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: false, goalActive: true), "a goal active: the reopen restores")
+        check(!Activation.reopenRestores(oldRunWithoutCard: true, shellTaskWithoutCard: false, goalActive: false)
+              && !Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: true, goalActive: false), "an old run / a shell task without card: held, as before")
         do {    // start → end → released
             let r = Rig(); openOK(r.mock)
             var closable: [Bool] = [], released: [UUID] = []
@@ -615,14 +632,16 @@ enum SurfaceTests {
             let a = UUID()
             let g = runs.start(a) { r.goal() }
             check(closable == [false], "started: not closable: \(closable)")
-            check(runs.holdsReopen, "active, no card: a reopen is held (hands' give-back)")
+            check(Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: false, goalActive: runs.active != nil) && runs.active == a,
+                  "a goal active, no card: the user's reopen (Dock, live card) restores the window")
             for l in taskLines { r.m.client.feed(l) }
             r.m.client.feed(["kind": "ask", "session_id": sid, "run_id": rid, "seq": 2, "ask_id": "ask_g",
                              "card": ["kind": "missing", "text": "发给谁？", "free_text": false, "blocking": true,
                                       "options": [["kind": "value", "text": "小王"], ["kind": "cancel", "text": "先别做了"]]]])
-            check(g?.cardWaiting == true && !runs.holdsReopen, "its card waits: a reopen is the user's")
+            check(g?.task != nil && Activation.reopenRestores(oldRunWithoutCard: false, shellTaskWithoutCard: false, goalActive: true),
+                  "its card waits: restores too")
             for l in endLines { r.m.client.feed(l) }
-            check(closable == [false, true] && released == [a] && !runs.holdsReopen, "ended: closable, released once: \(closable) \(released)")
+            check(closable == [false, true] && released == [a], "ended: closable, released once: \(closable) \(released)")
         }
         do {    // failing, its stop unanswered: not closable, kept; answered: closable, released once
             let r = Rig(); openOK(r.mock)

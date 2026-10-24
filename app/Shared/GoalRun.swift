@@ -279,13 +279,13 @@ enum GoalLifecycle {
         }
     }
 
-    /// The task the goal's own cua started, and only that: the harness stores the /cua's words as a user message
-    /// with the cua's client_id, and its session.task replies to that message (reply_to). A task with no such link —
-    /// the user's own in the same session (they type there, or /cua) — is never the goal's: never adopted, never
-    /// stopped, never shown as the goal's (#118 delta review at 221a7f3). The one matcher: opening, sent, stopping.
+    /// The task the goal's own cua started, and only that: its session.task carries the cua's client_id (harness#72,
+    /// bound when the cua's task is created). Any other task — the user's own in the same session, a retry or the
+    /// model's task replying to the same message (no client_id) — is never the goal's: never adopted, never stopped,
+    /// never shown as the goal's (#118 delta review at 221a7f3; Codex on harness#72: a retry replies to the same
+    /// message). The one matcher: opening, sent, stopping.
     static func task(of cua: String, in s: SessionState) -> TaskState? {
-        guard let m = s.messages.first(where: { $0.role == "user" && $0.clientId == cua }) else { return nil }
-        return s.tasks.first { $0.replyTo == m.id }
+        s.tasks.first { $0.clientId == cua }
     }
 
     static func over(_ s: State) -> Bool {
@@ -461,12 +461,6 @@ final class GoalRun: ObservableObject {
         if n != before { onStateChanged?() }
     }
 
-    /// A card of its own task waits on the user (pinned in its session).
-    var cardWaiting: Bool {
-        guard let (s, t) = task, let p = shell.pinned(s) else { return false }
-        return p.runId == t.runId
-    }
-
     /// After a change: done with it (over) — its watch cancelled, it let go.
     private func changed(from before: GoalLifecycle.State) {
         guard GoalLifecycle.done(state), !GoalLifecycle.done(before) else { return }
@@ -555,13 +549,6 @@ final class GoalRuns {
         guard c != closable else { return }
         closable = c
         setClosable(c)
-    }
-
-    /// A reopen while a goal is active and no card of its own waits is most likely hands giving the front back after
-    /// a foreground step (`open -b`): the window is not restored then (the island is the way in).
-    var holdsReopen: Bool {
-        guard let id = active, let r = runs[id] else { return false }
-        return !r.cardWaiting
     }
 
     func run(_ id: UUID) -> GoalRun? { runs[id] }

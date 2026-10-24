@@ -224,7 +224,10 @@ struct SessionTaskEvent: Codable, Equatable {
     var goal: String?
     @LStr var by: String = "" // slash | model
     var replyTo: String?
-    enum CodingKeys: String, CodingKey { case msgId = "msg_id", runId = "run_id", raw, goal, by, replyTo = "reply_to" }
+    /// The client_id of the cua that started it (harness#72: bound when a /cua's task is created; a retry's or the
+    /// model's task for the same message has none).
+    var clientId: String?
+    enum CodingKeys: String, CodingKey { case msgId = "msg_id", runId = "run_id", raw, goal, by, replyTo = "reply_to", clientId = "client_id" }
 }
 
 struct Changes: Codable, Equatable {
