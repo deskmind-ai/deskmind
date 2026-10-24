@@ -384,7 +384,8 @@ struct GoalRecord: Equatable {
     var failed: String?
     /// How the goal ended (its lifecycle's `ended` status; nil when it failed): its outcome, whatever its task says.
     var ended: String? = nil
-    /// The run it ended with (its lifecycle's `ended`).
+    /// The run it ended with (its lifecycle's `ended`): the record's session task — set whether or not the task's
+    /// lines have come yet (a stop's ack may end it before the history does; Codex review at c03c9e5).
     var runId: String? = nil
 
     /// Done (succeeded), by its ending.
@@ -406,6 +407,9 @@ struct GoalRunEffects {
     /// Write the goal's recent-runs record — once, at its ending.
     var writeRecord: (GoalRecord) -> Void
     var after: (Double, @escaping () -> Void) -> Void
+    /// The goal's state or its session's changed (the app: its island and notifications, IslandFeed.frame(goal) —
+    /// kept with the goal, so they follow it while no view shows it).
+    var changed: (GoalRun) -> Void = { _ in }
 }
 
 /// One goal, as GoalLifecycle runs it. On the UI queue (the shell's).
@@ -473,6 +477,8 @@ final class GoalRun: ObservableObject {
         for f in fx { apply(f) }
         // (a session that already says more: its task may have come with the open)
         if n != before, let sid = sessionId, let s = latest ?? shell.states[sid] { see(s) }
+        // (the island and notifications first — its end frame — then, done, it is let go)
+        if n != before { effects.changed(self) }
         changed(from: before)
         if n != before { onStateChanged?() }
     }
@@ -505,6 +511,8 @@ final class GoalRun: ObservableObject {
                 guard let self, let sid = self.sessionId, let s = all[sid] else { return }
                 self.latest = s
                 self.see(s)
+                // (never once it is over: an ended goal changes the island no more — Codex review at 2b46101)
+                if self.watch != nil, !GoalLifecycle.over(self.state) { self.effects.changed(self) }
             }
             shell.startTask(goal, scope: folder, clientId: cua, ticket: ticket) { [weak self] e in self?.send(e) }
         case .sendStop(let sid, let run):

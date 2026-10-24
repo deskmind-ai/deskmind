@@ -507,15 +507,33 @@ struct RootView: View {
             }
         }
         .background(Brand.paper)
+        // the island's Show Details on a session task: its GoalRunView, from its record
+        .onReceive(NotificationCenter.default.publisher(for: RunOverlay.showRecord)) { n in
+            route(details: n.object as? UUID)
+        }
         // a window that opens (again) while a goal is not over: straight to that goal (its cards, its Stop)
         .onAppear {
             MainWindow.applyClosable()      // (a window that came anew: as the run and the goal hold it)
-            var showing: UUID? = nil
-            if case .run(let r) = screen { showing = r.id }
-            if let id = GoalRuns.reopenRoute(active: GoalRuns.app.active, showing: showing), let r = GoalRequests.byId[id] { screen = .run(r) }
+            route(details: nil, animated: false)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
             downloader.stashForQuit()
+        }
+    }
+
+    /// Show Details and a window that opens again: IslandFeed.route — the active goal first, else the record.
+    private func route(details: UUID?, animated: Bool = true) {
+        var showingGoal: UUID? = nil, showingRecord: UUID? = nil
+        if case .run(let r) = screen { showingGoal = r.id }
+        if case .record(let r) = screen { showingRecord = r.id }
+        switch IslandFeed.route(active: GoalRuns.app.active, details: details, showingGoal: showingGoal, showingRecord: showingRecord) {
+        case .goal(let id)?:
+            guard let r = GoalRequests.byId[id] else { return }
+            if animated { go(.run(r)) } else { screen = .run(r) }
+        case .record(let id)?:
+            guard let r = RunHistory.shared.records.first(where: { $0.id == id }) else { return }
+            go(.record(r))
+        case nil: break
         }
     }
 

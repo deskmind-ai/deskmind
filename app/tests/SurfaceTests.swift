@@ -173,30 +173,35 @@ enum SurfaceTests {
         var recordingStops = 0
         var recordingBegins = 0
         var recordWrites = 0
-        final class Held { var work: [() -> Void] = [] }
+        final class Held { var work: [() -> Void] = []; var deliver: [() -> Void] = [] }
         /// The work queue's jobs while `holdWork` (an open or a send that has not answered yet).
         let held = Held()
-        init(_ mock: Mock = Mock(), cloudOn: Bool = true, holdWork: Bool = false) {
+        init(_ mock: Mock = Mock(), cloudOn: Bool = true, holdWork: Bool = false, holdDeliver: Bool = false) {
             self.mock = mock
             let client = SessionClient(transport: mock)
             client.newClientId = { "c_1" }
             let held = held
             m = ShellModel(client: client, defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" }, lang: { .zhHans },
-                           cloudOn: { cloudOn }, takeBackAfter: timers.after, now: { [timers] in timers.now }, work: { f in if holdWork { held.work.append(f) } else { f() } }, deliver: { $0() })
+                           cloudOn: { cloudOn }, takeBackAfter: timers.after, now: { [timers] in timers.now },
+                           work: { f in if holdWork { held.work.append(f) } else { f() } },
+                           deliver: { f in if holdDeliver { held.deliver.append(f) } else { f() } })
         }
         /// The held jobs run, in order (and those they queue).
         func drain() { while !held.work.isEmpty { held.work.removeFirst()() } }
+        /// The held hand-overs to the UI queue run (one flush takes every session that changed meanwhile: one update).
+        func drainDeliver() { while !held.deliver.isEmpty { held.deliver.removeFirst()() } }
         /// The lines sent, in order, with their session.
         var linesSent: [(sid: String?, line: [String: Any])] {
             mock.requests.compactMap { r in (r["line"] as? [String: Any]).map { (r["session_id"] as? String, $0) } }
         }
-        func goal(record: Bool = true) -> GoalRun {
+        func goal(record: Bool = true, changed: @escaping (GoalRun) -> Void = { _ in }) -> GoalRun {
             GoalRun(goal: "把下载文件夹按类型整理", folder: "/tmp/dl", record: record, shell: m, effects: GoalRunEffects(
                 beginRecording: { [unowned self] _, started in recordingBegins += 1; started() },
                 stopRecording: { [unowned self] _, done in recordingStops += 1; done(nil) },
                 // (the goal's one record, written over when its task's details come after its ending)
                 writeRecord: { [unowned self] r in recordWrites += 1; if records.isEmpty { records.append(r) } else { records[records.count - 1] = r } },
-                after: { [unowned self] d, f in timers.after(d, f) }))
+                after: { [unowned self] d, f in timers.after(d, f) },
+                changed: changed))
         }
         var lines: [[String: Any]] { mock.requests.compactMap { $0["line"] as? [String: Any] } }
         func sent(_ type: String) -> [[String: Any]] { lines.filter { $0["type"] as? String == type } }

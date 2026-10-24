@@ -513,6 +513,7 @@ enum L10n {
         "Another task is still running. Try again once it ends.": "另一个任务还在进行，等它结束后再试。",
         "Can't confirm the stop: DeskMind's helper isn't answering. Quitting DeskMind ends the task.": "无法确认已停止：DeskMind 的后台助手没有回应。退出 DeskMind 会结束这个任务。",
         "Making sure it stopped…": "正在确认已停止…",
+        "The details of this run are no longer available.": "这次运行的详情已经没有了。",
         "DeskMind's helper isn't answering. Conversations come back when it does.": "后台助手没有回应。它恢复后，对话会回来。",
         "Waiting for you: %@": "等你：%@",
         "Stopped: the screen is locked": "已停下：屏幕锁上了",
