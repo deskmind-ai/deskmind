@@ -159,7 +159,8 @@ enum SurfaceTests {
               "Stop: its run, to its session, nothing selected: \(stops)")
         for l in endLines { r.m.client.feed(l) }
         check(g.state == .ended(sid: sid, run: rid, status: "succeeded"), "ended: \(g.state)")
-        check(r.recordingStops == 1 && r.records.count == 1 && r.records.first?.task?.runId == rid && r.records.first?.sessionId == sid,
+        check(r.recordingStops == 1 && r.records.count == 1 && r.records.first?.task?.runId == rid && r.records.first?.sessionId == sid
+              && r.records.first?.task?.status == "succeeded" && r.records.first?.task?.ended == true,
               "the recording stopped and the record written, once: \(r.recordingStops) \(r.records.map(\.sessionId))")
         guard let (s, t) = g.task else { check(false, "the goal's task is there"); return }
         check(t.resultCardState.undoEnabled, "its result card, from the session's state: \(t.resultCardState)")
@@ -251,6 +252,7 @@ enum SurfaceTests {
             for l in taskLines { r.m.client.feed(l) }
             r.m.client.feed(exitLine)
             ended(r, g, .ended(sid: sid, run: rid, status: "interrupted"), "the session went mid-task")
+            check(r.records.first?.task?.ended == true, "interrupted: the record has the task as it ended")
             check(g.task.map { !$0.task.resultCardState.undoEnabled } ?? false, "interrupted: no undo")
         }
     }

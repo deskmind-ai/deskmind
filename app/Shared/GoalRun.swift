@@ -228,7 +228,9 @@ final class GoalRun: ObservableObject {
     private var watch: AnyCancellable?
     /// The newest deadline (a newer one replaces it).
     private var deadline = 0
-    private var written: GoalRecord?
+    /// Its session's newest state, as the shell's `states` takes it: the sink runs before `states` is set, so what
+    /// the goal reads (its task's end, the record) is this, never the shell's previous one.
+    private var latest: SessionState?
 
     init(goal: String, folder: String?, record: Bool, shell: ShellModel, effects: GoalRunEffects) {
         self.goal = goal; self.folder = folder; self.record = record; self.shell = shell; self.effects = effects
@@ -244,7 +246,7 @@ final class GoalRun: ObservableObject {
 
     /// The goal's task, as its session has it now (running or ended).
     var task: (session: SessionState, task: TaskState)? {
-        guard let sid = sessionId, let s = shell.states[sid] else { return nil }
+        guard let sid = sessionId, let s = latest ?? shell.states[sid] else { return nil }
         switch state {
         case .running(_, let run), .ended(_, let run, _): return s.task(run).map { (s, $0) }
         default: return nil
@@ -261,7 +263,7 @@ final class GoalRun: ObservableObject {
         state = n
         for f in fx { apply(f) }
         // (a session that already says more: its task may have come with the open)
-        if n != before, let sid = sessionId, let s = shell.states[sid] { see(s) }
+        if n != before, let sid = sessionId, let s = latest ?? shell.states[sid] { see(s) }
     }
 
     private func see(_ s: SessionState) {
@@ -273,9 +275,11 @@ final class GoalRun: ObservableObject {
         case .beginRecording:
             effects.beginRecording(goal) { [weak self] in self?.send(.recordingStarted) }
         case .open:
-            // this goal's own session's state, whenever the shell takes a newer one
+            // this goal's own session's state, whenever the shell takes a newer one (kept after its end too: its
+            // task's result card and undo go on changing)
             watch = shell.$states.sink { [weak self] all in
                 guard let self, let sid = self.sessionId, let s = all[sid] else { return }
+                self.latest = s
                 self.see(s)
             }
             shell.startTask(goal, scope: folder) { [weak self] e in self?.send(e) }
@@ -291,10 +295,7 @@ final class GoalRun: ObservableObject {
         case .stopRecording:
             effects.stopRecording(recordOf()) { [weak self] url in self?.movie = url }
         case .writeRecord:
-            let r = recordOf()
-            written = r
-            watch = nil
-            effects.writeRecord(r)
+            effects.writeRecord(recordOf())
         }
     }
 
