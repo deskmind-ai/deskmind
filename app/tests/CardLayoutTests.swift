@@ -26,6 +26,9 @@ enum CardLayoutTests {
         DecisionTests.group("layout.factsTests"); factsTests()
         DecisionTests.group("layout.keyGateTests"); keyGateTests()
         DecisionTests.group("layout.cardModeTests"); cardModeTests()
+        DecisionTests.group("layout.cardModeEndsTests"); cardModeEndsTests()
+        DecisionTests.group("layout.labelIsKeyTests"); labelIsKeyTests()
+        DecisionTests.group("layout.escTabTests"); escTabTests()
     }
 
     // MARK: samples
@@ -358,5 +361,150 @@ enum CardLayoutTests {
             check(CardLayout(m).controls.allSatisfy { CardLayout.hint($0, keys: r.m.keysActive(m), lang: .en).contains("Key") == r.m.keysActive(m) },
                   "hints say a key exactly when keys act")
         }
+    }
+
+    // MARK: - card mode ends; a label iff its key acts; Esc / Tab (#111 review at 82ce551, its repros adopted)
+
+    static func modeKey(_ r: CardStoreTests.Rig, _ c: String, editing: Bool = false, repeating: Bool = false, cmd: Bool = false, composing: Bool = false) -> Bool {
+        r.m.keyDown(characters: c, commandLike: cmd, mainWindowIsKey: true, editingText: editing, isRepeat: repeating, composing: composing)
+    }
+    static func modeArrive(_ r: CardStoreTests.Rig, _ id: String = "a1", kind: String = "action", seen: Bool = true) -> CardModel {
+        r.ask(id, kind)
+        let m = r.model(id)!
+        r.m.cardShown(m)
+        if seen { r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0) }
+        return m
+    }
+
+    /// Card mode ends when the card is no longer on screen in the key window: the card's view goes (the window closed,
+    /// the card answered), the window stops being the key one or another app comes forward (CardKeyMonitor's
+    /// notifications: leaveCardMode), another session is shown. Back again: a new move, and 1 s on screen first.
+    static func cardModeEndsTests() {
+        // (repro a) the window closed and opened again
+        let r = CardStoreTests.Rig()
+        let c = modeArrive(r)
+        r.timers.advance(2); r.m.enterCardMode(c)
+        r.m.cardHidden(c); r.timers.advance(3600); r.m.cardShown(c)
+        check(!r.m.keysActive(c), "window closed and reopened: card mode is not still on (no labels at once)")
+        check(!modeKey(r, "3") && r.wire.count("answer") == 0, "and the first digit (3 = 先别做了) sends nothing")
+        r.m.enterCardMode(c)
+        check(!r.m.keysActive(c), "a move right after it is back: not yet (1 s on screen again)")
+        r.timers.advance(CardKeys.cardOnScreen); r.m.enterCardMode(c)
+        check(r.m.keysActive(c), "after 1 s on screen and a new move: card mode")
+        // (repro b) another session shown, then back
+        let s = CardStoreTests.Rig()
+        let cs = modeArrive(s)
+        s.timers.advance(2); s.m.enterCardMode(cs)
+        s.m.selected = "ses_other"
+        check(!s.m.keysActive(cs), "another session shown: card mode ends (even before the card's view goes)")
+        s.m.cardHidden(cs); s.timers.advance(60)
+        s.m.selected = CardStoreTests.sid; s.m.cardShown(cs)
+        check(!modeKey(s, "2") && s.phase("a1") == .open, "back from another session: a digit at once does not pick")
+        // the window stops being the key one / another app comes forward
+        let w = CardStoreTests.Rig()
+        let cw = modeArrive(w)
+        w.timers.advance(2); w.m.enterCardMode(cw)
+        w.m.leaveCardMode()
+        check(!w.m.keysActive(cw) && !modeKey(w, "2"), "the window resigned key or the app went back: card mode ends")
+        // the monitor turns those into leaveCardMode
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let monitor = text.components(separatedBy: "struct CardKeyMonitor").dropFirst().first ?? ""
+        check(monitor.contains("NSWindow.didResignKeyNotification") && monitor.contains("NSWindow.willCloseNotification")
+              && monitor.contains("NSApplication.didResignActiveNotification") && monitor.contains("self?.onLeave()"),
+              "the monitor ends card mode when its window resigns key or closes, or the app goes to the back")
+        let main = (try? String(contentsOf: url.deletingLastPathComponent().appendingPathComponent("MainSplitView.swift"), encoding: .utf8)) ?? ""
+        check(main.contains("onLeave: { shell.leaveCardMode() }"), "the chat column wires it to the model")
+        // card mode belongs to the card by its run and ask_id: an older result card of the session shows no digits
+        let o = CardStoreTests.Rig()
+        o.ask("a0"); o.resumed("a0")
+        o.emit("task_done", ["status": "succeeded", "reason": "", "summary": "",
+                             "result_card": ["kind": "result", "text": "改好了", "blocking": false, "free_text": false,
+                                             "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
+        let old = CardModel(resultCard: o.state.task(CardStoreTests.rid)!.resultCard!, runId: CardStoreTests.rid)
+        o.feed(["kind": "session.task", "session_id": CardStoreTests.sid, "seq": 3, "msg_id": "u2", "run_id": "r2", "raw": "再来", "by": "slash"])
+        o.feed(["kind": "ask", "session_id": CardStoreTests.sid, "run_id": "r2", "seq": 1, "ask_id": "b1", "card": CardStoreTests.cardJSON("action")])
+        let newer = CardModel(card: o.state.task("r2")!.cards[0].card, runId: "r2", askId: "b1")
+        o.m.cardShown(newer); o.m.cardShown(old); o.m.cardBody(newer, contentHeight: 1, visibleHeight: 1, offset: 0)
+        o.timers.advance(2); o.m.enterCardMode(newer)
+        check(o.m.keysActive(newer) && !o.m.keysActive(old), "card mode is the new card's, not the older result card's")
+        check(CardLayout(old).controls.allSatisfy { !o.m.keyWorks(old, $0) }, "the older result card: no digits")
+    }
+
+    /// The label (KeyCap), the hint's "Key n" and the dispatcher read one predicate, keyWorks; a key that does nothing
+    /// passes on (keyDown false). Checked against the dispatcher's real result, control by control, card by card, in
+    /// each state: no card mode; card mode with the card not yet seen whole; card mode, seen.
+    static func labelIsKeyTests() {
+        for (name, json) in samples() where (json["kind"] as? String) != nil {
+            let layout = CardLayout(model(json))
+            for c in layout.controls where c.key != nil {
+                for state in ["no mode", "mode, not seen", "mode, seen"] {
+                    let r = CardStoreTests.Rig()
+                    r.ask("a1", card: json)
+                    let m = r.model("a1")!
+                    r.m.cardShown(m)
+                    if state == "mode, seen" { r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0) }
+                    r.timers.advance(2)
+                    if state != "no mode" { _ = modeKey(r, "\u{1b}") }
+                    let label = r.m.keyWorks(m, c)
+                    let hintSays = CardLayout.hint(c, keys: r.m.keyWorks(m, c), lang: .en).contains("Key \(c.key!)")
+                    let consumed = modeKey(r, String(c.key!))
+                    r.timers.advance(CardStore.takeBack + 0.1)
+                    let acted = r.phase("a1")?.pending != nil || r.wire.count("answer") > 0
+                    check(label == acted && consumed == acted && hintSays == acted,
+                          "\(name), \(state), key \(c.key!) (\(c.button.kind)): label \(label), hint \(hintSays), consumed \(consumed), acted \(acted)")
+                }
+            }
+        }
+        // the view's labels and hints read keyWorks (never keysActive alone)
+        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        check(text.components(separatedBy: "KeyCap(n: k)").count - 1 == 2 && text.components(separatedBy: "if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) }").count - 1 == 2
+              && text.contains("CardLayout.hint(c, keys: shell.keyWorks(card, c)") && !text.contains("keysActive"), "labels and hints: keyWorks")
+        // a click by VoiceOver presses the same action as the mouse: the control's Button runs shell.click
+        check(text.contains("let action = { _ = shell.click(b) }") && text.components(separatedBy: "Button(action: action)").count - 1 == 2,
+              "VoiceOver's press and the mouse click are the same action")
+        // a click on an option (the mouse, or VoiceOver's press: that action) is a move into the card
+        let r = CardStoreTests.Rig()
+        let m = modeArrive(r, kind: "ambiguity", seen: false)
+        r.timers.advance(2)
+        r.m.click(m.buttons.first { $0.role == .choice }!)
+        check(r.m.keysActive(m), "a click on an option: card mode")
+        let r2 = CardStoreTests.Rig()
+        let m2 = modeArrive(r2, seen: false)
+        r2.timers.advance(2)
+        r2.m.click(m2.buttons.first { $0.role == .approve }!)      // (not seen yet: the approve does nothing, the move counts)
+        check(r2.m.keysActive(m2) && r2.phase("a1") == .open, "a click on an approve not yet seen whole: no pick, but a move into the card")
+    }
+
+    /// Esc and Tab (⇧Tab too) enter card mode only with no ⌘⌃⌥, not repeated, no field being edited and no input-method
+    /// composition (Esc there cancels the candidates); they are never consumed.
+    static func escTabTests() {
+        func entered(_ ch: String, editing: Bool = false, repeating: Bool = false, cmd: Bool = false, composing: Bool = false) -> Bool {
+            let r = CardStoreTests.Rig()
+            let c = modeArrive(r)
+            r.timers.advance(5)
+            let consumed = modeKey(r, ch, editing: editing, repeating: repeating, cmd: cmd, composing: composing)
+            check(!consumed, "\(ch.unicodeScalars.first!.value): never consumed")
+            return r.m.keysActive(c)
+        }
+        check(entered("\u{1b}") && entered("\t") && entered("\u{19}"), "Esc, Tab, ⇧Tab: card mode")
+        check(!entered("\u{1b}", editing: true), "Esc in a field (an input method's cancel): no card mode")
+        check(!entered("\u{1b}", composing: true) && !entered("\t", composing: true), "an input-method composition under way: no card mode")
+        check(!entered("\u{1b}", cmd: true) && !entered("\t", cmd: true), "⌘Esc, ⌃Tab: no card mode")
+        check(!entered("\u{1b}", repeating: true), "Esc auto-repeat: no card mode")
+        check(!entered("\t", editing: true), "Tab in a field: no card mode")
+        // (repro) Esc in the card's own field, then the user clicks the chat (no move), then 3: nothing goes
+        let r = CardStoreTests.Rig()
+        let c = modeArrive(r)
+        r.timers.advance(5)
+        _ = modeKey(r, "\u{1b}", editing: true)
+        _ = modeKey(r, "3")
+        check(!r.m.keysActive(c) && r.wire.count("answer") == 0, "Esc while editing, then 3: 先别做了 is not sent")
+        // a digit during a composition never reaches the card (it is the input method's)
+        let k = CardStoreTests.Rig()
+        let ck = modeArrive(k)
+        k.timers.advance(5); k.m.enterCardMode(ck)
+        check(!modeKey(k, "1", composing: true), "a digit while an input method composes: not the card's")
     }
 }

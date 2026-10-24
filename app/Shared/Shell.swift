@@ -318,7 +318,10 @@ struct SessionNames {
 /// runs through `work`. Tests and the e2e give both their own.
 final class ShellModel: ObservableObject {
     /// The selection: a session, or the new conversation not opened yet (nil: its first message opens it).
-    @Published var selected: String?
+    @Published var selected: String? {
+        // (another session shown: the card mode of this one's card ends — a new move into it when it is back)
+        didSet { if oldValue != selected { leaveCardMode() } }
+    }
     @Published private(set) var rows: [ShellRow] = []
     @Published private(set) var states: [String: SessionState] = [:]
     /// The composer's text per session ("" key: the new conversation).
@@ -721,18 +724,20 @@ final class ShellModel: ObservableObject {
     /// A click on a card's button: that card's answer (its option index, its ask_id). On a card that waits, the answer
     /// is held for its take-back (3 s: picking again starts over, 「撤回」 drops it) and sent once that ran out — only if
     /// the card is still the open one; the way out (「先别做了」) is sent at once. A result card's answer goes at once.
-    func click(_ button: CardModel.Button) {
-        guard let id = selected else { return }
+    /// True when it picked or sent something (a key that did nothing then passes on: ShellModel.keyDown). A click on
+    /// an option — by the mouse or VoiceOver's press, the same action — is a click on its card: a move into it.
+    @discardableResult
+    func click(_ button: CardModel.Button) -> Bool {
+        guard let id = selected else { return false }
+        if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
         // an approve-type option only once the card's whole body has been on screen (never approve what was not seen)
-        if button.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: button.runId, askId: button.askId)) { return }
+        if button.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: button.runId, askId: button.askId)) { return false }
         // cloud models off: only what reaches no model is held back — the way out and undo (the session undoes from
         // its receipts, no model) always go; an answer that resumes the task would make the model go on
-        if !button.role.reachesNoModel && !cloudAllows() { return }
+        if !button.role.reachesNoModel && !cloudAllows() { return false }
         let a = CardModel.answer(button)
-        if a.askId == nil { act(cards.respond(a, sessionId: id, in: client.state(id)), in: id); return }
-        // (a click on an option is a click on its card: an explicit move into it, before the pick changes its phase)
-        if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
-        pick(a, immediate: button.role == .cancel, in: id)
+        if a.askId == nil { return act(cards.respond(a, sessionId: id, in: client.state(id)), in: id) }
+        return pick(a, immediate: button.role == .cancel, in: id)
     }
 
     /// The user's own words on a card that takes them (its own field): on a card with an approve-type option, only once
@@ -772,7 +777,17 @@ final class ShellModel: ObservableObject {
     @Published private(set) var keyCard: String?
 
     func cardShown(_ card: CardModel) { let k = Self.cardKey(card); if shownAt[k] == nil { shownAt[k] = now() } }
-    func cardHidden(_ card: CardModel) { shownAt[Self.cardKey(card)] = nil }
+    /// The card left the screen (its view went: the window closed, another session shown, the card answered): its card
+    /// mode ends with it, and its time on screen starts again when it is back.
+    func cardHidden(_ card: CardModel) {
+        let k = Self.cardKey(card)
+        shownAt[k] = nil
+        if keyCard == k { leaveCardMode() }
+    }
+    /// Card mode ends: the card is no longer on screen in the key window — the window closed or is no longer the key
+    /// one, another app came forward (owner/coordinator 10-24: leaving the app ends it), another session shown. A new
+    /// explicit move is needed, and the 1 s on screen counts again from when the card is back.
+    func leaveCardMode() { if keyCard != nil { keyCard = nil } }
 
     /// The pinned card that takes picks in the selected session, as a CardModel.
     private func pinnedTakingPicks() -> CardModel? {
@@ -788,26 +803,37 @@ final class ShellModel: ObservableObject {
         if keyCard != k { keyCard = k }
     }
 
-    /// Whether 1–9 act on `card` now (and its keys are shown): card mode is on for it and it is the pinned card that
-    /// takes picks.
+    /// Card mode is on for `card` (by its run and ask_id: never another card of the session, an older result card
+    /// included), it is the pinned card that takes picks, and it is on screen.
     func keysActive(_ card: CardModel) -> Bool {
-        guard let k = keyCard, k == Self.cardKey(card), let p = pinnedTakingPicks() else { return false }
+        let k = Self.cardKey(card)
+        guard keyCard == k, shownAt[k] != nil, let p = pinnedTakingPicks() else { return false }
         return Self.cardKey(p) == k
     }
 
-    /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true when it picked on the pinned
-    /// card and is consumed. Esc and Tab are explicit moves into the pinned card (never consumed); a digit picks only
-    /// in card mode for the pinned card (keysActive) and when it is a card key (CardKeys.number: no ⌘⌃⌥, no
-    /// auto-repeat, no field being typed in).
-    func keyDown(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool) -> Bool {
-        if mainWindowIsKey, !commandLike, !isRepeat, characters == "\u{1b}" || characters == "\t" {
-            if let p = pinnedTakingPicks() { enterCardMode(p) }
+    /// THE predicate for a key: whether pressing `control`'s key on `card` picks it now. The key's label, the "Key n"
+    /// of its VoiceOver hint and the dispatcher (keyDown) all read this, so a label is shown if and only if its key
+    /// does what it says: card mode for the card, the control has a key, and its click would act (an approve-type one
+    /// once the whole card was seen; the card still takes a pick).
+    func keyWorks(_ card: CardModel, _ control: CardLayout.Control) -> Bool {
+        guard control.key != nil, keysActive(card), let id = selected, let s = states[id] else { return false }
+        return buttonEnabled(control.button, card: card, in: s)
+    }
+
+    /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true only when it acted on the
+    /// pinned card (it is consumed then; otherwise it passes on). Esc and Tab (⇧Tab too), with no ⌘⌃⌥, not repeated,
+    /// with no field being edited and no input-method composition under way, are explicit moves into the pinned card
+    /// (never consumed: Esc in a field cancels the input method's candidates there, and is not a move). A digit acts
+    /// only when keyWorks says its control does.
+    func keyDown(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool, composing: Bool = false) -> Bool {
+        if characters == "\u{1b}" || characters == "\t" || characters == "\u{19}" {
+            if mainWindowIsKey, !commandLike, !isRepeat, !editingText, !composing, let p = pinnedTakingPicks() { enterCardMode(p) }
             return false
         }
-        guard let n = CardKeys.number(characters: characters, commandLike: commandLike, mainWindowIsKey: mainWindowIsKey,
-                                      editingText: editingText, isRepeat: isRepeat),
-              let p = pinnedTakingPicks(), keysActive(p) else { return false }
-        return pressKey(n)
+        guard !composing, let n = CardKeys.number(characters: characters, commandLike: commandLike, mainWindowIsKey: mainWindowIsKey,
+                                                  editingText: editingText, isRepeat: isRepeat),
+              let p = pinnedTakingPicks(), let c = CardLayout(p).control(forKey: n), keyWorks(p, c) else { return false }
+        return click(c.button)
     }
 
     /// Key `n` (1–9, CardKeys) on the pinned card: its n-th control as shown (CardLayout), picked as a click is — held for
@@ -818,8 +844,7 @@ final class ShellModel: ObservableObject {
         guard let id = selected, let s = states[id], let p = pinned(s), p.phase.takesPick else { return false }
         let card = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
         guard let c = CardLayout(card).control(forKey: n) else { return false }
-        click(c.button)
-        return true
+        return click(c.button)
     }
 
     /// 「撤回」 within the take-back: the held answer is dropped, never sent; the card waits again.
@@ -862,17 +887,20 @@ final class ShellModel: ObservableObject {
 
     /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run
     /// out — written once; or written now.
-    private func pick(_ a: CardAnswer, immediate: Bool, in id: String) {
+    @discardableResult
+    private func pick(_ a: CardAnswer, immediate: Bool, in id: String) -> Bool {
         act(cards.pick(a, sessionId: id, immediate: immediate, now: now(), offEpoch: client.offEpoch, in: client.state(id)), in: id)
     }
 
-    private func act(_ action: CardStore.Action, in id: String) {
+    @discardableResult
+    private func act(_ action: CardStore.Action, in id: String) -> Bool {
         switch action {
-        case .none: break
+        case .none: return false
         case .send(let key, let a): write(a, key: key, in: id)
         case .hold(let key, let token):
             takeBackAfter(CardStore.takeBack) { [weak self] in self?.due(key, token: token, in: id) }
         }
+        return true
     }
 
     /// A held answer's take-back ran out: written if it is still the card's pick and the card still waits (the newest

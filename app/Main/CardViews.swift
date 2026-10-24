@@ -36,8 +36,6 @@ struct CardView: View {
     private var layout: CardLayout { CardLayout(card) }
     private var wordsEnabled: Bool { shell.wordsEnabled(card, in: session) }
     private var seen: Bool { shell.bodySeen.contains(ShellModel.cardKey(card)) }
-    /// Its keys act now (card mode for it): their labels and hints are shown only then.
-    private var keysOn: Bool { shell.keysActive(card) }
 
     var body: some View {
         let layout = self.layout
@@ -118,13 +116,13 @@ struct CardView: View {
     @ViewBuilder private func control(_ c: CardLayout.Control) -> some View {
         let b = c.button
         let enabled = shell.buttonEnabled(b, card: card, in: session)
-        let action = { shell.click(b) }
+        let action = { _ = shell.click(b) }      // (the same action for a mouse click and VoiceOver's press)
         Group {
             switch c.slot {
             case .list:
                 Button(action: action) {
                     HStack(spacing: 8) {
-                        if keysOn, let k = c.key { KeyCap(n: k) }
+                        if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) }
                         Text(b.text).frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
@@ -133,7 +131,7 @@ struct CardView: View {
             case .button:
                 Button(action: action) {
                     HStack(spacing: 6) {
-                        if keysOn, let k = c.key { KeyCap(n: k) }
+                        if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) }
                         Text(b.text)
                     }
                 }
@@ -143,7 +141,7 @@ struct CardView: View {
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)    // (InkButtonStyle does not dim: the card's own)
         .accessibilityLabel(b.text)
-        .accessibilityHint(b.role.needsWholeBody && !seen ? L("Read the whole card first: scroll to its end", lang: lang) : CardLayout.hint(c, keys: keysOn, lang: lang))
+        .accessibilityHint(b.role.needsWholeBody && !seen ? L("Read the whole card first: scroll to its end", lang: lang) : CardLayout.hint(c, keys: shell.keyWorks(card, c), lang: lang))
     }
 
     /// The answer held for its take-back: what was picked, the seconds left, and 「撤回」 (the words come back to the
@@ -290,32 +288,49 @@ struct ConsentFields: View {
 /// picked something. It never takes the focus and never brings anything forward.
 struct CardKeyMonitor: NSViewRepresentable {
     /// Every key-down of this window, with what the gate needs; true: consumed (it picked).
-    let onKey: (_ characters: String?, _ commandLike: Bool, _ mainWindowIsKey: Bool, _ editingText: Bool, _ isRepeat: Bool) -> Bool
+    let onKey: (_ characters: String?, _ commandLike: Bool, _ mainWindowIsKey: Bool, _ editingText: Bool, _ isRepeat: Bool, _ composing: Bool) -> Bool
+    /// The window stopped being the key one, closed, or the app went to the back: card mode ends.
+    let onLeave: () -> Void
 
-    func makeNSView(context: Context) -> NSView { Watcher(onKey: onKey) }
-    func updateNSView(_ v: NSView, context: Context) { (v as? Watcher)?.onKey = onKey }
+    func makeNSView(context: Context) -> NSView { Watcher(onKey: onKey, onLeave: onLeave) }
+    func updateNSView(_ v: NSView, context: Context) { (v as? Watcher)?.onKey = onKey; (v as? Watcher)?.onLeave = onLeave }
     static func dismantleNSView(_ v: NSView, coordinator: ()) { (v as? Watcher)?.stop() }
 
     final class Watcher: NSView {
-        var onKey: (String?, Bool, Bool, Bool, Bool) -> Bool
+        var onKey: (String?, Bool, Bool, Bool, Bool, Bool) -> Bool
+        var onLeave: () -> Void
         private var monitor: Any?
-        init(onKey: @escaping (String?, Bool, Bool, Bool, Bool) -> Bool) { self.onKey = onKey; super.init(frame: .zero) }
+        private var observers: [NSObjectProtocol] = []
+        init(onKey: @escaping (String?, Bool, Bool, Bool, Bool, Bool) -> Bool, onLeave: @escaping () -> Void) {
+            self.onKey = onKey; self.onLeave = onLeave; super.init(frame: .zero)
+        }
         required init?(coder: NSCoder) { nil }
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             stop()
-            guard window != nil else { return }
+            guard let win = window else { return }
+            // (observed, never acted on: nothing here moves the focus or a window)
+            let c = NotificationCenter.default
+            for (name, object) in [(NSWindow.didResignKeyNotification, win as AnyObject?), (NSWindow.willCloseNotification, win),
+                                   (NSApplication.didResignActiveNotification, nil)] {
+                observers.append(c.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in self?.onLeave() })
+            }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
                 guard let self, let w = self.window, e.window === w else { return e }
                 // (every key-down goes to the model, a digit or not: the typing guard counts them all)
+                let composing = (w.firstResponder as? NSTextInputClient)?.hasMarkedText() ?? false     // (an input method's candidates up)
                 let picked = self.onKey(e.charactersIgnoringModifiers, !e.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-                                        w.isKeyWindow, w.firstResponder is NSText, e.isARepeat)
+                                        w.isKeyWindow, w.firstResponder is NSText, e.isARepeat, composing)
                 return picked ? nil : e
             }
         }
 
-        func stop() { if let m = monitor { NSEvent.removeMonitor(m); monitor = nil } }
+        func stop() {
+            if let m = monitor { NSEvent.removeMonitor(m); monitor = nil }
+            for o in observers { NotificationCenter.default.removeObserver(o) }
+            observers = []
+        }
         deinit { stop() }
     }
 }
