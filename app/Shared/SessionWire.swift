@@ -18,11 +18,14 @@ enum SessionWire {
                                           "end_if_idle", "set_config",     // (harness#62, #64)
                                           "reask"]                         // (harness H1: 「现在回答」 on an expired card)
     /// A control line that makes the model work (harness `no_model` refuses these when the session has no model): say,
-    /// cua, retry, steer, queue_send_now, and a set_config that is not null. The helper refuses them while cloud models
+    /// cua, retry, steer, queue_send_now, reask (the task looks and decides again), and a set_config that is not null.
+    /// Not here: answer (whether it resumes the task depends on its option's kind, which the helper does not see — the
+    /// app holds it back by the card it has, SessionClient.needsModel, and a session set to no model stops its task),
+    /// respond (undo runs from receipts), stop, attach, the queue's edit and cancel, end. The helper refuses them while cloud models
     /// are off (models.off), from any client.
     static func needsModel(_ o: [String: Any]) -> Bool {
         switch o["type"] as? String {
-        case "say", "cua", "retry", "steer", "queue_send_now": return true
+        case "say", "cua", "retry", "steer", "queue_send_now", "reask": return true
         case "set_config": return !(o["config"] is NSNull) && o["config"] != nil
         default: return false
         }

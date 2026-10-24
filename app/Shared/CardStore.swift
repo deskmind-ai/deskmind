@@ -87,6 +87,8 @@ struct CardStore: Equatable {
         var answer: CardAnswer
         var until: Double
         var token: Int
+        /// The cloud switch's off-epoch when it was picked (SessionClient.offEpoch).
+        var offEpoch: Int = 0
     }
 
     struct Sent: Equatable {
@@ -152,7 +154,7 @@ struct CardStore: Equatable {
     /// The user picked `a` on its card (`immediate`: the way out, 「先别做了」, which has no take-back). Taken only while
     /// the card is the open one in `s` (the newest state the app has) and nothing was written for it yet: held, or —
     /// immediate — to be written now (a held pick of the card is dropped: it is never sent).
-    mutating func pick(_ a: CardAnswer, sessionId: String, immediate: Bool, now: Double, in s: SessionState) -> Action {
+    mutating func pick(_ a: CardAnswer, sessionId: String, immediate: Bool, now: Double, offEpoch: Int = 0, in s: SessionState) -> Action {
         guard a.askId != nil, SessionClient.refusal(a, in: s) == nil else { return .none }
         let key = Self.key(a)
         guard sent[key] == nil else { return .none }
@@ -162,7 +164,7 @@ struct CardStore: Equatable {
             return .send(key: key, a)
         }
         tokens += 1
-        picks[key] = Pick(sessionId: sessionId, answer: a, until: now + Self.takeBack, token: tokens)
+        picks[key] = Pick(sessionId: sessionId, answer: a, until: now + Self.takeBack, token: tokens, offEpoch: offEpoch)
         return .hold(key: key, token: tokens)
     }
 
@@ -175,16 +177,20 @@ struct CardStore: Equatable {
         return .send(key: key, a)
     }
 
+    /// The cloud switch went off: every held answer is dropped, never sent (turning it on again revives none).
+    mutating func cloudOff() { picks = [:] }
+
     /// The take-back: the held answer is dropped, never sent.
     mutating func takeBack(_ key: String) { picks[key] = nil }
 
     /// The take-back of `key`'s pick `token` ran out: its answer, to write now — once, and only if that pick is still
     /// the card's (not taken back, not picked again) and the card is still the open one in `s`. Either way the pick
     /// is gone.
-    mutating func due(_ key: String, token: Int, in s: SessionState) -> CardAnswer? {
+    mutating func due(_ key: String, token: Int, offEpoch: Int = 0, in s: SessionState) -> CardAnswer? {
         guard let p = picks[key], p.token == token else { return nil }
         picks[key] = nil
-        guard SessionClient.refusal(p.answer, in: s) == nil, sent[key] == nil else { return nil }
+        // (the cloud switch went off since it was picked — whether or not it is on again: never sent)
+        guard p.offEpoch == offEpoch, SessionClient.refusal(p.answer, in: s) == nil, sent[key] == nil else { return nil }
         sent[key] = Sent(sessionId: p.sessionId, answer: p.answer)
         return p.answer
     }

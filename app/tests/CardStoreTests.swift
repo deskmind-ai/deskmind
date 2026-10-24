@@ -21,6 +21,7 @@ enum CardStoreTests {
     static func run() {
         DecisionTests.group("cards.wireTests"); wireTests()
         DecisionTests.group("cards.movedOnTests"); movedOnTests()
+        DecisionTests.group("cards.cloudOffTests"); cloudOffTests()
         DecisionTests.group("cards.tableTests"); tableTests()
         DecisionTests.group("cards.allOrdersTests"); allOrdersTests()
         DecisionTests.group("cards.propertyTests"); propertyTests()
@@ -148,7 +149,7 @@ enum CardStoreTests {
     static func wireTests() {
         check(SessionWire.validate(["type": "reask", "run_id": "r1"]).line != nil, "reask with its run: passed on")
         check(SessionWire.validate(["type": "reask"]).error == "reask needs run_id", "reask without a run: refused")
-        check(!SessionWire.needsModel(["type": "reask", "run_id": "r1"]), "reask is held back as an answer is (by the app), not by the helper")
+        check(SessionWire.needsModel(["type": "reask", "run_id": "r1"]), "reask makes the model work: the helper refuses it while cloud models are off (#110 Codex review)")
         check(SessionControl.reask(runId: "r1").line as NSDictionary == ["type": "reask", "run_id": "r1"] as NSDictionary, "the control line")
         let r = Rig()
         r.ask("a1")
@@ -228,6 +229,108 @@ enum CardStoreTests {
         g.ask("a1"); g.void("a1", CardState.timeout); g.emit("steered", ["text": "x"])
         g.restart()
         check(!waits(g), "after a restart's replay: still not waiting")
+    }
+
+    // MARK: - cloud models off (#110 Codex review at 0a5e9b5)
+
+    /// A model whose cloud switch is the app's kind: read live through a ModelsOffSync (every write of it pushes, as
+    /// CloudModelSettings.engineIsCloud does), its work queued until the test runs it.
+    final class OffRig {
+        var cloud = true
+        var queued: [() -> Void] = []
+        let wire = Wire()
+        let timers = ShellTests.Timers()
+        var sync: ModelsOffSync!
+        var m: ShellModel!
+        let feeder = Rig()
+        init() {
+            sync = ModelsOffSync(transport: wire, current: { [unowned self] in !self.cloud })
+            m = ShellModel(client: SessionClient(transport: wire, modelsSync: sync), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                           lang: { .zhHans }, cloudOn: { [unowned self] in self.cloud }, takeBackAfter: timers.after, now: { [unowned self] in self.timers.now },
+                           work: { [unowned self] f in self.queued.append(f) }, deliver: { $0() })
+            m.selected = sid
+            for l in feeder.fed { m.client.feed(l) }        // (the session and its task begun)
+        }
+        /// The switch written (and pushed, as the app's setter does).
+        func set(cloud on: Bool) { cloud = on; sync.push() }
+        func runWork() { while !queued.isEmpty { queued.removeFirst()() } }
+        func feed(_ f: (Rig) -> Void) { let n = feeder.fed.count; f(feeder); for l in feeder.fed[n...] { m.client.feed(l) } }
+        var state: SessionState { m.states[sid] ?? SessionState() }
+        func card(_ id: String) -> CardModel { CardModel(card: state.task(rid)!.cards.first { $0.askId == id }!.card, runId: rid, askId: id) }
+        func answers() -> Int { wire.count("answer") }
+    }
+
+    /// The take-back while the cloud switch moves, and the controls that make the model work, checked as they are sent.
+    ///
+    /// | during the 3 s take-back | outcome |
+    /// |---|---|
+    /// | nothing | the pick is sent at 3 s |
+    /// | cloud turned off | the pick is dropped now and never sent, even if cloud comes back on |
+    /// | 「先别做了」 / Stop | at once, as before (cloud off too: it reaches no model) |
+    /// | the card moved on / expired | the pick is dropped (tableTests) |
+    static func cloudOffTests() {
+        // nothing: sent at 3 s
+        let a = OffRig()
+        a.feed { $0.ask("a1") }
+        a.m.cardBody(a.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        a.m.click(a.card("a1").buttons[0])
+        a.timers.advance(CardStore.takeBack); a.runWork()
+        check(a.answers() == 1, "nothing in between: the pick goes at 3 s")
+        // off then on again within the 3 s: never sent
+        let b = OffRig()
+        b.feed { $0.ask("a1") }
+        b.m.cardBody(b.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        b.m.click(b.card("a1").buttons[0])
+        b.timers.advance(1); b.set(cloud: false)
+        b.timers.advance(1); b.set(cloud: true)
+        b.timers.advance(CardStore.takeBack); b.runWork()
+        check(b.answers() == 0, "cloud off and on again within the take-back: the held approve is never sent (\(b.answers()))")
+        // off, not seen by the window at all (no settings path ran) and on again: still never sent
+        let b2 = OffRig()
+        b2.feed { $0.ask("a1") }
+        b2.m.cardBody(b2.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        b2.m.click(b2.card("a1").buttons[0])
+        b2.cloud = false; b2.sync.push(); b2.cloud = true; b2.sync.push()
+        b2.timers.advance(CardStore.takeBack); b2.runWork()
+        check(b2.answers() == 0, "a toggle the window never saw: not sent either (the off-epoch)")
+        // the 3 s ran out while on, its write still queued; cloud goes off before the write: not sent (checked as it goes)
+        let c = OffRig()
+        c.feed { $0.ask("a1") }
+        c.m.cardBody(c.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        c.m.click(c.card("a1").buttons[0])
+        c.timers.advance(CardStore.takeBack)
+        c.set(cloud: false); c.runWork()
+        check(c.answers() == 0, "the approve's write queued, cloud off before it ran: not sent")
+        // the way out goes, off or not
+        let d = OffRig()
+        d.feed { $0.ask("a1") }
+        d.m.click(d.card("a1").buttons.first { $0.role == .cancel }!)
+        d.set(cloud: false); d.runWork()
+        check(d.answers() == 1, "先别做了: sent at once, cloud off too (it reaches no model)")
+        // 「现在回答」 queued, cloud off before it ran: not sent; the button is offered again (when cloud is back)
+        let e = OffRig()
+        e.feed { $0.ask("a1"); $0.void("a1", CardState.timeout) }
+        e.m.answerNow(rid, askId: "a1")
+        e.set(cloud: false); e.runWork()
+        check(e.wire.count("reask") == 0 && e.m.cards.reasks.isEmpty, "reask queued, cloud off before it went: not sent, not left 'asked'")
+        // the two boundaries classify the same, control by control (the audit: what can make the model work)
+        let table: [(SessionControl, String, Bool)] = [
+            (.say("x"), "say", true), (.cua("x"), "cua", true), (.steer("x", runId: rid), "steer", true), (.retry, "retry", true),
+            (.queueSendNow(id: "q"), "queue_send_now", true), (.reask(runId: rid), "reask", true),
+            (.stop(runId: rid), "stop", false), (.queueEdit(id: "q", text: "x"), "queue_edit", false), (.queueCancel(id: "q"), "queue_cancel", false),
+            (.attach(afterSeq: 0), "attach", false), (.answer(.respond(runId: rid, option: 0)), "respond", false)]
+        for (ctl, type, model) in table {
+            check(SessionClient.needsModel(ctl, in: SessionState()) == model, "the app: \(type) \(model ? "needs" : "does not need") the model")
+            check(SessionWire.needsModel(ctl.line) == model, "the helper: \(type) \(model ? "needs" : "does not need") the model")
+        }
+        check(SessionWire.needsModel(["type": "set_config", "config": "x"]) && !SessionWire.needsModel(["type": "set_config", "config": NSNull()]), "set_config: a model only when not null")
+        // a card's answer, by its option (the app's boundary: the helper does not see options)
+        let s = Rig(); s.ask("a1"); s.ask("a2", "ambiguity")
+        let st = s.state
+        check(SessionClient.needsModel(.answer(.option(runId: rid, askId: "a2", option: 0)), in: st), "a reading: resumes the task")
+        check(!SessionClient.needsModel(.answer(.option(runId: rid, askId: "a2", option: 3)), in: st), "the way out: no model")
+        check(SessionClient.needsModel(.answer(.text(runId: rid, askId: "a2", text: "x")), in: st), "words: resume the task")
+        check(SessionClient.needsModel(.answer(.option(runId: rid, askId: "zz", option: 0)), in: st), "a card the app can't find: counted as resuming")
     }
 
     // MARK: - the table (plan §4.2), cell by cell

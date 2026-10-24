@@ -441,6 +441,7 @@ final class ShellModel: ObservableObject {
 
     private func applySettings(reconcileIfModelChanged: Bool) {
         let off = !cloudOn()
+        if off && !cards.picks.isEmpty { cards.cloudOff() }    // (held answers go with the switch: SessionClient.offEpoch)
         guard client.modelOff != off else { return }
         client.modelOff = off
         if reconcileIfModelChanged { work { [weak self] in self?.client.convergeAll() } }
@@ -782,7 +783,7 @@ final class ShellModel: ObservableObject {
     /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run
     /// out — written once; or written now.
     private func pick(_ a: CardAnswer, immediate: Bool, in id: String) {
-        act(cards.pick(a, sessionId: id, immediate: immediate, now: now(), in: client.state(id)), in: id)
+        act(cards.pick(a, sessionId: id, immediate: immediate, now: now(), offEpoch: client.offEpoch, in: client.state(id)), in: id)
     }
 
     private func act(_ action: CardStore.Action, in id: String) {
@@ -800,7 +801,7 @@ final class ShellModel: ObservableObject {
     private func due(_ key: String, token: Int, in id: String) {
         guard cards.picks[key]?.token == token else { return }
         if !cloudAllows() { cards.takeBack(key); return }
-        guard let a = cards.due(key, token: token, in: client.state(id)) else { return }
+        guard let a = cards.due(key, token: token, offEpoch: client.offEpoch, in: client.state(id)) else { return }
         write(a, key: key, in: id)
     }
 
