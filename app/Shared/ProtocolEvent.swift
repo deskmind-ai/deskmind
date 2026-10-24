@@ -331,6 +331,23 @@ struct SessionDuplicate: Codable, Equatable {
     enum CodingKeys: String, CodingKey { case clientId = "client_id", control, seq }
 }
 
+/// The answer to a `stop {client_id}` (harness#72), one per stop line, not stored: what became of the cua with that
+/// client_id — `stopped` (its task stopped; `status` how it ended), `already_ended` (its task had ended), `none` (no
+/// task came of it: it is cancelled, refused if it comes).
+struct SessionStopAck: Codable, Equatable {
+    @LStr var clientId: String = ""
+    @LStr var result: String = ""
+    var runId: String?
+    var status: String?
+    enum CodingKeys: String, CodingKey { case clientId = "client_id", result, runId = "run_id", status }
+}
+
+/// A cua cancelled by a `stop {client_id}` before any task came of it (stored; harness#72): refused if it comes.
+struct SessionCuaCancelled: Codable, Equatable {
+    @LStr var clientId: String = ""
+    enum CodingKeys: String, CodingKey { case clientId = "client_id" }
+}
+
 struct SessionQueue: Codable, Equatable {
     @LList<QueueItem> var items: [QueueItem] = []
 }
@@ -588,6 +605,8 @@ enum ProtocolEvent: Equatable {
     case retry(SessionRetry)
     case queue(SessionQueue)
     case duplicate(SessionDuplicate)
+    case stopAck(SessionStopAck)
+    case cuaCancelled(SessionCuaCancelled)
     // the helper, about a session
     case sessionExit(HelperSessionExit)
     // the executor, forwarded
@@ -631,6 +650,8 @@ enum ProtocolEvent: Equatable {
         case .retry: return "session.retry"
         case .queue: return "session.queue"
         case .duplicate: return "session.duplicate"
+        case .stopAck: return "session.stop_ack"
+        case .cuaCancelled: return "session.cua_cancelled"
         case .sessionExit: return "helper.session_exit"
         case .start: return "start"
         case .preparing: return "preparing"
@@ -692,6 +713,8 @@ extension ProtocolEvent: Codable {
         case "session.retry": self = read(ProtocolEvent.retry)
         case "session.queue": self = read(ProtocolEvent.queue)
         case "session.duplicate": self = read(ProtocolEvent.duplicate)
+        case "session.stop_ack": self = read(ProtocolEvent.stopAck)
+        case "session.cua_cancelled": self = read(ProtocolEvent.cuaCancelled)
         case "helper.session_exit": self = read(ProtocolEvent.sessionExit)
         case "start": self = read(ProtocolEvent.start)
         case "preparing": self = .preparing
@@ -735,6 +758,8 @@ extension ProtocolEvent: Codable {
         case .retry(let v): try v.encode(to: encoder)
         case .queue(let v): try v.encode(to: encoder)
         case .duplicate(let v): try v.encode(to: encoder)
+        case .stopAck(let v): try v.encode(to: encoder)
+        case .cuaCancelled(let v): try v.encode(to: encoder)
         case .sessionExit(let v): try v.encode(to: encoder)
         case .start(let v): try v.encode(to: encoder)
         case .preparing: break

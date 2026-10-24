@@ -63,6 +63,18 @@ enum SessionClientE2E {
         s = client.state(sid)
         check(s.messages.filter { $0.text == "你好" }.count == 1 && assistant().count == 3 && s.outbox.isEmpty, "stored once, no new reply: \(s.messages.map(\.text).suffix(3))")
 
+        // stop {client_id} (harness#72): a cua the session never got — answered `none` (not stored) and the cua
+        // cancelled (stored); that cua sent after it is refused `cancelled`, its words not run
+        let cancelled = "c_e2e_cancelled"
+        check(client.send(.stopCua(clientId: cancelled), to: sid) == .sent, "stop {client_id} sent")
+        check(until { client.state(sid).stopAcks[cancelled]?.result == "none" }, "its ack: none (\(String(describing: client.state(sid).stopAcks[cancelled])))")
+        check(until { client.state(sid).cancelledCuas.contains(cancelled) }, "session.cua_cancelled stored")
+        check(client.send(.cua("打开计算器"), to: sid, clientId: cancelled) == .sent, "the cancelled cua sent after it")
+        check(until { client.state(sid).outbox.first { $0.id == cancelled }?.refused == "cancelled" }, "refused cancelled: \(client.state(sid).outbox)")
+        check(client.state(sid).tasks.isEmpty, "no task started")
+        // the same stop again: the same answer
+        check(client.send(.stopCua(clientId: cancelled), to: sid) == .sent && until { client.state(sid).stopAcks[cancelled]?.result == "none" }, "stopped again: the same answer")
+
         // the session ended by the app: its exit (pid, start_seq, last_seq) heard; not opened again by a watch or a send
         check(client.end(sid), "end")
         check(until { client.state(sid).exited != nil }, "its exit heard: exited \(String(describing: client.state(sid).exited))")

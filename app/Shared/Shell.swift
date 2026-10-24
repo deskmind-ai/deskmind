@@ -777,7 +777,7 @@ final class ShellModel: ObservableObject {
         work { [weak self] in
             guard let self else { return }
             // (a goal over before its open went: nothing is opened for it)
-            if ticket?.over == true { self.deliver { self.opening = false }; return }
+            if ticket?.over == true { self.deliver { self.opening = false; report(.openFailed) }; return }
             // (with the settings stored when it goes: SessionClient.desired())
             guard let id = self.client.open() else {
                 self.deliver {
@@ -814,6 +814,17 @@ final class ShellModel: ObservableObject {
     /// never put back in the composer (a newer draft there stays as it is). No helper: said once too.
     private func notSent(_ r: SessionClient.SendResult, text: String, in id: String) {
         if r == .unavailable { notice = L("DeskMind's helper didn't answer. Your message is kept below; send it again.", lang: lang()) }
+    }
+
+    /// `stop {client_id}` (harness#72) to one session: the task the cua with that client id started, or — none yet —
+    /// the cua cancelled. `sent`: the helper took the line (true) or did not answer (false); the session's answer is
+    /// session.stop_ack, on its stream. The send reopens an exited session (it answers from its history).
+    func stopCua(sessionId id: String, clientId: String, sent: @escaping (Bool) -> Void) {
+        work { [weak self] in
+            guard let self else { return }
+            let r = self.client.send(.stopCua(clientId: clientId), to: id)
+            self.deliver { sent(r == .sent) }
+        }
     }
 
     /// Stop one task of one session by its run (GoalRun). Never run-less: the session would stop whatever task runs.
