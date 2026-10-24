@@ -354,15 +354,12 @@ extension GoalRunEffects {
                 }
             },
             writeRecord: { g in MainActor.assumeIsolated {
-                // (its outcome from the goal's ending; its details from its task, once present — written over then)
-                let t = g.task
-                RunHistory.shared.put(RunRecord(
+                // (identity and outcome only, from the goal's ending; never a copy of its task's details — read live
+                // from its session when the record is shown)
+                RunHistory.shared.add(RunRecord(
                     id: id, date: Date(), goal: g.goal, folder: g.folder, apps: [],
-                    finished: g.finished, errored: g.errored,
-                    summary: t.map { ShellText.task($0, lang: lang) } ?? g.ended.map { ShellText.ending($0, lang: lang) } ?? GoalRunScreen.why(g.failed ?? "", lang: lang),
-                    answer: t?.answer ?? "",
-                    steps: (t?.steps ?? []).map { RunRecord.Step(n: $0.n, human: $0.displayText, app: "", shot: $0.shot ?? "", describe: $0.text, detail: $0.why ?? "", ok: $0.status == .ok) },
-                    created: t?.changes.created ?? [], modified: t?.changes.modified ?? [], deleted: t?.changes.deleted ?? []))
+                    finished: g.finished, errored: g.errored, summary: g.endingText(lang: lang),
+                    answer: "", steps: [], created: [], modified: [], deleted: []))
             } },
             after: { seconds, f in DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: f) })
     }

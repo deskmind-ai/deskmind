@@ -91,15 +91,6 @@ final class RunHistory: ObservableObject {
         records = (try? Data(contentsOf: url)).flatMap { try? dec.decode([RunRecord].self, from: $0) } ?? []
     }
 
-    /// A record kept again (the same id: written over in its place, its movie kept), else added.
-    func put(_ r: RunRecord) {
-        guard let i = records.firstIndex(where: { $0.id == r.id }) else { add(r); return }
-        var r = r
-        if r.movie == nil { r.movie = records[i].movie }
-        records[i] = r
-        save()
-    }
-
     func add(_ r: RunRecord) {
         records.insert(r, at: 0)
         if records.count > Self.keep { records.removeLast(records.count - Self.keep) }
@@ -117,9 +108,9 @@ final class RunHistory: ObservableObject {
         save()
     }
 
+    /// The movie saved after its record: set on the record if it is still there (deleted: nothing, never re-added).
     func setMovie(_ path: String, for id: UUID) {
-        guard let i = records.firstIndex(where: { $0.id == id }) else { return }
-        records[i].movie = path
+        guard KeptRecords.update(&records, id: id, { $0.movie = path }) else { return }
         save()
     }
 
