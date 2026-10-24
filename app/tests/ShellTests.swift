@@ -24,6 +24,7 @@ enum ShellTests {
         DecisionTests.group("shell.cloudOffTests"); cloudOffTests()
         DecisionTests.group("shell.cardBodyTests"); cardBodyTests()
         DecisionTests.group("shell.focusTests"); focusTests()
+        DecisionTests.group("shell.activationTests"); activationTests()
         DecisionTests.group("shell.idleReclaimTests"); idleReclaimTests()
         DecisionTests.group("shell.historyTests"); historyTests()
         DecisionTests.group("shell.cloudOffNoModelTests"); cloudOffNoModelTests()
@@ -723,6 +724,68 @@ enum ShellTests {
         check(CardModel.Role.undo.reachesNoModel && CardModel.Role.cancel.reachesNoModel && !CardModel.Role.approve.reachesNoModel
               && !CardModel.Role.choice.reachesNoModel && !CardModel.Role.delegate.reachesNoModel && !CardModel.Role.skipStep.reachesNoModel,
               "what reaches no model: the way out and undo")
+    }
+
+    /// No app activation, ever, unless the user directly clicked DeskMind (a button of its own, the Dock, a
+    /// notification, the live card): over every source the main app and the helper build from (build.sh), each call
+    /// that can make an app frontmost sits in a function on this list, each such function is called only from a user's
+    /// action, every panel is non-activating, and every `open` of an app is in the background (-g). (rc.15 device
+    /// check, 10-24: an activation 2 s after a plan card was traced to the test script standing in for the user's
+    /// click — scripts/rc_e2e/answer_asks.py activates DeskMind before it clicks — not to the app; this keeps it so.)
+    static func activationTests() {
+        let app = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        guard let build = try? String(contentsOf: app.appendingPathComponent("build.sh"), encoding: .utf8) else { check(false, "build.sh readable"); return }
+        let lines = build.components(separatedBy: "\n")
+        var files: Set<String> = []
+        for marker in ["-o \"$MAIN/Contents/MacOS/DeskMind\"", "-o \"$HELPER/Contents/MacOS/DeskMindHands\""] {
+            guard let at = lines.firstIndex(where: { $0.contains(marker) }), at + 1 < lines.count else { check(false, "build.sh: \(marker)"); continue }
+            files.formUnion(lines[at + 1].split(separator: " ").map(String.init).filter { $0.hasSuffix(".swift") })
+        }
+        check(files.contains("Helper/LiveCard.swift") && files.contains("Main/IslandView.swift") && files.count > 40, "every source of both apps: \(files.count)")
+        /// The function a line is in (the nearest `func` above it).
+        func enclosing(_ ls: [String], _ i: Int) -> String {
+            for j in stride(from: i, through: 0, by: -1) {
+                if let r = ls[j].range(of: "func ") {
+                    return String(ls[j][r.upperBound...].prefix { $0.isLetter || $0.isNumber || $0 == "_" })
+                }
+            }
+            return ""
+        }
+        // what can make an app frontmost → the functions allowed to do it (each a user's own action)
+        let activators = ["NSApp.activate", ".activate(", "activateWithOptions", "activateIgnoringOtherApps", "makeKeyAndOrderFront", "openApplication(", "NSApp.unhide"]
+        let allowed: Set<String> = ["IslandView.swift:comeBack", "LiveCard.swift:clicked"]
+        // the allowed functions' callers → the user's actions they are reached from
+        let callers: [String: Set<String>] = ["comeBack": ["showDetails", "openWindow", "applicationShouldHandleReopen"]]
+        var found: [String] = []
+        var callSites: [String: [String]] = [:]
+        for f in files.sorted() {
+            guard let text = try? String(contentsOf: app.appendingPathComponent(f), encoding: .utf8) else { check(false, "\(f) readable"); continue }
+            let ls = text.components(separatedBy: "\n")
+            for (i, l) in ls.enumerated() {
+                let code = l.components(separatedBy: "//").first ?? ""
+                if activators.contains(where: { code.contains($0) }) {
+                    let at = "\((f as NSString).lastPathComponent):\(enclosing(ls, i))"
+                    // (an app opened with `activates = false` just above: in the background — the helper's launch)
+                    let background = code.contains("openApplication(") && ls[max(0, i - 5)..<i].contains { $0.contains(".activates = false") }
+                    if !allowed.contains(at) && !background { found.append("\(f):\(i + 1) in \(enclosing(ls, i))") }
+                }
+                for callee in callers.keys where code.contains("\(callee)()") && !code.contains("func \(callee)") {
+                    callSites[callee, default: []].append(enclosing(ls, i))
+                }
+                // a panel that could take the front: never (non-activating, every one)
+                if code.contains("NSPanel(") && !ls[i...min(ls.count - 1, i + 1)].joined().contains(".nonactivatingPanel") { found.append("\(f):\(i + 1): an NSPanel without .nonactivatingPanel") }
+                // an app opened: in the background only
+                if code.contains("/usr/bin/open") {
+                    let near = ls[i...min(ls.count - 1, i + 2)].joined()
+                    if !near.contains("-g") { found.append("\(f):\(i + 1): /usr/bin/open without -g") }
+                }
+            }
+        }
+        check(found.isEmpty, "nothing activates an app outside a user's own action: \(found)")
+        for (callee, sites) in callSites {
+            let wrong = sites.filter { !(callers[callee] ?? []).contains($0) }
+            check(!sites.isEmpty && wrong.isEmpty, "\(callee) is reached only from a user's action (\(callers[callee]!.sorted())): \(sites)")
+        }
     }
 
     /// #107 re-review (2): 0.5.0 has no local-only mode. The 0.5 window's model settings show the cloud switch on and
