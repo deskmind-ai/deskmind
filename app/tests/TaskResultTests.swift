@@ -24,6 +24,8 @@ enum TaskResultTests {
         DecisionTests.group("result.lineTests"); lineTests()
         DecisionTests.group("result.contrastTests"); contrastTests()
         DecisionTests.group("result.viewTests"); viewTests()
+        DecisionTests.group("result.refusalMatchTests"); refusalMatchTests()
+        DecisionTests.group("result.canSendTableTests"); canSendTableTests()
         RvA3Tests.run()
     }
 
@@ -324,5 +326,119 @@ enum TaskResultTests {
         check(buttons >= 1 && task.components(separatedBy: ".accessibilityHint(").count - 1 >= buttons && task.components(separatedBy: ".accessibilityLabel(").count - 1 >= buttons,
               "VoiceOver: a label and a hint on each of the \(buttons) buttons")
         check(task.contains("ShellText.resultLine(task, now: shell.now()") && task.contains("CardView(shell: shell, card: m"), "the result line and the card's buttons from the one state")
+    }
+
+    // MARK: - a refusal is the respond's it answers (#114 Codex review at 7553637)
+
+    static func refusalMatchTests() {
+        // A's undo was sent; before its answer, the session moved on: B's card opens; then a refusal (no_task) comes —
+        // it answers A's respond, never B's card
+        let r = CardStoreTests.Rig()
+        r.emit("task_done", ["status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
+                             "result_card": ["kind": "result", "text": "a", "blocking": false, "free_text": false,
+                                             "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
+        r.feed(["kind": "session.task_end", "session_id": CardStoreTests.sid, "seq": 3, "run_id": CardStoreTests.rid, "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000])
+        let am = CardModel(resultCard: r.state.task(CardStoreTests.rid)!.resultCard!, runId: CardStoreTests.rid)
+        r.m.click(am.buttons.first { $0.role == .undo }!)
+        check(r.state.respondsInFlight == [CardStoreTests.rid], "A's respond is in flight: \(r.state.respondsInFlight)")
+        r.feed(["kind": "session.task_closed", "session_id": CardStoreTests.sid, "seq": 4, "run_id": CardStoreTests.rid, "why": "new_task"])
+        r.feed(["kind": "session.task", "session_id": CardStoreTests.sid, "seq": 5, "msg_id": "u2", "run_id": "r2", "raw": "再来", "by": "slash"])
+        r.feed(["kind": "task_done", "session_id": CardStoreTests.sid, "run_id": "r2", "seq": 1, "status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
+                "result_card": ["kind": "result", "text": "b", "blocking": false, "free_text": false,
+                                "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
+        r.feed(["kind": "session.task_end", "session_id": CardStoreTests.sid, "seq": 6, "run_id": "r2", "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000])
+        check(r.state.task("r2")?.resultCardState.undoEnabled == true, "(B's card open)")
+        r.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "no_task", "control": "respond", "text": "no result card of this session is waiting"])
+        let b = r.state.task("r2")!
+        check(b.resultCardState.undoEnabled && b.respondRefused == nil && ShellText.resultLine(b, now: 2_000_000_000 - 120, lang: .zhHans) == "还能撤回 2 分钟",
+              "the late refusal answers A's respond: B's card stays open, its undo on (\(b.resultCardState))")
+        check(r.state.respondsInFlight.isEmpty, "and nothing is in flight any more")
+        // a refusal with nothing in flight changes nothing
+        r.m.client.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "no_task", "control": "respond", "text": "x"])
+        check(r.state.task("r2")?.resultCardState.undoEnabled == true, "a refusal with no respond in flight: nothing changes")
+        // two in flight (A then B), A's stored answer held behind a gap, B's refusal arrives first: it waits, then is B's
+        var s = SessionReducer.reduce(SessionState(), begin + [ex(2, #""kind":"task_done","undo_until":2000000000,"status":"succeeded","reason":"","summary":"s","# + undoCard),
+                                                            se(2, #""kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"s","undo":"open","undo_until":2000000000"#)])
+        s.respondsInFlight = ["r1", "r1"]
+        s = SessionReducer.reduce(s, se(4, #""kind":"session.task_closed","run_id":"r1","why":"linger""#))     // (held: seq 3 missing)
+        s = SessionReducer.reduce(s, se(nil, #""kind":"session.error","code":"busy","control":"respond","text":"x""#))
+        check(s.task("r1")?.respondRefused == nil && s.heldRespondRefusals.count == 1, "a refusal behind a gap waits for the stored lines before it")
+        s = SessionReducer.reduce(s, se(3, #""kind":"session.task_respond","run_id":"r1","option":1,"undo":true"#))
+        check(s.respondsInFlight.isEmpty && s.heldRespondRefusals.isEmpty, "the gap filled: the stored answer took the first, the refusal the second")
+    }
+
+    // MARK: - one predicate per option: enabled == a click sends == its key sends
+
+    static func canSendTableTests() {
+        typealias Rig = CardStoreTests.Rig
+        let sid = CardStoreTests.sid, rid = CardStoreTests.rid
+        func resultRig(undoUntil: Bool, extra: [[String: Any]]) -> Rig {
+            let r = Rig()
+            var done: [String: Any] = ["status": "succeeded", "reason": "", "summary": "s",
+                                       "result_card": ["kind": "result", "text": "t", "blocking": false, "free_text": false,
+                                                       "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]]
+            if undoUntil { done["undo_until"] = 2_000_000_000 }
+            r.emit("task_done", done)
+            if undoUntil { r.feed(["kind": "session.task_end", "session_id": sid, "seq": 3, "run_id": rid, "status": "succeeded", "summary": "s", "undo": "open", "undo_until": 2_000_000_000]) }
+            for l in extra { if l["kind"] as? String == "session.error" { r.m.client.feed(l) } else { r.feed(l) } }
+            return r
+        }
+        let respond: [String: Any] = ["kind": "session.task_respond", "session_id": sid, "seq": 4, "run_id": rid, "option": 1, "undo": true]
+        let closed: [String: Any] = ["kind": "session.task_closed", "session_id": sid, "seq": 4, "run_id": rid, "why": "linger"]
+        let results: [(String, () -> Rig)] = [
+            ("open, undo offered", { resultRig(undoUntil: true, extra: []) }),
+            ("an undo option, no undo_until (not offered)", { resultRig(undoUntil: false, extra: []) }),
+            ("undoing", { resultRig(undoUntil: true, extra: [respond]) }),
+            ("closed", { resultRig(undoUntil: true, extra: [closed]) }),
+        ]
+        var rows = 0
+        for (name, make) in results {
+            let probe = make()
+            let card = CardModel(resultCard: probe.state.task(rid)!.resultCard!, runId: rid)
+            for b in card.buttons {
+                let r = make()
+                r.m.cardBody(card, contentHeight: 1, visibleHeight: 1, offset: 0)
+                let enabled = r.m.canSend(b), shown = r.m.buttonEnabled(b, card: card, in: r.state)
+                let n = r.wire.count("respond")
+                r.m.click(b)
+                let sent = r.wire.count("respond") > n
+                check(enabled == shown && enabled == sent, "result card, \(name), \(b.kind): enabled \(enabled), shown \(shown), click sent \(sent)")
+                rows += 1
+            }
+        }
+        // ask cards in each phase: the button, a click and its key (card mode on) agree
+        let phases = ["open", "pending", "sent", "answered", "voided", "expired"]
+        for phase in phases {
+            for i in 0..<3 {
+                for byKey in [false, true] {
+                    let r = Rig()
+                    r.ask("a1")
+                    let m = r.model("a1")!
+                    r.m.cardShown(m); r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+                    r.timers.advance(2); r.m.enterCardMode(m)
+                    switch phase {
+                    case "pending": r.click("a1", .skipStep)
+                    case "sent": r.click("a1", .skipStep); r.timers.advance(CardStore.takeBack)
+                    case "answered": r.resumed("a1")
+                    case "voided": r.void("a1", "steer")
+                    case "expired": r.void("a1", CardState.timeout)
+                    default: break
+                    }
+                    let b = m.buttons[i]
+                    let enabled = r.m.canSend(b), shown = r.m.buttonEnabled(b, card: m, in: r.state)
+                    let ctl = CardLayout(m).controls.first { $0.index == i }!
+                    let label = r.m.keyWorks(m, ctl)
+                    let before = (r.wire.count("answer"), r.m.cards.picks)
+                    let acted: Bool
+                    if byKey { acted = r.m.keyDown(characters: String(ctl.key!), commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false) }
+                    else { acted = r.m.click(b) }
+                    let changed = r.wire.count("answer") > before.0 || r.m.cards.picks != before.1
+                    check(enabled == shown && enabled == acted && acted == changed && (!byKey || label == enabled),
+                          "ask card, \(phase), \(b.kind) by \(byKey ? "key" : "click"): enabled \(enabled), shown \(shown), acted \(acted), changed \(changed), label \(label)")
+                    rows += 1
+                }
+            }
+        }
+        check(rows == 8 + phases.count * 6, "every state × option: \(rows)")
     }
 }

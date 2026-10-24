@@ -811,11 +811,11 @@ final class ShellModel: ObservableObject {
     func click(_ button: CardModel.Button) -> Bool {
         guard let id = selected else { return false }
         if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
-        // an approve-type option only once the card's whole body has been on screen (never approve what was not seen)
-        if button.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: button.runId, askId: button.askId)) { return false }
-        // cloud models off: only what reaches no model is held back — the way out and undo (the session undoes from
-        // its receipts, no model) always go; an answer that resumes the task would make the model go on
-        if !button.role.reachesNoModel && !cloudAllows() { return false }
+        // the one predicate (canSend): what it says is what happens
+        guard canSend(button) else {
+            if !button.role.reachesNoModel && !cloudOn() { _ = cloudAllows() }     // (says why: the cloud model is off)
+            return false
+        }
         let a = CardModel.answer(button)
         if a.askId == nil { return act(cards.respond(a, sessionId: id, in: client.state(id)), in: id) }
         return pick(a, immediate: button.role == .cancel, in: id)
@@ -948,11 +948,8 @@ final class ShellModel: ObservableObject {
     func keyWorks(_ card: CardModel, _ control: CardLayout.Control) -> Bool {
         guard control.key != nil, !editingText, !composing, keysActive(card), let id = selected else { return false }
         let b = control.button
-        guard b.runId == card.runId, b.askId == card.askId, let ask = b.askId else { return false }
-        if b.role.needsWholeBody && !bodySeen.contains(Self.cardKey(card)) { return false }
-        if !b.role.reachesNoModel && !cloudOn() { return false }
-        let a = CardModel.answer(b)
-        return cards.wouldPick(a, askId: ask, in: client.state(id))
+        guard b.runId == card.runId, b.askId == card.askId, b.askId != nil, selected == id else { return false }
+        return canSend(b)
     }
 
     /// Every key-down of the main window (CardKeyMonitor, before it goes anywhere): true only when it acted on the
@@ -1019,8 +1016,23 @@ final class ShellModel: ObservableObject {
     }
 
     /// Whether this button takes a click now: its card can be answered, and an approve-type option's card was seen whole.
-    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool {
-        answerable(card, in: s) && (!b.role.needsWholeBody || bodySeen.contains(Self.cardKey(card)))
+    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b) }
+
+    /// THE predicate for one option of one card (#114 Codex review at 7553637): whether pressing it now sends its answer
+    /// (or holds it for the take-back). The button's enabled state, its VoiceOver state, the key path (keyWorks) and the
+    /// click all read this, and nothing else decides: the card takes this option now (an ask card: it is the open one
+    /// and takes a pick; a result card: it is open, the option is one it offers — undo only while offered — and no answer
+    /// of ours is on its way), an approve-type option only once the whole card was seen, a model-reaching option only
+    /// while cloud models are on. Read against the client's newest state, the one CardStore checks as it writes.
+    func canSend(_ b: CardModel.Button) -> Bool {
+        guard let id = selected else { return false }
+        let s = client.state(id)
+        if b.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: b.runId, askId: b.askId)) { return false }
+        if !b.role.reachesNoModel && !cloudOn() { return false }
+        let a = CardModel.answer(b)
+        guard let ask = b.askId else { return cards.wouldRespond(a, in: s) }
+        guard let t = s.task(b.runId), let c = t.cards.first(where: { $0.askId == ask }), cards.phase(c, of: t).takesPick else { return false }
+        return cards.wouldPick(a, askId: ask, in: s)
     }
 
     /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run

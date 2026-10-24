@@ -641,7 +641,15 @@ final class SessionClient {
     var newClientId: () -> String = { "c_" + UUID().uuidString.lowercased() }      // unique for the session's life (harness #59)
 
     /// Blocks while it reopens an ended session (up to a minute): call it off the main thread.
-    func send(_ control: SessionControl, to sessionId: String) -> SendResult { send(control, to: sessionId, clientId: nil) }
+    func send(_ control: SessionControl, to sessionId: String) -> SendResult {
+        // a result-card answer is recorded in flight before it goes (its refusal may come back before this returns), and
+        // taken off again when it did not go
+        guard case .answer(.respond(let run, _)) = control else { return send(control, to: sessionId, clientId: nil) }
+        mutate(sessionId) { $0.respondsInFlight.append(run) }
+        let r = send(control, to: sessionId, clientId: nil)
+        if r != .sent { mutate(sessionId) { st in if let k = st.respondsInFlight.lastIndex(of: run) { st.respondsInFlight.remove(at: k) } } }
+        return r
+    }
 
     /// `clientId`: the words' id when they are sent again (resend); new words get one.
     private func send(_ control: SessionControl, to sessionId: String, clientId: String?) -> SendResult {

@@ -371,6 +371,14 @@ struct SessionState: Equatable {
     /// What is not sent: shown with 「重新发送」 (SessionClient.resend) or dropped (SessionClient.dropUnsent).
     var unsent: [Outgoing] { outbox.filter { !$0.sending } }
     var errors: [StoredError] = []
+    /// The result-card answers (respond) this app sent and the session has not answered yet, by run, in the order sent
+    /// (SessionClient.send records them as they go). The session handles its stdin in order and answers each respond
+    /// with a stored session.task_respond or an unstored refusal that names no run (harness host.ts refuse): a refusal
+    /// belongs to the oldest respond still in flight; one with none in flight changes nothing.
+    var respondsInFlight: [String] = []
+    /// Respond refusals that came while stored session lines were held behind a gap: matched once they are in (a
+    /// stored task_respond held there answers an earlier respond).
+    var heldRespondRefusals: [SessionErrorEvent] = []
     /// The latest refusal of a control (busy, card_open, computer_busy, …): not stored, shown once.
     var lastRefusal: SessionErrorEvent? = nil
     /// The session's settings as it stored them last (session.config): its model configuration (nil: no model) and
@@ -450,6 +458,12 @@ enum SessionReducer {
             deferred()
             while let next = s.pendingSession.removeValue(forKey: s.lastSeq + 1) { applySession(&s, next); deferred() }
             s.pendingSession = s.pendingSession.filter { $0.key > s.lastSeq }
+            // (respond refusals that waited for the stored lines before them)
+            if s.pendingSession.isEmpty && !s.heldRespondRefusals.isEmpty {
+                let held = s.heldRespondRefusals
+                s.heldRespondRefusals = []
+                for e in held { respondRefused(&s, e) }
+            }
             return .applied
         } else {
             if case .unknown(let k, _) = ev { s.unknownKinds.insert(k) }
@@ -486,6 +500,15 @@ enum SessionReducer {
         case .sessionExit, .sessionStart: for i in s.tasks.indices { settle(&s.tasks[i], goneUpTo: s.goneUpTo) }
         default: break
         }
+    }
+
+    /// A respond refusal, matched to the respond it answers: the oldest in flight; none in flight, nothing changes.
+    private static func respondRefused(_ s: inout SessionState, _ e: SessionErrorEvent) {
+        guard !s.respondsInFlight.isEmpty else { return }
+        let run = s.respondsInFlight.removeFirst()
+        guard let i = s.taskPos[run], s.tasks[i].resultCardState.isOpen else { return }
+        s.tasks[i].respondRefused = e.code
+        s.tasks[i].respondRefusals += 1
     }
 
     private static func settle(_ s: inout SessionState, _ runId: String) {
@@ -562,6 +585,8 @@ enum SessionReducer {
     /// sent to the new process (a send reopens the session first) are not the old one's.
     private static func processGone(_ s: inout SessionState, exited: Bool) {
         dropEmptyStreaming(&s)
+        s.respondsInFlight = []                         // (its process is gone: no answer to them will come)
+        s.heldRespondRefusals = []
         for i in s.messages.indices where s.messages[i].streaming {
             s.messages[i].streaming = false
             s.messages[i].interrupted = true
@@ -718,10 +743,9 @@ enum SessionReducer {
                 place(&s, .error(seq), seq: seq)
             } else {
                 s.lastRefusal = e
-                // the session refused this app's answer to a result card (no run named: the one that could still be answered)
-                if e.control == "respond", let i = s.tasks.lastIndex(where: { $0.resultCardState.isOpen }) {
-                    s.tasks[i].respondRefused = e.code
-                    s.tasks[i].respondRefusals += 1
+                // the session refused this app's answer to a result card: the respond it answers (the oldest in flight)
+                if e.control == "respond" {
+                    if s.pendingSession.isEmpty { respondRefused(&s, e) } else { s.heldRespondRefusals.append(e) }
                 }
                 // the session refused 「现在回答」 (no run named on the refusal: the running task's expired card)
                 if e.control == "reask", let i = s.tasks.lastIndex(where: { $0.running }), let c = s.tasks[i].expiredCard {
@@ -763,6 +787,8 @@ enum SessionReducer {
         case .taskRespond(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].respond = e
+            // (the session took a respond of this run: the oldest in flight for it is answered)
+            if let k = s.respondsInFlight.firstIndex(of: e.runId) { s.respondsInFlight.remove(at: k) }
         case .sessionConfig(let e):
             s.settings = e
             if e.by == "set_config" { s.settingsRefused = nil }

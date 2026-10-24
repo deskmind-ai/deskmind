@@ -175,6 +175,11 @@ struct CardStore: Equatable {
         a.askId == askId && SessionClient.refusal(a, in: s) == nil && sent[Self.key(a)] == nil
     }
 
+    /// Whether `respond` would take `a` now: what ShellModel.canSend asks of a result card's option.
+    func wouldRespond(_ a: CardAnswer, in s: SessionState) -> Bool {
+        a.askId == nil && SessionClient.refusal(a, in: s) == nil && sent[Self.key(a)] == nil
+    }
+
     /// A result card's answer (respond): written now, once.
     mutating func respond(_ a: CardAnswer, sessionId: String, in s: SessionState) -> Action {
         guard a.askId == nil, SessionClient.refusal(a, in: s) == nil else { return .none }
