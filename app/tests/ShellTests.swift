@@ -1007,16 +1007,16 @@ enum ShellTests {
     static func configBusyTests() {
         let mock = Mock()
         mock.replies = [SessionClient.Op.send: ["ok": true]]
-        let c = SessionClient(transport: mock)
+        let steps = Steps()                                  // (its reconciles: run before each check, deskmind#112)
+        let c = steps.client(mock)
         c.adoptSettings(config: "ds-flash", lang: "en")
         for l in SessionTests.lines("chat") { c.feed(l) }
-        c.reconciling.wait(); mock.requests = []
+        steps.drain(); mock.requests = []
         c.setConfig("ses_t", config: "ds-flash", lang: "en")
         func sentConfigs() -> [[String: Any]] { mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" } }
         let first = sentConfigs().last?["client_id"] as? String ?? ""
         c.feed(["kind": "session.error", "session_id": "ses_t", "code": "busy", "control": "set_config", "client_id": first, "text": "x"])
-        let deadline = Date().addingTimeInterval(2)
-        while sentConfigs().count < 2 && Date() < deadline { usleep(10_000) }
+        steps.drain()
         let second = sentConfigs().last
         check(sentConfigs().count == 2 && second?["config"] as? String == "ds-flash" && second?["client_id"] as? String != first,
               "busy (not stored): sent once more: \(sentConfigs())")
@@ -1179,14 +1179,15 @@ enum ShellTests {
         let back = mock.requests.compactMap { $0["line"] as? [String: Any] }
         check(mock.requests.first?["config"] == nil && back.first?["type"] as? String == "set_config" && back.first?["config"] as? String == "ds-flash",
               "turned on mid-open (opened with none): its configuration at once: \(back)")
-        let gate = DispatchSemaphore(value: 0)
-        mock.onRequest = { op in if op == SessionClient.Op.open { gate.wait() } }
-        DispatchQueue.global().async { _ = c.open(sessionId: "ses_o", config: "ds-flash", lang: "zh") }
-        let deadline = Date().addingTimeInterval(2)
-        while !c.liveIds().contains("ses_o") && Date() < deadline { usleep(5_000) }
+        // (sync points, not sleeps — deskmind#112: the open is in the helper when its request arrives; done when it returns)
+        let gate = DispatchSemaphore(value: 0), inOpen = DispatchSemaphore(value: 0), opened = DispatchSemaphore(value: 0)
+        mock.onRequest = { op in if op == SessionClient.Op.open { inOpen.signal(); gate.wait() } }
+        DispatchQueue.global().async { _ = c.open(sessionId: "ses_o", config: "ds-flash", lang: "zh"); opened.signal() }
+        check(inOpen.wait(timeout: .now() + 10) == .success, "(the open reached the helper)")
         check(c.liveIds().contains("ses_o"), "a session being opened is in the client's list (a reconcile reaches it)")
         gate.signal()
-        usleep(100_000)
+        check(opened.wait(timeout: .now() + 10) == .success, "(the open returned)")
+        c.reconciling.wait()
         mock.onRequest = nil
     }
 
@@ -1390,21 +1391,16 @@ enum ShellTests {
         let helper = OffHelper()
         let mock = helper.inner
         mock.replies = [SessionClient.Op.send: ["ok": true], "models.off": ["ok": true, "off": false]]
-        let c = SessionClient(transport: helper)
+        let steps = Steps()                 // (the client's reconciles and pushes: run here, in turn — deskmind#112)
+        let c = steps.client(helper)
         c.adoptSettings(config: "ds-flash", lang: "zh")
         mock.streamLines = [["kind": "helper.watching", "open": ["ses_k"], "models_off": true],
                             ["kind": "session.config", "session_id": "ses_k", "seq": 1, "config": NSNull(), "lang": "zh", "by": "set_config"]]
         _ = c.watch()
         // (until the helper has the switch and the session its configuration: the refused one is repaired by a push and a
         // reconcile of its own)
-        let until = Date().addingTimeInterval(5)
-        while Date() < until {
-            c.modelsSync.settle(); c.reconciling.wait()
-            if mock.requests.compactMap({ $0["line"] as? [String: Any] }).last(where: { $0["type"] as? String == "set_config" })?["config"] as? String == "ds-flash"
-                && !c.modelsSync.isPending, (mock.requests.firstIndex { $0["op"] as? String == "models.off" } ?? Int.max)
-                < (mock.requests.lastIndex { ($0["line"] as? [String: Any])?["type"] as? String == "set_config" } ?? -1) { break }
-            usleep(20_000)
-        }
+        c.backfilling.wait()
+        check(steps.drain() && !c.modelsSync.isPending, "(the switch pushed and acked, every reconcile run)")
         let ops = mock.requests.map { r -> String in
             let t = (r["line"] as? [String: Any])?["type"] as? String
             return (r["op"] as? String ?? "") + (t.map { ":" + $0 } ?? "")
@@ -1452,11 +1448,14 @@ enum ShellTests {
         let acked = DispatchSemaphore(value: 0)
         sync.push { acked.signal() }
         check(acked.wait(timeout: .now() + 3) == .success, "not acked twice: sent again until it is (\(t.seen))")
-        // (A) a retry still scheduled while the switch turns: it sends the switch as it is then, never the old value
+        // (A) a retry still scheduled while the switch turns: it sends the switch as it is then, never the old value. Its
+        // sends are this test's steps (deskmind#112: a 50 ms sleep stood for "its first try failed")
         t.lock.lock(); t.seen = []; t.failFirst = 1; t.lock.unlock()
-        sync.firstDelay = 0.2
+        let steps = Steps()
+        sync.work = steps.lane("off")
         sync.push()
-        usleep(50_000)                                       // its first try failed; its retry waits
+        steps.run("off")                                     // its first try failed; its retry waits
+        check(steps.count("off") == 1 && sync.isPending, "(A: the first try failed, its retry queued)")
         box.lock(); switchOff = true; box.unlock()           // the switch turned off meanwhile (another window, say)
         sync.settle()
         t.lock.lock(); let seen = t.seen; t.lock.unlock()
@@ -1810,18 +1809,18 @@ enum ShellTests {
     static func configRetryLatestTests() {
         let mock = Mock()
         mock.replies = [SessionClient.Op.send: ["ok": true]]
-        let c = SessionClient(transport: mock)
+        let steps = Steps()                                  // (its reconciles: run before the check, deskmind#112)
+        let c = steps.client(mock)
         c.adoptSettings(config: "openai:deepseek|a", lang: "zh")
         for l in SessionTests.lines("chat") { c.feed(l) }
-        c.reconciling.wait(); mock.requests = []
+        steps.drain(); mock.requests = []
         c.setConfig("ses_t", config: "openai:deepseek|a", lang: "zh")
         let first = (mock.requests.last?["line"] as? [String: Any])?["client_id"] as? String ?? ""
         c.adoptSettings(config: "openai:deepseek|b", lang: "en")      // saved since: the store has b
         c.setConfig("ses_t", config: "openai:deepseek|b", lang: "en")
         c.feed(["kind": "session.error", "session_id": "ses_t", "code": "busy", "control": "set_config", "client_id": first, "text": "x"])
-        let deadline = Date().addingTimeInterval(2)
         func configs() -> [[String: Any]] { mock.requests.compactMap { $0["line"] as? [String: Any] }.filter { $0["type"] as? String == "set_config" } }
-        while configs().count < 3 && Date() < deadline { usleep(10_000) }
+        steps.drain()
         check(configs().count == 3 && configs().last?["config"] as? String == "openai:deepseek|b" && configs().last?["lang"] as? String == "en",
               "the retry carries the latest settings: \(configs().map { $0["config"] ?? "" })")
     }
@@ -2757,9 +2756,15 @@ enum ShellTests {
             }
             return pending == 0
         }
+        /// Runs one lane until it is empty (what it queues on others stays queued).
+        func drain(_ name: String, limit: Int = 10_000) { var n = 0; while n < limit, run(name) { n += 1 } }
+        /// A sync of the test's own whose sends are this test's steps.
+        func sync(_ t: SessionTransport, current: @escaping () -> Bool) -> ModelsOffSync {
+            let s = ModelsOffSync(transport: t, current: current); s.work = lane("off"); return s
+        }
         /// A client whose reconciles, retries and switch pushes run as this test's steps.
-        func client(_ t: SessionTransport) -> SessionClient {
-            let c = SessionClient(transport: t)
+        func client(_ t: SessionTransport, modelsSync: ModelsOffSync? = nil) -> SessionClient {
+            let c = SessionClient(transport: t, modelsSync: modelsSync)
             c.reconcileWork = lane("reconcile"); c.retryWork = lane("retry"); c.modelsSync.work = lane("off")
             return c
         }
@@ -3000,14 +3005,15 @@ enum ShellTests {
         do {
             let mock = Mock()
             mock.replies = [SessionClient.Op.send: ["ok": true], "models.off": ["ok": true]]
-            let c = SessionClient(transport: mock)
+            let steps = Steps()                                   // (its push and reconciles run before the check)
+            let c = steps.client(mock)
             c.adoptSettings(config: "A", lang: "zh")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
             c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
-            c.reconciling.wait()
+            steps.drain()
             mock.requests = []
             c.feed(["kind": "session.error", "session_id": "s", "code": "no_model", "control": "say", "text": "x"])
-            c.modelsSync.settle(); c.reconciling.wait()
+            steps.drain()
             check(configs(mock).contains { $0["config"] as? String == "A" }, "B2: after no_model, the configuration is sent again: \(configs(mock))")
         }
         // E1: newer evidence while a set_config is out (another's set_config, stored) is not overwritten by its reply
@@ -3117,14 +3123,20 @@ enum ShellTests {
     }
 
     static func dirtyFlagTests() {
+        // Each client's reconciles, retries and switch pushes are this test's steps, and settle runs every one of them on
+        // this thread — a retry's send included — before any check (deskmind#112: a poll of retriesPending reached zero
+        // while a retry was still sending, and P3 read B).
+        let steps = Steps()
+        func newClient(_ t: SessionTransport) -> SessionClient { steps.client(t) }
         func settle(_ c: SessionClient) {
-            for _ in 0..<300 { c.reconciling.wait(); c.modelsSync.settle(timeout: 1); c.reconciling.wait(); if c.retriesPending == 0 { return }; usleep(5_000) }
+            let done = steps.drain()
+            check(done && steps.pending == 0 && c.retriesPending == 0 && c.settingsStranded.isEmpty,
+                  "(settled: nothing queued, no retry waiting, none stranded)")
         }
         // P1: a null held past a gap, applied when the gap fills (the switch on): the configuration is sent
         do {
             let t = OneProcess()
-            let c = SessionClient(transport: t)
-            c.retryBase = 0.002
+            let c = newClient(t)
             c.adoptSettings(config: "A", lang: "zh")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
             c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
@@ -3140,8 +3152,7 @@ enum ShellTests {
         do {
             let t = OneProcess()
             t.noAnswer = [3]
-            let c = SessionClient(transport: t)
-            c.retryBase = 0.002
+            let c = newClient(t)
             c.adoptSettings(config: "A", lang: "zh")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
             settle(c)                                                           // (1: A)
@@ -3151,6 +3162,28 @@ enum ShellTests {
             c.feed(["kind": "session.error", "session_id": "s", "code": "busy", "control": "set_config", "client_id": cid, "text": "busy"])
             settle(c)                                                           // (3: C, no answer; then again)
             check(t.runs.config == "C" && c.retriesPending == 0, "P3: busy, then a send with no answer: retried until C is taken (\(t.sentConfigs))")
+            // (#107's invariant, exactly: one send per trigger, the unanswered one retried once, nothing after C is taken)
+            check(t.sentConfigs == ["A", "B", "C", "C"], "P3: A, B (busy), C (no answer), C again — and no more (\(t.sentConfigs))")
+            c.convergeAll(); settle(c); settle(c)
+            check(t.sentConfigs == ["A", "B", "C", "C", "C"], "P3: converged, a save sends once and nothing follows (\(t.sentConfigs))")
+        }
+        // P3, the retry held (deskmind#112, Codex at 1dabf22): the 4th attempt — the retry of the unanswered C — held at
+        // afterSnapshot, between its read and its send. Settle must not return before it is sent: C is what runs.
+        do {
+            let t = OneProcess()
+            t.noAnswer = [3]
+            let c = newClient(t)
+            c.afterSnapshot = { _ in if t.sentConfigs.count == 3 { usleep(50_000) } }      // (held: the retry, read, not sent)
+            c.adoptSettings(config: "A", lang: "zh")
+            c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
+            settle(c)
+            c.adoptSettings(config: "B", lang: "zh"); c.convergeAll()
+            let cid = t.lastId
+            c.adoptSettings(config: "C", lang: "zh")
+            c.feed(["kind": "session.error", "session_id": "s", "code": "busy", "control": "set_config", "client_id": cid, "text": "busy"])
+            settle(c)
+            check(t.runs.config == "C" && t.sentConfigs == ["A", "B", "C", "C"],
+                  "P3 held: the retry held between its read and its send — settled only after it went: C runs (\(t.sentConfigs))")
         }
         // P4: stored A; B saved and a reopen with B; A saved back while the open is out, its start heard before the reply;
         // then the harness's by:open B — the process ends on A
@@ -3169,8 +3202,7 @@ enum ShellTests {
                 func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
             }
             let t = Reopen()
-            let c = SessionClient(transport: t)
-            c.retryBase = 0.002
+            let c = newClient(t)
             c.adoptSettings(config: "A", lang: "zh")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
             c.feed(["kind": "session.config", "session_id": "s", "seq": 1, "config": "A", "lang": "zh", "by": "open"])
@@ -3180,7 +3212,7 @@ enum ShellTests {
             t.during = {
                 c.adoptSettings(config: "A", lang: "zh"); c.convergeAll()
                 c.feed(["kind": "session.start", "session_id": "s", "resumed": true, "last_seq": 1])
-                c.reconciling.wait()
+                steps.drain()
             }
             _ = c.open(sessionId: "s")
             settle(c)
@@ -3192,8 +3224,7 @@ enum ShellTests {
         // open-time (null, zh) row; the busy reply; zh saved — the process ends on (null, zh)
         do {
             let t = OneProcess()
-            let c = SessionClient(transport: t)
-            c.retryBase = 0.002
+            let c = newClient(t)
             c.modelOff = true
             c.adoptSettings(config: "A", lang: "en")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
@@ -3264,11 +3295,11 @@ enum ShellTests {
         // once normalised — no set_config every round
         do {
             let h = GateHelper(); h.normalize = harnessNormalize
-            let c = SessionClient(transport: h)
-            c.retryBase = 0.002
+            let steps = Steps()
+            let c = steps.client(h)
             c.adoptSettings(config: "openai:custom| gpt-4o ", lang: "zh")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
-            for _ in 0..<200 { c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait() }
+            for _ in 0..<200 { steps.drain(); h.deliverAll(c); steps.drain() }
             check(h.sent.count <= 2 && h.sent.first == "openai:custom|gpt-4o",
                   "R1: an untrimmed model name: sent normalised, its echo no trigger — \(h.sent.count) sends in 200 rounds")
         }
@@ -3276,8 +3307,9 @@ enum ShellTests {
         // the blocked branch's cleanup — the session is not left dirty with nothing scheduled
         do {
             let h = GateHelper()
+            let steps = Steps()                    // (reconciles and retries: steps; the switch's push: its real queue)
             let c = SessionClient(transport: h)
-            c.retryBase = 0.002
+            c.reconcileWork = steps.lane("reconcile"); c.retryWork = steps.lane("retry")
             final class Box { let lock = NSLock(); var value = "A"; var hook: (() -> Void)? }
             let box = Box()
             c.settingsSource = {
@@ -3286,7 +3318,7 @@ enum ShellTests {
                 return (v, "zh")
             }
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
-            c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait()
+            c.modelsSync.settle(timeout: 5); steps.drain(); h.deliverAll(c); steps.drain()
             h.holdModelsOff = DispatchSemaphore(value: 0)
             c.modelsSync.push()
             h.modelsOffEntered.wait()                                     // (the push pending, held in the helper)
@@ -3294,15 +3326,14 @@ enum ShellTests {
             box.value = "B"
             box.hook = {                                                  // (read by the blocked converge: the ack lands now)
                 h.holdModelsOff?.signal()
-                for _ in 0..<500 { if !c.modelsSync.isPending { break }; usleep(1_000) }
-                c.modelsSync.settle(timeout: 2)
-                c.reconciling.wait()
+                c.modelsSync.settle(timeout: 10)                          // (acked: its converge queued)
+                steps.drain("reconcile")                                  // (and run now: it finds this send in flight)
             }
             box.lock.unlock()
             let done = DispatchSemaphore(value: 0)
             DispatchQueue.global().async { c.convergeAll(); done.signal() }     // (B saved while the push is pending)
             done.wait()
-            for _ in 0..<500 { c.reconciling.wait(); if h.sent.last == "B" { break }; usleep(2_000) }
+            steps.drain()
             check(h.sent.last == "B", "R2: the ack in the gate's window: B still sent (\(h.sent))")
         }
         // R5: a configuration in flight (a slow helper) when cloud is turned off: models.off reaches the helper after it
@@ -3344,16 +3375,17 @@ enum ShellTests {
         // R6: the helper acked off; the app's switch reads on before its push begins: no configuration until that push's ack
         do {
             let h = GateHelper()
-            let c = SessionClient(transport: h)
+            let steps = Steps()                                           // (its pushes, reconciles, retries: run in turn)
+            let c = steps.client(h)
             c.adoptSettings(config: "A", lang: "zh")
-            c.modelOff = true; c.modelsSync.push(); c.modelsSync.settle(timeout: 2)
+            c.modelOff = true; c.modelsSync.push(); steps.drain()
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
-            c.reconciling.wait(); c.modelsSync.settle(timeout: 2); c.reconciling.wait()
+            steps.drain()
             h.lock.lock(); h.configs = []; h.lock.unlock()
-            c.modelOff = false; c.convergeAll(); c.reconciling.wait()
+            c.modelOff = false; c.convergeAll()
+            steps.drain("reconcile")
             let before = h.sent
-            c.modelsSync.push(); c.modelsSync.settle(timeout: 2); c.reconciling.wait()
-            for _ in 0..<500 { if h.sent.contains("A") { break }; usleep(2_000) }
+            c.modelsSync.push(); steps.drain()
             check(!before.contains { $0 != "null" } && h.sent.contains("A"),
                   "R6: the helper holds off, the app's switch on before its push: nothing sent, then A after the ack (\(before) → \(h.sent))")
         }
@@ -3406,11 +3438,11 @@ enum ShellTests {
         // the FEFF loop: a name pasted with U+FEFF, a harness that trims it — its echo is no trigger
         do {
             let h = GateHelper(); h.normalize = harnessNormalize
-            let c = SessionClient(transport: h)
-            c.retryBase = 0.002
+            let steps = Steps()
+            let c = steps.client(h)
             c.adoptSettings(config: "openai:custom|gpt-4o\u{FEFF}", lang: "zh")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
-            for _ in 0..<200 { c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait() }
+            for _ in 0..<200 { steps.drain(); h.deliverAll(c); steps.drain() }
             check(h.sent.count <= 2 && h.sent.first == "openai:custom|gpt-4o", "a U+FEFF in the model name: \(h.sent.count) sends in 200 rounds")
         }
         // the guard: a helper that normalises what the app does not (drops a trailing "!") — its echo is ours and not
@@ -3418,15 +3450,15 @@ enum ShellTests {
         do {
             let h = GateHelper()
             h.normalize = { $0.hasSuffix("!") ? String($0.dropLast()) : $0 }
-            let c = SessionClient(transport: h)
-            c.retryBase = 0.002
+            let steps = Steps()
+            let c = steps.client(h)
             c.adoptSettings(config: "openai:custom|M!", lang: "zh")
             c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
-            for _ in 0..<200 { c.reconciling.wait(); h.deliverAll(c); c.reconciling.wait() }
+            for _ in 0..<200 { steps.drain(); h.deliverAll(c); steps.drain() }
             let looped = h.sent.count
             h.lock.lock(); h.seq += 1; let n = h.seq; h.lock.unlock()
             c.feed(["kind": "session.config", "session_id": "s", "seq": n, "config": NSNull(), "lang": "zh", "by": "set_config"])  // (the helper's)
-            c.reconciling.wait()
+            steps.drain()
             check(looped <= 2 && h.sent.count == looped + 1 && h.sent.last == "openai:custom|M!",
                   "a normalisation the app does not share: \(looped) sends in 200 rounds (no loop); a real null after it: sent again (\(h.sent))")
         }
@@ -3448,13 +3480,13 @@ enum ShellTests {
         }
         final class Switch { let lock = NSLock(); var off = true; func read() -> Bool { lock.lock(); defer { lock.unlock() }; return off } }
         let t = T(), sw = Switch()
-        let sync = ModelsOffSync(transport: t, current: { sw.read() })
-        let c = SessionClient(transport: t, modelsSync: sync)
-        c.retryBase = 0.002
+        let steps = Steps()                    // (the sync's sends and the client's reconciles: run in turn, deskmind#112)
+        let sync = steps.sync(t, current: { sw.read() })
+        let c = steps.client(t, modelsSync: sync)
         c.adoptSettings(config: "A", lang: "zh")
-        sync.push(); sync.settle(timeout: 2)                                   // (the helper holds off)
+        sync.push(); steps.drain()                                             // (the helper holds off)
         c.feed(["kind": "session.start", "session_id": "s", "resumed": false, "last_seq": 0])
-        c.reconciling.wait(); sync.settle(timeout: 2); c.reconciling.wait()
+        steps.drain()
         // a save: its converge reads the settings and the switch (off) — then, before it sends, the switch turns on, its
         // push is acked and the ack's converge runs, finding this session in flight
         let fired = NSLock(); var once = true
@@ -3462,12 +3494,10 @@ enum ShellTests {
             fired.lock(); let go = once; once = false; fired.unlock()
             guard go else { return }
             sw.lock.lock(); sw.off = false; sw.lock.unlock()
-            sync.push(); sync.settle(timeout: 2); c.reconciling.wait()
+            sync.push(); sync.settle()                  // (the push acked, and the ack's converge run: it finds this send)
         }
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { c.convergeAll(); done.signal() }
-        done.wait()
-        for _ in 0..<500 { c.reconciling.wait(); if t.sent.last == "A" { break }; usleep(2_000) }
+        c.convergeAll()
+        steps.drain()
         c.afterSnapshot = nil
         check(t.sent.last == "A" && c.settingsStranded.isEmpty,
               "the switch read off, then on and acked during the send: A still reaches the session (\(t.sent); stranded \(c.settingsStranded))")
