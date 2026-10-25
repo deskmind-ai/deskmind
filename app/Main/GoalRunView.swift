@@ -24,6 +24,8 @@ struct GoalRunView: View {
     @ObservedObject private var shell = ShellModel.live
     @StateObject private var goalBox = GoalRunBox()
     @State private var sessionRunState = false
+    /// 「跳到卡片」: the in-place card to scroll to (one too tall for this screen's pinned place: PinnedCard).
+    @State private var jumpTo: String?
     /// A session task is shown (a goal started here, or a past one whose session still has it); a past one whose
     /// session or task is gone shows its record's own steps and summary instead (RunModel.show).
     private var sessionRun: Bool { sessionRunState && shown.sessionShown }
@@ -89,7 +91,8 @@ struct GoalRunView: View {
             .padding(.horizontal, 28).padding(.top, 30).padding(.bottom, 14)
 
             if sessionRun {
-                sessionContent.frame(maxHeight: .infinity)
+                // (its height is the room this screen gives its pinned card: ShellModel.pinRoom)
+                VStack(spacing: 0) { sessionContent }.frame(maxHeight: .infinity).background(PinRoomReporter(shell: shell))
             } else {
             ScrollViewReader { proxy in
                 ScrollView {
@@ -306,6 +309,7 @@ struct GoalRunView: View {
     /// The session task as the chat shows it: its row (steps, cards that are no longer pinned, its end, its result
     /// card with undo — ResultSection), the pinned card, and — once it ended — the answer, the changes and 👍👎.
     @ViewBuilder private var sessionContent: some View {
+        ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 if let s = shown.session, let t = shown.task {
@@ -321,11 +325,16 @@ struct GoalRunView: View {
             }
             .padding(.horizontal, 28).padding(.bottom, 12)
         }
-        // (the shown task's own card only, while its session is the selected one: GoalShown)
+        .onChange(of: jumpTo) { _, id in
+            if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }; jumpTo = nil }
+        }
+        .onChange(of: shell.scrollRequest?.n) { _, _ in if let id = shell.scrollRequest?.id { proxy.scrollTo(id) } }
+        }
+        // (the shown task's own card only, while its session is the selected one: GoalShown) -- pinned whole when it
+        // fits this screen's room, else one line and the card in place above (TaskRow), as the chat does (A2)
         if let s = shown.session, let p = shown.pinned {
             let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-            CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s, bodyCap: CardBody.maxHeight)
-                .id(ShellModel.cardKey(m))
+            PinnedCard(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s) { jumpTo = $0 }
                 .padding(.horizontal, 28).padding(.bottom, 10)
         }
     }

@@ -13,10 +13,11 @@ import SwiftUI
 /// A card: its state, its body (the text whole, then the plan's or the consent's fields, then the list of picks), its
 /// buttons, the take-back or the expiry when it has one, and its own field when it takes the user's words.
 ///
-/// Its header and its buttons stay put; its body — which the harness does not cap (a send list can be long) — scrolls
-/// inside `bodyCap`. An approve-type option (CardModel.Role.needsWholeBody) takes a click (or its key) only once the
-/// body's end has been on screen (it fits, or it was scrolled to the end): never approve what was never shown
-/// (ShellModel.cardBody, from the scroll geometry alone).
+/// It never scrolls inside (A2, invariant 3): every option is on screen as the card is, and what goes out is laid out
+/// before 「可以」. Its title (H2's headline, else its text), what goes beyond the request and an action card's fields
+/// are always shown; with a headline, the text and the plan's steps fold under 「细节」 (CardLayout). Its height as laid
+/// out goes to the shell (cardLaidOut): a card taller than the pinned place stays in place in the chat, and there an
+/// approve-type option takes no key (ShellModel.keyWorks).
 ///
 /// It shows the card's one state (`phase`, CardStore): an answer held for its take-back says what was picked, with a
 /// countdown and 「撤回」; one sent waits greyed; an expired card keeps its text, drops its options and offers 「现在回答」.
@@ -26,16 +27,21 @@ struct CardView: View {
     let phase: CardPhase
     let askedAt: Double?
     let session: SessionState
-    let bodyCap: Double
     @Environment(\.lang) private var lang
-    @State private var words = ""
-    @State private var visible: Double = 0
-    @State private var content: Double = 0
-    @State private var offset: Double = 0
+    /// The words typed in its own field: the shell's, by card key (they survive the card moving: #124 Codex review).
+    private var words: Binding<String> { Binding(get: { shell.cardDraft(card) }, set: { shell.setCardDraft(card, $0) }) }
+    /// Which option has the keyboard focus -- observed, never set (the user's Tab moves it): on a card in place in the
+    /// chat, the focused option is scrolled into view (ShellModel.requestScroll), so a keyboard or VoiceOver user can
+    /// answer a card too tall to pin (lead 10-25).
+    @FocusState private var focusedOption: Int?
+
+    /// 「细节」 open or not: the shell's, by card key (it survives the card moving between the pinned place and the chat).
+    private var detailsOpen: Binding<Bool> {
+        Binding(get: { shell.detailsOpen(card) }, set: { shell.setDetails(card, open: $0) })
+    }
 
     private var layout: CardLayout { CardLayout(card) }
     private var wordsEnabled: Bool { shell.wordsEnabled(card, in: session) }
-    private var seen: Bool { shell.bodySeen.contains(ShellModel.cardKey(card)) }
 
     var body: some View {
         let layout = self.layout
@@ -48,31 +54,37 @@ struct CardView: View {
                 Text(ShellText.cardKind(card.kind.name, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
             }
             .fixedSize(horizontal: false, vertical: true)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(card.text).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
-                    if let c = layout.consent { ConsentFields(consent: c) }
-                    if !layout.list.isEmpty && phase.ending == nil {
-                        VStack(alignment: .leading, spacing: 6) {
-                            ForEach(layout.list, id: \.index) { c in control(c) }
+            Text(layout.title).font(.system(size: 13, weight: layout.folds ? .semibold : .regular)).foregroundStyle(Brand.ink)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let t = layout.shownText {
+                Text(t).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
+                Text(line).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+            }
+            if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
+            if let c = layout.consent { ConsentFields(consent: c) }
+            if layout.folds {
+                DisclosureGroup(isExpanded: detailsOpen) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !layout.text.isEmpty {
+                            Text(layout.text).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
+                        if !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
                     }
+                    .padding(.top, 4)
+                } label: {
+                    Text(L("Card details", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
                 }
-                .background(GeometryReader { g in
-                    Color.clear.preference(key: CardBodyGeometry.self,
-                                           value: [g.size.height, -g.frame(in: .named(coordinateSpace)).minY])
-                })
             }
-            .coordinateSpace(name: coordinateSpace)
-            .frame(minHeight: min(CardBody.minHeight, content), maxHeight: min(bodyCap, max(content, 1)))
-            .background(GeometryReader { g in Color.clear.preference(key: CardBodyVisible.self, value: g.size.height) })
-            .onPreferenceChange(CardBodyGeometry.self) { v in
-                if v.count == 2 { content = v[0]; offset = v[1]; reportBody() }
+            if !layout.list.isEmpty && phase.ending == nil {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(layout.list, id: \.index) { c in control(c) }
+                }
             }
-            .onPreferenceChange(CardBodyVisible.self) { h in visible = h; reportBody() }
             if phase.ending == nil {
                 HStack(spacing: 8) {
                     ForEach(layout.buttons, id: \.index) { c in control(c) }
@@ -81,22 +93,14 @@ struct CardView: View {
             }
             if let held = phase.pending, case .pending(_, let until) = phase { takeBackRow(held, until: until) }
             if case .expired(_, let now) = phase { expiredRow(now) }
-            if phase.takesPick && !seen && card.buttons.contains(where: { $0.role.needsWholeBody }) {
-                // (neutral: it holds the card's own field too, for someone who wants to type)
-                Text(L("Read the whole card first: scroll to its end", lang: lang))
-                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-            }
             if layout.field && phase.ending == nil {
                 HStack(spacing: 8) {
-                    // (on a card with an approve-type option, words wait for the whole body as its approve does)
-                    TextField(L("Or answer in your own words", lang: lang), text: $words, axis: .vertical)
+                    TextField(L("Or answer in your own words", lang: lang), text: words, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(sendWords)
                         .disabled(!wordsEnabled)
-                        .accessibilityHint(!wordsEnabled && ShellModel.wordsWaitForBody(card) && !seen
-                                           ? L("Read the whole card first: scroll to its end", lang: lang) : "")
                     Button(L("Send", lang: lang), action: sendWords).buttonStyle(InkButtonStyle(prominent: false))
-                        .disabled(!wordsEnabled || words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!wordsEnabled || words.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -106,6 +110,12 @@ struct CardView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(card.blocking && (phase.ending == nil || phase.isExpiredOffer) ? Brand.dot : Brand.line, lineWidth: 1.2))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Self.voiceOverLabel(card, phase: phase, lang: lang))
+        // (its height as laid out: whether it fits the pinned place -- ShellModel.cardFits)
+        .background(GeometryReader { g in Color.clear.preference(key: CardHeight.self, value: g.size.height) })
+        .onPreferenceChange(CardHeight.self) { h in shell.cardLaidOut(card, height: h) }
+        .onChange(of: focusedOption) { _, i in
+            if let i, !shell.cardPinnedWhole(card) { shell.requestScroll(to: ShellModel.optionAnchor(card, i)) }
+        }
         // (a click anywhere on it is a move into it: card mode, its keys on — CardKeys; when it came on screen)
         .simultaneousGesture(TapGesture().onEnded { shell.enterCardMode(card) })
         .onAppear { shell.cardShown(card) }
@@ -121,9 +131,15 @@ struct CardView: View {
             switch c.slot {
             case .list:
                 Button(action: action) {
-                    HStack(spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
                         if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) }
-                        Text(b.text).frame(maxWidth: .infinity, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(b.text).fixedSize(horizontal: false, vertical: true)
+                            if let d = b.detail {
+                                Text(d).font(.system(size: 11)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
                 .buttonStyle(.plain).padding(.horizontal, 10).padding(.vertical, 6)
@@ -140,8 +156,10 @@ struct CardView: View {
         }
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)    // (InkButtonStyle does not dim: the card's own)
-        .accessibilityLabel(b.text)
-        .accessibilityHint(b.role.needsWholeBody && !seen ? L("Read the whole card first: scroll to its end", lang: lang) : CardLayout.hint(c, keys: shell.keyWorks(card, c), lang: lang))
+        .focused($focusedOption, equals: c.index)
+        .id(ShellModel.optionAnchor(card, c.index))
+        .accessibilityLabel(b.detail.map { L("%@, %@", b.text, $0, lang: lang) } ?? b.text)
+        .accessibilityHint(CardLayout.hint(c, keys: shell.keyWorks(card, c), lang: lang))
     }
 
     /// The answer held for its take-back: what was picked, the seconds left, and 「撤回」 (the words come back to the
@@ -154,7 +172,7 @@ struct CardView: View {
                     .font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
             }
             Button(L("Take back", lang: lang)) {
-                if case .text(_, _, let w) = held { words = w }
+                if case .text(_, _, let w) = held { words.wrappedValue = w }
                 shell.takeBack(card)
             }
             .buttonStyle(InkButtonStyle(prominent: false))
@@ -186,23 +204,17 @@ struct CardView: View {
         }
     }
 
-    private var coordinateSpace: String { "cardBody/" + ShellModel.cardKey(card) }
-
-    private func reportBody() {
-        shell.cardBody(card, contentHeight: content, visibleHeight: visible, offset: offset)
-    }
-
     private func sendWords() {
         guard wordsEnabled else { return }
-        shell.answer(card, text: words)
-        words = ""
+        shell.answer(card, text: words.wrappedValue)
+        words.wrappedValue = ""
     }
 
-    /// 「<状态>：<卡的种类>。<正文第一句>。<n> 个选项」 (handoff §3.10).
+    /// 「<状态>：<卡的种类>。<标题>。<n> 个选项」 (handoff §3.10): the title is H2's headline, else the text's first sentence.
     static func voiceOverLabel(_ card: CardModel, phase: CardPhase, lang: ResolvedLang) -> String {
         let state = ShellText.cardState(phase, lang: lang)
         let kind = ShellText.cardKind(card.kind.name, lang: lang)
-        return L("%@: %@. %@. %d options", state, kind, firstSentence(card.text), card.buttons.count, lang: lang)
+        return L("%@: %@. %@. %d options", state, kind, card.headline ?? firstSentence(card.text), card.buttons.count, lang: lang)
     }
 
     /// The text up to its first sentence end (for VoiceOver; the whole card stays readable inside).
@@ -210,6 +222,50 @@ struct CardView: View {
         let ends: Set<Character> = ["。", "！", "？", ".", "!", "?", "\n"]
         guard let i = text.firstIndex(where: { ends.contains($0) }) else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
         return String(text[..<i]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// A window's open card where it pins it (A2): whole when it fits the pinned place (ShellModel.cardPinnedWhole), else
+/// one line -- its title and 「跳到卡片」 -- while TaskRow draws it whole in place in the window's scroll. Both windows (the
+/// chat, a goal's screen) pin their card through this and say their room (ShellModel.pinRoom), and TaskRow reads the
+/// same predicate: one answerable copy per window (#124 review at 64547f9).
+struct PinnedCard: View {
+    @ObservedObject var shell: ShellModel
+    let card: CardModel
+    let phase: CardPhase
+    let askedAt: Double?
+    let session: SessionState
+    /// 「跳到卡片」: scroll the window to the card's place (TaskRow.cardAnchor).
+    let jump: (String) -> Void
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        if shell.cardPinnedWhole(card) {
+            CardView(shell: shell, card: card, phase: phase, askedAt: askedAt, session: session)
+                .id(ShellModel.cardKey(card))
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+        } else {
+            HStack(spacing: 8) {
+                Text(L("Waiting for you", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                Text(CardLayout(card).title).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
+                Spacer()
+                Button(L("Go to the card", lang: lang)) { jump(TaskRow.cardAnchor(card)) }
+                    .buttonStyle(InkButtonStyle(prominent: false))
+                    .accessibilityHint(L("Scrolls the chat to the card", lang: lang))
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Brand.card))
+        }
+    }
+}
+
+/// The room a window gives its pinned card, said to the shell as the window's height changes (ShellModel.pinRoom).
+struct PinRoomReporter: View {
+    @ObservedObject var shell: ShellModel
+    var body: some View {
+        GeometryReader { g in
+            Color.clear.onChange(of: g.size.height, initial: true) { _, h in shell.pinRoom(columnHeight: h) }
+        }
     }
 }
 

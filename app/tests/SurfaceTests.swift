@@ -35,6 +35,7 @@ enum SurfaceTests {
         DecisionTests.group("surface.goalClosableTests"); goalClosableTests()
         DecisionTests.group("surface.goalStopTests"); goalStopTests()
         DecisionTests.group("surface.goalCardKeysTests"); goalCardKeysTests()
+        DecisionTests.group("surface.rev124OldWindow"); rev124OldWindow()
     }
 
     typealias L = GoalLifecycle
@@ -741,6 +742,41 @@ enum SurfaceTests {
 
     /// Codex review at 84d72f3 (3): the goal's pinned card takes 1–9 and Esc / Tab through the chat's one wiring
     /// (ShellModel.cardKeyHandlers, which the goal screen's CardKeyMonitor installs too).
+    /// #124 review (rev124OldWindow, adopted): a goal's screen pins its card through PinnedCard and TaskRow reads the
+    /// same predicate -- before its window said its room, the card is drawn pinned (never a second copy in TaskRow); once
+    /// it said it (PinRoomReporter, as the chat does), a small card's approve key works as before A2.
+    static func rev124OldWindow() {
+        let r = Rig(); openOK(r.mock)
+        let g = r.goal(); g.start()
+        for l in taskLines { r.m.client.feed(l) }
+        r.m.client.feed(["kind": "ask", "session_id": sid, "run_id": rid, "seq": 2, "ask_id": "ask_g",
+                         "card": ["kind": "action", "text": "在 Mail 里点「发送」", "free_text": false, "blocking": true,
+                                  "options": [["kind": "approve", "text": "可以"], ["kind": "cancel", "text": "先别做了"]]]])
+        guard let (s, _) = g.task, let p = r.m.pinned(s) else { check(false, "the goal's card is pinned"); return }
+        let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+        r.m.cardShown(m)
+        r.m.cardLaidOut(m, height: 180)          // its CardView measured a small card; the room not said yet
+        check(r.m.cardPinnedWhole(m), "room not said: drawn pinned, never a second copy in TaskRow")
+        let approve = CardLayout(m).controls.first { $0.button.role == .approve }!
+        r.m.pinRoom(columnHeight: 700)           // the goal screen's PinRoomReporter
+        check(r.m.cardPinnedWhole(m) && r.m.cardFits(m), "a 180 pt card in a 700 pt screen: fits, pinned")
+        r.timers.advance(5)
+        _ = r.m.cardKeyHandlers.onKey("\t", false, true, false, false, false)
+        check(r.m.keyWorks(m, approve), "its approve key works (as before A2)")
+        // the screen drew the card pinned (its view) and, just as it moves, in place (another view): both counted --
+        // the one leaving takes nothing with it
+        r.m.cardShown(m); r.m.cardHidden(m)
+        check(r.m.keysActive(m) && r.m.keyWorks(m, approve), "a second view of the card came and went: its keys stay on")
+        // the static side: both windows pin through PinnedCard and say their room; none draws its pinned card itself
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        for f in ["Main/MainSplitView.swift", "Main/GoalRunView.swift"] {
+            let code = ((try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? "")
+                .split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+            check(code.contains("PinnedCard(shell: shell") && code.contains("PinRoomReporter(shell: shell)") && !code.contains("CardView(shell:"),
+                  "\(f): pins through PinnedCard, says its room, draws no CardView of its own")
+        }
+    }
+
     static func goalCardKeysTests() {
         let r = Rig(); openOK(r.mock)
         let g = r.goal(); g.start()
@@ -751,7 +787,7 @@ enum SurfaceTests {
         guard let (s, _) = g.task, let p = r.m.pinned(s) else { check(false, "the goal's card is pinned"); return }
         let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
         r.m.cardShown(m)
-        r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+        r.m.fit(m)
         r.timers.advance(5)
         let keys = r.m.cardKeyHandlers
         _ = keys.onKey("\t", false, true, false, false, false)

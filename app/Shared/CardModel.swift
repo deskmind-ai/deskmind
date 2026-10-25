@@ -71,6 +71,8 @@ struct CardModel: Equatable {
         var text: String
         var role: Role
         var style: Style
+        /// Its second line (option.detail), if the harness gave one.
+        var detail: String? = nil
     }
 
     var runId: String
@@ -84,6 +86,9 @@ struct CardModel: Equatable {
     var blocking: Bool
     var plan: PlanFacts?
     var consent: ConsentFacts?
+    /// The card's title and what goes beyond the request (H2); nil headline: an older harness, `text` is the card.
+    var headline: String?
+    var beyond: [String]
 
     var isResult: Bool { askId == nil }
 
@@ -102,12 +107,15 @@ struct CardModel: Equatable {
         text = card.text
         // an option with no words cannot be shown, so it gets no button (its index stays the card's own)
         buttons = card.options.enumerated().compactMap { i, o in
-            o.text.isEmpty ? nil : Button(runId: runId, askId: askId, index: i, kind: o.kind, text: o.text, role: Self.role(o.kind), style: Self.style(o.kind))
+            o.text.isEmpty ? nil : Button(runId: runId, askId: askId, index: i, kind: o.kind, text: o.text, role: Self.role(o.kind), style: Self.style(o.kind),
+                                          detail: o.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : o.detail)
         }
         allowsFreeText = askId != nil && card.freeText
         blocking = card.blocking
         plan = card.plan
         consent = card.consent
+        headline = card.headline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : card.headline
+        beyond = card.beyond.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     static func role(_ kind: String) -> Role {

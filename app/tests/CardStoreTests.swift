@@ -134,13 +134,13 @@ enum CardStoreTests {
         /// A click on the card's first option of `role` (its whole body seen first, as a user who read it).
         func click(_ id: String, _ role: CardModel.Role, nth: Int = 0) {
             guard let c = model(id) else { return }
-            m.cardBody(c, contentHeight: 10, visibleHeight: 10, offset: 0)
+            m.fit(c)
             let bs = c.buttons.filter { $0.role == role }
             if nth < bs.count { m.click(bs[nth]) }
         }
         func words(_ id: String, _ text: String) {
             guard let c = model(id) else { return }
-            m.cardBody(c, contentHeight: 10, visibleHeight: 10, offset: 0)
+            m.fit(c)
             m.answer(c, text: text)
         }
         func takeBack(_ id: String) { if let c = model(id) { m.takeBack(c) } }
@@ -276,14 +276,14 @@ enum CardStoreTests {
         // nothing: sent at 3 s
         let a = OffRig()
         a.feed { $0.ask("a1") }
-        a.m.cardBody(a.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        a.m.fit(a.card("a1"))
         a.m.click(a.card("a1").buttons[0])
         a.timers.advance(CardStore.takeBack); a.runWork()
         check(a.answers() == 1, "nothing in between: the pick goes at 3 s")
         // off then on again within the 3 s: never sent
         let b = OffRig()
         b.feed { $0.ask("a1") }
-        b.m.cardBody(b.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        b.m.fit(b.card("a1"))
         b.m.click(b.card("a1").buttons[0])
         b.timers.advance(1); b.set(cloud: false)
         b.timers.advance(1); b.set(cloud: true)
@@ -292,7 +292,7 @@ enum CardStoreTests {
         // off, not seen by the window at all (no settings path ran) and on again: still never sent
         let b2 = OffRig()
         b2.feed { $0.ask("a1") }
-        b2.m.cardBody(b2.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        b2.m.fit(b2.card("a1"))
         b2.m.click(b2.card("a1").buttons[0])
         b2.cloud = false; b2.sync.push(); b2.cloud = true; b2.sync.push()
         b2.timers.advance(CardStore.takeBack); b2.runWork()
@@ -300,7 +300,7 @@ enum CardStoreTests {
         // the 3 s ran out while on, its write still queued; cloud goes off before the write: not sent (checked as it goes)
         let c = OffRig()
         c.feed { $0.ask("a1") }
-        c.m.cardBody(c.card("a1"), contentHeight: 1, visibleHeight: 1, offset: 0)
+        c.m.fit(c.card("a1"))
         c.m.click(c.card("a1").buttons[0])
         c.timers.advance(CardStore.takeBack)
         c.set(cloud: false); c.runWork()
@@ -372,7 +372,7 @@ enum CardStoreTests {
         let a = MainRig()
         a.ask("a1")
         let c = a.card("a1")
-        a.m.cardBody(c, contentHeight: 1, visibleHeight: 1, offset: 0)
+        a.m.fit(c)
         a.m.click(c.buttons[0])
         check(a.m.cards.picks.count == 1, "(held)")
         a.cloud = false
@@ -387,7 +387,7 @@ enum CardStoreTests {
         let b = MainRig()
         b.ask("a1")
         let cb = b.card("a1")
-        b.m.cardBody(cb, contentHeight: 1, visibleHeight: 1, offset: 0)
+        b.m.fit(cb)
         b.cloud = false
         b.elsewhere { b.m.applySettings() }            // (its clear is queued, not run)
         b.cloud = true
@@ -567,7 +567,7 @@ enum CardStoreTests {
         for l in rr.fed { rm.client.feed(l) }
         while !queued.isEmpty { queued.removeFirst()() }
         let rc = CardModel(card: rm.states[sid]!.openCard!.card.card, runId: rid, askId: "a1")
-        rm.cardBody(rc, contentHeight: 1, visibleHeight: 1, offset: 0)
+        rm.fit(rc)
         rm.click(rc.buttons[0])
         rr.void("a1", "steer")
         rm.client.feed(rr.fed.last!)                    // the client has it; the window not yet
@@ -585,7 +585,7 @@ enum CardStoreTests {
         let cr = Rig(); cr.ask("a1")
         for l in cr.fed { c.client.feed(l) }
         let cm = CardModel(card: c.states[sid]!.openCard!.card.card, runId: rid, askId: "a1")
-        c.cardBody(cm, contentHeight: 1, visibleHeight: 1, offset: 0)
+        c.fit(cm)
         c.click(cm.buttons[0])
         cloud = false
         t.advance(CardStore.takeBack)
@@ -785,7 +785,7 @@ enum CardStoreTests {
                 if let p = r.m.pinned(r.state), p.phase.takesPick, let c = r.model(p.card.askId) {
                     let bs = c.buttons.filter { $0.role != .cancel }
                     let b = bs[g.next(bs.count)]
-                    r.m.cardBody(c, contentHeight: 1, visibleHeight: 1, offset: 0)
+                    r.m.fit(c)
                     intents[c.askId!, default: []].append(Intent(life: r.wire.life, at: r.timers.now, answer: ["option": b.index], immediate: false))
                     r.m.click(b)
                 }

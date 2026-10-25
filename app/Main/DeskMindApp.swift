@@ -196,27 +196,27 @@ extension EnvironmentValues {
 /// ResolvedLang.current (log lines, run messages, the "lang" of every request to the helper) in step with it.
 /// A change re-renders everything under it at once.
 struct LocalizedRoot<Content: View>: View {
-    @AppStorage("language") private var language = AppLanguage.system.rawValue
+    @AppStorage(AppLanguage.key) private var language = AppLanguage.system.rawValue
     @ViewBuilder let content: Content
 
     var body: some View {
-        let lang = (AppLanguage(rawValue: language) ?? .en).resolved
+        let lang = AppLanguage.resolve(language)
         content
             .environment(\.lang, lang)
             .onChange(of: lang, initial: true) { _, now in ResolvedLang.current = now }
     }
 }
 
-/// A compact menu: English, 简体中文, or follow the system. Each language is named in itself; "follow system" is
+/// A compact menu: English, 中文, or follow the system. Each language is named in itself; "follow system" is
 /// in the current one.
 struct LanguagePicker: View {
-    @AppStorage("language") private var language = AppLanguage.system.rawValue
+    @AppStorage(AppLanguage.key) private var language = AppLanguage.system.rawValue
     @Environment(\.lang) private var lang
 
     func name(_ l: AppLanguage) -> String {
         switch l {
         case .en: "English"
-        case .zhHans: "简体中文"
+        case .zhHans: "中文"
         case .system: L("Follow system", lang: lang)
         }
     }
@@ -228,7 +228,7 @@ struct LanguagePicker: View {
             }
             .pickerStyle(.inline).labelsHidden()
         } label: {
-            Label(name(AppLanguage(rawValue: language) ?? .en), systemImage: "globe")
+            Label(name(AppLanguage.choice(language)), systemImage: "globe")
                 .font(.system(size: 12))
         }
         .menuStyle(.borderlessButton)
@@ -550,12 +550,11 @@ struct DeskMindApp: App {
     @StateObject private var downloader = ModelDownloader()
     @StateObject private var eyes = EyesDownloader()
     @StateObject private var history = RunHistory.shared
-    @AppStorage("language") private var language = AppLanguage.system.rawValue
+    @AppStorage(AppLanguage.key) private var language = AppLanguage.system.rawValue
 
     init() {
         // Before the helper model logs anything or sends its first request.
-        let stored = UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue
-        ResolvedLang.current = (AppLanguage(rawValue: stored) ?? .en).resolved
+        ResolvedLang.current = AppLanguage.current()
         // The UI event log, this Mac only (Shared/UIEvents.swift); the switch is read from its file.
         UIEvents.log = UIEventLog(dir: DeskMindIPC.supportDir, file: UIEventLog.mainFile)
         _uiLogOn = State(initialValue: UIEvents.enabled)
@@ -571,7 +570,7 @@ struct DeskMindApp: App {
     /// The 0.5 main window (M1, a developer switch until it is the only one).
     @AppStorage(ShellFlag.key) private var shellOn = false
     var body: some Scene {
-        WindowGroup(L("DeskMind", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
+        WindowGroup(L("DeskMind", lang: AppLanguage.resolve(language))) {
             LocalizedRoot {
                 AppRoot().environmentObject(model).environmentObject(downloader)
                     .environmentObject(eyes).environmentObject(history)
@@ -582,45 +581,51 @@ struct DeskMindApp: App {
         .commands {
             CommandGroup(after: .toolbar) {
                 // The decision panel outside recordings too: what the agent chose at each step and how sure it was.
-                Toggle(L("Show Decisions While Running", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                Toggle(L("Show Decisions While Running", lang: AppLanguage.resolve(language)),
                        isOn: $showDecisions)
                 // A recording shows the task's apps and DeskMind's island; these add DeskMind's window, or everything.
-                Toggle(L("Include DeskMind's Window in Recordings", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                Toggle(L("Include DeskMind's Window in Recordings", lang: AppLanguage.resolve(language)),
                        isOn: $recordMainWindow)
-                Toggle(L("Record the Whole Screen", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                Toggle(L("Record the Whole Screen", lang: AppLanguage.resolve(language)),
                        isOn: $recordWholeScreen)
                 // 30 fps for footage where motion matters; the default 10 fps barely slows the run.
-                Toggle(L("Smooth Recordings (30 fps, Slows Tasks About 10%)", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                Toggle(L("Smooth Recordings (30 fps, Slows Tasks About 10%)", lang: AppLanguage.resolve(language)),
                        isOn: $recordSmooth)
                 // A corner card with the window the task works in, live, and the step it is taking.
-                Toggle(L("Show a Live View of the Task", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                Toggle(L("Show a Live View of the Task", lang: AppLanguage.resolve(language)),
                        isOn: $liveView)
                 // Developer: the 0.5 main window (conversations, chat, the agent's column), off by default.
-                Toggle(L("Use the New Main Window (0.5 Preview)", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                Toggle(L("Use the New Main Window (0.5 Preview)", lang: AppLanguage.resolve(language)),
                        isOn: $shellOn)
                 // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
-                Toggle(L("Record Interface Use on This Mac", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                Toggle(L("Record Interface Use on This Mac", lang: AppLanguage.resolve(language)),
                        isOn: Binding(get: { uiLogOn }, set: { UIEvents.setEnabled($0) { now in uiLogOn = now } }))   // (as it is: a folder that refuses the switch's file keeps it)
-                Button(L("Clear Interface Use Records", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
+                Button(L("Clear Interface Use Records", lang: AppLanguage.resolve(language))) {
                     // (done, or the user is told: the helper may hold the log's lock for a while)
                     UIEvents.clear { ok in
                         guard !ok else { return }
                         let a = NSAlert()
-                        a.messageText = L("Couldn't clear the interface use records. Try again in a moment.", lang: (AppLanguage(rawValue: language) ?? .en).resolved)
+                        a.messageText = L("Couldn't clear the interface use records. Try again in a moment.", lang: AppLanguage.resolve(language))
                         a.runModal()
                     }
+                }
+                // The language of every screen and of what the session writes: the system's (default), or forced.
+                Picker(L("Language", lang: AppLanguage.resolve(language)), selection: $language) {
+                    Text(L("Follow system", lang: AppLanguage.resolve(language))).tag(AppLanguage.system.rawValue)
+                    Text(verbatim: "中文").tag(AppLanguage.zhHans.rawValue)
+                    Text(verbatim: "English").tag(AppLanguage.en.rawValue)
                 }
             }
             // The 0.5 window's keys (handoff §3.7), only while it is on: the old window keeps its own.
             if shellOn {
-                ShellCommands(lang: (AppLanguage(rawValue: language) ?? .en).resolved)
+                ShellCommands(lang: AppLanguage.resolve(language))
             }
             // Help: where to report a problem, and the project.
             CommandGroup(replacing: .help) {
-                Button(L("Report an Issue…", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
+                Button(L("Report an Issue…", lang: AppLanguage.resolve(language))) {
                     NSWorkspace.shared.open(URL(string: IssueReport.repo + "/issues/new")!)
                 }
-                Button(L("DeskMind on GitHub", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
+                Button(L("DeskMind on GitHub", lang: AppLanguage.resolve(language))) {
                     NSWorkspace.shared.open(URL(string: IssueReport.repo)!)
                 }
             }

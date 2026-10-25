@@ -200,12 +200,39 @@ enum ShellText {
             if !t.plan.isEmpty, let p = t.steps.last?.planStep { return L("Working · step %d of %d", p, t.plan.count, lang: lang) }
             return n > 0 ? L("Working · step %d", n, lang: lang) : L("Working", lang: lang)
         }
-        // (why it stopped is its end's own: status and cause — never how its result card closed later)
+        // (why it stopped is its end's own: status and cause — never how its result card closed later — unless an undo
+        // took back all it did, which is then what happened: A8)
+        if fullyUndone(t) != nil { return L("Undone", lang: lang) }
         switch t.status {
         case "stopped" where t.cause == .lastStepUnknown: return L("Stopped. The last step may or may not have happened", lang: lang)
         case "environment" where t.cause == .screenLocked: return L("Stopped: the screen is locked", lang: lang)
         default: return ending(t.status, lang: lang)
         }
+    }
+
+    // A finished task's words come from its latest record of what happened (plan §3.7, A8): its end (task_done, else
+    // session.task_end -- one recorded on a reopen replaces the one cut off), then an undo of it. A full undo is what
+    // happened now: its title and summary say so. A partial, refused, cut-off or late undo keeps the end's words (the
+    // result line says what came of it). task_closed changes no words: it only adds the result line's why.
+    //
+    // | records (any arrival order)            | title            | summary                        |
+    // |----------------------------------------|------------------|--------------------------------|
+    // | end                                    | the end's        | the end's                      |
+    // | end, undo all n of n                   | 已撤回            | 改动都撤回了（n 处）             |
+    // | end, undo m of n / refused / cut off   | the end's        | the end's (line: why)          |
+    // | end, undo expired / closed             | the end's        | the end's (line: why)          |
+    // | closed, no end                         | 中断了            | —                              |
+
+    /// All of the task's changes were undone: how many (nil otherwise).
+    static func fullyUndone(_ t: TaskState) -> Int? {
+        if case .undone(let n, let m, nil) = t.resultCardState, n == m, m > 0 { return m }
+        return nil
+    }
+
+    /// A finished task's summary: what it did, or -- all of it undone -- that it was undone.
+    static func summary(_ t: TaskState, lang: ResolvedLang) -> String {
+        if let m = fullyUndone(t) { return L("All changes were undone (%d)", m, lang: lang) }
+        return t.done?.summary ?? t.end?.summary ?? ""
     }
 
     /// An ending by its status alone.
@@ -413,8 +440,22 @@ final class ShellModel: ObservableObject {
     /// Cloud models are off in the settings: a session sends nothing (0.5 has no local-only session: it needs a cloud
     /// model, owner 10-22); the chat says so with a button to the settings.
     @Published private(set) var cloudOff = false
-    /// Cards whose whole body has been on screen (`cardBody`), by card key: their approve-type options take a click.
-    @Published private(set) var bodySeen: Set<String> = []
+    /// Each card's height as laid out (CardView, unscrolled: a card never scrolls inside), and the room the pinned place
+    /// above the composer has (MainSplitView): a card fits there when its whole height does (`cardFits`). One fact, read
+    /// by where the card is drawn (pinned, or in place in the chat) and by the keys (an approve-type option takes no key
+    /// on a card that does not fit: its content may be off screen; the mouse reaches its button only past the content).
+    @Published private(set) var cardHeights: [String: Double] = [:]
+    @Published private(set) var pinRoom: Double = 0
+    /// Cards whose 「细节」 is open, by card key, and the words typed in a card's own field: kept here, not in the view, so
+    /// that a card moving between the pinned place and the chat keeps them (#124 reviews). The card's height counts as
+    /// it is, open or not: a card that outgrew the pinned place with its details open moves to the chat, open.
+    @Published private(set) var openDetails: Set<String> = []
+    @Published private(set) var cardDrafts: [String: String] = [:]
+    func cardDraft(_ card: CardModel) -> String { cardDrafts[Self.cardKey(card)] ?? "" }
+    func setCardDraft(_ card: CardModel, _ text: String) {
+        let key = Self.cardKey(card)
+        if text.isEmpty { cardDrafts[key] = nil } else if cardDrafts[key] != text { cardDrafts[key] = text }
+    }
 
     let client: SessionClient
     private let names: SessionNames
@@ -646,6 +687,9 @@ final class ShellModel: ObservableObject {
         // marks)
         if let sel = selected, ids.contains(sel), let s = states[sel], s.lastSeq > s.seenSeq || s.goneUpTo > s.seenGone,
            SessionStatus.problemShown(s) { client.markSeen(sel) }
+        // a card no longer pinned anywhere: its height and its fold go (they were the layout's, not the card's) -- on
+        // the UI queue, where CardStore is read
+        onUIQueue { [weak self] in self?.dropLayoutFacts() }
         rebuild()
     }
 
@@ -890,8 +934,7 @@ final class ShellModel: ObservableObject {
     /// its whole body has been on screen, as its approve (words can approve too; they are never read). Held for the
     /// take-back as a click is.
     func answer(_ card: CardModel, text: String) {
-        guard let id = selected, !Self.wordsWaitForBody(card) || bodySeen.contains(Self.cardKey(card)),
-              let a = card.answer(text: text), cloudAllows() else { return }
+        guard let id = selected, let a = card.answer(text: text), cloudAllows() else { return }
         pick(a, role: .other, by: .typed, immediate: false, in: id)
     }
 
@@ -922,8 +965,10 @@ final class ShellModel: ObservableObject {
     // no input-method composition. keyDown parses the event (a digit, no ⌘⌃⌥, not repeated) and then acts exactly when
     // keyWorks says so. Every input of those gates is published, so the labels follow it.
 
-    /// Cards whose view is on screen (CardView's appear / disappear), by card key.
-    private var visible: Set<String> = []
+    /// Cards whose view is on screen (CardView's appear / disappear), by card key, counted: one card can have two views
+    /// for a moment -- moving between the pinned place and the chat, the new one appears before the old one goes
+    /// (#124 review) -- and it is off screen only when the last one went.
+    private var visible: [String: Int] = [:]
     /// Since when each visible card has been on screen in the key window of the active app (set when it appears there,
     /// or when the window becomes key / the app active / the window is restored with it on screen; cleared when it
     /// leaves): the 1 s counts from then.
@@ -973,6 +1018,13 @@ final class ShellModel: ObservableObject {
     }
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
+    /// An option of a card in place in the chat took the keyboard focus (the user's Tab): the window scrolls it into
+    /// view (its ScrollViewReader takes this). Never set by a card arriving.
+    @Published private(set) var scrollRequest: (id: String, n: Int)?
+    private var scrolls = 0
+    func requestScroll(to id: String) { scrolls += 1; scrollRequest = (id, scrolls) }
+    /// Where the window scrolls to show an option of a card in place there (the option's view id).
+    static func optionAnchor(_ card: CardModel, _ index: Int) -> String { "option/\(cardKey(card))/\(index)" }
     /// The main window is the key window of the active app (CardKeyMonitor's notifications; true until told otherwise).
     @Published private(set) var windowKey = true
     /// A field in the main window is being edited / an input method composes there (CardKeyMonitor: on every key-down
@@ -984,7 +1036,7 @@ final class ShellModel: ObservableObject {
 
     func cardShown(_ card: CardModel) {
         let k = Self.cardKey(card)
-        visible.insert(k)
+        visible[k, default: 0] += 1
         if windowKey && shownAt[k] == nil { shownAt[k] = now() }
     }
     /// The card left the screen (its view went: the window closed, another session shown, the card answered): its card
@@ -996,7 +1048,9 @@ final class ShellModel: ObservableObject {
     /// session's (windowLeft, leaveCardMode).
     func cardHidden(_ card: CardModel) {
         let k = Self.cardKey(card)
-        visible.remove(k)
+        let n = (visible[k] ?? 0) - 1
+        visible[k] = n > 0 ? n : nil
+        guard n <= 0 else { return }       // (another view of it is still on screen: its time and card mode stay)
         shownAt[k] = nil
         if keyCard == k { keyCard = nil }
     }
@@ -1018,7 +1072,7 @@ final class ShellModel: ObservableObject {
     func windowReturned() {
         if !windowKey { windowKey = true }
         let t = now()
-        for k in visible where shownAt[k] == nil { shownAt[k] = t }
+        for k in visible.keys where shownAt[k] == nil { shownAt[k] = t }
     }
     /// Where the typing is in the main window (the monitor, on each key-down and window update).
     func focusChanged(editing: Bool, composing c: Bool) {
@@ -1057,6 +1111,10 @@ final class ShellModel: ObservableObject {
         guard control.key != nil, !editingText, !composing, keysActive(card), let id = selected else { return false }
         let b = control.button
         guard b.runId == card.runId, b.askId == card.askId, b.askId != nil, selected == id else { return false }
+        // (a digit acts from a distance: only on a card that fits whole, every control of it on screen -- #124 Codex
+        // review at 80c339e. On a card in place in the chat the focus-based keys still work -- Tab / ⇧Tab into it,
+        // Space / Return on the focused control, Esc -- and the focused option is scrolled into view: lead 10-25)
+        if !cardFits(card) { return false }
         return canSend(b)
     }
 
@@ -1080,14 +1138,33 @@ final class ShellModel: ObservableObject {
     func keyDown(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText editing: Bool, isRepeat: Bool, composing c: Bool = false) -> Bool {
         focusChanged(editing: editing, composing: c)
         if mainWindowIsKey { if !windowKey { windowReturned() } } else { windowLeft() }
-        if characters == "\u{1b}" || characters == "\t" || characters == "\u{19}" {
-            if !commandLike, !isRepeat, !editingText, !composing, let p = pinnedTakingPicks() { enterCardMode(p) }
+        let p = pinnedTakingPicks()
+        let held = p.flatMap { cards.picks[Self.cardKey($0)] } != nil
+        let what = CardKeys.action(characters: characters, commandLike: commandLike, isRepeat: isRepeat,
+                                   CardKeys.Context(inCard: p.map(keysActive) ?? false, held: held, editing: editingText, composing: composing))
+        switch what {
+        case .none: return false
+        case .enterCard:
+            if let p { enterCardMode(p) }
+            return false        // (Esc / Tab go on: the focus moves natively; Esc cancels nothing in a field here)
+        case .leaveCard:
+            if keyCard != nil { keyCard = nil }
             return false
+        case .takeBack:
+            guard let p else { return false }
+            takeBack(p)
+            return true
+        case .sendNow:
+            guard let p, let id = selected else { return false }
+            let key = Self.cardKey(p)
+            guard let token = cards.picks[key]?.token else { return false }
+            due(key, token: token, in: id)
+            return true
+        case .digit(let n):
+            guard let p, let ctl = CardLayout(p).control(forKey: n), keyWorks(p, ctl), let id = selected else { return false }
+            // (keyWorks said yes: act, with no gate of its own)
+            return pick(CardModel.answer(ctl.button), role: ctl.button.role, by: .digit, immediate: ctl.button.role == .cancel, in: id)
         }
-        guard let n = CardKeys.digit(characters: characters, commandLike: commandLike, isRepeat: isRepeat),
-              let p = pinnedTakingPicks(), let ctl = CardLayout(p).control(forKey: n), keyWorks(p, ctl), let id = selected else { return false }
-        // (keyWorks said yes: act, with no gate of its own)
-        return pick(CardModel.answer(ctl.button), role: ctl.button.role, by: .digit, immediate: ctl.button.role == .cancel, in: id)
     }
 
     /// Key `n` (1–9, CardKeys) on the pinned card: its n-th control as shown (CardLayout), picked as a click is — held for
@@ -1125,37 +1202,64 @@ final class ShellModel: ObservableObject {
     }
 
     /// A card whose own words wait for its whole body: one with an approve-type option (#107 re-review).
-    static func wordsWaitForBody(_ card: CardModel) -> Bool { card.buttons.contains { $0.role.needsWholeBody } }
-
-    /// Whether the card's own field (and its Send) takes words now: as `answer` sends them.
-    func wordsEnabled(_ card: CardModel, in s: SessionState) -> Bool {
-        answerable(card, in: s) && (!Self.wordsWaitForBody(card) || bodySeen.contains(Self.cardKey(card)))
-    }
+    /// Whether the card's own field (and its Send) takes words now: as `answer` sends them (the field is drawn after
+    /// the card's content: reaching it is reading past it).
+    func wordsEnabled(_ card: CardModel, in s: SessionState) -> Bool { answerable(card, in: s) }
 
     static func cardKey(runId: String, askId: String?) -> String { CardStore.key(runId: runId, askId: askId) }
     static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
 
-    /// The card's body as it is on screen (its scroll view's geometry, CardBody.endShown): once its end has been on
-    /// screen — it fits, or it was scrolled to its last line — its approve-type options take a click, for good.
-    func cardBody(_ card: CardModel, contentHeight: Double, visibleHeight: Double, offset: Double) {
-        let key = Self.cardKey(card)
-        guard !bodySeen.contains(key), CardBody.endShown(contentHeight: contentHeight, visibleHeight: visibleHeight, offset: offset) else { return }
-        bodySeen.insert(key)
+    /// The layout facts of cards no longer pinned anywhere (nor an open result card) go. UI queue.
+    private func dropLayoutFacts() {
+        let pinnedKeys = Set(states.values.compactMap { cards.pinned($0) }.map { Self.cardKey(runId: $0.runId, askId: $0.card.askId) })
+        let results = Set(states.values.flatMap { $0.tasks }.filter { $0.resultCardState.isOpen }.map(\.runId))
+        let keep = { (k: String) in pinnedKeys.contains(k) || results.contains(k) }
+        if cardHeights.keys.contains(where: { !keep($0) }) { cardHeights = cardHeights.filter { keep($0.key) } }
+        if openDetails.contains(where: { !keep($0) }) { openDetails = openDetails.filter(keep) }
+        if cardDrafts.keys.contains(where: { !keep($0) }) { cardDrafts = cardDrafts.filter { keep($0.key) } }
     }
 
-    /// Whether this button takes a click now: its card can be answered, and an approve-type option's card was seen whole.
+    /// The card's height as laid out (its view's geometry), as it is -- 「细节」 open or not (#124 Codex review at 80c339e:
+    /// a card kept pinned at its folded height grew past the window with its details open, its controls off screen) --
+    /// and the pinned place's room (the window's that pins the card: the chat column, or a goal's screen).
+    func cardLaidOut(_ card: CardModel, height: Double) {
+        let key = Self.cardKey(card)
+        guard height > 0 else { return }
+        if cardHeights[key] != height { cardHeights[key] = height }
+    }
+    func detailsOpen(_ card: CardModel) -> Bool { openDetails.contains(Self.cardKey(card)) }
+    func setDetails(_ card: CardModel, open: Bool) {
+        let key = Self.cardKey(card)
+        if open { openDetails.insert(key) } else { openDetails.remove(key) }
+    }
+    func pinRoom(columnHeight: Double) {
+        let r = CardBody.pinRoom(columnHeight: columnHeight)
+        if pinRoom != r { pinRoom = r }
+    }
+    /// The card fits in the pinned place, whole: laid out, and no taller than the room. Not yet laid out: not known --
+    /// it is drawn pinned to be measured, and its approve-type keys wait.
+    func cardFits(_ card: CardModel) -> Bool { cardFits(Self.cardKey(card)) }
+    func cardFits(_ key: String) -> Bool { cardHeights[key].map { CardBody.fits(height: $0, room: pinRoom) } ?? false }
+    /// Where the pinned card is drawn: pinned while it fits, is not laid out yet, or its window has not said its room
+    /// (never two copies: the in-place one only when this says no -- #124 review at 64547f9); else in place in the
+    /// window's scroll, with one line pinned (its title and 「跳到卡片」). Both windows draw it through PinnedCard and
+    /// TaskRow, which read this one predicate.
+    func cardPinnedWhole(_ card: CardModel) -> Bool { pinRoom <= 0 || cardHeights[Self.cardKey(card)] == nil || cardFits(card) }
+
+    /// Whether this button takes a click now: its card can be answered (canSend).
     func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b) }
 
     /// THE predicate for one option of one card (#114 Codex review at 7553637): whether pressing it now sends its answer
     /// (or holds it for the take-back). The button's enabled state, its VoiceOver state, the key path (keyWorks) and the
     /// click all read this, and nothing else decides: the card takes this option now (an ask card: it is the open one
     /// and takes a pick; a result card: it is open, the option is one it offers — undo only while offered — and no answer
-    /// of ours is on its way), an approve-type option only once the whole card was seen, a model-reaching option only
-    /// while cloud models are on. Read against the client's newest state, the one CardStore checks as it writes.
+    /// of ours is on its way), a model-reaching option only while cloud models are on. Read against the client's newest
+    /// state, the one CardStore checks as it writes. (A card no longer scrolls inside, and what goes out is laid out
+    /// before 「可以」 (A2, invariant 3): a click is never gated on scrolling; an approve-type option's key is, on a card
+    /// that does not fit -- keyWorks.)
     func canSend(_ b: CardModel.Button) -> Bool {
         guard let id = selected else { return false }
         let s = client.state(id)
-        if b.role.needsWholeBody && !bodySeen.contains(Self.cardKey(runId: b.runId, askId: b.askId)) { return false }
         if !b.role.reachesNoModel && !cloudOn() { return false }
         let a = CardModel.answer(b)
         guard let ask = b.askId else { return cards.wouldRespond(a, in: s) }
@@ -1445,8 +1549,8 @@ final class ShellModel: ObservableObject {
 
 extension CardModel.Role {
     /// An option that lets the task go ahead on what the card shows (yes; "you decide") — or one whose kind this app
-    /// does not know, which might (it fails closed): answered only once the card's whole body has been on screen
-    /// (owner: never approve what you can't fully see). The way out, a pick, a skip and undo are not.
+    /// does not know, which might (it fails closed): its key works only on a card that fits whole where it is pinned
+    /// (owner: never approve what you can't fully see; fable 10-25 for A2). The way out, a pick, a skip and undo are not.
     var needsWholeBody: Bool { self == .approve || self == .delegate || self == .other }
     /// An answer that resumes no model work (the way out; undo, which the session runs from its receipts): it goes
     /// with cloud models off too (#107 re-review: holding back an undo for its 600 s would break the gate).
@@ -1482,11 +1586,12 @@ enum CardBody {
     /// The least it keeps when the window is short.
     static let minHeight: Double = 60
 
-    /// It fits, or its last line is on screen (the content's top is `offset` above the visible top).
-    static func endShown(contentHeight: Double, visibleHeight: Double, offset: Double) -> Bool {
-        guard contentHeight > 0, visibleHeight > 0 else { return false }
-        return contentHeight <= visibleHeight + 0.5 || offset + visibleHeight >= contentHeight - 0.5
-    }
+    /// A whole card fits the pinned place: laid out, and no taller than its room.
+    static func fits(height: Double, room: Double) -> Bool { height > 0 && room > 0 && height <= room + 0.5 }
+
+    /// The pinned place's room in a chat column `columnHeight` tall: half of it, so the chat and the composer keep
+    /// their place; a card taller than that stays in place in the chat.
+    static func pinRoom(columnHeight: Double) -> Double { max(0, columnHeight * 0.5) }
 
     /// The body's height cap in a chat column `columnHeight` tall: a share of it, between minHeight and maxHeight, so
     /// that the header, the card's buttons and the composer always keep their place.

@@ -13,8 +13,13 @@ import SwiftUI
 
 /// The handoff's text colours (§3.10): secondary text and orange text at 4.5:1 or better on paper.
 enum ShellColor {
-    static let secondary = Color(hex: ShellPalette.secondary)
-    static let orangeText = Color(hex: ShellPalette.orangeText)
+    static let secondary = Color(ShellPalette.secondary)
+    static let orangeText = Color(ShellPalette.orangeText)
+    static let panel = Color(ShellPalette.panel)
+    static let panelSelected = Color(ShellPalette.panelSelected)
+    static let banner = Color(ShellPalette.banner)
+    static let problem = Color(ShellPalette.problem)
+    static let error = Color(ShellPalette.error)
 }
 
 struct MainSplitView: View {
@@ -84,7 +89,7 @@ extension ShellModel {
         // the language as the setting has it now (not ResolvedLang.current, which the window updates in its own time)
         // (the app's one ModelsOffSync: the engine setter and the helper's connect push through the same one)
         let m = ShellModel(client: SessionClient(transport: transport, modelsSync: .shared), config: { MainSplitView.modelConfig() },
-                           lang: { (AppLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue) ?? .en).resolved },
+                           lang: { AppLanguage.current() },
                            cloudOn: { CloudModelSettings.engineIsCloud },
                            // every save of the model settings, from whichever window (ModelSettingsSaved), while the app runs
                            keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default,
@@ -137,7 +142,7 @@ struct SessionList: View {
             .font(.system(size: 13, weight: .semibold, design: .rounded))
             .foregroundStyle(Brand.ink)
             .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(shell.selected == nil ? Brand.mist.opacity(0.25) : Color.clear)
+            .background(shell.selected == nil ? ShellColor.panelSelected : Color.clear)
             .help(L("New conversation (⌘N)", lang: lang))
             .accessibilityHint(L("Starts a new conversation", lang: lang))
             List(selection: Binding(get: { shell.selected }, set: { id in if let id { shell.select(id) } })) {
@@ -154,7 +159,7 @@ struct SessionList: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
         }
-        .background(Brand.card.opacity(0.6))
+        .background(ShellColor.panel)
         .alert(L("Rename conversation", lang: lang), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(L("Name", lang: lang), text: $newName)
             Button(L("Cancel", lang: lang), role: .cancel) { renaming = nil }
@@ -188,7 +193,7 @@ struct SessionRowView: View {
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(row.title), \(status)")
+        .accessibilityLabel(L("%@, %@", row.title, status, lang: lang))
     }
 }
 
@@ -231,9 +236,12 @@ struct ChatColumn: View {
     let openSettings: () -> Void
     @Environment(\.lang) private var lang
     @State private var announced: String?
+    /// 「跳到卡片」: the card to scroll the chat to (one too tall to pin stays in place there).
+    @State private var jumpTo: String?
 
     var body: some View {
         GeometryReader { g in column(height: g.size.height) }
+            .background(PinRoomReporter(shell: shell))
             .background(Brand.paper)
             // 1–9 pick the pinned card's options (only while this window is the key one and no field is typed in)
             .background(CardKeyMonitor(shell.cardKeyHandlers))
@@ -268,13 +276,19 @@ struct ChatColumn: View {
                     }
                     .padding(.horizontal, 22).padding(.vertical, 16)
                 }
-                .onChange(of: s?.lastSeq) { _, _ in withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } }
+                // (not while a card too tall to pin waits in place in the chat: the chat would pull away from it)
+                .onChange(of: s?.lastSeq) { _, _ in if !inlineCard(s) { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } } }
                 .onChange(of: s?.streamingMessage?.text.count) { _, _ in proxy.scrollTo("bottom") }
                 .onChange(of: shell.selected) { _, _ in proxy.scrollTo("bottom") }
+                .onChange(of: jumpTo) { _, id in
+                    if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }; jumpTo = nil }
+                }
+                // (an option of a card in place here took the keyboard focus: into view)
+                .onChange(of: shell.scrollRequest?.n) { _, _ in if let id = shell.scrollRequest?.id { proxy.scrollTo(id) } }
             }
             .frame(minHeight: 0, maxHeight: .infinity)
             .layoutPriority(0)
-            if let s { pinned(s, bodyCap: CardBody.cap(columnHeight: height)).layoutPriority(1) }
+            if let s { pinned(s, queueCap: CardBody.cap(columnHeight: height)).layoutPriority(1) }
             if let n = shell.notice {
                 Text(n).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.bottom, 4)
@@ -323,20 +337,25 @@ struct ChatColumn: View {
         ForEach(s.shownOutbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
     }
 
-    /// Above the composer: the open card (handoff §3.3, pinned while it waits; its body scrolls within `bodyCap`) and
-    /// the queue (scrolls past a few).
-    @ViewBuilder private func pinned(_ s: SessionState, bodyCap: Double) -> some View {
+    /// Above the composer: the open card (handoff §3.3, pinned while it waits) -- whole when it fits the pinned place
+    /// (ShellModel.cardPinnedWhole), else one line, its title and 「跳到卡片」, the card itself in place in the chat (A2) --
+    /// and the queue (scrolls past a few).
+    @ViewBuilder private func pinned(_ s: SessionState, queueCap: Double) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let p = shell.pinned(s) {
                 let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-                CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s, bodyCap: bodyCap)
-                    .id(ShellModel.cardKey(m))
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                PinnedCard(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s) { jumpTo = $0 }
             }
-            if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, bodyCap)) }
+            if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, queueCap)) }
         }
         .padding(.horizontal, 22)
         .animation(.easeOut(duration: 0.2), value: shell.pinned(s)?.card.askId)
+    }
+
+    /// The open card is drawn whole in place in the chat (too tall to pin).
+    private func inlineCard(_ s: SessionState?) -> Bool {
+        guard let s, let p = shell.pinned(s) else { return false }
+        return !shell.cardPinnedWhole(CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId))
     }
 
     /// A new card is said aloud, without moving the focus (handoff §3.10).
@@ -344,7 +363,10 @@ struct ChatColumn: View {
         guard let id, id != announced, let s, let p = shell.pinned(s) else { return }
         announced = id
         let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, phase: p.phase, lang: lang)).post()
+        // (and how to reach it by keys: Tab moves into the card, its options' keys work then -- fable 10-25; from a field
+        // being typed in, Tab is the field's first)
+        let how = shell.editingText ? L("Leave the text field, then press Tab to move into the card.", lang: lang) : L("Press Tab to move into the card.", lang: lang)
+        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, phase: p.phase, lang: lang) + " " + how).post()
     }
 }
 
@@ -379,7 +401,7 @@ struct CloudOffRow: View {
             Button(L("Open model settings", lang: lang), action: openSettings).buttonStyle(InkButtonStyle(prominent: true))
         }
         .padding(.horizontal, 22).padding(.vertical, 8)
-        .background(Brand.dot.opacity(0.10))
+        .background(ShellColor.banner)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .contain)
     }
@@ -391,7 +413,7 @@ struct Banner: View {
         Text(text).font(.system(size: 12)).foregroundStyle(Brand.ink)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 22).padding(.vertical, 8)
-            .background(Brand.dot.opacity(0.10))
+            .background(ShellColor.banner)
     }
 }
 
@@ -474,7 +496,7 @@ struct ErrorRow: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Brand.dot.opacity(0.07)))
+        .background(RoundedRectangle(cornerRadius: 12).fill(ShellColor.problem))
         .accessibilityElement(children: .contain)
     }
 }
@@ -562,10 +584,10 @@ struct QueuedBubble: View {
 
 // (CardView, the card by its kind: Main/CardViews.swift)
 
-/// The card body's content height and how far it is scrolled ([height, offset]).
-struct CardBodyGeometry: PreferenceKey {
-    static let defaultValue: [Double] = []
-    static func reduce(value: inout [Double], nextValue: () -> [Double]) { let n = nextValue(); if !n.isEmpty { value = n } }
+/// A card's height as laid out (ShellModel.cardLaidOut).
+struct CardHeight: PreferenceKey {
+    static let defaultValue: Double = 0
+    static func reduce(value: inout Double, nextValue: () -> Double) { value = max(value, nextValue()) }
 }
 
 /// The card body's visible height.
@@ -650,7 +672,7 @@ struct AgentPanel: View {
         }
         .padding(18)
         .frame(maxHeight: .infinity)
-        .background(Brand.card.opacity(0.6))
+        .background(ShellColor.panel)
     }
 
     /// 小方's face for the state (LiveView.face): looking while it works, up when it waits for you, happy when done,

@@ -146,7 +146,7 @@ enum CardLayoutTests {
                     let r = CardStoreTests.Rig()
                     r.ask("a1", card: json)
                     guard let m = r.model("a1") else { check(false, "\(name): the card is open"); continue }
-                    r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+                    r.m.fit(m)
                     if byKey { check(r.m.pressKey(c.key!), "\(name): key \(c.key!) picks") } else { r.m.click(c.button) }
                     r.timers.advance(CardStore.takeBack)
                     let sent = r.wire.answers("a1")
@@ -168,31 +168,53 @@ enum CardLayoutTests {
         check(!r.m.pressKey(1), "an expired card: key 1 picks nothing")
     }
 
-    // MARK: - the whole card first
+    // MARK: - every option at once (A2, invariant 3)
 
+    /// The card never scrolls inside: each option takes a click the moment the card shows, whatever its height. A card
+    /// too tall for the pinned place stays in place in the chat; there no digit picks -- its controls may be off screen
+    /// (#124 Codex review at 80c339e) -- while Tab, Space and Esc, which act on what has the focus, still do (CardKeysTests).
     static func wholeCardTests() {
         for (name, json) in samples() {
             let card = model(json)
             for c in CardLayout(card).controls {
-                // (handoff: approve, "you decide"; and a kind this app does not know, which might approve: it fails closed)
-                let waits = c.button.role == .approve || c.button.role == .delegate || c.button.role == .other
-                let r = CardStoreTests.Rig()
-                r.ask("a1", card: json)
-                guard let m = r.model("a1") else { continue }
-                check(r.m.buttonEnabled(c.button, card: m, in: r.state) == !waits, "\(name): \(c.button.kind) \(waits ? "off" : "on") before the card was seen")
-                // half way down a long card: still not seen
-                r.m.cardBody(m, contentHeight: 900, visibleHeight: 200, offset: 300)
-                if let k = c.key { r.m.pressKey(k) } else { r.m.click(c.button) }
-                r.timers.advance(CardStore.takeBack)
-                check(r.wire.count("answer") == (waits ? 0 : 1), "\(name): \(c.button.kind) before the end was on screen: \(r.wire.count("answer")) sent")
-                if waits {
-                    r.m.cardBody(m, contentHeight: 900, visibleHeight: 200, offset: 700)
-                    check(r.m.buttonEnabled(c.button, card: m, in: r.state), "\(name): \(c.button.kind) on once the end was on screen")
-                    if let k = c.key { r.m.pressKey(k) } else { r.m.click(c.button) }
+                let approveType = c.button.role == .approve || c.button.role == .delegate || c.button.role == .other
+                for tall in [false, true] {
+                    // a click: at once, on any card
+                    let r = CardStoreTests.Rig()
+                    r.ask("a1", card: json)
+                    guard let m = r.model("a1") else { continue }
+                    r.m.pinRoom(columnHeight: 1000); r.m.cardLaidOut(m, height: tall ? 900 : 200)
+                    check(r.m.cardFits(m) == !tall && r.m.cardPinnedWhole(m) == !tall, "\(name): \(tall ? "tall: in place in the chat" : "fits: pinned")")
+                    check(r.m.buttonEnabled(c.button, card: m, in: r.state), "\(name), \(tall ? "tall" : "fits"): \(c.button.kind) takes a click at once")
+                    r.m.click(c.button)
                     r.timers.advance(CardStore.takeBack)
-                    check(r.wire.answers("a1").first?["option"] as? Int == c.index, "\(name): then it sends")
+                    check(r.wire.answers("a1").first?["option"] as? Int == c.index, "\(name), \(tall ? "tall" : "fits"): a click on \(c.button.kind) sends it")
+                    // its key, in card mode
+                    guard let k = c.key else { continue }
+                    let q = CardStoreTests.Rig()
+                    q.ask("a1", card: json)
+                    guard let qm = q.model("a1") else { continue }
+                    q.m.pinRoom(columnHeight: 1000); q.m.cardLaidOut(qm, height: tall ? 900 : 200)
+                    q.m.cardShown(qm); q.timers.advance(CardKeys.cardOnScreen + 0.1); q.m.enterCardMode(qm)
+                    let works = !tall
+                    _ = approveType
+                    let ctl = CardLayout(qm).controls.first { $0.index == c.index }!
+                    check(q.m.keyWorks(qm, ctl) == works, "\(name), \(tall ? "tall" : "fits"): key \(k) on \(c.button.kind) \(works ? "works" : "does nothing")")
+                    _ = q.m.keyDown(characters: "\(k)", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false)
+                    q.timers.advance(CardStore.takeBack)
+                    check((q.wire.answers("a1").first?["option"] as? Int == c.index) == works, "\(name), \(tall ? "tall" : "fits"): key \(k) sends \(c.button.kind): \(works)")
                 }
             }
+        }
+        // not laid out yet: drawn pinned (to be measured); its approve-type keys wait
+        let r = CardStoreTests.Rig()
+        r.ask("a1", "action")
+        if let m = r.model("a1") {
+            check(r.m.cardPinnedWhole(m) && !r.m.cardFits(m), "not laid out: pinned, not known to fit")
+            r.m.pinRoom(columnHeight: 1000); r.m.cardLaidOut(m, height: 600)
+            check(!r.m.cardFits(m), "600 in a 1000 column (room 500): too tall")
+            r.m.pinRoom(columnHeight: 1400)
+            check(r.m.cardFits(m), "the window grew (room 700): it fits now -- pinned again")
         }
     }
 
@@ -260,7 +282,7 @@ enum CardLayoutTests {
             r.ask(id, kind)
             let m = r.model(id)!
             r.m.cardShown(m)
-            r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+            r.m.fit(m)
             return m
         }
         // row 1: the composer was being typed in, the card came, the focus went; digits after any pause: never the card's
@@ -374,7 +396,7 @@ enum CardLayoutTests {
         r.ask(id, kind)
         let m = r.model(id)!
         r.m.cardShown(m)
-        if seen { r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0) }
+        if seen { r.m.fit(m) }
         return m
     }
 
@@ -450,7 +472,7 @@ enum CardLayoutTests {
         o.feed(["kind": "session.task", "session_id": CardStoreTests.sid, "seq": 3, "msg_id": "u2", "run_id": "r2", "raw": "再来", "by": "slash"])
         o.feed(["kind": "ask", "session_id": CardStoreTests.sid, "run_id": "r2", "seq": 1, "ask_id": "b1", "card": CardStoreTests.cardJSON("action")])
         let newer = CardModel(card: o.state.task("r2")!.cards[0].card, runId: "r2", askId: "b1")
-        o.m.cardShown(newer); o.m.cardShown(old); o.m.cardBody(newer, contentHeight: 1, visibleHeight: 1, offset: 0)
+        o.m.cardShown(newer); o.m.cardShown(old); o.m.fit(newer)
         o.timers.advance(2); o.m.enterCardMode(newer)
         check(o.m.keysActive(newer) && !o.m.keysActive(old), "card mode is the new card's, not the older result card's")
         check(CardLayout(old).controls.allSatisfy { !o.m.keyWorks(old, $0) }, "the older result card: no digits")
@@ -468,7 +490,7 @@ enum CardLayoutTests {
                     r.ask("a1", card: json)
                     let m = r.model("a1")!
                     r.m.cardShown(m)
-                    if state == "mode, seen" { r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0) }
+                    if state == "mode, seen" { r.m.fit(m) }
                     r.timers.advance(2)
                     if state != "no mode" { _ = modeKey(r, "\u{1b}") }
                     let label = r.m.keyWorks(m, c)
@@ -498,8 +520,8 @@ enum CardLayoutTests {
         let r2 = CardStoreTests.Rig()
         let m2 = modeArrive(r2, seen: false)
         r2.timers.advance(2)
-        r2.m.click(m2.buttons.first { $0.role == .approve }!)      // (not seen yet: the approve does nothing, the move counts)
-        check(r2.m.keysActive(m2) && r2.phase("a1") == .open, "a click on an approve not yet seen whole: no pick, but a move into the card")
+        r2.m.click(m2.buttons.first { $0.role == .approve }!)      // (A2: an approve takes a click at once)
+        check(r2.m.keysActive(m2) && r2.phase("a1")?.pending != nil, "a click on an approve: a pick held, and a move into the card")
     }
 
     /// Esc and Tab (⇧Tab too) enter card mode only with no ⌘⌃⌥, not repeated, no field being edited and no input-method
@@ -548,14 +570,14 @@ enum CardLayoutTests {
                 o.feed { $0.ask("a1", kind) }
                 var m = o.card("a1")
                 o.m.cardShown(m)
-                if gate != "not seen whole" { o.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0) }
+                if gate != "not seen whole" { o.m.fit(m) }
                 o.timers.advance(2)
                 if gate != "no card mode" { _ = o.m.keyDown(characters: "\u{1b}", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false) }
                 var editing = false, composing = false
                 switch gate {
                 case "a newer card":
                     o.feed { $0.void("a1", "steer"); $0.ask("a2", kind) }
-                    m = o.card("a2"); o.m.cardShown(m); o.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0); o.timers.advance(2)
+                    m = o.card("a2"); o.m.cardShown(m); o.m.fit(m); o.timers.advance(2)
                 case "card hidden": o.m.cardHidden(m)
                 case "window left": o.m.windowLeft()
                 case "window back 0.1 s":

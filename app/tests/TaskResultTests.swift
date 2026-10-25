@@ -303,18 +303,20 @@ enum TaskResultTests {
     // MARK: - contrast, the views
 
     static func contrastTests() {
-        for (fg, bg) in ShellPalette.textOn {
-            let r = ShellPalette.contrast(fg, bg)
-            check(r >= 4.5, String(format: "text #%06X on #%06X: %.2f:1 (at least 4.5)", fg, bg, r))
+        for a in ShellPalette.Appearance.allCases {
+            for (fg, bg) in ShellPalette.textOn(a) {
+                let r = ShellPalette.contrast(fg, bg)
+                check(r >= 4.5, String(format: "\(a): text #%06X on #%06X: %.2f:1 (at least 4.5)", fg, bg, r))
+            }
         }
-        check(ShellPalette.contrast(0x69736A, ShellPalette.paper) < 4.5, "(Brand.sage on paper is under 4.5: not a text colour)")
+        check(ShellPalette.contrast(ShellPalette.sage.light, ShellPalette.paper.light) < 4.5, "(sage on paper is under 4.5: not a text colour)")
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let brand = (try? String(contentsOf: dir.appendingPathComponent("Main/Brand.swift"), encoding: .utf8)) ?? ""
-        check(brand.contains("static let ink = Color(hex: 0x262B28)") && brand.contains("static let paper = Color(hex: 0xF4F1EA)") && brand.contains("static let card = Color(hex: 0xFFFEFA)"),
-              "the palette's ink, paper and card are Brand's")
+        check(brand.contains("static let ink = Color(ShellPalette.ink)") && brand.contains("static let paper = Color(ShellPalette.paper)") && brand.contains("static let card = Color(ShellPalette.card)"),
+              "Brand's ink, paper and card are the palette's tokens")
         let main = (try? String(contentsOf: dir.appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
-        check(main.contains("static let secondary = Color(hex: ShellPalette.secondary)") && main.contains("static let orangeText = Color(hex: ShellPalette.orangeText)"),
-              "the window's text colours are the palette's")
+        check(main.contains("static let secondary = Color(ShellPalette.secondary)") && main.contains("static let orangeText = Color(ShellPalette.orangeText)"),
+              "the window's text colours are the palette's tokens")
         let views = ShellTests.windowViewFiles().map(\.code).joined(separator: "\n")
         check(!views.contains("foregroundStyle(Brand.sage)") && !views.contains("foregroundStyle(Brand.dot)") && !views.contains("foregroundStyle(Brand.mist)"),
               "no text in the window's views in a colour under 4.5:1")
@@ -454,7 +456,7 @@ enum TaskResultTests {
             let card = CardModel(resultCard: probe.state.task(rid)!.resultCard!, runId: rid)
             for b in card.buttons {
                 let r = make()
-                r.m.cardBody(card, contentHeight: 1, visibleHeight: 1, offset: 0)
+                r.m.fit(card)
                 let enabled = r.m.canSend(b), shown = r.m.buttonEnabled(b, card: card, in: r.state)
                 let n = r.wire.count("respond")
                 r.m.click(b)
@@ -471,7 +473,7 @@ enum TaskResultTests {
                     let r = Rig()
                     r.ask("a1")
                     let m = r.model("a1")!
-                    r.m.cardShown(m); r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+                    r.m.cardShown(m); r.m.fit(m)
                     r.timers.advance(2); r.m.enterCardMode(m)
                     switch phase {
                     case "pending": r.click("a1", .skipStep)
