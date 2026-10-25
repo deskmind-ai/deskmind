@@ -205,13 +205,12 @@ final class LiveCard: NSObject {
     /// Size, place, show what the state says. Main thread.
     fileprivate func refresh() {
         guard let p = panel, let v = view else { return }
-        let (status, userCollapsed, large, app, words) = read { c -> (LiveView.Status, Bool, Bool, String, LiveView.Words) in
-            let s: LiveView.Status = c.runStatus.isEnding || c.runStatus == .waitingForUser ? c.runStatus
-                : (c.windowHidden && c.hadPicture ? .hidden : c.runStatus)
-            return (s, c.collapsed, c.large, c.appName, LiveView.words(s, step: c.step, hadPicture: c.hadPicture, approval: c.approval,
-                                                                         stepWords: c.stepWords, lang: ResolvedLang.current))
-        }
         let lang = ResolvedLang.current
+        let (userCollapsed, large, app, words) = read { c -> (Bool, Bool, String, LiveView.Words) in
+            (c.collapsed, c.large, c.appName, LiveView.words(c.runStatus, windowHidden: c.windowHidden, hadPicture: c.hadPicture,
+                                                             step: c.step, approval: c.approval, stepWords: c.stepWords, lang: lang))
+        }
+        let status = words.status
         shownLang = lang
         let shownApp = v.appTitle.isEmpty ? app.components(separatedBy: " (").first ?? app : v.appTitle
         v.title.stringValue = shownApp.isEmpty ? words.header : "\(shownApp) · \(words.header)"
@@ -235,7 +234,7 @@ final class LiveCard: NSObject {
         let frame = LiveView.frame(size: size, corner: placed.corner, visible: visible)
         covers = placed.covers
         p.ignoresMouseEvents = !LiveView.interactive(covers: covers, pointerOnCardFor: pointerSince.map { Date().timeIntervalSince($0) })
-        v.layoutCard(collapsed: collapsed, large: large, size: size, dimmed: status == .hidden, note: words.note)
+        v.layoutCard(collapsed: collapsed, large: large, size: size, dimmed: words.dimmed, note: words.note)
         if p.frame != frame {
             if p.isVisible && !v.dragging && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 NSAnimationContext.runAnimationGroup { ctx in ctx.duration = 0.2; p.animator().setFrame(frame, display: true) }

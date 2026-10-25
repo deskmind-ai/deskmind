@@ -383,40 +383,45 @@ enum DecisionTests {
             check(L(LV.word(st), lang: .zhHans) != LV.word(st), "a Chinese word for \(LV.word(st))")
         }
 
-        // What the card says, state × picture (A0): the header by the state, the note only that there is no picture
-        // yet. On 0.5 rc.16 a run waiting for an answer before its first picture said "Starting" in the picture's place.
-        let wordsTable: [(LV.Status, Int, (en: String, zh: String))] = [
-            (.starting, 0, ("Starting", "启动中")), (.working, 0, ("Working", "工作中")), (.working, 3, ("Step 3", "第 3 步")),
-            (.waitingForUser, 3, ("Needs you", "需要你")), (.paused, 3, ("Paused", "已暂停")),
-            (.done, 3, ("Done", "完成了")), (.failed, 3, ("Didn't finish", "没做完")), (.stopped, 3, ("Stopped", "已停下")),
+        // What the card says, run state × window out of sight × picture × language (A0): the header and the line by
+        // the run, the note and the dimming by the window; with no picture yet the note says only that. On 0.5 rc.16 a
+        // run waiting for an answer before its first picture said "Starting" in the picture's place; #122 review at
+        // d10d6b1: a paused run whose window was out of sight must still say it is paused.
+        let headers: [(LV.Status, Int, en: String, zh: String)] = [
+            (.starting, 0, "Starting", "启动中"), (.working, 0, "Working", "工作中"), (.working, 3, "Step 3", "第 3 步"),
+            (.waitingForUser, 3, "Needs you", "需要你"), (.paused, 3, "Paused", "已暂停"),
+            (.done, 3, "Done", "完成了"), (.failed, 3, "Didn't finish", "没做完"), (.stopped, 3, "Stopped", "已停下"),
         ]
-        for (st, n, header) in wordsTable {
-            for picture in [false, true] {
-                for (lang, want) in [(ResolvedLang.en, header.en), (.zhHans, header.zh)] {
-                    let w = LV.words(st, step: n, hadPicture: picture, approval: false, stepWords: "Click “Save”", lang: lang)
-                    let note = picture ? nil : (lang == .en ? "No picture yet" : "还没有画面")
-                    check(w.header == want && w.note == note,
-                          "\(st) step \(n), picture \(picture), \(lang): \(w.header) / \(w.note ?? "-")")
+        let lines: [LV.Status: (en: String, zh: String)] = [
+            .waitingForUser: ("Waiting for your answer in DeskMind", "在 DeskMind 窗口里等你回答"),
+            .paused: ("Paused while you use your Mac", "你在用电脑，已暂停，停手后继续"),
+        ]
+        for (st, n, en, zh) in headers {
+            for hidden in [false, true] {
+                for picture in [false, true] {
+                    for lang in [ResolvedLang.en, .zhHans] {
+                        let w = LV.words(st, windowHidden: hidden, hadPicture: picture, step: n, approval: false,
+                                         stepWords: "Click “Save”", lang: lang)
+                        let zhs = lang == .zhHans
+                        // the oracle: out of sight counts only with a picture to dim, and not once the run has ended
+                        let outOfSight = hidden && picture && ![LV.Status.done, .failed, .stopped].contains(st)
+                        let note = outOfSight ? (zhs ? "窗口不可见" : "Window not visible")
+                            : picture ? nil : (zhs ? "还没有画面" : "No picture yet")
+                        let line = lines[st].map { zhs ? $0.zh : $0.en } ?? "Click “Save”"
+                        let light: LV.Status = outOfSight && (st == .working || st == .starting) ? .hidden : st
+                        check(w.header == (zhs ? zh : en) && w.note == note && w.line == line && w.dimmed == outOfSight && w.status == light,
+                              "\(st) step \(n), hidden \(hidden), picture \(picture), \(lang): \(w)")
+                    }
                 }
             }
         }
+        // The helper's language from a request: session.open carries the session's code ("zh"), others the name.
+        check(ResolvedLang.fromRequest("zh") == .zhHans && ResolvedLang.fromRequest("zh-Hans") == .zhHans
+              && ResolvedLang.fromRequest("en") == .en && ResolvedLang.fromRequest("fr") == nil && ResolvedLang.fromRequest(nil) == nil,
+              "a request's lang, by name or by the session's code")
         for lang in [ResolvedLang.en, .zhHans] {
-            let hidden = LV.words(.hidden, step: 3, hadPicture: true, approval: false, stepWords: "", lang: lang)
-            check(hidden.header == L("Window not visible", lang: lang) && hidden.note == hidden.header, "hidden: header and note say so")
-        }
-        // The line under the picture, by state, worded in the language asked now (the pause line followed the language
-        // of the moment the pause began, and stayed after the run went back to work until its next step).
-        let lineTable: [(LV.Status, Bool, en: String, zh: String)] = [
-            (.waitingForUser, false, "Waiting for your answer in DeskMind", "在 DeskMind 窗口里等你回答"),
-            (.waitingForUser, true, "Waiting for your approval in DeskMind", "在 DeskMind 窗口里等你批准"),
-            (.paused, false, "Paused while you use your Mac", "你在用电脑，已暂停，停手后继续"),
-            (.starting, false, "Click “Save”", "Click “Save”"), (.working, false, "Click “Save”", "Click “Save”"),
-            (.working, true, "Click “Save”", "Click “Save”"), (.done, false, "Click “Save”", "Click “Save”"),
-        ]
-        for (st, approval, en, zh) in lineTable {
-            let wEn = LV.words(st, step: 3, hadPicture: true, approval: approval, stepWords: "Click “Save”", lang: .en)
-            let wZh = LV.words(st, step: 3, hadPicture: true, approval: approval, stepWords: "Click “Save”", lang: .zhHans)
-            check(wEn.line == en && wZh.line == zh, "line, \(st) approval \(approval): \(wEn.line) / \(wZh.line)")
+            let w = LV.words(.waitingForUser, windowHidden: false, hadPicture: true, step: 3, approval: true, stepWords: "", lang: lang)
+            check(w.line == (lang == .en ? "Waiting for your approval in DeskMind" : "在 DeskMind 窗口里等你批准"), "an approval: \(w.line)")
         }
     }
 

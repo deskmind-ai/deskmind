@@ -214,23 +214,29 @@ enum LiveView {
         }
     }
 
-    /// What the card says: the header's status part (the app goes before it), the note in the picture's place, and
-    /// the line under the picture. The header follows the run's state, never the picture: with no picture yet the
-    /// note says only that, whatever the state (it said "Starting" whenever there was none, so a run waiting for an
-    /// answer before its first step showed "Starting"). The line is the last step's words (the instruction before
-    /// the first), except while the run waits for the user, when it says what for. Worded from the state at every
-    /// refresh, so in the language of now (`approval`: the question waiting is an approval).
-    struct Words: Equatable { var header: String; var note: String?; var line: String }
+    /// What the card says and shows: the header's status part (the app goes before it), the note in the picture's
+    /// place, the line under the picture, whether the picture is dimmed, and the status its light and 小方 show. Two
+    /// facts go in apart: the run's state and whether its window is out of sight. The header and the line follow the
+    /// run (a paused run whose window is on another Space still says it is paused); the note and the dimming follow
+    /// the window. With no picture yet the note says only that, whatever the state (it said "Starting" whenever there
+    /// was none, so a run waiting for an answer before its first step showed "Starting"). The line is the last step's
+    /// words (the instruction before the first), except while the run waits for the user, when it says what for.
+    /// Worded from the state at every refresh, so in the language of now (`approval`: the question waiting is an
+    /// approval). Once the run has ended its last picture stays as it was: the window no longer counts.
+    struct Words: Equatable { var header: String; var note: String?; var line: String; var dimmed: Bool; var status: Status }
 
-    static func words(_ s: Status, step: Int, hadPicture: Bool, approval: Bool, stepWords: String,
+    static func words(_ run: Status, windowHidden: Bool, hadPicture: Bool, step: Int, approval: Bool, stepWords: String,
                       lang: ResolvedLang) -> Words {
-        let header = s == .working && step > 0 ? L("Step %d", step, lang: lang) : L(word(s), lang: lang)
-        let note = s == .hidden ? L(word(.hidden), lang: lang) : hadPicture ? nil : L("No picture yet", lang: lang)
-        let line = switch s {
+        let hidden = windowHidden && hadPicture && !run.isEnding
+        let header = run == .working && step > 0 ? L("Step %d", step, lang: lang) : L(word(run), lang: lang)
+        let note = hidden ? L(word(.hidden), lang: lang) : hadPicture ? nil : L("No picture yet", lang: lang)
+        let line = switch run {
         case .waitingForUser: L(approval ? "Waiting for your approval in DeskMind" : "Waiting for your answer in DeskMind", lang: lang)
         case .paused: L("Paused while you use your Mac", lang: lang)
         default: stepWords
         }
-        return Words(header: header, note: note, line: line)
+        // (小方 and the light: – – while the window of a run at work is out of sight; a paused or waiting run shows its own)
+        let status: Status = hidden && (run == .working || run == .starting) ? .hidden : run
+        return Words(header: header, note: note, line: line, dimmed: hidden, status: status)
     }
 }
