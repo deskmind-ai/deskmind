@@ -601,7 +601,15 @@ struct DeskMindApp: App {
                 // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
                 Toggle(L("Record Interface Use on This Mac", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
                        isOn: Binding(get: { uiLogOn }, set: { UIEvents.setEnabled($0) { now in uiLogOn = now } }))   // (as it is: a folder that refuses the switch's file keeps it)
-                Button(L("Clear Interface Use Records", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) { UIEvents.clear() }
+                Button(L("Clear Interface Use Records", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) {
+                    // (done, or the user is told: the helper may hold the log's lock for a while)
+                    UIEvents.clear { ok in
+                        guard !ok else { return }
+                        let a = NSAlert()
+                        a.messageText = L("Couldn't clear the interface use records. Try again in a moment.", lang: (AppLanguage(rawValue: language) ?? .en).resolved)
+                        a.runModal()
+                    }
+                }
             }
             // The 0.5 window's keys (handoff §3.7), only while it is on: the old window keeps its own.
             if shellOn {

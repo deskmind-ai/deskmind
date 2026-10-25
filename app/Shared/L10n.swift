@@ -318,6 +318,7 @@ enum L10n {
         "Show a Live View of the Task": "显示任务窗口的实时画面",
         "Record Interface Use on This Mac": "在本机记录界面使用情况",
         "Clear Interface Use Records": "清除界面使用记录",
+        "Couldn't clear the interface use records. Try again in a moment.": "没能清除界面使用记录，请稍后再试。",
         // The live view (Helper/LiveCard.swift).
         "DeskMind live view": "DeskMind 实时画面",
         "Click to answer in DeskMind": "点击在 DeskMind 里回答",

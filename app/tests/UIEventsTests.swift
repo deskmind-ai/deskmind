@@ -19,6 +19,7 @@ enum UIEventsTests {
         DecisionTests.group("ui-events.sample"); sampleTests()
         DecisionTests.group("ui-events.lockBound"); lockBoundTests()
         DecisionTests.group("ui-events.inferredExit"); inferredExitTests()
+        DecisionTests.group("ui-events.clearRetry"); clearRetryTests()
     }
 
     static var appDir: URL { URL(fileURLWithPath: FileManager.default.currentDirectoryPath) }
@@ -476,6 +477,7 @@ enum UIEventsTests {
     /// within the bound; a write gives up within the bound and is counted.
     static func lockBoundTests() {
         let d = tempDir(), log = UIEventLog(dir: d, file: UIEventLog.mainFile)
+        log.clearRetries = 0          // (one try here; the retries: below)
         log.record(.reopenAsked); log.flush()
         let fd = open(d.appendingPathComponent(UIEventLog.lockFile).path, O_CREAT | O_RDWR, 0o600)
         guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else { check(false, "the test holds the lock"); return }
@@ -499,6 +501,32 @@ enum UIEventsTests {
         log.clear { cleared = $0 }
         while cleared == nil && Date() < until.addingTimeInterval(1) { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
         check(cleared == true && !FileManager.default.fileExists(atPath: log.url.path), "the lock free: Clear done")
+    }
+
+    /// #123 Codex at a5c8995: a Clear the user asked for is done, or the user is told. The lock held 350 ms: tried
+    /// again in the background, done after it is let go. Held past the retries: done(false) (the menu says so).
+    static func clearRetryTests() {
+        func held(for seconds: Double?, retries: Int, every: Double) -> Bool? {
+            let d = tempDir(), log = UIEventLog(dir: d, file: UIEventLog.mainFile)
+            log.clearRetries = retries; log.clearRetryEvery = every
+            log.record(.reopenAsked); log.flush()
+            let fd = open(d.appendingPathComponent(UIEventLog.lockFile).path, O_CREAT | O_RDWR, 0o600)
+            guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else { return nil }
+            if let seconds { DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { flock(fd, LOCK_UN); close(fd) } }
+            var done: Bool?
+            let t0 = Date()
+            log.clear { done = $0 }
+            check(Date().timeIntervalSince(t0) < 0.05, "Clear returns at once")
+            let until = Date().addingTimeInterval(Double(retries + 1) * (every + UIEventLog.lockWait) + 2)
+            while done == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+            if seconds == nil { flock(fd, LOCK_UN); close(fd) }
+            if done == true { check(!FileManager.default.fileExists(atPath: log.url.path), "done: the log is gone") }
+            return done
+        }
+        check(held(for: 0.35, retries: 5, every: 0.1) == true, "the lock held 350 ms: Clear tried again, done once it was let go")
+        check(held(for: nil, retries: 2, every: 0.05) == false, "held past the retries: done(false), for the menu to say so")
+        let menu = source("Main/DeskMindApp.swift")
+        check(menu.contains("UIEvents.clear { ok in") && menu.contains("Couldn't clear the interface use records"), "the menu says when it could not clear")
     }
 
     /// #123 Codex re-review at 85a6d11 (the second bug of the inferred-exit family, redesigned from provenance): an exit

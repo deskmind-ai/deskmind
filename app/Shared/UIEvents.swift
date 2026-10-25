@@ -164,6 +164,10 @@ final class UIEventLog {
     /// How long a write or a Clear waits for the lock the other process holds, at most (#123 Codex re-review at
     /// 85a6d11: the wait was unbounded, and a helper stuck in IO held the main thread's Clear). Then it gives up.
     static let lockWait: Double = 0.2
+    /// A Clear the user asked for is tried again this many times, this far apart, on the log's queue without holding it
+    /// (#123 Codex at a5c8995: it gave up once, silently, and the logs stayed): it is done, or the user is told.
+    var clearRetries = 10
+    var clearRetryEvery: Double = 0.5
 
     /// Runs `f` holding the lock both processes write under, tried without blocking for at most `lockWait`; true when
     /// it ran. Not had in time: `f` does not run (a write is dropped, a Clear not done) and the failure is counted.
@@ -211,7 +215,9 @@ final class UIEventLog {
     /// what either process recorded before it is never written after it. On the log's queue, never the caller's thread
     /// (the menu's: the main thread never waits on the other process); `done` (on the main queue): whether it was done
     /// -- false when the lock was not had within `lockWait`.
-    func clear(done: ((Bool) -> Void)? = nil) {
+    func clear(done: ((Bool) -> Void)? = nil) { clear(attempt: 0, done: done) }
+
+    private func clear(attempt: Int, done: ((Bool) -> Void)?) {
         queue.async { [self] in
             let ok = locked {
                 let next = generation() + 1
@@ -219,6 +225,11 @@ final class UIEventLog {
                 for f in [Self.mainFile, Self.helperFile] {
                     for name in [f, f + ".1"] { try? FileManager.default.removeItem(at: dir.appendingPathComponent(name)) }
                 }
+            }
+            if !ok && attempt < clearRetries {
+                // (the lock still held: again a little later, the queue free meanwhile for the writes)
+                queue.asyncAfter(deadline: .now() + clearRetryEvery) { [self] in clear(attempt: attempt + 1, done: done) }
+                return
             }
             if let done { DispatchQueue.main.async { done(ok) } }
         }
