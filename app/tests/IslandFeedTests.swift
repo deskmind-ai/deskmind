@@ -345,7 +345,7 @@ enum IslandFeedTests {
             check(surface.detailsRecord == recA && recA != nil, "A ended: its link")
             // B, in a session of its own
             r.mock.replies[SessionClient.Op.open] = ["ok": true, "session_id": "ses_b", "last_seq": 0]
-            r.m.client.newClientId = { "c_b" }
+            r.m.client.makeClientId = { "c_b" }
             let b = goal(); b.start()
             for l: [String: Any] in [
                 ["kind": "session.message", "session_id": "ses_b", "seq": 1, "msg_id": "ub", "role": "user", "text": "b", "via": "cua", "client_id": "c_b"],
