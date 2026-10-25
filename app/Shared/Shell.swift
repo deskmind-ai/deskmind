@@ -11,15 +11,6 @@
 import Combine
 import Foundation
 
-// MARK: - The flag
-
-/// The new main window (handoff §6, M1): off by default; the View menu's developer switch turns it on. Off, the app is
-/// as it was.
-enum ShellFlag {
-    static let key = "ui05.shell"
-    static func isOn(_ defaults: UserDefaults = .standard) -> Bool { defaults.bool(forKey: key) }
-}
-
 // MARK: - Model settings saved
 
 /// The model settings were saved — the key file, the service, the configuration — wherever that happened: the 0.5

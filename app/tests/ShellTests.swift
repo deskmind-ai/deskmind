@@ -12,7 +12,6 @@ enum ShellTests {
 
     static func run() {
         DecisionTests.group("shell.defaultsHygieneTests"); defaultsHygieneTests()
-        DecisionTests.group("shell.flagTests"); flagTests()
         DecisionTests.group("shell.statusPriorityTests"); statusPriorityTests()
         DecisionTests.group("shell.composerTests"); composerTests()
         DecisionTests.group("shell.rowsTests"); rowsTests()
@@ -181,15 +180,6 @@ enum ShellTests {
     static func sends(_ mock: Mock) -> Int { mock.requests.filter(isControl).count }
 
     // MARK: the flag
-
-    static func flagTests() {
-        let d = scratchDefaults()
-        check(!ShellFlag.isOn(d), "off by default")
-        d.set(true, forKey: "ui05.shell")
-        check(ShellFlag.isOn(d), "on once set (the View menu's switch)")
-        d.set(false, forKey: ShellFlag.key)
-        check(!ShellFlag.isOn(d), "off again")
-    }
 
     // MARK: the status dot
 

@@ -16,8 +16,7 @@ struct TaskRow: View {
     @ObservedObject var shell: ShellModel
     let task: TaskState
     let session: SessionState
-    /// Its Stop: the chat's (the selected session's task); a goal's screen gives the goal's own (GoalRun.stop: by its
-    /// run, never run-less).
+    /// Its Stop: the chat's (the selected session's task) unless given.
     var stop: (() -> Void)? = nil
     @Environment(\.lang) private var lang
 

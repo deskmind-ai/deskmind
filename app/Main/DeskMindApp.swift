@@ -1,7 +1,7 @@
 import Combine
-// DeskMind.app (prototype): the window the user keeps open. It holds no special permission; it registers the
-// helper with launchd, walks the user through granting the helper's permissions (the setup card on the home
-// screen, HomeView), and reconnects whenever the helper restarts.
+// DeskMind.app: the window the user keeps open. It holds no special permission; it registers the helper with
+// launchd, walks the user through granting the helper's permissions (the first run, Main/FirstRun.swift), and
+// reconnects whenever the helper restarts.
 
 import ServiceManagement
 import SwiftUI
@@ -487,8 +487,6 @@ struct DeskMindApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = HelperModel()
     @StateObject private var downloader = ModelDownloader()
-    @StateObject private var eyes = EyesDownloader()
-    @StateObject private var history = RunHistory.shared
     @AppStorage(AppLanguage.key) private var language = AppLanguage.system.rawValue
 
     init() {
@@ -505,14 +503,10 @@ struct DeskMindApp: App {
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
     @AppStorage(RunRecorder.wholeScreenKey) private var recordWholeScreen = false
     @AppStorage(RunRecorder.smoothKey) private var recordSmooth = false
-    @AppStorage(LiveView.enabledKey) private var liveView = true
-    /// The 0.5 main window (M1, a developer switch until it is the only one).
-    @AppStorage(ShellFlag.key) private var shellOn = false
     var body: some Scene {
         WindowGroup(L("DeskMind", lang: AppLanguage.resolve(language))) {
             LocalizedRoot {
                 AppRoot().environmentObject(model).environmentObject(downloader)
-                    .environmentObject(eyes).environmentObject(history)
             }
         }
         .windowResizability(.contentSize)
@@ -530,12 +524,6 @@ struct DeskMindApp: App {
                 // 30 fps for footage where motion matters; the default 10 fps barely slows the run.
                 Toggle(L("Smooth Recordings (30 fps, Slows Tasks About 10%)", lang: AppLanguage.resolve(language)),
                        isOn: $recordSmooth)
-                // A corner card with the window the task works in, live, and the step it is taking.
-                Toggle(L("Show a Live View of the Task", lang: AppLanguage.resolve(language)),
-                       isOn: $liveView)
-                // Developer: the 0.5 main window (conversations, chat, the agent's column), off by default.
-                Toggle(L("Use the New Main Window (0.5 Preview)", lang: AppLanguage.resolve(language)),
-                       isOn: $shellOn)
                 // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
                 Toggle(L("Record Interface Use on This Mac", lang: AppLanguage.resolve(language)),
                        isOn: Binding(get: { uiLogOn }, set: { UIEvents.setEnabled($0) { now in uiLogOn = now } }))   // (as it is: a folder that refuses the switch's file keeps it)
@@ -555,10 +543,8 @@ struct DeskMindApp: App {
                     Text(verbatim: "English").tag(AppLanguage.en.rawValue)
                 }
             }
-            // The 0.5 window's keys (handoff §3.7), only while it is on: the old window keeps its own.
-            if shellOn {
-                ShellCommands(lang: AppLanguage.resolve(language))
-            }
+            // The window's keys (handoff §3.7).
+            ShellCommands(lang: AppLanguage.resolve(language))
             // Help: where to report a problem, and the project.
             CommandGroup(replacing: .help) {
                 Button(L("Report an Issue…", lang: AppLanguage.resolve(language))) {

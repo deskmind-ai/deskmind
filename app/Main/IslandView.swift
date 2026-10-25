@@ -176,26 +176,6 @@ enum MainWindow {
         NSApp.windows.first { !($0 is NSPanel) && $0.canBecomeMain && $0.contentView != nil }
     }
 
-    /// While a run is running the window cannot be closed (its close button is off; ⌘W beeps), only minimised: card
-    /// questions are answered in it, and closing it ended the run's view and model.
-    static func setClosable(_ on: Bool) {
-        runHolds = !on
-        applyClosable()
-    }
-
-    /// A goal is active (GoalRuns.app owns this: no view sets it).
-    static func setGoalClosable(_ on: Bool) {
-        goalHolds = !on
-        applyClosable()
-    }
-
-    private static var runHolds = false
-    private static var goalHolds = false
-    /// The close button as the run (RunModel) and the goal (GoalRuns) hold it — again for a window that came anew.
-    static func applyClosable() {
-        window?.standardWindowButton(.closeButton)?.isEnabled = !runHolds && !goalHolds
-    }
-
     /// A key was pressed in the last `seconds`, in any app (the HID system's own count; no keys are read).
     static func userTypedRecently(_ seconds: Double = 2) -> Bool {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown) < seconds

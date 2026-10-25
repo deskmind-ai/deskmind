@@ -3,7 +3,7 @@
 
 import AppKit
 
-/// RunOverlay, as the island a goal's frames are applied to. (Called on the main queue: GoalRun runs there.)
+/// RunOverlay, as the island a chat task's frames are applied to. (Called on the main queue.)
 final class RunOverlaySurface: IslandSurface {
     static let shared = RunOverlaySurface()
     var owner: ObjectIdentifier?
@@ -26,10 +26,6 @@ final class RunOverlaySurface: IslandSurface {
         }
     }
     func notify(title: String, body: String) { MainActor.assumeIsolated { RunOverlay.notify(title: title, body: body) } }
-    var detailsRecord: UUID? {
-        get { MainActor.assumeIsolated { RunOverlay.shared.detailsRecord } }
-        set { MainActor.assumeIsolated { RunOverlay.shared.detailsRecord = newValue } }
-    }
     var appActive: Bool { MainActor.assumeIsolated { NSApp.isActive } }
     var userTyping: Bool { MainActor.assumeIsolated { MainWindow.userTypedRecently() } }
 }

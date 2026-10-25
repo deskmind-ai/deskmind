@@ -61,6 +61,12 @@ enum LiveWatchTests {
         let back = LiveFeed.read(LiveFeed.frameLine(run: "r", window: 1, epoch: 1, jpeg: Data([1]), width: 1, height: 1, visible: [0.25, 0, 0.75, 1]))
         if case .frame(_, _, _, _, _, _, let v)? = back { check(v == [0.25, 0, 0.75, 1], "the visible part carried with the picture") } else { check(false, "the frame read") }
         check(LiveFeed.windowNumber("window:com.apple.TextEdit#812") == 812 && LiveFeed.windowNumber("file:/x") == nil, "a step's window number")
+        // (A10) the session's protocol events as they come, no translation: a step's object names the window it acts in
+        LiveWatch.note(run: "run_proto", ["kind": "step", "step_id": "st_1", "text": "click", "object": "window:com.example.Mail#7", "consequence": "read"])
+        check(LiveWatch.window(of: "run_proto") == 7, "a protocol step: the live view follows its window")
+        LiveWatch.note(run: "run_proto", ["kind": "step", "step_id": "st_2", "text": "click", "object": "window:Mail#9"])
+        check(LiveWatch.window(of: "run_proto") == 9, "an app-named window id too")
+        LiveWatch.note(run: "run_proto", ["kind": "task_done", "status": "succeeded", "reason": "", "summary": ""])
     }
 
     final class FakeSource: LiveFrameSource {

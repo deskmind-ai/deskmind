@@ -351,11 +351,11 @@ def run(env, helper):
     runs = [e for e in w1.lines if e.get("run_id") == run_id and not str(e.get("kind", "")).startswith("session.")]
     seqs = [e["seq"] for e in runs]
     check(seqs == list(range(1, len(seqs) + 1)), f"the task's lines once each, in order: {seqs}")
-    # the live card, on by default (as for op run), follows the task: one start, its events, one finish
+    # the live view's feed follows the task (A10: no helper card for a session): its events, one end
     drove = ui(run_id)
     whats = [d["what"] for d in drove]
-    check(whats[:1] == ["start"] and whats.count("start") == 1 and "show" in whats and whats[-1:] == ["finish"] and whats.count("finish") == 1,
-          f"the live card is shown without live_view (default on): {whats}")
+    check("note" in whats and "start" not in whats and whats[-1:] == ["ended"] and whats.count("ended") == 1,
+          f"the live view's feed follows the task, no helper card: {whats}")
     check(until(lambda: task_running() is False, 5) is not None, "the task over, no undo offered: nothing holds a restart")
 
     # disconnect; the chat goes on; reconnect with the cursor: no duplicate, no gap, the reply in progress caught up
@@ -428,7 +428,7 @@ def run(env, helper):
     for w in joined:
         w.close()
     whats = [d["what"] for d in ui(run1)]
-    check(whats.count("start") == 1 and whats.count("finish") == 1, f"those replays drove the card once: {whats.count('start')} start, {whats.count('finish')} finish")
+    check(whats.count("ended") == 1, f"those replays ended its feed once: {whats.count('ended')}")
     until(lambda: [m for m in w2.kinds("session.message", sid) if m.get("text") == "任务结束了。" and m.get("seq", 0) > last], 20)
     last = session_lines(sid)[-1]["seq"]
     until(lambda: w2.last_seq(sid) == last and w3.last_seq(sid) == last, 10)
@@ -449,13 +449,13 @@ def run(env, helper):
     ended = until(lambda: [e for e in w2.kinds("session.task_end", sid) if e.get("run_id") == runk], 15)
     check(bool(ex) and ended is not None and ended[0].get("status") == "failed", f"the executor killed: the session ends the task ({ex}, {ended and ended[0].get('status')})")
     whats = [d["what"] for d in ui(runk)]
-    check(whats[:1] == ["start"] and whats[-1:] == ["finish"], f"its card ends without a task_done: {whats}")
+    check(whats.count("ended") == 1, f"its live view ends without a task_done: {whats}")
     until(lambda: [e for e in w2.kinds("session.task_closed", sid) if e.get("run_id") == runk], 10)
     until(lambda: [m for m in w2.kinds("session.message", sid) if m.get("role") == "assistant" and m.get("seq", 0) > ended[0].get("seq", 0)] if ended else True, 20)
     send(sid, {"type": "cua", "text": "给笔记换个颜色"})
     ask = until(lambda: [a for a in w2.kinds("ask", sid) if a.get("run_id") not in (run_id, run1, runk)], 30)
     runn = ask[0]["run_id"] if ask else ""
-    check(bool(runn) and [d["what"] for d in ui(runn)][:1] == ["start"], "the next task of the session gets its card")
+    check(bool(runn) and "note" in [d["what"] for d in ui(runn)], "the next task of the session is followed too")
     if ask:
         send(sid, {"type": "answer", "run_id": runn, "ask_id": ask[0]["ask_id"], "option": 0})
     until(lambda: [e for e in w2.kinds("session.task_closed", sid) if e.get("run_id") == runn], 30)
@@ -561,7 +561,7 @@ def run(env, helper):
     check(ask2 is not None, f"a second task waits on its card ({sent2}, {[(e.get('code'), e.get('why'), e.get('text')) for e in w4.kinds('session.error', sid)]})")
     run2 = ask2[0]["run_id"] if ask2 else ""
     whats = [d["what"] for d in ui(run2)]
-    check("start" not in whats and "show" not in whats, f"live_view false: no card, the recording only ({whats})")
+    check("start" not in whats and "show" not in whats, f"live_view false (accepted, ignored): the feed only ({whats})")
     r = request({"op": "e2e.acquire", "run_id": "run_oprun2"})
     check(r.get("code") == "computer_busy", f"op run while a session's task holds the Mac: computer_busy ({r.get('code')})")
     w4.close()

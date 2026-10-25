@@ -43,8 +43,8 @@ enum SessionE2E {
                                   environment: { _ in ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"].merging(pass) { x, _ in x } },
                                   prepare: {}, idleSeconds: Double(a[6]) ?? 300, driver: "sim")
         SessionHost.onModelsOff = { uiLock.lock(); modelsOffStops += 1; uiLock.unlock() }
-        SessionHost.setup.ui = .init(start: { run, _, _ in note(run, "start") }, show: { run, ev in note(run, "show", ev) },
-                                     record: { run, ev in note(run, "record", ev) }, finish: { run, st in note(run, "finish", ["status": "\(String(describing: st))"]) })
+        // (A10: the live view's feed only -- the helper shows no card of its own for a session)
+        SessionHost.setup.ui = .init(note: { run, ev in note(run, "note", ev) }, ended: { run in note(run, "ended") })
         serve(path: a[2])
     }
 
@@ -54,7 +54,7 @@ enum SessionE2E {
     nonisolated(unsafe) static var modelsOffStops = 0
     static let uiLock = NSLock()
     static func note(_ run: String, _ what: String, _ ev: [String: Any] = [:]) {
-        uiLock.lock(); ui.append(["run_id": run, "what": what, "event": ev["event"] ?? ev["status"] ?? ""]); uiLock.unlock()
+        uiLock.lock(); ui.append(["run_id": run, "what": what, "event": ev["kind"] ?? ev["event"] ?? ""]); uiLock.unlock()
     }
 
     static func testOp(_ req: [String: Any]) -> [String: Any]? {

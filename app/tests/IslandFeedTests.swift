@@ -76,11 +76,10 @@ enum IslandFeedTests {
     final class FakeSurface: IslandSurface {
         var owner: ObjectIdentifier?
         var calls: [String] = []
-        var detailsRecord: UUID? = nil
         var appActive = true
         var userTyping = false
         func requestNotifications() {}
-        func show(title: String, line: String, onStop: @escaping () -> Void) { calls.append("show"); detailsRecord = nil }   // (as RunOverlay.show)
+        func show(title: String, line: String, onStop: @escaping () -> Void) { calls.append("show") }
         func update(step: Int, line: String) { calls.append("update") }
         func setAsking(_ on: Bool) { calls.append("asking:\(on)") }
         func finish(passed: Bool, stopped: Bool, summary: String) { calls.append("finish:\(passed):\(summary)") }

@@ -30,7 +30,6 @@ struct IslandFrame: Equatable {
     var cardApproval: Bool
     var cardText: String
     /// The recent-runs record its "Show Details" opens (once kept).
-    var detailsRecord: UUID? = nil
 }
 
 enum IslandFeed {

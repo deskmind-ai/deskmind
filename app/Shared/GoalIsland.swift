@@ -1,11 +1,8 @@
-// A goal's island, notifications and recent-runs record, as the app applies them (M2, PR B) — here, with what only
-// the app has (RunOverlay, RunRecorder, RunHistory) behind two small protocols, so the tests run the same applier and
-// the same GoalRunEffects closures the app does (#119 review at 3795dcf).
+// A chat task's island and notifications, as the app applies them: its frames (IslandFeed.frame) to an IslandSurface
+// (the app: RunOverlay; a test: its own), so the tests run the same applier the app does.
 //
-// - IslandApplier: a goal's frames (IslandFeed.frame(goal)) to an IslandSurface — show once, then step / line /
-//   asking as they change, finish once; the record "Show Details" opens is part of the frame and is set after `show`
-//   (which clears the last one), so a task that starts and ends in one update keeps its link.
-// - GoalRunEffects.app: the recording, the record (once), the deadlines, the island — kept with the goal.
+// - IslandApplier: a task's frames to an IslandSurface -- show once, then step / line / asking as they change, finish
+//   once.
 
 import Foundation
 
@@ -21,8 +18,6 @@ protocol IslandSurface: AnyObject {
     func setAsking(_ on: Bool)
     func finish(passed: Bool, stopped: Bool, summary: String)
     func notify(title: String, body: String)
-    /// The recent-runs record its "Show Details" opens.
-    var detailsRecord: UUID? { get set }
     var appActive: Bool { get }
     var userTyping: Bool { get }
 }
@@ -43,8 +38,6 @@ final class IslandApplier {
             o.requestNotifications()
             o.show(title: title.count > 40 ? String(title.prefix(39)) + "…" : title, line: f.line, onStop: onStop)
         }
-        // (after `show`, which clears it: the frame's own link, whatever order its record and its first frame came in)
-        if let r = f.detailsRecord, o.detailsRecord != r { o.detailsRecord = r }
         if let n = IslandFeed.cardNotification(from: last, to: f, appActive: o.appActive, userTyping: o.userTyping, lang: lang) {
             o.notify(title: n.title, body: n.body)
         }
@@ -62,4 +55,3 @@ final class IslandApplier {
     }
 }
 
-/// What the app keeps of a goal (the app: RunRecorder and RunHistory; a test: its own).

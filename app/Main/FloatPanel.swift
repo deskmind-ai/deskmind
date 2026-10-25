@@ -33,8 +33,14 @@ final class SystemNotifier: CardNotifier {
 final class ChatIslandSurface: IslandSurface {
     var owner: ObjectIdentifier?
     private let base = RunOverlaySurface.shared
+    /// "Show Details": the window on this task's conversation (its task message, the right column).
+    private let details: () -> Void
+    init(details: @escaping () -> Void) { self.details = details }
     func requestNotifications() { base.requestNotifications() }
-    func show(title: String, line: String, onStop: @escaping () -> Void) { base.show(title: title, line: line, onStop: onStop) }
+    func show(title: String, line: String, onStop: @escaping () -> Void) {
+        base.show(title: title, line: line, onStop: onStop)
+        MainActor.assumeIsolated { RunOverlay.shared.onDetails = details }
+    }
     func update(step: Int, line: String) { base.update(step: step, line: line) }
     func setAsking(_ on: Bool) { base.setAsking(on) }
     func finish(passed: Bool, stopped: Bool, summary: String) {
@@ -46,7 +52,6 @@ final class ChatIslandSurface: IslandSurface {
         }
     }
     func notify(title: String, body: String) {}       // (CardNotices posts them, by id)
-    var detailsRecord: UUID? { get { nil } set {} }
     var appActive: Bool { base.appActive }
     var userTyping: Bool { base.userTyping }
 }
@@ -164,7 +169,10 @@ final class FloatController: ObservableObject {
             return
         }
         let pinned = shell.pinned(s)
-        let island = islands[task.runId] ?? { let a = IslandApplier(ChatIslandSurface()); islands[task.runId] = a; return a }()
+        let island = islands[task.runId] ?? {
+            let a = IslandApplier(ChatIslandSurface(details: { [weak shell] in shell?.select(sid) }))
+            islands[task.runId] = a; return a
+        }()
         island.apply(IslandFeed.frame(task, pinned: pinned.map { ($0.card, $0.phase) }, lang: lang), title: task.raw, lang: lang,
                      onStop: { shell.stop(sessionId: sid, runId: task.runId) })
         let card = pinned.map { CardModel(card: $0.card.card, runId: $0.runId, askId: $0.card.askId) }
