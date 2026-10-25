@@ -57,7 +57,7 @@ enum UIEventsTests {
         let body = String(src[start.upperBound..<end.lowerBound])
         let code = body.split(separator: "\n").map { $0.components(separatedBy: "//").first ?? "" }
         // every case's associated values: enums of this file, Int, Bool, ID — nothing else
-        let allowed: Set<String> = ["ID?", "ID", "CardKind", "Place", "Window", "Option", "Pick", "Ending", "Activation", "Input", "Undo", "Int", "Bool"]
+        let allowed: Set<String> = ["ID?", "ID", "CardKind", "Place", "Window", "Option", "Pick", "Ending", "Activation", "Input", "Undo", "Int", "Int?", "Bool"]
         var cases = 0, bad: [String] = []
         for l in code where l.trimmingCharacters(in: .whitespaces).hasPrefix("case ") && l.contains("(") && !l.contains("enum ") {
             guard let open = l.firstIndex(of: "("), let close = l.lastIndex(of: ")") else { continue }
@@ -277,6 +277,36 @@ enum UIEventsTests {
             r.resumed("a1")
             check(take() == [.cardEnded(run: nil, ask: nil, kind: .action, why: .answered)], "its ending, live: logged")
         }
+        // a pick on a card shown before the relaunch: its time since shown is not known -- left out, never 0
+        do {
+            let (r, take) = rig()
+            r.emit("ask", ["ask_id": "a1", "card": R.cardJSON("action"), "t": 999_000.0]); _ = take()
+            r.timers.advance(60)
+            r.click("a1", .skipStep)
+            let e = take()
+            check(e == [.cardPick(run: nil, ask: nil, kind: .action, option: .skipStep, by: .click, place: .chat, ms: nil)], "no ms when the show is unknown: \(e)")
+            check(e.first.map { $0.fields["ms"] == nil } == true, "and none in the line")
+        }
+        // #123 review probe: the whole stored history of each recorded session, in any order, after the app began
+        // watching: nothing is logged
+        do {
+            struct RNG { var s: UInt64; mutating func next() -> UInt64 { s = s &* 6364136223846793005 &+ 1442695040888963407; return s >> 33 } }
+            var logged: [String] = []
+            for name in SessionTests.names {
+                let ls = SessionTests.lines(name)
+                for seed in 1...12 {
+                    var r = RNG(s: UInt64(seed)), order = ls
+                    for i in stride(from: order.count - 1, to: 0, by: -1) { order.swapAt(i, Int(r.next() % UInt64(i + 1))) }
+                    let t = ShellTests.Timers()
+                    t.now = 1_900_000_000
+                    let m = ShellModel(client: SessionClient(transport: R.Wire()), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                                       lang: { .zhHans }, takeBackAfter: t.after, now: { t.now }, work: { $0() }, deliver: { $0() })
+                    m.uiRecord = { logged.append("\(name) seed \(seed): \($0.name)") }
+                    for l in order { m.client.feed(l) }
+                }
+            }
+            check(logged.isEmpty, "all history, any order (\(SessionTests.names.count) sessions × 12): nothing logged: \(logged.prefix(3))")
+        }
         // the real ids, when the run's are the harness's
         let s0 = SessionState()
         var s1 = SessionState()
@@ -363,7 +393,8 @@ enum UIEventsTests {
         at(0, .cardSent(run: r1, ask: nil, kind: .result, heldMs: 0))
         at(1_500, .undo(run: r1, outcome: .undone))
         at(30_000, .activation(by: .none, input: .none))
-        at(8_000, .activation(by: .none, input: .keyDown))           // ⌘Tab
+        at(8_000, .activation(by: .none, input: .keyDown))           // a key the user pressed
+        at(4_000, .activation(by: .none, input: .appKitDefined))     // ⌘Tab: the system's
         at(9_000, .activation(by: .none, input: .mouseDownInWindow)) // a click on the window
         at(2_000, .cardShown(run: r2, ask: a3, kind: .action, place: .chat, window: .minimized, options: 3, details: true))
         at(5_000, .cardPick(run: r2, ask: a3, kind: .action, option: .approve, by: .click, place: .chat, ms: 5_000))   // held, then dropped: no answer
@@ -372,6 +403,10 @@ enum UIEventsTests {
         at(3_000, .liveCardOpen)
         at(120, .activation(by: .none, input: .none))
         at(1_000, .cardReask(run: r2, ask: a3, kind: .action))
+        // a card shown before a relaunch, answered after it: no card_shown, no ms -- left out of the times
+        let a5 = UIEvent.ID("ask_0b1c2d3e")
+        at(1_000, .cardPick(run: r2, ask: a5, kind: .missing, option: .choice, by: .click, place: .chat, ms: nil))
+        at(3_000, .cardSent(run: r2, ask: a5, kind: .missing, heldMs: 3_000))
         at(4_000, .cardShown(run: r2, ask: a4, kind: .ambiguity, place: .chat, window: .front, options: 4, details: false))
         at(7_000, .cardPick(run: r2, ask: a4, kind: .ambiguity, option: .choice, by: .click, place: .chat, ms: 7_000))
         at(3_000, .cardSent(run: r2, ask: a4, kind: .ambiguity, heldMs: 3_000))

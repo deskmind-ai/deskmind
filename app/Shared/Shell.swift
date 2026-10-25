@@ -957,9 +957,10 @@ final class ShellModel: ObservableObject {
 
     private func logPick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick) {
         let c = logCard(a), key = CardStore.key(a)
-        let ms = cardShownAt[key].map { Int(((now() - $0) * 1000).rounded()) } ?? 0
+        // (not known for a card shown before this model began watching: left out, never 0)
+        let ms = cardShownAt[key].map { max(0, Int(((now() - $0) * 1000).rounded())) }
         cardPickedAt[key] = now()
-        uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: .chat, ms: max(0, ms)))
+        uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: .chat, ms: ms))
     }
 
     /// The answer is being written: what the log will say once the helper took it (write's `sent`).

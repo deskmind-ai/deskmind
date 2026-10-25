@@ -8,14 +8,17 @@ events at or after it count. Without files it reads ui-events.jsonl and ui-event
 DIR, by default ~/Library/Application Support/DeskMind. It only reads; nothing leaves this Mac.
 
 Prints, per task: cards shown by kind and where they were answered, take-backs, expiries, re-asks and undo
-outcomes; then the time from a card shown to the pick that was sent (median and 90th percentile) by the main
-window's state when it came; then activations by cause, pauses, and l10n misses.
+outcomes; then the time from a card shown to the pick that was sent (median and 90th percentile, from the two
+events' times; a card with no card_shown -- shown before a relaunch -- is left out) by the main window's state when
+it came; then activations by cause, pauses, and l10n misses.
 
 An answer is a card_sent: its pick is the last one before it (a pick taken back is no answer; one held and dropped --
 the card closed, cloud models went off -- has no card_sent). An activation is explained by DeskMind's own funnel (its
 `by`), by the user's own event AppKit was handling then (a mouse-down, a key-down: `input`), or by a reopen the app
-was asked for or a live-card open the helper logged within a second of it; any other is "unexplained" (acceptance
-wants 0). Nothing is guessed from timing of the user's input.
+was asked for or a live-card open the helper logged within a second of it. One whose event was AppKit-defined (the
+system's: ⌘Tab, a click on a window behind, a launch) is its own row: it cannot be put down to anyone. "Unexplained"
+is an activation with no funnel call, an event of no kind or another, and no reopen or live-card open near it.
+Whether DeskMind ever took the front on its own is checked by the passive recording of the front app, not here.
 """
 
 import argparse
@@ -83,6 +86,7 @@ def summary(events):
     tasks = defaultdict(lambda: {"shown": Counter(), "answered_in": Counter(), "take_backs": 0, "expired": 0,
                                  "reasks": 0, "undo": Counter()})
     window_of = {}  # (run, ask) -> the window when the card came
+    shown_at = {}   # (run, ask) -> when it was shown
     last_pick = {}  # (run, ask) -> its pick held now (taken back: none)
     answers = []    # (card, the pick that was sent)
     activations_raw, reopens, live_opens = [], [], []
@@ -97,6 +101,7 @@ def summary(events):
         if name == "card_shown":
             t["shown"][e.get("kind", "?")] += 1
             window_of[card] = e.get("window", "?")
+            shown_at[card] = e["t"]
         elif name == "card_pick":
             last_pick[card] = e
         elif name == "card_take_back":
@@ -127,7 +132,8 @@ def summary(events):
     picks_by_window = defaultdict(list)
     for card, e in answers:
         tasks[card[0]]["answered_in"][e.get("place", "?")] += 1
-        picks_by_window[window_of.get(card, "?")].append(e.get("ms", 0))
+        if card in shown_at:
+            picks_by_window[window_of[card]].append(e["t"] - shown_at[card])
 
     def near(times, t):
         return any(abs(x - t) <= NEAR_MS for x in times)
@@ -138,6 +144,8 @@ def summary(events):
             activations[by] += 1
         elif e.get("input") in USER_INPUT:
             activations["user_" + e["input"]] += 1
+        elif e.get("input") == "appkit_defined":
+            activations["system"] += 1
         elif near(live_opens, e["t"]):
             activations["live_card"] += 1
         elif near(reopens, e["t"]):
@@ -161,6 +169,8 @@ def summary(events):
         out.append(f"| {w} | {len(v)} | {ms(pct(v, 0.5))} | {ms(pct(v, 0.9))} |")
     out.append("")
     out.append(f"Activations: {counts(activations)}; unexplained (must be 0): {activations.get('unexplained', 0)}")
+    out.append(f"  system activation (⌘Tab / click / launch -- not attributable): {activations.get('system', 0)}")
+    out.append("  (whether DeskMind ever took the front on its own: the passive front-app recording, not this log)")
     out.append(f"Pauses: {pauses}, {ms(paused_ms) if pauses else '0.0s'} in all")
     out.append(f"l10n misses: {counts(l10n)}")
     return "\n".join(out) + "\n"

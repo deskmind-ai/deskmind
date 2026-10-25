@@ -55,7 +55,8 @@ enum UIEvent: Equatable {
                         expiredNewTask = "expired_new_task", expiredHelperQuit = "expired_helper_quit", expiredOther = "expired_other" }
 
     case cardShown(run: ID?, ask: ID?, kind: CardKind, place: Place, window: Window, options: Int, details: Bool)
-    case cardPick(run: ID?, ask: ID?, kind: CardKind, option: Option, by: Pick, place: Place, ms: Int)
+    /// `ms`: since the card was shown here; nil when that is not known (a card shown before a relaunch).
+    case cardPick(run: ID?, ask: ID?, kind: CardKind, option: Option, by: Pick, place: Place, ms: Int?)
     case cardTakeBack(run: ID?, ask: ID?, kind: CardKind)
     /// Written to the session; `heldMs`: how long it was held for its take-back (0: sent at once).
     case cardSent(run: ID?, ask: ID?, kind: CardKind, heldMs: Int)
@@ -97,7 +98,9 @@ enum UIEvent: Equatable {
         case .cardShown(let r, let a, let k, let p, let w, let n, let d):
             return with(ids(r, a), ["kind": k.rawValue, "place": p.rawValue, "window": w.rawValue, "options": n, "details": d])
         case .cardPick(let r, let a, let k, let o, let b, let p, let ms):
-            return with(ids(r, a), ["kind": k.rawValue, "option": o.rawValue, "by": b.rawValue, "place": p.rawValue, "ms": ms])
+            var f = with(ids(r, a), ["kind": k.rawValue, "option": o.rawValue, "by": b.rawValue, "place": p.rawValue])
+            if let ms { f["ms"] = ms }
+            return f
         case .cardTakeBack(let r, let a, let k), .cardReask(let r, let a, let k):
             return with(ids(r, a), ["kind": k.rawValue])
         case .cardSent(let r, let a, let k, let ms):
