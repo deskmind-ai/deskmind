@@ -75,6 +75,10 @@ struct CardLayout: Equatable {
     var beyond: [String]
     /// The text and the plan's steps are folded under 「细节」: only with a headline (else they are the card).
     var folds: Bool
+    /// The text, shown whole under the title, when the card has a headline and folds nothing (an action card with no
+    /// consent fields: its text is the only account of what it does). nil: the text is the title, or it is folded.
+    /// #124 Codex review at 80c339e: such a card showed its headline only, and its 「可以」 took a click.
+    var shownText: String? { folds || title == text || text.isEmpty ? nil : text }
     /// In the order shown: the list, then the buttons.
     var controls: [Control]
     /// The card takes the user's own words, in its own field (main window only).

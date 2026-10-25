@@ -446,9 +446,16 @@ final class ShellModel: ObservableObject {
     /// on a card that does not fit: its content may be off screen; the mouse reaches its button only past the content).
     @Published private(set) var cardHeights: [String: Double] = [:]
     @Published private(set) var pinRoom: Double = 0
-    /// Cards whose 「细节」 is open, by card key: kept here, not in the view, so that a card moving between the pinned
-    /// place and the chat keeps it (#124 review). Its height counts folded (cardLaidOut), so opening it never moves it.
+    /// Cards whose 「细节」 is open, by card key, and the words typed in a card's own field: kept here, not in the view, so
+    /// that a card moving between the pinned place and the chat keeps them (#124 reviews). The card's height counts as
+    /// it is, open or not: a card that outgrew the pinned place with its details open moves to the chat, open.
     @Published private(set) var openDetails: Set<String> = []
+    @Published private(set) var cardDrafts: [String: String] = [:]
+    func cardDraft(_ card: CardModel) -> String { cardDrafts[Self.cardKey(card)] ?? "" }
+    func setCardDraft(_ card: CardModel, _ text: String) {
+        let key = Self.cardKey(card)
+        if text.isEmpty { cardDrafts[key] = nil } else if cardDrafts[key] != text { cardDrafts[key] = text }
+    }
 
     let client: SessionClient
     private let names: SessionNames
@@ -1047,8 +1054,9 @@ final class ShellModel: ObservableObject {
         guard control.key != nil, !editingText, !composing, keysActive(card), let id = selected else { return false }
         let b = control.button
         guard b.runId == card.runId, b.askId == card.askId, b.askId != nil, selected == id else { return false }
-        // (an approve-type option's key only on a card that fits whole: A2)
-        if b.role.needsWholeBody && !cardFits(card) { return false }
+        // (a key only on a card that fits whole: every control of it is on screen -- #124 Codex review at 80c339e; a
+        // card in place in the chat is the mouse's)
+        if !cardFits(card) { return false }
         return canSend(b)
     }
 
@@ -1141,14 +1149,15 @@ final class ShellModel: ObservableObject {
         let keep = { (k: String) in pinnedKeys.contains(k) || results.contains(k) }
         if cardHeights.keys.contains(where: { !keep($0) }) { cardHeights = cardHeights.filter { keep($0.key) } }
         if openDetails.contains(where: { !keep($0) }) { openDetails = openDetails.filter(keep) }
+        if cardDrafts.keys.contains(where: { !keep($0) }) { cardDrafts = cardDrafts.filter { keep($0.key) } }
     }
 
-    /// The card's height as laid out (its view's geometry), folded: one measured with 「细节」 open is not taken (the
-    /// fold is no reason to move the card, and moving it would close nothing but confuse), and the pinned place's room
-    /// (the window's that pins the card: the chat column, or a goal's screen).
+    /// The card's height as laid out (its view's geometry), as it is -- 「细节」 open or not (#124 Codex review at 80c339e:
+    /// a card kept pinned at its folded height grew past the window with its details open, its controls off screen) --
+    /// and the pinned place's room (the window's that pins the card: the chat column, or a goal's screen).
     func cardLaidOut(_ card: CardModel, height: Double) {
         let key = Self.cardKey(card)
-        guard !openDetails.contains(key), height > 0 else { return }
+        guard height > 0 else { return }
         if cardHeights[key] != height { cardHeights[key] = height }
     }
     func detailsOpen(_ card: CardModel) -> Bool { openDetails.contains(Self.cardKey(card)) }

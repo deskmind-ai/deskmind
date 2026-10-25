@@ -28,7 +28,8 @@ struct CardView: View {
     let askedAt: Double?
     let session: SessionState
     @Environment(\.lang) private var lang
-    @State private var words = ""
+    /// The words typed in its own field: the shell's, by card key (they survive the card moving: #124 Codex review).
+    private var words: Binding<String> { Binding(get: { shell.cardDraft(card) }, set: { shell.setCardDraft(card, $0) }) }
     /// 「细节」 open or not: the shell's, by card key (it survives the card moving between the pinned place and the chat).
     private var detailsOpen: Binding<Bool> {
         Binding(get: { shell.detailsOpen(card) }, set: { shell.setDetails(card, open: $0) })
@@ -51,6 +52,10 @@ struct CardView: View {
             Text(layout.title).font(.system(size: 13, weight: layout.folds ? .semibold : .regular)).foregroundStyle(Brand.ink)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if let t = layout.shownText {
+                Text(t).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
                 Text(line).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
             }
@@ -85,12 +90,12 @@ struct CardView: View {
             if case .expired(_, let now) = phase { expiredRow(now) }
             if layout.field && phase.ending == nil {
                 HStack(spacing: 8) {
-                    TextField(L("Or answer in your own words", lang: lang), text: $words, axis: .vertical)
+                    TextField(L("Or answer in your own words", lang: lang), text: words, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(sendWords)
                         .disabled(!wordsEnabled)
                     Button(L("Send", lang: lang), action: sendWords).buttonStyle(InkButtonStyle(prominent: false))
-                        .disabled(!wordsEnabled || words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!wordsEnabled || words.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -157,7 +162,7 @@ struct CardView: View {
                     .font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
             }
             Button(L("Take back", lang: lang)) {
-                if case .text(_, _, let w) = held { words = w }
+                if case .text(_, _, let w) = held { words.wrappedValue = w }
                 shell.takeBack(card)
             }
             .buttonStyle(InkButtonStyle(prominent: false))
@@ -191,8 +196,8 @@ struct CardView: View {
 
     private func sendWords() {
         guard wordsEnabled else { return }
-        shell.answer(card, text: words)
-        words = ""
+        shell.answer(card, text: words.wrappedValue)
+        words.wrappedValue = ""
     }
 
     /// 「<状态>：<卡的种类>。<标题>。<n> 个选项」 (handoff §3.10): the title is H2's headline, else the text's first sentence.
