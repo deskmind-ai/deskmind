@@ -155,6 +155,8 @@ struct TaskState: Equatable {
     /// Between session.task / start and the first plan, step or card.
     var preparing = true
     var plan: [PlanEvent.Step] = []
+    /// How many steps had been taken when the latest plan came: those before it were the old plan's (the right column).
+    var planSince = 0
     var steps: [StepState] = []
     var cards: [CardState] = []
     var openCardId: String? = nil
@@ -870,6 +872,7 @@ enum SessionReducer {
             break
         case .plan(let p):
             task.plan = p.steps
+            task.planSince = task.steps.count      // (a new plan -- a steer, an answer -- replaces the old: its steps count from here)
             task.preparing = false
             if let e = task.waitingOnExpired { task.movedOn.insert(e) }
         case .step(let e):

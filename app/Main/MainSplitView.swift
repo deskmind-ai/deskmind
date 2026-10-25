@@ -655,26 +655,99 @@ struct AgentPanel: View {
     @ObservedObject var shell: ShellModel
     @Environment(\.lang) private var lang
 
+    /// The column's blocks (RightColumn.model: only what the events said), each second while a task runs.
     var body: some View {
-        let status = shell.current?.status ?? .idle
-        VStack(spacing: 14) {
-            XiaoFang(mood: Self.mood(status), size: 84)
-                .accessibilityHidden(true)
-            Text(ShellText.status(status, lang: lang))
-                .font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Brand.ink)
-                .multilineTextAlignment(.center)
-                .accessibilityLabel(L("Status: %@", ShellText.status(status, lang: lang), lang: lang))
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-                .overlay(Text(L("The live view of the task's window and its steps will show here.", lang: lang))
-                            .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-                            .multilineTextAlignment(.center).padding(14))
-                .frame(height: 180)
-            Spacer()
+        TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }
+    }
+
+    private var column: RightColumn {
+        let other = shell.rows.first { $0.id != shell.selected && $0.taskRunning }?.title
+        return RightColumn.model(shell.current, otherRunning: other, now: shell.now())
+    }
+
+    private func content(_ c: RightColumn) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(spacing: 6) {
+                    XiaoFang(mood: Self.mood(c.status), size: 84).accessibilityHidden(true)
+                    Text(ShellText.status(c.status, lang: lang))
+                        .font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Brand.ink)
+                        .multilineTextAlignment(.center)
+                        .accessibilityLabel(L("Status: %@", ShellText.status(c.status, lang: lang), lang: lang))
+                    if let p = c.progress {
+                        Text(L("Step %d · %d:%02d", p.step, p.seconds / 60, p.seconds % 60, lang: lang))
+                            .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                // (the live view of the task's window: A4)
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                    .overlay(Text(L("The live view of the task's window and its steps will show here.", lang: lang))
+                                .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                                .multilineTextAlignment(.center).padding(14))
+                    .frame(height: 150)
+                if let who = c.computerUsedBy {
+                    Text(L("The computer is being used by 「%@」", who, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+                }
+                if c.youAreUsingIt || c.screenLocked {
+                    section(L("This Mac", lang: lang)) {
+                        if c.youAreUsingIt { line(L("You're using it: the task waits for you to stop", lang: lang)) }
+                        if c.screenLocked { line(L("The screen was locked, so the task stopped", lang: lang)) }
+                    }
+                }
+                if !c.plan.isEmpty {
+                    section(L("Steps", lang: lang)) {
+                        ForEach(c.plan, id: \.n) { r in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(Self.markSymbol(r.mark)).font(.system(size: 11, weight: .semibold)).foregroundStyle(r.mark == .current ? ShellColor.orangeText : ShellColor.secondary)
+                                    .accessibilityHidden(true)
+                                Text(r.purpose).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+                                if r.asksFirst { Text(L("asks before sending", lang: lang)).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel(L("Step %d: %@, %@", r.n, r.purpose, Self.markWord(r.mark, lang: lang), lang: lang))
+                        }
+                    }
+                }
+                if !c.changes.isEmpty {
+                    section(L("Changes and outputs", lang: lang)) {
+                        if c.changes.undone { line(L("All undone", lang: lang)) }
+                        list(L("Created", lang: lang), c.changes.created)
+                        list(L("Modified", lang: lang), c.changes.modified)
+                        list(L("Deleted", lang: lang), c.changes.deleted)
+                        list(L("Sent out", lang: lang), c.changes.external)
+                        if !c.changes.unconfirmed.isEmpty {
+                            line(L("Files that appeared or changed while the task worked in apps; not known to be this task's (not undone)", lang: lang))
+                            ForEach(c.changes.unconfirmed, id: \.self) { line($0) }
+                        }
+                    }
+                }
+            }
+            .padding(18)
         }
-        .padding(18)
         .frame(maxHeight: .infinity)
         .background(ShellColor.panel)
+    }
+
+    @ViewBuilder private func section(_ title: String, @ViewBuilder _ body: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+            body()
+        }
+    }
+    @ViewBuilder private func list(_ label: String, _ items: [String]) -> some View {
+        if !items.isEmpty { line(L("%@: %@", label, items.joined(separator: L(", ", lang: lang)), lang: lang)) }
+    }
+    private func line(_ text: String) -> some View {
+        Text(text).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+    }
+
+    static func markSymbol(_ m: RightColumn.PlanRow.Mark) -> String {
+        switch m { case .done: "✓"; case .current: "▶"; case .todo: "·" }
+    }
+    static func markWord(_ m: RightColumn.PlanRow.Mark, lang: ResolvedLang) -> String {
+        switch m { case .done: L("done", lang: lang); case .current: L("doing now", lang: lang); case .todo: L("not yet", lang: lang) }
     }
 
     /// 小方's face for the state (LiveView.face): looking while it works, up when it waits for you, happy when done,
