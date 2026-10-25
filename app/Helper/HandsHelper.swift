@@ -283,7 +283,7 @@ func serve() {
             let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
             // The main app's language, sent with every request (status polls included): steps, hints and errors
             // follow a switch within a second. English until the first request says otherwise.
-            if let lang = (req["lang"] as? String).flatMap(ResolvedLang.init(rawValue:)) { ResolvedLang.current = lang }
+            if let lang = ResolvedLang.fromRequest(req["lang"] as? String) { ResolvedLang.current = lang }
             // Chat sessions (session.open / send / end, sessions.list / watch): SessionHost.
             if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {

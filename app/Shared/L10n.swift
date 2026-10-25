@@ -34,6 +34,10 @@ enum ResolvedLang: String {
         (Locale.preferredLanguages.first ?? "en").hasPrefix("zh") ? .zhHans : .en
     }
 
+    /// A request's "lang": a language's own name (most requests, Protocol.withLang), or the session's code
+    /// (session.open and set_config carry "zh" / "en", Shell.langCode); nil for anything else.
+    static func fromRequest(_ s: String?) -> ResolvedLang? { s == "zh" ? .zhHans : s.flatMap(ResolvedLang.init(rawValue:)) }
+
     /// The language for code outside a view: the main app keeps it in step with its setting, the helper sets it
     /// from every request. English until then.
     nonisolated(unsafe) static var current: ResolvedLang = .en
@@ -327,6 +331,7 @@ enum L10n {
         "Needs you": "需要你",
         "Paused": "已暂停",
         "Window not visible": "窗口不可见",
+        "No picture yet": "还没有画面",
         "Starting the recording…": "正在开始录屏…",
         "Next task…": "下一个任务…",
         "Clear all": "全部清除",
