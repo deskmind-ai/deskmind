@@ -63,6 +63,26 @@ final class RunRecorder {
     }
 }
 
+/// A chat task's recording (Shared/TaskRecording.swift): RunRecorder through the helper, with the decision panel
+/// on screen while it records (non-activating, as it always was: it is what a demo shows).
+final class AppTaskRecorder: TaskRecorder {
+    func start(goal: String, started: @escaping (Bool) -> Void) {
+        MainActor.assumeIsolated {
+            DecisionPanel.shared.show()
+            RunRecorder.shared.begin(goal: goal, bundles: []) { ok in
+                if !ok { DecisionPanel.shared.hide() }
+                started(ok)
+            }
+        }
+    }
+    func stop(done: @escaping (URL?) -> Void) {
+        MainActor.assumeIsolated {
+            RunRecorder.shared.stop { url in DecisionPanel.shared.hide(after: 2); done(url) }
+        }
+    }
+    func step(_ n: Int, _ words: String) { MainActor.assumeIsolated { DecisionPanel.shared.update(n: n, words: words) } }
+}
+
 // MARK: - The decision panel
 
 /// One step as the planner decided it: the operation and target, its three likeliest operations, which model
@@ -125,6 +145,12 @@ final class DecisionPanel {
             guard let self, self.generation == g else { return }
             self.hide()
         }
+    }
+
+    /// A chat task's step: its number and its words (the protocol says no model's scores for it).
+    func update(n: Int, words: String) {
+        guard panel?.isVisible == true else { return }
+        model.n = n; model.headline = words; model.top = []; model.tier = ""; model.ms = 0; model.question = ""; model.answer = ""
     }
 
     /// A step event from the helper: its "decision" record (hands' JSON: top, operation, routing), its target.

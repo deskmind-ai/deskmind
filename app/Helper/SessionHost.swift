@@ -98,7 +98,15 @@ enum SessionHost {
     struct UI {
         var note: (_ run: String, _ ev: [String: Any]) -> Void
         var ended: (_ run: String) -> Void
-        static let standard = UI(note: { run, ev in LiveWatch.note(run: run, ev) }, ended: { run in LiveWatch.ended(run) })
+        static let standard = UI(note: { run, ev in LiveWatch.note(run: run, ev); recordApp(ev) }, ended: { run in LiveWatch.ended(run) })
+
+        /// A step's window's app into the recording, if one is going (the main app's 「录制这个任务」): the step's
+        /// `object` (window:<bundle>#<n>), as the protocol says it.
+        static func recordApp(_ ev: [String: Any]) {
+            guard ev["kind"] as? String == "step", let o = ev["object"] as? String, o.hasPrefix("window:"), let hash = o.lastIndex(of: "#") else { return }
+            let bundle = String(o[o.index(o.startIndex, offsetBy: 7)..<hash])
+            if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
+        }
     }
 
     static let ops: Set<String> = ["session.open", "session.send", "session.end", "session.delete", "session.history", "sessions.list", "sessions.watch",

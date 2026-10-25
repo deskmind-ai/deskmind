@@ -39,6 +39,12 @@ struct TaskRow: View {
                         .buttonStyle(.link).font(.system(size: 11))
                         .accessibilityHint(L("Shows this task's process in the right column", lang: lang))
                 }
+                // 「已录制」: the task's movie (Movies › DeskMind), when one was made
+                if task.ended, let path = shell.movies[task.runId] {
+                    Button(L("Recorded", lang: lang)) { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+                        .buttonStyle(.link).font(.system(size: 11))
+                        .accessibilityHint(L("Opens the task's recording", lang: lang))
+                }
                 if task.running {
                     Button(L("Stop", lang: lang)) { if let stop { stop() } else { shell.stop() } }
                         .buttonStyle(InkButtonStyle(prominent: false))

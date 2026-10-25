@@ -535,6 +535,8 @@ final class ShellModel: ObservableObject {
         self.work = work
         self.lane = lane ?? work
         self.deliver = deliver
+        recording.defaultOn = defaults.bool(forKey: TaskRecording.defaultKey)
+        movies = (defaults.dictionary(forKey: TaskRecording.moviesKey) as? [String: String]) ?? [:]
         client.clock = now        // (an exit the client infers for a session alive this run is stamped by this clock)
         client.onChange = { [weak self] id, _ in self?.changed(id) }
         // each refusal of an answer as it comes: one of ours goes to the UI queue to be matched; any other is dropped here
@@ -1028,16 +1030,64 @@ final class ShellModel: ObservableObject {
             if !tabStarted.contains(task.runId), (task.startedAt ?? .infinity) >= liveSince, task.running || task.ended {
                 tabStarted.insert(task.runId)
                 t.apply(.taskStarted(task.runId))
+                record(recording.apply(.taskStarted(session: id, run: task.runId)), in: id, state: new)
+            }
+            // (the recorded task's steps, for the decision panel)
+            if recording.recordingRun == task.runId, task.steps.count > (stepsNoted[task.runId] ?? 0), let last = task.steps.last {
+                stepsNoted[task.runId] = task.steps.count
+                recorder?.step(task.steps.count, last.displayText)
             }
             if task.ended, !tabEnded.contains(task.runId) {
                 tabEnded.insert(task.runId)
                 if (task.endedAt ?? .infinity) >= liveSince { t.apply(.taskDone(task.runId)); ended = true }
+                // (any end: done, ended, closed, its process gone -- the recording stops with it)
+                record(recording.apply(.taskEnded(run: task.runId)), in: id, state: new)
             }
         }
         if t != before { tabs[id] = t }
         if ended { onTaskEnded() }
     }
-    /// The runs whose start / end the tabs were told of (or that ended before this model began).
+
+    // MARK: recording a task (TaskRecording)
+
+    /// The recorder (the app's: RunRecorder through the helper; nil: none -- tests set their own).
+    var recorder: TaskRecorder?
+    /// Each conversation's 「录制这个任务」 and the run being recorded.
+    @Published private(set) var recording = TaskRecording()
+    /// The movies recorded, by run (record.movies).
+    @Published private(set) var movies: [String: String] = [:]
+    private var stepsNoted: [String: Int] = [:]
+
+    /// The selected conversation's switch.
+    var recordsNext: Bool { selected.map { recording.isOn($0) } ?? recording.defaultOn }
+    func setRecording(_ on: Bool) {
+        guard let id = selected else { return }
+        defaults.set(on, forKey: TaskRecording.defaultKey)     // (the next conversation starts with this choice)
+        recording.defaultOn = on
+        record(recording.apply(.toggled(session: id, on: on)), in: id)
+    }
+
+    /// `state`: the session's newest (a flush tells the recording before it stores it).
+    private func record(_ actions: [TaskRecording.Action], in id: String, state: SessionState? = nil) {
+        for a in actions {
+            switch a {
+            case .start(_, let run):
+                let goal = (state ?? states[id])?.task(run)?.raw ?? ""
+                recorder?.start(goal: goal) { [weak self] ok in
+                    guard let self, !ok else { return }
+                    _ = self.recording.apply(.startFailed(run: run))
+                }
+            case .stop(let run):
+                stepsNoted[run] = nil
+                recorder?.stop { [weak self] url in
+                    guard let self, let url else { return }
+                    self.movies[run] = url.path
+                    self.defaults.set(self.movies, forKey: TaskRecording.moviesKey)
+                }
+            }
+        }
+    }
+    /// The runs whose start / end the tabs (and the recording) were told of.
     private var tabStarted: Set<String> = [], tabEnded: Set<String> = []
 
     /// The selected conversation's tabs.

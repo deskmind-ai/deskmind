@@ -235,6 +235,7 @@ enum DecisionTests {
         ModelStoreTests.run()
         OnePathTests.run()
         FirstRunTests.run()
+        RecordingTests.run()
         ProcessTests.run()
         UIEventsTests.run()
         TaskResultTests.run()

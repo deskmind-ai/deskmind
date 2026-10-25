@@ -119,6 +119,7 @@ extension ShellModel {
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         m.client.liveView = false      // (the window draws the float itself: the helper starts no live card for its tasks)
         m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
+        m.recorder = AppTaskRecorder()      // (「录制这个任务」: the helper records the task's apps)
         // a task ended here: the run records' rule (M5: 30 days / 1 GB), off the main queue, the live runs kept
         m.onTaskEnded = { [weak m] in
             DispatchQueue.global(qos: .utility).async { [weak m] in RunRetention.prune(live: { m?.liveRunsNow() ?? [] }) }
@@ -664,6 +665,14 @@ struct Composer: View {
                     .buttonStyle(InkButtonStyle(prominent: false))
                     .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
             }
+            // 「录制这个任务」: this conversation's next computer task recorded (TaskRecording), off unless turned on
+            Toggle(isOn: Binding(get: { shell.recordsNext }, set: { shell.setRecording($0) })) {
+                Image(systemName: shell.recordsNext ? "record.circle.fill" : "record.circle")
+            }
+            .toggleStyle(.button).buttonStyle(.plain)
+            .foregroundStyle(shell.recordsNext ? ShellColor.orangeText : ShellColor.secondary)
+            .help(L("Record this task", lang: lang))
+            .accessibilityLabel(L("Record this task", lang: lang))
             if !mode.replying {
                 Button(L("Send", lang: lang)) { shell.submit() }
                     .buttonStyle(InkButtonStyle(prominent: true))
