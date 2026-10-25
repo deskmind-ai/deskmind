@@ -302,3 +302,88 @@ struct CardStore: Equatable {
     /// The refusal hint of a run's result card (its code), if one of this client's answers got one.
     func hint(_ runId: String) -> String? { hints[runId] }
 }
+
+// MARK: - the UI event log's part (Shared/UIEvents.swift)
+
+extension UIEvents {
+    /// What one change of a session's state says of its cards, for the log: a card shown (it is in `new` and open, and
+    /// was not in `old`), a card's ending (open in `old`, ended in `new`), a result card shown, an undo's outcome. Read
+    /// from the run's word alone (CardState.outcome, ResultCardState), never from what the app holds; `old` nil (the
+    /// session's first state in this app, its history included) says nothing of what had already ended.
+    static func changes(from old: SessionState?, to new: SessionState, window: UIEvent.Window) -> [UIEvent] {
+        cardChanges(from: old, to: new, window: window).map(\.event)
+    }
+
+    /// The same, each with the card it is about, by the session's own ids (CardStore.key: the run's, the ask's).
+    static func cardChanges(from old: SessionState?, to new: SessionState, window: UIEvent.Window) -> [(key: String, event: UIEvent)] {
+        var out: [(key: String, event: UIEvent)] = []
+        for t in new.tasks {
+            let before = old?.task(t.runId)
+            let run = UIEvent.ID(t.runId)
+            for c in t.cards {
+                let was = before?.cards.first { $0.askId == c.askId }
+                let kind = UIEvent.CardKind(c.card.kind), ask = UIEvent.ID(c.askId)
+                let key = CardStore.key(runId: t.runId, askId: c.askId)
+                if was == nil, c.outcome == .open {
+                    out.append((key, .cardShown(run: run, ask: ask, kind: kind, place: .chat, window: window,
+                                          options: c.card.options.count, details: c.card.plan != nil || c.card.consent != nil)))
+                }
+                if was?.outcome == .open, c.outcome != .open { out.append((key, .cardEnded(run: run, ask: ask, kind: kind, why: ending(c.outcome)))) }
+            }
+            let r0 = before?.resultCardState ?? ResultCardState.none, r1 = t.resultCardState
+            if !r0.isOpen, r1.isOpen, let card = t.resultCard {
+                out.append((t.runId, .cardShown(run: run, ask: nil, kind: .result, place: .chat, window: window,
+                                                options: card.options.count, details: card.plan != nil || card.consent != nil)))
+            }
+            if r0 != r1, let u = undo(from: r0, to: r1) { out.append((t.runId, .undo(run: run, outcome: u))) }
+        }
+        return out
+    }
+
+    static func ending(_ o: CardState.Outcome) -> UIEvent.Ending {
+        switch o {
+        case .open, .answered: return .answered
+        case .void(let why):
+            switch why {
+            case CardState.timeout: return .expired
+            case "steer": return .steer
+            case "stop": return .stop
+            case "replaced": return .replaced
+            default: return .ended       // ended, task_done, session_exit, executor_exit
+            }
+        }
+    }
+
+    /// An undo's outcome, when the result card's state comes to one: undone (all of it), partial (some refused), cut
+    /// off (unknown), or expired (asked too late, or the card closed while undo was offered — by why).
+    static func undo(from r0: ResultCardState, to r1: ResultCardState) -> UIEvent.Undo? {
+        switch r1 {
+        case .undone(let n, let total, let refused): return refused == nil && n == total ? .undone : .partial
+        case .undoUnknown: return .unknown
+        case .undoExpired: return .expiredLate
+        case .closed(let why):
+            guard case .open(true, _) = r0 else { return nil }
+            switch why {
+            case "linger", "deadline": return .expiredTime
+            case "new_task": return .expiredNewTask
+            case "session_exit", "session_end": return .expiredHelperQuit
+            default: return .expiredOther
+            }
+        default: return nil
+        }
+    }
+}
+
+extension UIEvent.Option {
+    init(_ role: CardModel.Role) {
+        switch role {
+        case .approve: self = .approve
+        case .choice: self = .choice
+        case .skipStep: self = .skipStep
+        case .delegate: self = .delegate
+        case .cancel: self = .cancel
+        case .undo: self = .undo
+        case .other: self = .other
+        }
+    }
+}

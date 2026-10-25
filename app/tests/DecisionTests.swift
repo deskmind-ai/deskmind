@@ -227,6 +227,7 @@ enum DecisionTests {
         CardLayoutTests.run()
         SurfaceTests.run()
         IslandFeedTests.run()
+        UIEventsTests.run()
         TaskResultTests.run()
         group("sessionWireTests"); sessionWireTests()
         // An app running with no window gets it back; document-based apps (an Open panel on reopen) and Finder don't.

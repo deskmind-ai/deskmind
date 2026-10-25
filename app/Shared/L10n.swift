@@ -316,6 +316,8 @@ enum L10n {
         "Looking": "观察屏幕",
         "%ds": "%d 秒",
         "Show a Live View of the Task": "显示任务窗口的实时画面",
+        "Record Interface Use on This Mac": "在本机记录界面使用情况",
+        "Clear Interface Use Records": "清除界面使用记录",
         // The live view (Helper/LiveCard.swift).
         "DeskMind live view": "DeskMind 实时画面",
         "Click to answer in DeskMind": "点击在 DeskMind 里回答",

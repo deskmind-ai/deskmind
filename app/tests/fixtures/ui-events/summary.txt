@@ -1,0 +1,15 @@
+Tasks
+| task | cards shown | answered in | take-backs | expired | re-asks | undo |
+|---|---|---|---|---|---|---|
+| run_041c0f37 | action 1, plan 1, result 1 | chat 3 | 1 | 0 | 0 | undone 1 |
+| run_6f6acb41 | action 1, ambiguity 1, result 1 | chat 1 | 0 | 1 | 1 | expired_time 1 |
+
+Time to answer, by the main window when the card came
+| window | picks | median | p90 |
+|---|---|---|---|
+| behind | 1 | 16.4s | 16.4s |
+| front | 3 | 6.0s | 7.0s |
+
+Activations: button 1, other 1, reopen 1, user_input 1; other (must be 0): 1
+Pauses: 0, 0.0s in all
+l10n misses: -

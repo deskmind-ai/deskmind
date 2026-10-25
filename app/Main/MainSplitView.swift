@@ -91,6 +91,7 @@ extension ShellModel {
                            // a new key's asks the helper did not take: tried again on the main queue's clock
                            retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) })
         transport.isStopped = { [weak m] in m?.stopped ?? true }
+        m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
         return m
     }()
 }

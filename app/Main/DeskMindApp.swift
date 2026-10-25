@@ -556,7 +556,12 @@ struct DeskMindApp: App {
         // Before the helper model logs anything or sends its first request.
         let stored = UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue
         ResolvedLang.current = (AppLanguage(rawValue: stored) ?? .en).resolved
+        // The UI event log, this Mac only (Shared/UIEvents.swift); the switch is read from its file.
+        UIEvents.log = UIEventLog(dir: DeskMindIPC.supportDir, file: UIEventLog.mainFile)
+        _uiLogOn = State(initialValue: UIEvents.enabled)
+        ActivationRecorder.start()
     }
+    @State private var uiLogOn = true
 
     @AppStorage(DecisionPanel.alwaysKey) private var showDecisions = false
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
@@ -593,6 +598,10 @@ struct DeskMindApp: App {
                 // Developer: the 0.5 main window (conversations, chat, the agent's column), off by default.
                 Toggle(L("Use the New Main Window (0.5 Preview)", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
                        isOn: $shellOn)
+                // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
+                Toggle(L("Record Interface Use on This Mac", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
+                       isOn: Binding(get: { uiLogOn }, set: { uiLogOn = $0; UIEvents.setEnabled($0) }))
+                Button(L("Clear Interface Use Records", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) { UIEvents.clear() }
             }
             // The 0.5 window's keys (handoff §3.7), only while it is on: the old window keeps its own.
             if shellOn {
