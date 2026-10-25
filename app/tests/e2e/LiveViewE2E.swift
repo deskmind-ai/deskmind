@@ -228,11 +228,11 @@ enum LiveViewE2E {
         check(s["cursor"] is NSNull, "a target outside the window: no cursor")
 
         // 7. Needs the user; paused; back at work.
-        LiveCard.status(.waitingForUser, words: "Waiting for your answer in DeskMind")
+        LiveCard.status(.waitingForUser)
         s = waitFor { ($0["status"] as? String) == "Needs you" }
         check(s["status"] as? String == "Needs you" && s["line"] as? String == "Waiting for your answer in DeskMind", "needs you")
         check(s["face"] as? String == "up", "小方 looks up at you")
-        LiveCard.status(.paused, words: "Paused while you use your Mac")
+        LiveCard.status(.paused)
         s = waitFor { ($0["status"] as? String) == "Paused" }
         check(s["status"] as? String == "Paused", "paused")
         LiveCard.stepped(n: 5, words: "Type “hello”", target: nil, click: false)

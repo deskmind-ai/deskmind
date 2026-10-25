@@ -495,11 +495,9 @@ enum HarnessRun {
     static func show(_ ev: [String: Any]) {
         switch ev["event"] as? String {
         case "ask":
-            LiveCard.status(.waitingForUser, words: ev["approval"] as? Bool == true
-                            ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
-                            : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
+            LiveCard.status(.waitingForUser, approval: ev["approval"] as? Bool == true)
         case "waiting" where ev["ask_id"] == nil:   // the executor waits for the user to pause
-            LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
+            LiveCard.status(.paused)
         case "resumed" where ev["ask_id"] == nil, "ask_closed":
             LiveCard.status(.working)
         case "step":

@@ -213,4 +213,24 @@ enum LiveView {
         case .stopped: "Stopped"
         }
     }
+
+    /// What the card says: the header's status part (the app goes before it), the note in the picture's place, and
+    /// the line under the picture. The header follows the run's state, never the picture: with no picture yet the
+    /// note says only that, whatever the state (it said "Starting" whenever there was none, so a run waiting for an
+    /// answer before its first step showed "Starting"). The line is the last step's words (the instruction before
+    /// the first), except while the run waits for the user, when it says what for. Worded from the state at every
+    /// refresh, so in the language of now (`approval`: the question waiting is an approval).
+    struct Words: Equatable { var header: String; var note: String?; var line: String }
+
+    static func words(_ s: Status, step: Int, hadPicture: Bool, approval: Bool, stepWords: String,
+                      lang: ResolvedLang) -> Words {
+        let header = s == .working && step > 0 ? L("Step %d", step, lang: lang) : L(word(s), lang: lang)
+        let note = s == .hidden ? L(word(.hidden), lang: lang) : hadPicture ? nil : L("No picture yet", lang: lang)
+        let line = switch s {
+        case .waitingForUser: L(approval ? "Waiting for your approval in DeskMind" : "Waiting for your answer in DeskMind", lang: lang)
+        case .paused: L("Paused while you use your Mac", lang: lang)
+        default: stepWords
+        }
+        return Words(header: header, note: note, line: line)
+    }
 }

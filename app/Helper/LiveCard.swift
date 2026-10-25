@@ -65,6 +65,9 @@ final class LiveCard: NSObject {
     private var runStatus: LiveView.Status = .starting
     private var windowHidden = false
     private var step = 0
+    /// The last step's words (the instruction before the first step), and whether the question waiting is an approval.
+    private var stepWords: String
+    private var approval = false
     private var hadPicture = false
     /// How often the window is looked for (s), the pause between two pictures (s), and pixels per point of the
     /// picture. Tunable without a rebuild (`defaults write ai.deskmind.hands liveView.interval 0.5`).
@@ -83,15 +86,14 @@ final class LiveCard: NSObject {
     private var covers = false               // the card is over the window being worked in
     private var pointerSince: Date?          // the pointer has been on the card since
     private var hoverTimer: Timer?
+    private var shownLang: ResolvedLang?     // the language the card was last worded in
 
     /// What Stop on the card does (Runner.requestStop in the helper; a test's own in tests/e2e).
     private let onStop: () -> Void
 
-    /// The instruction: the action line until the first step.
-    private let goal: String
-
     private init(bundles: [String], goal: String, onStop: @escaping () -> Void) {
-        self.bundles = bundles; self.goal = goal; self.onStop = onStop
+        self.bundles = bundles; self.onStop = onStop
+        stepWords = goal.replacingOccurrences(of: "\n", with: " ")
     }
 
     // MARK: from Runner
@@ -137,12 +139,11 @@ final class LiveCard: NSObject {
     static func stepped(n: Int, words: String, target: Any?, click: Bool) {
         guard let card = current else { return }
         card.set { c in
-            c.step = n
+            c.step = n; c.stepWords = words
             if c.runStatus != .working && !c.runStatus.isEnding { c.runStatus = .working }
         }
         let p = LiveView.targetCenter(target)
         DispatchQueue.main.async {
-            card.view?.line.stringValue = words
             if let p {
                 card.lastTarget = p; card.recentTargets = Array((card.recentTargets + [p]).suffix(6))
                 card.placeCursor(ripple: click)
@@ -151,15 +152,10 @@ final class LiveCard: NSObject {
         }
     }
 
-    /// The run is waiting for the user (a question or an approval), or paused while they use the Mac, with the
-    /// line to show; or back at work.
-    static func status(_ s: LiveView.Status, words: String? = nil) {
-        guard let card = current else { return }
-        card.set { c in if !c.runStatus.isEnding { c.runStatus = s } }
-        DispatchQueue.main.async {
-            if let words { card.view?.line.stringValue = words }
-            card.refresh()
-        }
+    /// The run is waiting for the user (a question, or an approval: `approval`), or paused while they use the Mac;
+    /// or back at work. The line under the picture follows (LiveView.words).
+    static func status(_ s: LiveView.Status, approval: Bool = false) {
+        current?.set { c in if !c.runStatus.isEnding { c.runStatus = s; c.approval = approval } }
     }
 
     private static var current: LiveCard? { lock.lock(); defer { lock.unlock() }; return shared }
@@ -187,7 +183,6 @@ final class LiveCard: NSObject {
         p.becomesKeyOnlyIfNeeded = true
         let v = CardView(frame: .zero)
         v.card = self
-        v.line.stringValue = goal.replacingOccurrences(of: "\n", with: " ")
         p.contentView = v
         p.setAccessibilityLabel(L("DeskMind live view", lang: ResolvedLang.current))
         panel = p; view = v
@@ -199,6 +194,8 @@ final class LiveCard: NSObject {
 
     private func trackPointer() {
         guard let p = panel else { return }
+        // The helper's language follows the main app's last request: a switch rewords the card within a moment.
+        if shownLang != ResolvedLang.current { refresh() }
         let on = p.frame.contains(NSEvent.mouseLocation)
         if on { if pointerSince == nil { pointerSince = Date() } } else { pointerSince = nil }
         let take = LiveView.interactive(covers: covers, pointerOnCardFor: pointerSince.map { Date().timeIntervalSince($0) })
@@ -208,15 +205,17 @@ final class LiveCard: NSObject {
     /// Size, place, show what the state says. Main thread.
     fileprivate func refresh() {
         guard let p = panel, let v = view else { return }
-        let (status, userCollapsed, large, step, app, hadPicture) = read { c -> (LiveView.Status, Bool, Bool, Int, String, Bool) in
+        let (status, userCollapsed, large, app, words) = read { c -> (LiveView.Status, Bool, Bool, String, LiveView.Words) in
             let s: LiveView.Status = c.runStatus.isEnding || c.runStatus == .waitingForUser ? c.runStatus
                 : (c.windowHidden && c.hadPicture ? .hidden : c.runStatus)
-            return (s, c.collapsed, c.large, c.step, c.appName, c.hadPicture)
+            return (s, c.collapsed, c.large, c.appName, LiveView.words(s, step: c.step, hadPicture: c.hadPicture, approval: c.approval,
+                                                                         stepWords: c.stepWords, lang: ResolvedLang.current))
         }
         let lang = ResolvedLang.current
+        shownLang = lang
         let shownApp = v.appTitle.isEmpty ? app.components(separatedBy: " (").first ?? app : v.appTitle
-        let detail = status == .working && step > 0 ? L("Step %d", step, lang: lang) : L(LiveView.word(status), lang: lang)
-        v.title.stringValue = shownApp.isEmpty ? detail : "\(shownApp) · \(detail)"
+        v.title.stringValue = shownApp.isEmpty ? words.header : "\(shownApp) · \(words.header)"
+        v.line.stringValue = words.line
         v.setStatus(status)
         v.toolTip = status == .waitingForUser ? L("Click to answer in DeskMind", lang: lang) : nil
 
@@ -236,8 +235,7 @@ final class LiveCard: NSObject {
         let frame = LiveView.frame(size: size, corner: placed.corner, visible: visible)
         covers = placed.covers
         p.ignoresMouseEvents = !LiveView.interactive(covers: covers, pointerOnCardFor: pointerSince.map { Date().timeIntervalSince($0) })
-        v.layoutCard(collapsed: collapsed, large: large, size: size, dimmed: status == .hidden, note: status == .hidden || !hadPicture
-                     ? L(LiveView.word(status == .hidden ? .hidden : .starting), lang: lang) : nil)
+        v.layoutCard(collapsed: collapsed, large: large, size: size, dimmed: status == .hidden, note: words.note)
         if p.frame != frame {
             if p.isVisible && !v.dragging && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 NSAnimationContext.runAnimationGroup { ctx in ctx.duration = 0.2; p.animator().setFrame(frame, display: true) }

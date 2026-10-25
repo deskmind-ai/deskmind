@@ -327,6 +327,7 @@ enum L10n {
         "Needs you": "需要你",
         "Paused": "已暂停",
         "Window not visible": "窗口不可见",
+        "No picture yet": "还没有画面",
         "Starting the recording…": "正在开始录屏…",
         "Next task…": "下一个任务…",
         "Clear all": "全部清除",
