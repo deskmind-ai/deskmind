@@ -42,11 +42,14 @@ struct XiaoFang: View {
     let mood: Brand.Mood
     var size: CGFloat = 96
     @State private var bob = false
+    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         Image(nsImage: Brand.image(mood.rawValue))
             .resizable().interpolation(.high).scaledToFit()
             .frame(width: size, height: size)
+            // (its images are dark ink: in Dark Mode they sit on a light badge, a little larger than they are)
+            .background(Circle().fill(Color(ShellPalette.badge)).padding(-size * 0.06).opacity(scheme == .dark ? 1 : 0))
             .offset(y: bob ? -3 : 0)
             .animation(mood == .done ? .spring(response: 0.35, dampingFraction: 0.5)
                                      : .easeInOut(duration: 1.6).repeatForever(autoreverses: true), value: bob)

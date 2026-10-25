@@ -32,6 +32,9 @@ enum ShellPalette {
     static let sage = Tone(light: 0x69736A, dark: 0x8E988F)         // graphics only
     static let mist = Tone(light: 0xB2BBAF, dark: 0x4C554E)         // graphics, and the selected row's tint
     static let line = Tone(light: 0xD5D3C9, dark: 0x3B413D)         // hairlines
+    /// 小方's badge: light in both appearances -- its images are dark ink, drawn on it in Dark Mode (#124 delta review:
+    /// on the dark paper they were all but gone, ~1.15:1).
+    static let badge = Tone(light: 0xFFFEFA, dark: 0xFFFEFA)
 
     /// The sidebar and the agent's column: the card at 60 % over the paper.
     static let panel = tint(card, 0.6, over: paper)
