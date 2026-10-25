@@ -275,34 +275,41 @@ enum ProcessTests {
     static func tabTests() {
         typealias T = ProcessTabs
         var t = T()
-        t.apply(.taskStarted("r1")); check(t.tab == .now && t.run == "r1", "a task starts: the tab as it is, its run")
+        t.apply(.taskStarted("r1")); check(t.tab == .now && t.run == "r1", "a task starts, 现在 shown: its run")
         t.apply(.taskDone("r1")); check(t.tab == .process && t.run == "r1", "its end: 过程")
-        t.apply(.picked(.now)); t.apply(.taskStarted("r2")); t.apply(.taskDone("r2"))
-        check(t.tab == .now && t.run == "r2", "picked 现在: no switch to 过程 in this conversation")
-        t.apply(.picked(.process)); t.apply(.taskStarted("r3")); t.apply(.taskDone("r3"))
-        check(t.tab == .process && t.run == "r3", "picked 过程 again: switches again")
+        t.apply(.taskStarted("r2")); t.apply(.taskDone("r2"))
+        check(t.tab == .process && t.run == "r1", "(#126 3b) reached by the switch, being read: the next run's start and end change nothing")
+        t.apply(.picked(.now, latest: "r2")); t.apply(.taskStarted("r3")); t.apply(.taskDone("r3"))
+        check(t.tab == .now && t.run == "r3", "picked 现在: no switch to 过程 in this conversation")
+        t.apply(.picked(.process, latest: "r3")); check(t.tab == .process && t.run == "r3", "picked 过程: its run")
+        t.apply(.taskStarted("r4")); t.apply(.taskDone("r4"))
+        check(t.tab == .process && t.run == "r3", "picked 过程 on the latest run, then the next run starts and ends: stays")
+        var u = T(); u.apply(.picked(.process, latest: "a")); u.apply(.taskStarted("b")); u.apply(.taskDone("b"))
+        check(u.tab == .process && u.run == "a", "picked 过程 with no run shown: the latest, kept")
         t.apply(.clickedTask("old")); check(t.tab == .process && t.run == "old", "a task message clicked: its 过程")
-        t.apply(.taskStarted("B")); check(t.tab == .process && t.run == "old", "(#126) a queued task starts while reading 'old': not yanked")
-        t.apply(.taskDone("B")); check(t.run == "old", "its end: still 'old'")
-        t.apply(.taskDone("old")); check(t.tab == .process && t.run == "old", "the run they read ends: there")
+        t.apply(.taskStarted("B")); t.apply(.taskDone("B")); check(t.run == "old", "a queued task starts and ends while reading 'old': not yanked")
+        t.apply(.picked(.now, latest: "B")); t.apply(.picked(.process, latest: "B")); t.apply(.taskDone("C"))
+        check(t.tab == .process && t.run == "old", "back on 过程: still 'old', being read")
         check(T().shown(traceOn: false) == .now && t.shown(traceOn: false) == .now, "the switch off: 现在 only")
         // property: random sequences against an oracle written from the table
         var g = CardStoreTests.RNG(x: 5)
         for _ in 0..<500 {
-            var s = T(), tab = T.Tab.now, run: String? = nil, opened = false, stayNow = false
+            var s = T(), tab = T.Tab.now, run: String? = nil, stayNow = false
             for _ in 0..<20 {
                 let r = "r\(g.next(3))"
-                let e: T.Event = [.taskStarted(r), .taskDone(r), .picked(g.next(2) == 0 ? .now : .process), .clickedTask(r)][g.next(4)]
+                let e: T.Event = [.taskStarted(r), .taskDone(r), .picked(g.next(2) == 0 ? .now : .process, latest: g.next(4) == 0 ? nil : r), .clickedTask(r)][g.next(4)]
+                let before = (tab, run)
                 switch e {
-                case .taskStarted(let x): if !opened { run = x }
-                case .taskDone(let x): if !stayNow && !(opened && run != x) { tab = .process; run = x; opened = false }
-                case .picked(let p): tab = p; stayNow = p == .now; if p == .now { opened = false }
-                case .clickedTask(let x): tab = .process; run = x; opened = true; stayNow = false
+                case .taskStarted(let x): if tab == .now { run = x }
+                case .taskDone(let x): if tab == .now && !stayNow { tab = .process; run = x }
+                case .picked(let p, let latest): tab = p; stayNow = p == .now; if p == .process && run == nil { run = latest }
+                case .clickedTask(let x): tab = .process; run = x; stayNow = false
                 }
                 s.apply(e)
                 if s.tab != tab || s.run != run { check(false, "tabs vs the table after \(e): \(s) vs \(tab) \(run ?? "-")"); return }
-                // never yanked: a run the user opened stays until they move
-                if opened && s.run != run { check(false, "yanked"); return }
+                // being read: 过程 with a run shown -- a task's start or end never moves it
+                if before.0 == .process, before.1 != nil, case .taskStarted = e, (s.tab, s.run) != (before.0, before.1) { check(false, "yanked on a start"); return }
+                if before.0 == .process, before.1 != nil, case .taskDone = e, (s.tab, s.run) != (before.0, before.1) { check(false, "yanked on an end"); return }
             }
         }
         // the window's model: a task's end here switches to 过程 and prunes once; a history read does neither

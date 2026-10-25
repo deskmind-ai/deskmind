@@ -303,8 +303,9 @@ struct ProcessPane: View, Equatable {
                         Text(l.label == .right ? L("Right", lang: lang) : L("Wrong", lang: lang)).font(.system(size: 10, weight: .semibold))
                     }
                     if let n = l.note { Text(n).font(.system(size: 10)).foregroundStyle(Brand.ink) }
+                    // (the whole prompt, as kept: the pane scrolls)
                     Text(l.prompt ?? L("Original text not saved", lang: lang)).font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(ShellColor.secondary).lineLimit(3)
+                        .foregroundStyle(ShellColor.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     ForEach(l.options, id: \.self) { Text($0).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
                     ForEach(Array(l.tiers.enumerated()), id: \.offset) { _, t in Text(t).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
                     if let sh = l.shadow { Text(L("Shadow: %@", sh, lang: lang)).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }

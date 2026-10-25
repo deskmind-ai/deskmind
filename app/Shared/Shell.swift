@@ -1087,7 +1087,7 @@ final class ShellModel: ObservableObject {
     /// The user picks a tab in the right column.
     func pickTab(_ tab: ProcessTabs.Tab) {
         guard let id = selected else { return }
-        tabs[id, default: ProcessTabs()].apply(.picked(tab))
+        tabs[id, default: ProcessTabs()].apply(.picked(tab, latest: states[id]?.tasks.last?.runId))
     }
     /// The user clicks a task's message in the chat: its 过程.
     func showProcess(_ runId: String) {
