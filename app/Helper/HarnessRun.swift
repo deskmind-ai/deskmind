@@ -196,23 +196,11 @@ enum HarnessRun {
     static var bundle: URL { Runner.runtime.appendingPathComponent("harness/harness.mjs") }
     static var available: Bool { FileManager.default.isExecutableFile(atPath: node.path) && FileManager.default.fileExists(atPath: bundle.path) }
 
-    /// The model services' settings, until the app has a place for keys: KEY=VALUE lines in
-    /// Application Support/DeskMind/models.env (DEEPSEEK_API_KEY for the default config, OPENROUTER_API_KEY,
-    /// VOLCENGINE_API_KEY, YY_URL + YY_API_KEY for the in-house gateway). Values never logged.
-    static func modelEnv() -> [String: String] {
-        let url = DeskMindIPC.supportDir.appendingPathComponent("models.env")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [:] }
-        var out: [String: String] = [:]
-        for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { continue }
-            let k = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
-            var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-            if v.hasPrefix("\"") && v.hasSuffix("\"") && v.count >= 2 { v = String(v.dropFirst().dropLast()) }
-            if !k.isEmpty { out[k] = v }
-        }
-        return out
-    }
+    /// The model services' settings (DEEPSEEK_API_KEY for the default config, OPENROUTER_API_KEY, VOLCENGINE_API_KEY,
+    /// YY_URL + YY_API_KEY for the in-house gateway): the helper's keychain item, models.env moved in on the way
+    /// (A11: ModelKeychain / ModelStore). nil: not known -- the keychain could not be read and there is no file; never
+    /// taken for "none set". Values never logged.
+    static func modelEnv() -> [String: String]? { ModelKeychain.env() }
 
     /// `harness.mjs model-check --config X` with the keys from models.env: {ok, model, ms} or {ok: false, error}.
     /// The harness strips anything key-like from a service's error; nothing here logs the environment.
@@ -222,7 +210,11 @@ enum HarnessRun {
         p.executableURL = node
         p.arguments = [bundle.path, "model-check", "--config", config]
         var env: [String: String] = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
-        for (k, v) in modelEnv() { env[k] = v }
+        // (the same one read, migration and all: A11 -- keys that cannot be read: no check on them, unless the sheet
+        // gives the key to check with)
+        let kept = modelEnv()
+        if kept == nil && extra.isEmpty { return ["ok": false, "error": "keys_unreadable"] }
+        for (k, v) in kept ?? [:] { env[k] = v }
         for (k, v) in extra where k.range(of: "^[A-Z][A-Z0-9_]*$", options: .regularExpression) != nil { env[k] = v }   // the sheet's unsaved values
         p.environment = env
         let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
@@ -234,11 +226,11 @@ enum HarnessRun {
     }
 
     /// The harness's environment, for a run (`app-run`) and for a chat session (`session`, SessionHost), whose
-    /// executors inherit it: the model keys (models.env), Brain as the first judge, the judge's learning files, and the
+    /// executors inherit it: the model keys (the helper's keychain item, A11), Brain as the first judge, the judge's learning files, and the
     /// execution layer (hands' executor on the bundled Python). `apps`: the apps a request names, which may be brought
     /// forward for a step (a session names none: its tasks are not known when it starts).
-    /// `keys`: models.env as already read (a session's one read, its digest's: SessionHost.spawn); nil: read here.
-    static func environment(apps: [String] = [], keys: [String: String]? = nil) -> [String: String] {
+    /// `keys`: the model settings as already read (one read: a session's, its digest's -- SessionHost.spawn; a run's).
+    static func environment(apps: [String] = [], keys: [String: String]) -> [String: String] {
         let runtime = Runner.runtime, work = Runner.work
         let python = runtime.appendingPathComponent("python/bin/python3.12").path
         let pythonPath = "\(work.path):\(runtime.appendingPathComponent("site").path)"
@@ -282,7 +274,7 @@ enum HarnessRun {
                 + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
                 + "\"\(python)\" -m deskmind_hands.executor",
         ]
-        for (k, v) in keys ?? modelEnv() where env[k] == nil { env[k] = v }
+        for (k, v) in keys where env[k] == nil { env[k] = v }
         return env
     }
 
@@ -336,7 +328,11 @@ enum HarnessRun {
         p.executableURL = node
         p.arguments = [bundle.path, "app-run", "--runs", runs.path, "--linger", String(lingerSeconds)]
         p.currentDirectoryURL = work
-        p.environment = environment(apps: spec.apps.map(\.bundle))
+        // (keys that cannot be read: no run starts on an empty key -- the same rule as a session's process, A11)
+        guard let keys = modelEnv() else {
+            _ = emit(["event": "error", "code": "keys_unreadable", "error": "the model keys could not be read from the keychain"]); return
+        }
+        p.environment = environment(apps: spec.apps.map(\.bundle), keys: keys)
         let outPipe = Pipe(), inPipe = Pipe()
         p.standardOutput = outPipe
         p.standardInput = inPipe

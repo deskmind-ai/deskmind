@@ -1,7 +1,8 @@
 // The cloud model's settings: which service thinks for the harness engine and the key for it. The provider list is
 // the harness's provider table (src/gateway/index.ts PROVIDERS); a custom entry takes any OpenAI-compatible
-// service (URL, key, model id). Keys live in Application Support/DeskMind/models.env (owner-only), the file the
-// helper hands the harness as environment; never in defaults, never logged.
+// service (URL, key, model id). Keys live in the helper's keychain item (A11: Shared/ModelStore.swift): this app
+// writes them through the helper (keys.set) and is told only whether each is set and its last 4 characters
+// (keys.status) -- it never reads a key back; never in defaults, never logged.
 
 import Foundation
 import SwiftUI
@@ -23,32 +24,70 @@ struct CloudProvider: Identifiable, Hashable {
     static func named(_ id: String) -> CloudProvider { all.first { $0.id == id } ?? all[0] }
 }
 
-/// What is saved: the provider, its key and (custom) URL + model, as the models.env file and two defaults.
-enum CloudModelSettings {
-    static var fileURL: URL { DeskMindIPC.supportDir.appendingPathComponent("models.env") }
+/// What the helper says of the model settings (keys.status): each key by its last 4 characters, the settings that are
+/// no secret (a custom service's URL and model), the digest the helper computes over all of it. Read from any thread.
+final class KeyStatus: ObservableObject {
+    static let shared = KeyStatus()
+    struct Snapshot: Equatable {
+        /// Key name -> its last 4 characters.
+        var keys: [String: String] = [:]
+        var settings: [String: String] = [:]
+        var digest: String?
+        /// False: the helper could not read them (the keychain refused, no file) -- not "none set".
+        var readable = true
+        /// The helper has answered once.
+        var known = false
+    }
+    @Published private(set) var snapshot = Snapshot()
+    private let lock = NSLock()
+    private var current = Snapshot()
 
-    /// KEY=VALUE lines → dictionary (the helper reads the same format: HarnessRun.modelEnv).
-    static func read() -> [String: String] {
-        guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return [:] }
-        var out: [String: String] = [:]
-        for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { continue }
-            var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-            if v.hasPrefix("\"") && v.hasSuffix("\"") && v.count >= 2 { v = String(v.dropFirst().dropLast()) }
-            out[String(line[..<eq]).trimmingCharacters(in: .whitespaces)] = v
+    var now: Snapshot { lock.lock(); defer { lock.unlock() }; return current }
+
+    /// Asks the helper (off the main thread; the answer applied on it).
+    func refresh() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let r = DeskMindIPC.request(["op": "keys.status"], timeout: 5), r["ok"] as? Bool == true else { return }
+            self?.apply(r)
         }
-        return out
     }
 
-    /// Write the whole file back, owner-only. Other services' keys are kept: switching providers loses nothing.
-    static func write(_ env: [String: String]) throws {
-        let dir = fileURL.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let text = env.keys.sorted().compactMap { k in env[k].map { "\(k)=\($0)" } }.joined(separator: "\n") + "\n"
-        try text.write(to: fileURL, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-        // each writer of the model settings says so (the key file here, the service and the configuration below): the
+    /// A keys.status or keys.set answer.
+    func apply(_ r: [String: Any]) {
+        var s = Snapshot(known: true)
+        s.readable = r["readable"] as? Bool ?? false
+        s.keys = r["keys"] as? [String: String] ?? [:]
+        s.settings = r["settings"] as? [String: String] ?? [:]
+        s.digest = r["digest"] as? String
+        lock.lock(); let changed = current != s; current = s; lock.unlock()
+        guard changed else { return }
+        DispatchQueue.main.async { self.snapshot = s }
+    }
+}
+
+/// What is saved: the provider, its key and (custom) URL + model -- the helper's keychain item (keys.set) and two
+/// defaults.
+enum CloudModelSettings {
+    enum SaveError: Error, LocalizedError {
+        case refused(String)
+        var errorDescription: String? { if case .refused(let why) = self { return why }; return nil }
+    }
+
+    /// A change, merged by the helper into what it keeps (other services' keys stay: switching providers loses
+    /// nothing). Synchronous (the helper answers at once); off the main thread or from a sheet's save.
+    /// `replace`: the user's own save over keys the helper cannot read (another build's keychain item, a locked
+    /// keychain): that item is replaced. Off the main thread.
+    static func set(_ pairs: [String: String], unset: [String] = [], replace: Bool = false) throws {
+        guard let r = DeskMindIPC.request(["op": "keys.set", "set": pairs, "unset": unset, "replace": replace], timeout: 10) else {
+            throw SaveError.refused("no answer from the helper")
+        }
+        guard r["ok"] as? Bool == true else {
+            let why = r["error"] as? String
+            throw SaveError.refused(why == "old_file" ? "the old models.env could not be removed"
+                                    : why == "unreadable" ? "the keys in the keychain can't be read" : (why ?? "not saved"))
+        }
+        KeyStatus.shared.apply(r)
+        // each writer of the model settings says so (the keys here, the service and the configuration below): the
         // app's sessions take them whichever window saved (ShellModel.syncSettings; #107 review at 5999bd9)
         ModelSettingsSaved.post()
     }
@@ -67,11 +106,11 @@ enum CloudModelSettings {
     /// The harness configuration the main app sends with every run (History.swift reads `engine.config`).
     static func config(for p: CloudProvider, model: String) -> String { p.custom ? p.config + model : p.config }
 
-    /// Whether the chosen provider has what it needs: a key (and, custom, a URL and a model).
-    static var configured: Bool {
-        let env = read(), p = provider
-        guard !(env[p.keyEnv] ?? "").isEmpty else { return false }
-        return !p.custom || (!(env["CUSTOM_URL"] ?? "").isEmpty && !(env["CUSTOM_MODEL"] ?? "").isEmpty)
+    /// Whether the chosen provider has what it needs: a key (and, custom, a URL and a model) -- as the helper says.
+    static var configured: Bool { configured(KeyStatus.shared.now, provider) }
+    static func configured(_ s: KeyStatus.Snapshot, _ p: CloudProvider) -> Bool {
+        guard !(s.keys[p.keyEnv] ?? "").isEmpty else { return false }
+        return !p.custom || (!(s.settings["CUSTOM_URL"] ?? "").isEmpty && !(s.settings["CUSTOM_MODEL"] ?? "").isEmpty)
     }
     static var engineIsCloud: Bool {
         get { UserDefaults.standard.string(forKey: "engine") == "harness" }
@@ -122,6 +161,9 @@ struct CloudModelSheet: View {
     @State private var testing = false
     @State private var result: String? = nil
     @State private var resultOK = false
+    @ObservedObject private var keys = KeyStatus.shared
+    @State private var saving = false
+    private var status: KeyStatus.Snapshot { keys.snapshot }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -137,13 +179,21 @@ struct CloudModelSheet: View {
                     ForEach(CloudProvider.all) { p in Text(p.title).tag(p) }
                 }
                 .onChange(of: provider) { _, p in load(p) }
-                SecureField(L("API key", lang: lang), text: $key)
+                // (the key as the helper knows it: set or not, its last 4 -- never shown, never read back)
+                if status.known && !status.readable {
+                    // (the truth, and the way out: the user's own save replaces them -- #127 review)
+                    Text(L("The keys in the keychain can't be read (another build of DeskMind saved them, or the keychain is locked). Enter the key again and save: it replaces them.", lang: lang))
+                        .font(.system(size: 11)).foregroundStyle(ShellColor.error).fixedSize(horizontal: false, vertical: true)
+                } else if let last4 = status.keys[provider.keyEnv], !last4.isEmpty {
+                    Text(L("Set · ends in %@", last4, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                }
+                SecureField(status.keys[provider.keyEnv] == nil ? L("API key", lang: lang) : L("New API key (empty: keep it)", lang: lang), text: $key)
                 if provider.custom {
                     TextField(L("Base URL (…/v1)", lang: lang), text: $url)
                     TextField(L("Model id", lang: lang), text: $modelID)
                 }
                 HStack(spacing: 10) {
-                    Button(L("Test", lang: lang)) { test() }.disabled(testing || key.isEmpty)
+                    Button(L("Test", lang: lang)) { test() }.disabled(testing || (key.isEmpty && status.keys[provider.keyEnv] == nil))
                     if testing { ProgressView().controlSize(.small) }
                     if let result {
                         Text(result).font(.system(size: 12)).foregroundStyle(resultOK ? ShellColor.secondary : ShellColor.error)
@@ -152,30 +202,35 @@ struct CloudModelSheet: View {
                 }
                 // (the 0.5 window offers no local model: its note says what is sent, not to use one)
                 Text(inShell
-                     ? L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is stored in models.env in Application Support, readable by you only.", lang: lang)
-                     : L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is stored in models.env in Application Support, readable by you only.", lang: lang))
+                     ? L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is kept in your keychain, by DeskMind's helper only.", lang: lang)
+                     : L("With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is kept in your keychain, by DeskMind's helper only.", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
                 Spacer()
                 Button(L("Cancel", lang: lang)) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(L("Save", lang: lang)) { save() }.keyboardShortcut(.defaultAction)
-                    .disabled(useCloud && (key.isEmpty || (provider.custom && (url.isEmpty || modelID.isEmpty))))
+                Button(L("Save", lang: lang)) { save() }.keyboardShortcut(.defaultAction).disabled(saving)
+                    .disabled(useCloud && ((key.isEmpty && status.keys[provider.keyEnv] == nil) || (provider.custom && (url.isEmpty || modelID.isEmpty))))
             }
         }
         .padding(22).frame(width: 440)
+        // (the custom service's URL and model as the helper keeps them, once its answer comes)
+        .onChange(of: keys.snapshot) { _, s in
+            if url.isEmpty && modelID.isEmpty { url = s.settings["CUSTOM_URL"] ?? ""; modelID = s.settings["CUSTOM_MODEL"] ?? "" }
+        }
         .onAppear {
             savedCloud = CloudModelSettings.engineIsCloud
             useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)
             load(provider)
+            KeyStatus.shared.refresh()
         }
     }
 
+    /// The service's fields: its key field empty (a key is never read back), the custom URL and model as kept.
     private func load(_ p: CloudProvider) {
-        let env = CloudModelSettings.read()
-        key = env[p.keyEnv] ?? ""
-        url = env["CUSTOM_URL"] ?? ""
-        modelID = env["CUSTOM_MODEL"] ?? ""
+        key = ""
+        url = status.settings["CUSTOM_URL"] ?? ""
+        modelID = status.settings["CUSTOM_MODEL"] ?? ""
         result = nil
     }
 
@@ -184,7 +239,8 @@ struct CloudModelSheet: View {
     private func test() {
         testing = true; result = nil
         let config = CloudModelSettings.config(for: provider, model: modelID)
-        var env = [provider.keyEnv: key]
+        // (a key typed now is checked; none typed: the helper checks with the one it keeps)
+        var env: [String: String] = key.isEmpty ? [:] : [provider.keyEnv: key]
         if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = modelID }
         Task.detached {
             let reply = DeskMindIPC.request(["op": "model_check", "config": config, "env": env, "lang": ResolvedLang.current.rawValue], timeout: 60)
@@ -201,21 +257,34 @@ struct CloudModelSheet: View {
         }
     }
 
-    private func persist() throws {
-        let model = ModelChoice.modelName(modelID)         // (a pasted name's spaces never saved)
-        var env = CloudModelSettings.read()
-        env[provider.keyEnv] = key
-        if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = model }
-        try CloudModelSettings.write(env)
-        CloudModelSettings.provider = provider
-        CloudModelSettings.engineConfig = CloudModelSettings.config(for: provider, model: model)
-    }
-
+    /// The keys through the helper, off the main thread; then the service and its configuration, the engine, done.
     private func save() {
-        do { if useCloud { try persist() } } catch { result = error.localizedDescription; resultOK = false; return }
-        // the engine only if the user moved the switch (a privacy setting, shared with the window as it was)
-        if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }
-        model.refreshCloud()
-        dismiss()
+        let model = ModelChoice.modelName(modelID)         // (a pasted name's spaces never saved)
+        var pairs: [String: String] = [:]
+        if useCloud {
+            if !key.isEmpty { pairs[provider.keyEnv] = key }   // (empty: the key kept as it is)
+            if provider.custom { pairs["CUSTOM_URL"] = url; pairs["CUSTOM_MODEL"] = model }
+        }
+        // (keys the helper cannot read: the user's save replaces them -- the sheet said so)
+        let replace = status.known && !status.readable
+        saving = true
+        Task.detached {
+            var failure: String?
+            if !pairs.isEmpty {
+                do { try CloudModelSettings.set(pairs, replace: replace) } catch { failure = error.localizedDescription }
+            }
+            await MainActor.run {
+                saving = false
+                if let failure { result = failure; resultOK = false; return }
+                if useCloud {
+                    CloudModelSettings.provider = provider
+                    CloudModelSettings.engineConfig = CloudModelSettings.config(for: provider, model: model)
+                }
+                // the engine only if the user moved the switch (a privacy setting, shared with the window as it was)
+                if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }
+                self.model.refreshCloud()
+                dismiss()
+            }
+        }
     }
 }

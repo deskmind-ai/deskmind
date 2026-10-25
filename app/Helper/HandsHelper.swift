@@ -168,12 +168,16 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true]
     case "record_start":
         // The task's apps (or the whole screen), recorded by the helper, which holds Screen Recording: ScreenRecorder.
-        // Not while another task acts on this Mac: the run it is for would be refused (computer_busy), and nothing of a
-        // refused request may start on the desktop.
-        if ComputerLock.acting { return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"] }
+        // Not while another task acts on this Mac (the run it is for would be refused, computer_busy) -- but the
+        // recording of the task that holds it (`for_run`: the chat's 「录制这个任务」) is passive capture of that task.
+        let forRun = req["for_run"] as? String
+        guard RecordStart.allowed(acting: ComputerLock.acting, holderRun: ComputerLock.read()?.runID, forRun: forRun) else {
+            return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
+        }
         return ScreenRecorder.start(req)
     case "record_stop":
-        return ScreenRecorder.stop()
+        // the app's cancel: stopped at once, answered at once; the movie made in the background (beside its run)
+        return ScreenRecorder.stop(forRun: req["for_run"] as? String, wait: false)
     case "takeover":
         // The user lets the task use the mouse and the front for a while (0 ends it early).
         Runner.takeOver(seconds: req["seconds"] as? Double ?? 0)
@@ -218,6 +222,20 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     case "brain_status":
         if req["start"] as? Bool == true { BrainServer.ensure() }
         return ["ok": true].merging(BrainServer.status()) { a, _ in a }
+    case "keys.status":
+        // The model settings as the app may know them (A11): set or not, each key by its last 4, the settings that are
+        // no secret, the digest -- never a value.
+        return ModelStore.status(ModelStore.current(keychain: ModelKeychain.store, file: ModelKeychain.legacyFile))
+    case "keys.set":
+        // A change from the app's settings: {set: {NAME: value}, unset: [NAME]}, merged into what is kept. Answered with
+        // the status; nothing is ever echoed.
+        // (`replace`: only the user's own save, over an item this helper cannot read -- the sheet says so first)
+        let r = ModelStore.set(req["set"] as? [String: String] ?? [:], unset: req["unset"] as? [String] ?? [],
+                               replace: req["replace"] as? Bool == true, keychain: ModelKeychain.store, file: ModelKeychain.legacyFile)
+        switch r {
+        case .set(let text): return ModelStore.status(text)
+        case .failed(let why): return ["ok": false, "error": why]
+        }
     case "model_check":
         // The settings sheet's "Test": one tiny question to a cloud model. `env` carries what is typed in the sheet
         // (key, URL, model) for this check only — nothing is written until the user saves.
@@ -371,7 +389,7 @@ struct HandsHelper {
         Thread.detachNewThread { serve() }
         Runner.warmUp()
         BrainServer.ensure()
-        atexit { BrainServer.stop(); EyesServer.stop() }
+        atexit { BrainServer.stop(); EyesServer.stop(); ScreenRecorder.quit() }      // (a recording never outlives the helper)
         // A replaced or terminated helper must take its model servers with it: left running, the next helper would
         // adopt a server still loaded with the old models. exit runs the atexit above (Lifecycle).
         Lifecycle.exitOnSIGTERM()

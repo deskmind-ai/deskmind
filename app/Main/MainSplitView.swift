@@ -1,4 +1,4 @@
-// The 0.5 main window (M1 S3, behind `ui05.shell`): three columns — the conversations, the chat, and the right column
+// The main window: three columns — the conversations, the chat, and the right column
 // (a placeholder until M3: 小方 and the session's state). Its logic is ShellModel (Shared/Shell.swift); these are
 // views only.
 //
@@ -30,6 +30,9 @@ struct MainSplitView: View {
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @State private var settingsOpen = false
+    /// The first run (A12) at this step, while it is shown; on a first launch it starts at the language.
+    @State private var setupAt: FirstRun.Step? = UserDefaults.standard.bool(forKey: FirstRun.doneKey) ? nil : .language
+    @ObservedObject private var keys = KeyStatus.shared
 
     var body: some View {
         NavigationSplitView {
@@ -37,7 +40,7 @@ struct MainSplitView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         } detail: {
             HStack(spacing: 0) {
-                ChatColumn(shell: shell, openSettings: openSettings)
+                ChatColumn(shell: shell, openSettings: openSettings, unmet: setupAt == nil ? unmet : [], openSetup: { setupAt = $0 })
                     .frame(minWidth: 420, maxWidth: .infinity)
                 Divider()
                 AgentPanel(shell: shell)
@@ -48,6 +51,10 @@ struct MainSplitView: View {
         .background(Brand.paper)
         .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
             CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
+        }
+        .sheet(isPresented: Binding(get: { setupAt != nil }, set: { if !$0 { setupAt = nil } }), onDismiss: settingsClosed) {
+            FirstRunView(shell: shell, flow: FirstRun(step: setupAt ?? .language), done: { setupAt = nil })
+                .environmentObject(model).environment(\.lang, lang)
         }
         .onAppear {
             ShellModel.shared = shell
@@ -66,10 +73,18 @@ struct MainSplitView: View {
     /// change here needs a new process (set_config carries the rest in place). The shell keeps what it last gave
     /// (ShellModel.keyFile, syncSettings).
     static func envFingerprint() -> String {
-        ModelKeys.fingerprint(CloudModelSettings.read())
+        KeyStatus.shared.now.digest ?? ""     // (the helper's digest of what it keeps: A11 -- never a key here)
     }
 
     private func openSettings() { settingsOpen = true }
+
+    /// What the first run left unmet, as the helper says it now (rows in the empty chat).
+    private var unmet: [FirstRun.Unmet] {
+        guard model.helperReady, keys.snapshot.known else { return [] }
+        return FirstRun.unmet(FirstRun.Facts(accessibility: model.granted(.accessibility), screen: model.granted(.screen),
+                                             keySet: CloudModelSettings.configured(keys.snapshot, CloudModelSettings.provider)),
+                              keysReadable: keys.snapshot.readable)
+    }
 
     /// The sheet's Save already told the shell (ModelSettingsSaved); this compares again, and acts only on what it has
     /// not given its sessions yet (never a second restart for the same save: #107 review at 5999bd9).
@@ -83,7 +98,7 @@ struct MainSplitView: View {
         // (as the harness reads it: a model name saved with spaces around it by an older version, without them)
         if let c = CloudModelSettings.engineConfig, !c.isEmpty { return SessionClient.normalizeConfig(c) }
         let p = CloudModelSettings.provider
-        return SessionClient.normalizeConfig(CloudModelSettings.config(for: p, model: CloudModelSettings.read()["CUSTOM_MODEL"] ?? ""))
+        return SessionClient.normalizeConfig(CloudModelSettings.config(for: p, model: KeyStatus.shared.now.settings["CUSTOM_MODEL"] ?? ""))
     }
 }
 
@@ -105,6 +120,7 @@ extension ShellModel {
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         m.client.liveView = false      // (the window draws the float itself: the helper starts no live card for its tasks)
         m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
+        m.recorder = AppTaskRecorder()      // (「录制这个任务」: the helper records the task's apps)
         // a task ended here: the run records' rule (M5: 30 days / 1 GB), off the main queue, the live runs kept
         m.onTaskEnded = { [weak m] in
             DispatchQueue.global(qos: .utility).async { [weak m] in RunRetention.prune(live: { m?.liveRunsNow() ?? [] }) }
@@ -248,6 +264,8 @@ struct StatusDot: View {
 struct ChatColumn: View {
     @ObservedObject var shell: ShellModel
     let openSettings: () -> Void
+    var unmet: [FirstRun.Unmet] = []
+    var openSetup: (FirstRun.Step) -> Void = { _ in }
     @Environment(\.lang) private var lang
     @State private var announced: String?
     /// 「跳到卡片」: the card to scroll the chat to (one too tall to pin stays in place there).
@@ -285,7 +303,7 @@ struct ChatColumn: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        if let s { timeline(s) } else { EmptyChat(opening: shell.opening) }
+                        if let s { timeline(s) } else { EmptyChat(opening: shell.opening, unmet: unmet, openSetup: openSetup) }
                         Color.clear.frame(height: 1).id("bottom")
                     }
                     .padding(.horizontal, 22).padding(.vertical, 16)
@@ -433,6 +451,8 @@ struct Banner: View {
 
 struct EmptyChat: View {
     let opening: Bool
+    var unmet: [FirstRun.Unmet] = []
+    var openSetup: (FirstRun.Step) -> Void = { _ in }
     @Environment(\.lang) private var lang
     var body: some View {
         VStack(spacing: 10) {
@@ -441,6 +461,8 @@ struct EmptyChat: View {
                 .font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
             Text(L("Chat, or start a computer task with /cua followed by what to do.", lang: lang))
                 .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+            // (what the first run left unmet: its step again -- A12)
+            if !unmet.isEmpty { SetupRow(unmet: unmet, open: openSetup).padding(.top, 8) }
         }
         .frame(maxWidth: .infinity).padding(.top, 80)
     }
@@ -644,6 +666,14 @@ struct Composer: View {
                     .buttonStyle(InkButtonStyle(prominent: false))
                     .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
             }
+            // 「录制这个任务」: this conversation's next computer task recorded (TaskRecording), off unless turned on
+            Toggle(isOn: Binding(get: { shell.recordsNext }, set: { shell.setRecording($0) })) {
+                Image(systemName: shell.recordsNext ? "record.circle.fill" : "record.circle")
+            }
+            .toggleStyle(.button).buttonStyle(.plain)
+            .foregroundStyle(shell.recordsNext ? ShellColor.orangeText : ShellColor.secondary)
+            .help(L("Record this task", lang: lang))
+            .accessibilityLabel(L("Record this task", lang: lang))
             if !mode.replying {
                 Button(L("Send", lang: lang)) { shell.submit() }
                     .buttonStyle(InkButtonStyle(prominent: true))
@@ -681,23 +711,19 @@ struct AgentPanel: View {
         return t.runId
     }
 
-    @AppStorage(ProcessTabs.key) private var traceOn = false
-
-    /// The column's blocks (RightColumn.model: only what the events said), each second while a task runs; with the
-    /// 过程 tab on (ui05.trace), 「现在」 and 「过程」 above it (ProcessTabs: switching sends nothing).
+    /// The column's two tabs, 「现在」 and 「过程」 (ProcessTabs: switching sends nothing): 现在's blocks (RightColumn.model:
+    /// only what the events said), each second while a task runs; 过程, the run as its folder recorded it.
     var body: some View {
         VStack(spacing: 8) {
-            if traceOn {
-                Picker("", selection: Binding(get: { shell.currentTabs.tab }, set: { shell.pickTab($0) })) {
-                    Text(L("Now", lang: lang)).tag(ProcessTabs.Tab.now)
-                    Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
-                }
-                .pickerStyle(.segmented).labelsHidden()
+            Picker("", selection: Binding(get: { shell.currentTabs.tab }, set: { shell.pickTab($0) })) {
+                Text(L("Now", lang: lang)).tag(ProcessTabs.Tab.now)
+                Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
             }
-            if shell.currentTabs.shown(traceOn: traceOn) == .process, let sid = shell.selected,
+            .pickerStyle(.segmented).labelsHidden()
+            if shell.currentTabs.tab == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
                 ProcessPane(sessionId: sid, runId: run).equatable().id(sid + "/" + run)
-            } else if shell.currentTabs.shown(traceOn: traceOn) == .process {
+            } else if shell.currentTabs.tab == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }

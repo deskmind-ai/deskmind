@@ -92,21 +92,27 @@ enum SessionHost {
     }
     nonisolated(unsafe) static var setup = Setup.standard()
 
-    /// What a live task of a session drives on this Mac, by run: its card (when the session shows one), the
-    /// recording's app list, and the card's end.
+    /// What a live task of a session drives on this Mac, by run: the live view's feed (LiveWatch: the main app's
+    /// dock and float watch it), from the task's own protocol events -- its steps' windows, its end. The helper shows
+    /// nothing of its own for a session (A10: the main app's float is the one; `live_view` is accepted and ignored).
     struct UI {
-        var start: (_ run: String, _ goal: String, _ onStop: @escaping () -> Void) -> Void
-        /// An event of the task the card follows (HarnessRun.show).
-        var show: (_ run: String, _ ev: [String: Any]) -> Void
-        /// An event of a live task without the card: the recording only (HarnessRun.recordApp).
-        var record: (_ run: String, _ ev: [String: Any]) -> Void
-        var finish: (_ run: String, _ status: LiveView.Status?) -> Void
+        var note: (_ run: String, _ ev: [String: Any]) -> Void
+        var ended: (_ run: String) -> Void
+        static let standard = UI(note: { run, ev in
+            LiveWatch.note(run: run, ev)
+            if ScreenRecorder.records(run) { recordApp(ev) }       // (only the recorded task's steps: #127 delta)
+        }, ended: { run in
+            LiveWatch.ended(run)
+            ScreenRecorder.runEnded(run)        // (the recording of this run stops with it: the helper owns it)
+        })
 
-        // (every live task's events also go to the live view's feed -- LiveWatch -- with a card or without)
-        static let standard = UI(start: { _, goal, onStop in LiveCard.start(bundles: [], goal: goal, onStop: onStop) },
-                                 show: { run, ev in LiveWatch.note(run: run, ev); HarnessRun.show(ev) },
-                                 record: { run, ev in LiveWatch.note(run: run, ev); HarnessRun.recordApp(ev) },
-                                 finish: { run, status in LiveWatch.ended(run); LiveCard.finish(status) })
+        /// A step's window's app into the recording, if one is going (the main app's 「录制这个任务」): the step's
+        /// `object` (window:<bundle>#<n>), as the protocol says it.
+        static func recordApp(_ ev: [String: Any]) {
+            guard ev["kind"] as? String == "step", let o = ev["object"] as? String, o.hasPrefix("window:"), let hash = o.lastIndex(of: "#") else { return }
+            let bundle = String(o[o.index(o.startIndex, offsetBy: 7)..<hash])
+            if !bundle.isEmpty { ScreenRecorder.addApp(bundle) }
+        }
     }
 
     static let ops: Set<String> = ["session.open", "session.send", "session.end", "session.delete", "session.history", "sessions.list", "sessions.watch",
@@ -221,8 +227,6 @@ enum SessionHost {
         var activity = SessionWire.Activity()
         var lastActive = Date()
         var closing = false
-        /// Show a task's live card (session.open's `live_view`, on unless the app says false, as for `op run`).
-        var liveView = true
         /// Which lines are new in this process and which tasks are live in it (SessionWire.Live).
         var live = SessionWire.Live()
         /// Its session.start's `last_seq`: the stored seq this process began after.
@@ -246,8 +250,8 @@ enum SessionHost {
         /// the app asks a process for a restart while this is not the file's now.
         var keysDigest: String?
         // the reader thread's own: the live card's view of each live task
-        var cards: [String: HarnessEvents.State] = [:]
-        var cardRun: String?
+        /// Its tasks the live view's feed follows (each told when it ends, or when the process goes).
+        var watched: Set<String> = []
 
         init(id: String, process: Process, input: FileHandle) { self.id = id; self.process = process; self.input = input }
 
@@ -355,14 +359,13 @@ enum SessionHost {
         for k in ["config", "lang", "driver", "scope"] where req[k] != nil && !(req[k] is String) {
             return ["ok": false, "code": "bad_request", "error": "\(k) must be a string"]
         }
-        let liveView = req["live_view"] as? Bool
+        // (`live_view`: accepted from older apps and ignored -- the helper shows no card of its own for a session)
         // one opener per id at a time; a process on its way out is waited for (its lock is the session's): one closing,
         // one asked to end if idle (its answer may be its exit), one that exited and is not reaped yet
         let until = Date().addingTimeInterval(20)
         while true {
             lock.lock()
             if let s = sessions[id], s.started, !s.closing, s.ask == nil, s.process.isRunning {
-                if let liveView { s.liveView = liveView }
                 s.lastActive = Date()
                 lock.unlock()
                 return ["ok": true, "session_id": id, "resumed": s.first?["resumed"] as? Bool ?? true, "already_open": true,
@@ -384,7 +387,7 @@ enum SessionHost {
         // session's lock: the harness says busy and exits; tried again until it has gone.
         while true {
             let s: Session
-            do { s = try spawn(id: id, header: header, liveView: liveView ?? true) } catch {
+            do { s = try spawn(id: id, header: header) } catch {
                 return ["ok": false, "error": "launch: \(error.localizedDescription)"]
             }
             _ = s.firstLine.wait(timeout: .now() + 20)
@@ -405,7 +408,7 @@ enum SessionHost {
         }
     }
 
-    private static func spawn(id: String, header: [String: Any], liveView: Bool) throws -> Session {
+    private static func spawn(id: String, header: [String: Any]) throws -> Session {
         let fm = FileManager.default
         try? fm.createDirectory(at: setup.logs, withIntermediateDirectories: true)
         let errURL = setup.logs.appendingPathComponent("\(id).stderr")
@@ -422,7 +425,10 @@ enum SessionHost {
         defer { lock.lock(); spawning[id] = nil; lock.unlock() }
         setup.beforeKeys()
         // ONE read of the keys file: the environment the process gets and the digest the helper reports are of it
-        let keysEnv = HarnessRun.modelEnv()
+        guard let keysEnv = HarnessRun.modelEnv() else {
+            // the keys could not be read (the keychain refused, no file): no process starts on an empty key (A11)
+            throw NSError(domain: "DeskMind", code: 1, userInfo: [NSLocalizedDescriptionKey: "keys_unreadable"])
+        }
         let keys = ModelKeys.digest(env: keysEnv)
         lock.lock(); spawning[id] = .some(keys); lock.unlock()
         p.environment = setup.environment(keysEnv)
@@ -431,7 +437,6 @@ enum SessionHost {
         try p.run()
         try? err?.close()
         let s = Session(id: id, process: p, input: inPipe.fileHandleForWriting)
-        s.liveView = liveView
         s.keysDigest = keys
         // The header, then a replay for whoever watches: the stored events after the earliest cursor among them. Written
         // under the lock, so a connection that starts watching meanwhile (sessions.watch) writes its attach after the
@@ -658,7 +663,7 @@ enum SessionHost {
             return ["ok": false, "error": "no list from the harness (exit \(p.terminationStatus))"]
         }
         // (the file now, read before the processes' digests: a save meanwhile shows as owed, never as applied)
-        let keysNow = ModelKeys.digest(env: HarnessRun.modelEnv())
+        let keysNow = HarnessRun.modelEnv().map { ModelKeys.digest(env: $0) }      // (nil: not known -- not reported)
         lock.lock()
         // a process spawned whose session.start has not come yet (`starting`) has read its keys already: reported with
         // its digest too (#107 review at 85d81f6: missed, a key saved while it started left it on the old one)
@@ -690,7 +695,9 @@ enum SessionHost {
             if let k = r.keys { p["keys"] = k }
             return p
         }
-        return ["ok": true, "keys": keysNow, "sessions": reported, "processes": processes]
+        var reply: [String: Any] = ["ok": true, "sessions": reported, "processes": processes]
+        if let keysNow { reply["keys"] = keysNow }
+        return reply
     }
 
     // MARK: watching
@@ -780,9 +787,9 @@ enum SessionHost {
         ask?.answered.leave()
         if s.closedIdle { NSLog("DeskMind Hands: session \(s.id) idle; closed it") }
         s.firstLine.signal()
-        if let run = s.cardRun { setup.ui.finish(run, .failed); s.cardRun = nil }
         // every run of the process that went: its live view ends (the app's watch is told, nothing more is captured)
-        for run in Set(s.cards.keys) { LiveWatch.ended(run) }
+        for run in s.watched { setup.ui.ended(run) }
+        s.watched = []
     }
 
     private static func lineData(_ e: [String: Any]) -> Data? {
@@ -831,8 +838,6 @@ enum SessionHost {
         } else if e["run_id"] is String {
             drive = s.live.show(e)
         }
-        let raw = s.activity.raw[e["run_id"] as? String ?? ""] ?? ""
-        let liveView = s.liveView
         var hold = false
         for w in watchers {
             var g = w.gate(s.id)
@@ -846,17 +851,13 @@ enum SessionHost {
         let recheck = s.endWhenIdle && !s.closing && s.ask == nil && ends.contains(kind) && s.activity.idle
         lock.unlock()
         if recheck { DispatchQueue.global().async { endIfIdle(s, wait: false) } }
-        if drive, let run = e["run_id"] as? String { self.drive(s, run: run, e, raw: raw, liveView: liveView) }
+        if drive, let run = e["run_id"] as? String { self.drive(s, run: run, e) }
         // a task that ended without its executor's task_done (the executor died, the app went away): its card ends
         // here, or it would stay up and keep every later task of the session from showing one
         if let run = ended {
-            // (its live view ends too, card or not: #125 review -- a live_view:false session has no card run)
-            LiveWatch.ended(run)
-            s.cards[run] = nil
-            if s.cardRun == run {
-                setup.ui.finish(run, kind == "session.task_end" ? HarnessRun.ending(e["status"] as? String) : .failed)
-                s.cardRun = nil
-            }
+            // (its live view ends too: #125 review)
+            setup.ui.ended(run)
+            s.watched.remove(run)
         }
     }
 
@@ -886,21 +887,14 @@ enum SessionHost {
 
     /// A live task's event (SessionWire.Live.show: started in this process, not ended, not shown before): the card
     /// follows the first such task while the session shows cards; any other only feeds the recording's app list.
-    private static func drive(_ s: Session, run: String, _ e: [String: Any], raw: String, liveView: Bool) {
-        let kind = e["kind"] as? String ?? ""
-        if kind == "start" && liveView && s.cardRun == nil {
-            s.cardRun = run
-            setup.ui.start(run, raw) { [weak s] in _ = s?.write(["type": "stop", "run_id": run]) }
-        }
-        var st = s.cards[run] ?? HarnessEvents.State()
-        let out = HarnessEvents.translate(e, state: &st, title: raw, hasFolder: false, pid: Int(s.process.processIdentifier))
-        s.cards[run] = st
-        if s.cardRun == run { for ev in out { setup.ui.show(run, ev) } }
-        else { for ev in out { setup.ui.record(run, ev) } }
-        if kind == "task_done" {
-            LiveWatch.ended(run)
-            s.cards[run] = nil
-            if s.cardRun == run { setup.ui.finish(run, HarnessRun.ending(e["status"] as? String)); s.cardRun = nil }
+    /// A live task's protocol event to the live view's feed (its step's window, its end) -- read as the protocol has
+    /// it (A10: no translation into the old window's events).
+    private static func drive(_ s: Session, run: String, _ e: [String: Any]) {
+        s.watched.insert(run)
+        setup.ui.note(run, e)
+        if e["kind"] as? String == "task_done" {
+            setup.ui.ended(run)
+            s.watched.remove(run)
         }
     }
 

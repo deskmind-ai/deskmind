@@ -16,11 +16,9 @@ struct TaskRow: View {
     @ObservedObject var shell: ShellModel
     let task: TaskState
     let session: SessionState
-    /// Its Stop: the chat's (the selected session's task); a goal's screen gives the goal's own (GoalRun.stop: by its
-    /// run, never run-less).
+    /// Its Stop: the chat's (the selected session's task) unless given.
     var stop: (() -> Void)? = nil
     @Environment(\.lang) private var lang
-    @AppStorage(ProcessTabs.key) private var traceOn = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -36,10 +34,16 @@ struct TaskRow: View {
                 }
                 Spacer()
                 // the task's 「过程」 in the right column (M5): the one way to it from the chat
-                if traceOn, stop == nil {
+                if stop == nil {
                     Button(L("Process", lang: lang)) { shell.showProcess(task.runId) }
                         .buttonStyle(.link).font(.system(size: 11))
                         .accessibilityHint(L("Shows this task's process in the right column", lang: lang))
+                }
+                // 「已录制」: the task's movie (Movies › DeskMind), when one was made
+                if task.ended, let path = shell.movies[task.runId] {
+                    Button(L("Recorded", lang: lang)) { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+                        .buttonStyle(.link).font(.system(size: 11))
+                        .accessibilityHint(L("Opens the task's recording", lang: lang))
                 }
                 if task.running {
                     Button(L("Stop", lang: lang)) { if let stop { stop() } else { shell.stop() } }

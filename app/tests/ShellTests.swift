@@ -1,4 +1,4 @@
-// The 0.5 main window's glue (M1 S3, Shared/Shell.swift), without a screen: the ui05.shell flag, the status dot's
+// The 0.5 main window's glue (M1 S3, Shared/Shell.swift), without a screen: the status dot's
 // priority, the composer's Enter / ⌘Enter / disabled, the queue bubbles' controls, the card answers' payloads, the
 // session list (titles, rename, delete), the new conversation's open-then-send, and the settings reaching the client.
 // Run from DecisionTests.main (build.sh).
@@ -12,7 +12,6 @@ enum ShellTests {
 
     static func run() {
         DecisionTests.group("shell.defaultsHygieneTests"); defaultsHygieneTests()
-        DecisionTests.group("shell.flagTests"); flagTests()
         DecisionTests.group("shell.statusPriorityTests"); statusPriorityTests()
         DecisionTests.group("shell.composerTests"); composerTests()
         DecisionTests.group("shell.rowsTests"); rowsTests()
@@ -181,15 +180,6 @@ enum ShellTests {
     static func sends(_ mock: Mock) -> Int { mock.requests.filter(isControl).count }
 
     // MARK: the flag
-
-    static func flagTests() {
-        let d = scratchDefaults()
-        check(!ShellFlag.isOn(d), "off by default")
-        d.set(true, forKey: "ui05.shell")
-        check(ShellFlag.isOn(d), "on once set (the View menu's switch)")
-        d.set(false, forKey: ShellFlag.key)
-        check(!ShellFlag.isOn(d), "off again")
-    }
 
     // MARK: the status dot
 
@@ -1177,9 +1167,9 @@ enum ShellTests {
         check(ModelChoice.modelName("  deepseek-chat \n") == "deepseek-chat" && ModelChoice.modelName("a b") == "a b", "trimmed at its ends only")
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CloudModel.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let persist = text.components(separatedBy: "private func persist()").dropFirst().first?.components(separatedBy: "private func save()").first ?? ""
-        check(persist.contains("ModelChoice.modelName(modelID)") && !persist.contains("model: modelID") && !persist.contains("= modelID"),
-              "persist saves the trimmed name")
+        let save = text.components(separatedBy: "private func save()").dropFirst().first?.components(separatedBy: "\n    }\n").first ?? ""
+        check(save.contains("ModelChoice.modelName(modelID)") && !save.contains("model: modelID") && !save.contains("= modelID"),
+              "the save sends the trimmed name")
     }
 
     /// Final round (6, E1): the stored lines a watch reconnect reads come off the stream's thread (the live lines go on
@@ -1840,17 +1830,14 @@ enum ShellTests {
         check(c.state("ses_t").outbox.last?.refused == "no_model", "reopened, then no_model: shown as no_model (\(String(describing: c.state("ses_t").outbox.last?.refused)))")
     }
 
-    /// Re-review of b0ff614 (old window): the engine setter asserts through the ordered sync; the app asserts when the
-    /// helper's status disagrees; a refused run (no_model) is said as it is.
+    /// Re-review of b0ff614: the engine setter asserts through the ordered sync; the app asserts when the helper's
+    /// status disagrees. (The old window's run screen, which said a no_model refusal, went with A10.)
     static func oldWindowRunTests() {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let sheet = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
         check(sheet.contains("ModelsOffSync.shared.push()"), "the engine setter pushes through the app's one sync")
         let app = (try? String(contentsOf: dir.appendingPathComponent("Main/DeskMindApp.swift"), encoding: .utf8)) ?? ""
         check(app.contains("reply?[\"models_off\"]") && app.contains("ModelsOffSync.shared.push()"), "the helper's status disagreeing: pushed again")
-        let run = (try? String(contentsOf: dir.appendingPathComponent("Main/RunView.swift"), encoding: .utf8)) ?? ""
-        check(run.contains("[\"brain_not_ready\", \"no_model\"].contains"), "a run refused no_model: said as it is")
-        check(L("The cloud model is off. Turn it on in the model settings to run this task.", lang: .zhHans).contains("云端模型关着"), "translated")
     }
 
     /// External review of 473fdac (P1): the app starts with cloud off while the helper runs a session whose task runs.
@@ -2129,7 +2116,7 @@ enum ShellTests {
             let m = keyShell(h, center: center)
             for l in SessionTests.lines("chat") { m.client.feed(l) }
             m.syncSettings()                                     // (shown: nothing owed)
-            m.stopWatching()                                     // (the 0.5 window off: ui05.shell turned off)
+            m.stopWatching()                                     // (the window's model stops watching)
             h.key = "K=new"
             ModelSettingsSaved.post(center)
             check(h.ends() == ["ses_t"] && h.runsOn("ses_t") == nil, "a key saved in the old window: the live session asked for a new process: \(h.ends())")
@@ -2206,7 +2193,8 @@ enum ShellTests {
         // the app's writers post, and the app's one shell observes them; the window compares through the shell only
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let cloud = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
-        let write = cloud.components(separatedBy: "static func write(").dropFirst().first?.components(separatedBy: "static var provider").first ?? ""
+        // (the keys: written through the helper, keys.set -- A11)
+        let write = cloud.components(separatedBy: "static func set(_ pairs:").dropFirst().first?.components(separatedBy: "static var provider").first ?? ""
         let provider = cloud.components(separatedBy: "static var provider: CloudProvider {").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
         let engineConfig = cloud.components(separatedBy: "static var engineConfig: String? {").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
         check(write.contains("ModelSettingsSaved.post()") && provider.contains("ModelSettingsSaved.post()") && engineConfig.contains("ModelSettingsSaved.post()"),
@@ -2507,7 +2495,7 @@ enum ShellTests {
         let spawn = host.components(separatedBy: "private static func spawn(").dropFirst().first?.components(separatedBy: "static func send(").first ?? ""
         check(spawn.contains("s.keysDigest = keys"), "spawn: the digest kept with the process")
         let list = host.components(separatedBy: "static func list() -> [String: Any] {").dropFirst().first ?? ""
-        check(list.contains("\"keys\": keysNow") && list.contains("i[\"keys\"] = k") && list.contains("i[\"ending\"] = r.ending"),
+        check(list.contains("reply[\"keys\"] = keysNow") && list.contains("i[\"keys\"] = k") && list.contains("i[\"ending\"] = r.ending"),
               "sessions.list: the file's digest now, each open process's, and whether it is ending")
         check(list.contains("(s.started || s.process.isRunning)") && list.contains("i[\"starting\"] = true"),
               "sessions.list: a process spawned, not started yet, is reported (starting) with its digest")

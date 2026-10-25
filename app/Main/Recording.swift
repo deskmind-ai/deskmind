@@ -12,9 +12,6 @@ import SwiftUI
 @MainActor
 final class RunRecorder {
     static let shared = RunRecorder()
-    private(set) var fileURL: URL?
-
-    var isRecording: Bool { fileURL != nil }
 
     /// The View menu's two recording settings: DeskMind's own window in the recording (off: the island and panels
     /// only), and the whole screen instead of the task's apps (off: other apps are left out).
@@ -31,36 +28,84 @@ final class RunRecorder {
         return dir.appendingPathComponent(MovieName.folder(goal: goal, date: Date()), isDirectory: true)
     }
 
-    /// Start recording the task's apps (`bundles`). `started(true)` once recording; false if it could not start (no
-    /// Screen Recording for the helper, the helper away) -- the run goes ahead either way.
-    func begin(goal: String, bundles: [String], started: @escaping (Bool) -> Void) {
-        guard fileURL == nil else { started(true); return }
+    /// The run the helper was asked to record, until its task is over or the app cancels it (the app's quit tells the
+    /// helper to stop it).
+    private(set) var run: String?
+    var busy: Bool { run != nil }
+
+    /// Ask the helper to record `run`'s task (of `session`): the apps it works in (its steps add them), into
+    /// Movies › DeskMind. The helper owns it from here (RecordingOwner): it stops when that run ends. `started(false)`:
+    /// it said no (no Screen Recording); no answer at all is taken as recording -- the run's end stops it anyway.
+    func begin(goal: String, run: String, session: String, started: @escaping (Bool) -> Void) {
+        self.run = run
         let url = Self.folderURL(goal: goal)
-        let body: [String: Any] = ["op": "record_start", "path": url.path, "bundles": bundles, "goal": goal,
+        let body: [String: Any] = ["op": "record_start", "path": url.path, "bundles": [String](), "goal": goal,
+                                   "for_run": run, "session_id": session,
                                    "include_main": UserDefaults.standard.bool(forKey: Self.includeMainKey),
                                    "whole_screen": UserDefaults.standard.bool(forKey: Self.wholeScreenKey),
                                    "smooth": UserDefaults.standard.bool(forKey: Self.smoothKey)]
         DispatchQueue.global().async {
             let reply = DeskMindIPC.request(body, timeout: 25)
-            let ok = reply?["ok"] as? Bool == true
+            let refused = reply != nil && reply?["ok"] as? Bool != true
             DispatchQueue.main.async {
-                if ok { self.fileURL = url }
-                started(ok)
+                if refused, self.run == run { self.run = nil }
+                started(!refused)
             }
         }
     }
 
-    /// Stop and finish the recording; `done` gets the movie to show (nil if nothing was recorded). The helper makes
-    /// the delivery copy and the step file first, which takes a while for a long run.
-    func stop(done: @escaping (URL?) -> Void) {
-        guard fileURL != nil else { done(nil); return }
-        fileURL = nil   // handed over: never taken for the next run's
+    /// Ask the helper to stop recording `run`: asked again, waiting longer each time, until it answers (it stops at
+    /// once and answers at once; asking when nothing records is harmless).
+    func cancel(_ run: String) {
+        if self.run == run { self.run = nil }
         DispatchQueue.global().async {
-            let reply = DeskMindIPC.request(["op": "record_stop"], timeout: 900)
-            let url = (reply?["path"] as? String).map { URL(fileURLWithPath: $0) }
-            DispatchQueue.main.async { done(url) }
+            var wait = 1.0
+            for _ in 0..<8 {
+                if DeskMindIPC.request(["op": "record_stop", "for_run": run], timeout: 5) != nil { return }
+                Thread.sleep(forTimeInterval: wait); wait = min(wait * 2, 30)
+            }
         }
     }
+
+    /// The task is over (the helper stopped its recording): the movie, once the helper has made it, from the run's
+    /// folder (recording.json) -- looked for every few seconds, for as long as a long movie takes.
+    func awaitMovie(run: String, session: String, saved: @escaping (URL) -> Void) {
+        if self.run == run { self.run = nil }
+        guard let folder = RunDir.folder(session: session, run: run) else { return }
+        let file = folder.appendingPathComponent(RecordingOwner.savedFile)
+        DispatchQueue.global(qos: .utility).async {
+            for _ in 0..<(3 * 3600 / 3) {
+                if let d = try? Data(contentsOf: file), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                   let path = o["path"] as? String {
+                    DispatchQueue.main.async { saved(URL(fileURLWithPath: path)) }
+                    return
+                }
+                Thread.sleep(forTimeInterval: 3)
+            }
+        }
+    }
+}
+
+/// A chat task's recording (Shared/TaskRecording.swift): RunRecorder through the helper, with the decision panel
+/// on screen while it records (non-activating, as it always was: it is what a demo shows).
+final class AppTaskRecorder: TaskRecorder {
+    func start(goal: String, run: String, session: String, started: @escaping (Bool) -> Void) {
+        MainActor.assumeIsolated {
+            DecisionPanel.shared.show()
+            RunRecorder.shared.begin(goal: goal, run: run, session: session) { ok in
+                if !ok { DecisionPanel.shared.hide() }
+                started(ok)
+            }
+        }
+    }
+    func cancel(run: String) { MainActor.assumeIsolated { RunRecorder.shared.cancel(run) } }
+    func ended(run: String, session: String, saved: @escaping (URL) -> Void) {
+        MainActor.assumeIsolated {
+            DecisionPanel.shared.hide(after: 2)
+            RunRecorder.shared.awaitMovie(run: run, session: session, saved: saved)
+        }
+    }
+    func step(_ n: Int, _ words: String) { MainActor.assumeIsolated { DecisionPanel.shared.update(n: n, words: words) } }
 }
 
 // MARK: - The decision panel
@@ -125,6 +170,12 @@ final class DecisionPanel {
             guard let self, self.generation == g else { return }
             self.hide()
         }
+    }
+
+    /// A chat task's step: its number and its words (the protocol says no model's scores for it).
+    func update(n: Int, words: String) {
+        guard panel?.isVisible == true else { return }
+        model.n = n; model.headline = words; model.top = []; model.tier = ""; model.ms = 0; model.question = ""; model.answer = ""
     }
 
     /// A step event from the helper: its "decision" record (hands' JSON: top, operation, routing), its target.

@@ -1,5 +1,5 @@
 // The 0.5 main window's logic (M1 S3), apart from its views (Main/MainSplitView.swift) so that it is tested without a
-// screen: the `ui05.shell` flag; the session list (rows, titles, status dots); what the composer does with Enter and
+// screen: the session list (rows, titles, status dots); what the composer does with Enter and
 // ⌘Enter; what each chat item says; and `ShellModel`, the glue between the views and the session client
 // (SessionClient: the helper's sessions, the reducer's states).
 //
@@ -10,15 +10,6 @@
 
 import Combine
 import Foundation
-
-// MARK: - The flag
-
-/// The new main window (handoff §6, M1): off by default; the View menu's developer switch turns it on. Off, the app is
-/// as it was.
-enum ShellFlag {
-    static let key = "ui05.shell"
-    static func isOn(_ defaults: UserDefaults = .standard) -> Bool { defaults.bool(forKey: key) }
-}
 
 // MARK: - Model settings saved
 
@@ -544,6 +535,9 @@ final class ShellModel: ObservableObject {
         self.work = work
         self.lane = lane ?? work
         self.deliver = deliver
+        recording.defaultOn = defaults.bool(forKey: TaskRecording.defaultKey)
+        recording.on = (defaults.dictionary(forKey: TaskRecording.conversationsKey) as? [String: Bool]) ?? [:]
+        movies = (defaults.dictionary(forKey: TaskRecording.moviesKey) as? [String: String]) ?? [:]
         client.clock = now        // (an exit the client infers for a session alive this run is stamped by this clock)
         client.onChange = { [weak self] id, _ in self?.changed(id) }
         // each refusal of an answer as it comes: one of ours goes to the UI queue to be matched; any other is dropped here
@@ -834,39 +828,19 @@ final class ShellModel: ObservableObject {
         }
     }
 
-    /// A computer task of its own, from the home screen's GoalRunView (harness engine): a new session, opened, then
-    /// `cua` with the goal and its folder as the scope — the same session task the chat runs, so it shows with the
-    /// chat's task row, cards and result card (A3's one state, the same canSend / respond path). The new session
-    /// becomes the selected one once it is open. What came of it goes to `report`, on the UI queue, each once: the
-    /// cloud switch's refusal, else the open (its session id, or failed), then the send (sent, refused, unavailable)
-    /// — GoalRun's lifecycle (Shared/GoalRun.swift) is driven by these, never by the selected session.
-    /// `clientId`: its cua's (the goal matches a refusal by it); `ticket`: the goal still wants it — over, the cua is
-    /// never sent, and a cua that went while it became over is followed by a stop.
-    func startTask(_ goal: String, scope: String?, clientId: String? = nil, ticket: GoalTicket? = nil,
-                   report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
-        newConversation()
-        let control = SessionControl.cua(goal, scope: scope)
-        guard cloudAllows() else { report(.cloudRefused); return }
-        openThenSend(control, text: goal, clientId: clientId, ticket: ticket, report: report)
-    }
-
     /// The new conversation's first message: the session is opened (with the settings now), then the words sent. The
     /// words stay in the composer until the session is open (it takes no typing meanwhile: `opening`); not opened, they
     /// are still there; opened, they are the session's (sent, or an unsent bubble of it).
-    private func openThenSend(_ control: SessionControl, text: String, clientId: String? = nil, ticket: GoalTicket? = nil,
-                              report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
-        guard !opening else { report(.openFailed); return }
+    private func openThenSend(_ control: SessionControl, text: String) {
+        guard !opening else { return }
         opening = true
         work { [weak self] in
             guard let self else { return }
-            // (a goal over before its open went: nothing is opened for it)
-            if ticket?.over == true { self.deliver { self.opening = false; report(.openFailed) }; return }
             // (with the settings stored when it goes: SessionClient.desired())
             guard let id = self.client.open() else {
                 self.deliver {
                     self.opening = false
                     self.notice = L("Couldn't start a conversation. Is DeskMind's helper running?", lang: self.lang())
-                    report(.openFailed)
                 }
                 return
             }
@@ -874,22 +848,12 @@ final class ShellModel: ObservableObject {
                 self.opening = false
                 if self.drafts[""] == text { self.drafts[""] = "" }
                 self.states[id] = self.client.state(id)
+                self.seedRecording(id)          // (a new conversation: the last 「录制这个任务」 choice)
                 if self.selected == nil { self.selected = id }
                 self.rebuild()
-                report(.opened(sid: id))
             }
-            // a goal over meanwhile (its bound ran out while the open waited): its cua is never sent
-            if ticket?.over == true { return }
-            let r = self.client.send(control, to: id, clientId: clientId)
-            // (over while the send went: the goal's guard stops the task it starts, by its run — never a run-less
-            // stop here, which the session would take for whatever task runs)
-            self.deliver {
-                switch r {
-                case .sent: report(.sent)
-                case .refused(let code): self.notSent(r, text: text, in: id); report(.refused(code))
-                case .unavailable: self.notSent(r, text: text, in: id); report(.unavailable)
-                }
-            }
+            let r = self.client.send(control, to: id)
+            if r != .sent { self.deliver { self.notSent(r, text: text, in: id) } }
         }
     }
 
@@ -899,18 +863,7 @@ final class ShellModel: ObservableObject {
         if r == .unavailable { notice = L("DeskMind's helper didn't answer. Your message is kept below; send it again.", lang: lang()) }
     }
 
-    /// `stop {client_id}` (harness#72) to one session: the task the cua with that client id started, or — none yet —
-    /// the cua cancelled. `sent`: the helper took the line (true) or did not answer (false); the session's answer is
-    /// session.stop_ack, on its stream. The send reopens an exited session (it answers from its history).
-    func stopCua(sessionId id: String, clientId: String, sent: @escaping (Bool) -> Void) {
-        work { [weak self] in
-            guard let self else { return }
-            let r = self.client.send(.stopCua(clientId: clientId), to: id)
-            self.deliver { sent(r == .sent) }
-        }
-    }
-
-    /// Stop one task of one session by its run (GoalRun). Never run-less: the session would stop whatever task runs.
+    /// Stop one task of one session by its run (the float's Stop). Never run-less: the session would stop whatever task runs.
     func stop(sessionId id: String, runId: String) {
         cards.stopping(runId)
         work { [weak self] in _ = self?.client.send(.stop(runId: runId), to: id) }
@@ -1079,16 +1032,78 @@ final class ShellModel: ObservableObject {
             if !tabStarted.contains(task.runId), (task.startedAt ?? .infinity) >= liveSince, task.running || task.ended {
                 tabStarted.insert(task.runId)
                 t.apply(.taskStarted(task.runId))
+                record(recording.apply(.taskStarted(session: id, run: task.runId)), in: id, state: new)
+            }
+            // (the recorded task's steps, for the decision panel)
+            if recording.recordingRun == task.runId, task.steps.count > (stepsNoted[task.runId] ?? 0), let last = task.steps.last {
+                stepsNoted[task.runId] = task.steps.count
+                recorder?.step(task.steps.count, last.displayText)
             }
             if task.ended, !tabEnded.contains(task.runId) {
                 tabEnded.insert(task.runId)
                 if (task.endedAt ?? .infinity) >= liveSince { t.apply(.taskDone(task.runId)); ended = true }
+                // (any end: done, ended, closed, its process gone -- the recording stops with it)
+                record(recording.apply(.taskEnded(run: task.runId)), in: id, state: new)
             }
         }
         if t != before { tabs[id] = t }
         if ended { onTaskEnded() }
     }
-    /// The runs whose start / end the tabs were told of (or that ended before this model began).
+
+    // MARK: recording a task (TaskRecording)
+
+    /// The recorder (the app's: RunRecorder through the helper; nil: none -- tests set their own).
+    var recorder: TaskRecorder?
+    /// Each conversation's 「录制这个任务」 and the run being recorded.
+    @Published private(set) var recording = TaskRecording()
+    /// The movies recorded, by run (record.movies).
+    @Published private(set) var movies: [String: String] = [:]
+    private var stepsNoted: [String: Int] = [:]
+
+    /// The run's movie, made by the helper (its recording.json): its row says 「已录制」.
+    private func saved(_ run: String, _ url: URL) {
+        movies[run] = url.path
+        defaults.set(movies, forKey: TaskRecording.moviesKey)
+    }
+
+    /// The selected conversation's switch (no conversation yet: the one a new conversation starts with).
+    var recordsNext: Bool { selected.map { recording.isOn($0) } ?? recording.defaultOn }
+    func setRecording(_ on: Bool) {
+        defaults.set(on, forKey: TaskRecording.defaultKey)     // (the next new conversation starts with this choice)
+        recording.defaultOn = on
+        guard let id = selected else { return }
+        record(recording.apply(.toggled(session: id, on: on)), in: id)
+        saveRecordingSwitches()
+    }
+    /// A conversation just made here: seeded with the last choice (record.default) -- never an existing one.
+    private func seedRecording(_ id: String) {
+        guard recording.on[id] == nil else { return }
+        _ = recording.apply(.toggled(session: id, on: recording.defaultOn))
+        saveRecordingSwitches()
+    }
+    private func saveRecordingSwitches() { defaults.set(recording.on, forKey: TaskRecording.conversationsKey) }
+
+    /// `state`: the session's newest (a flush tells the recording before it stores it).
+    private func record(_ actions: [TaskRecording.Action], in id: String, state: SessionState? = nil) {
+        for a in actions {
+            switch a {
+            case .start(let session, let run):
+                let goal = (state ?? states[id])?.task(run)?.raw ?? ""
+                recorder?.start(goal: goal, run: run, session: session) { [weak self] ok in
+                    guard let self, !ok else { return }
+                    _ = self.recording.apply(.startFailed(run: run))
+                }
+            case .cancel(let run):
+                stepsNoted[run] = nil
+                recorder?.cancel(run: run)
+                recorder?.ended(run: run, session: id) { [weak self] url in self?.saved(run, url) }
+            case .ended(let session, let run):
+                stepsNoted[run] = nil
+                recorder?.ended(run: run, session: session) { [weak self] url in self?.saved(run, url) }
+            }
+        }
+    }
+    /// The runs whose start / end the tabs (and the recording) were told of.
     private var tabStarted: Set<String> = [], tabEnded: Set<String> = []
 
     /// The selected conversation's tabs.

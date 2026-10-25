@@ -212,7 +212,6 @@ enum DecisionTests {
         group("liveViewTests"); liveViewTests()
         group("issueReportTests"); issueReportTests()
         group("runErrorTests"); runErrorTests()
-        group("fileExampleTests"); fileExampleTests()
         group("selfTestTests"); selfTestTests()
         group("notInstalledTests"); notInstalledTests()
         group("folderPolicyTests"); folderPolicyTests()
@@ -225,7 +224,6 @@ enum DecisionTests {
         ShellTests.run()
         CardStoreTests.run()
         CardLayoutTests.run()
-        SurfaceTests.run()
         IslandFeedTests.run()
         L10nTests.run()
         CardPlacementTests.run()
@@ -234,6 +232,10 @@ enum DecisionTests {
         RightColumnTests.run()
         LiveWatchTests.run()
         CardNoticesTests.run()
+        ModelStoreTests.run()
+        OnePathTests.run()
+        FirstRunTests.run()
+        RecordingTests.run()
         ProcessTests.run()
         UIEventsTests.run()
         TaskResultTests.run()
@@ -478,25 +480,6 @@ enum DecisionTests {
         let alive = "the last task's process has not ended (it may still be undoing), so this task was not started"
         check(RunErrorText.friendly(alive, lang: .en).hasPrefix("The last task's process hasn't ended yet"), "previous run alive: \(RunErrorText.friendly(alive, lang: .en))")
         check(RunErrorText.friendly(alive, lang: .zhHans).hasPrefix("上一个任务的进程还没结束"), "zh: previous run alive")
-    }
-
-    /// The file example names a file the folder really holds (Shared/FileExample.swift).
-    static func fileExampleTests() {
-        typealias F = FileExample
-        check(F.file(in: ["待办.txt", "报销单.csv", "草稿.txt"]) == "报销单.csv", "the sample folder, Chinese")
-        check(F.file(in: ["todo.txt", "expenses.csv"]) == "expenses.csv", "the sample folder, English")
-        check(F.file(in: ["todo.txt", "draft.txt"]) == "draft.txt", "no expenses file: a document it really holds")
-        check(F.file(in: ["IMG_0042.jpg", "setup.dmg", "Q3 report.pdf", "data.csv"]) == "data.csv", "documents first (csv, then pdf…)")
-        check(F.file(in: ["IMG_0042.jpg", "setup.dmg"]) == "IMG_0042.jpg", "no document: any visible file, in name order")
-        check(F.file(in: [".DS_Store", ".hidden.csv", "~$draft.docx", "Makefile"]) == nil, "nothing to name: the example is not offered")
-        check(F.file(in: []) == nil, "an empty folder")
-        // files(at:) lists files only, no folders, nothing hidden.
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("fileexample-\(UUID().uuidString)")
-        try? FileManager.default.createDirectory(at: dir.appendingPathComponent("Receipts"), withIntermediateDirectories: true)
-        for n in ["a.pdf", ".DS_Store"] { FileManager.default.createFile(atPath: dir.appendingPathComponent(n).path, contents: Data()) }
-        check(F.files(at: dir.path) == ["a.pdf"], "files only: \(F.files(at: dir.path))")
-        try? FileManager.default.removeItem(at: dir)
-        check(L("Make a folder called Receipts and move %@ into it", "a.pdf", lang: .zhHans) != "Make a folder called Receipts and move a.pdf into it", "zh")
     }
 
     /// The Self-test screen's titles and Start button (Shared/SelfTest.swift).

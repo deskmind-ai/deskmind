@@ -97,6 +97,9 @@ enum LiveWatch {
         }
     }
 
+    /// The window the run's live view shows now (nil: none yet).
+    static func window(of run: String) -> Int? { lock.lock(); defer { lock.unlock() }; return feed.windows[run]?.id }
+
     /// The run's task ended (or the helper goes): its watchers are told, nothing more is captured.
     static func ended(_ run: String) {
         lock.lock()

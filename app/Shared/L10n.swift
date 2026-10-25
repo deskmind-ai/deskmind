@@ -720,6 +720,39 @@ enum L10n {
         // MARK: Helper notes (Helper/HandsHelper.swift)
         "Allow it in System Settings, then restart the helper": "请在系统设置里授权，然后重启助手",
 
+        // MARK: the first run (Main/FirstRunView.swift, A12)
+        "Set up DeskMind": "设置 DeskMind",
+        "Step %d of %d": "第 %d 步，共 %d 步",
+        "Skip all": "全部跳过",
+        "Later": "稍后",
+        "Next step": "下一步",
+        "Finish": "完成",
+        "Which language should DeskMind use?": "DeskMind 用哪种语言？",
+        "DeskMind's helper needs two permissions to see and use your apps. You can grant them later too.": "DeskMind 的助手需要两项权限才能看到和操作你的应用。也可以稍后再授权。",
+        "Conversations think with a cloud model: add its API key. It is kept in your keychain, by DeskMind's helper only.": "对话要用云端模型来思考：请填上它的 API 密钥。密钥存在你的钥匙串里，只有 DeskMind 的助手能读。",
+        "%@ · Set · ends in %@": "%@ · 已设置 · 末 4 位 %@",
+        "No key yet": "还没有密钥",
+        "Check": "检查",
+        "Try a first task. It goes into the message box; nothing is sent until you press Return.": "试一个任务吧。它会填进输入框；你按回车之前什么都不会发出去。",
+        "/cua Open TextEdit and write a shopping list: milk, eggs, bread": "/cua 打开文本编辑，写一张购物清单：牛奶、鸡蛋、面包",
+        "/cua Find the largest file in my Downloads folder": "/cua 找出“下载”文件夹里最大的文件",
+        "What can you do on my Mac?": "你能在我的 Mac 上做什么？",
+        "The helper's permissions aren't granted yet.": "助手的权限还没授权。",
+        "No model key yet.": "还没有模型密钥。",
+        "Finish setup": "完成设置",
+
+        // MARK: recording a task (Shared/TaskRecording.swift)
+        "Record this task": "录制这个任务",
+        "Opens the task's recording": "打开这个任务的录像",
+
+        // MARK: the model keys (Main/CloudModel.swift, A11)
+        "The keys in the keychain can't be read (another build of DeskMind saved them, or the keychain is locked). Enter the key again and save: it replaces them.": "钥匙串里的密钥读不出来（是另一个版本的 DeskMind 存的，或者钥匙串锁着）。重新输入密钥并保存，就会替换掉它们。",
+        "The keys in the keychain can't be read": "钥匙串里的密钥读不出来",
+        "Set · ends in %@": "已设置 · 末 4 位 %@",
+        "New API key (empty: keep it)": "新的 API 密钥（留空：不变）",
+        "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is kept in your keychain, by DeskMind's helper only.": "用云端模型时，每个任务的话、它看的窗口、文件夹列表和它读的文件内容都会发给这个服务来思考。密钥存在你的钥匙串里，只有 DeskMind 的助手能读。",
+        "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is kept in your keychain, by DeskMind's helper only.": "用云端模型时，每个任务的话、它看的窗口、文件夹列表和它读的文件内容都会发给这个服务来思考——内容敏感的任务请用本地模型。密钥存在你的钥匙串里，只有 DeskMind 的助手能读。",
+
         // MARK: the right column's 「过程」 tab (Main/ProcessPane.swift, M5)
         "Now": "现在",
         "Process": "过程",
@@ -750,7 +783,6 @@ enum L10n {
         "Windows made": "开出的窗口",
         "Export Labels…": "导出标注…",
         "Shows this task's process in the right column": "在右栏显示这个任务的过程",
-        "Show the Process Tab (0.5 Preview)": "显示「过程」标签（0.5 预览）",
         "Clear Run Records": "清除运行记录",
     ]
 }

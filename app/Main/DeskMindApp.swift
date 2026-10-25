@@ -1,6 +1,7 @@
-// DeskMind.app (prototype): the window the user keeps open. It holds no special permission; it registers the
-// helper with launchd, walks the user through granting the helper's permissions (the setup card on the home
-// screen, HomeView), and reconnects whenever the helper restarts.
+import Combine
+// DeskMind.app: the window the user keeps open. It holds no special permission; it registers the helper with
+// launchd, walks the user through granting the helper's permissions (the first run, Main/FirstRun.swift), and
+// reconnects whenever the helper restarts.
 
 import ServiceManagement
 import SwiftUI
@@ -26,6 +27,7 @@ final class HelperModel: ObservableObject {
         if service.status == .enabled || service.status == .requiresApproval { try? service.unregister() }
         registration = service.status
         HelperModel.shared = self
+        followKeys()
         // A newer helper ships with this app: replace the installed copy and restart it before connecting.
         if (try? installHelper()) == true {
             note(L("Helper updated", lang: ResolvedLang.current))
@@ -88,6 +90,12 @@ final class HelperModel: ObservableObject {
     @Published var cloudEngine = CloudModelSettings.engineIsCloud
     @Published var cloudConfigured = CloudModelSettings.configured
     func refreshCloud() { cloudEngine = CloudModelSettings.engineIsCloud; cloudConfigured = CloudModelSettings.configured }
+    /// The helper's word on the keys (A11), as it comes: whether the chosen service has its key follows it.
+    private var keysSeen: AnyCancellable?
+    func followKeys() {
+        keysSeen = KeyStatus.shared.$snapshot.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.refreshCloud() }
+        KeyStatus.shared.refresh()
+    }
     /// "Ready" means a real task can run: permissions, and whichever model thinks — the local one downloaded and
     /// running, or the cloud one with its key.
     var requiredDone: Bool { permissionsDone && (cloudEngine ? cloudConfigured : brainReady) }
@@ -233,7 +241,7 @@ struct LanguagePicker: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .foregroundStyle(Brand.sage)
+        .foregroundStyle(ShellColor.secondary)
         .help(L("Language", lang: lang))
     }
 }
@@ -264,13 +272,13 @@ struct PermissionRow: View {
                 HStack(spacing: 6) {
                     Text(title).font(.system(size: 14, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
                     if optional {
-                        Text(L("Optional", lang: lang)).font(.system(size: 10, weight: .semibold)).foregroundStyle(Brand.sage)
+                        Text(L("Optional", lang: lang)).font(.system(size: 10, weight: .semibold)).foregroundStyle(ShellColor.secondary)
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Capsule().fill(Brand.mist.opacity(0.3)))
                     }
                 }
                 // Two lines when needed: English copy runs longer than Chinese and was cut off mid-sentence.
-                Text(subtitle).font(.system(size: 12)).foregroundStyle(Brand.sage)
+                Text(subtitle).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                     .lineLimit(3).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
@@ -279,7 +287,7 @@ struct PermissionRow: View {
             } else if done {
                 if let doneActionTitle, let doneAction {
                     Button(doneActionTitle, action: doneAction).buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.sage).underline()
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary).underline()
                 }
                 HStack(spacing: 6) {
                     Circle().fill(Brand.dot).frame(width: 7, height: 7)
@@ -377,7 +385,7 @@ struct BrainRow: View {
                              Self.eta(downloader.eta, lang: lang), lang: lang)
                          : String(format: "%.2f / %.2f GB", Double(downloader.bytesDone) / 1e9,
                                   Double(downloader.bytesTotal) / 1e9))
-                        .font(.system(size: 11).monospacedDigit()).foregroundStyle(Brand.sage)
+                        .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
                 }
                 .padding(.leading, 50).padding(.bottom, 6)
             }
@@ -422,7 +430,7 @@ struct HardwareNotes: View {
     var body: some View {
         ForEach(Hardware.notes(lang: lang, modelsMissing: modelsMissing), id: \.self) { note in
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.dot)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(ShellColor.orangeText)
                 Text(note).fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: 11)).foregroundStyle(Brand.ink)
@@ -444,7 +452,7 @@ struct DevTools: View {
                 }
                 Text(L("Helper pid %@ · up %@ s", model.status["pid"].map { "\($0)" } ?? "—",
                        model.status["uptime_s"].map { "\($0)" } ?? "—", lang: lang))
-                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(Brand.sage)
+                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
                 Spacer()
                 LanguagePicker()
             }.buttonStyle(InkButtonStyle(prominent: false))
@@ -462,84 +470,15 @@ struct DevTools: View {
     }
 }
 
-/// The window's content: the 0.5 main window when `ui05.shell` is on, else the window as it was (RootView).
+/// The window's content: the main window (conversations, chat, the agent's column) -- the one window (A10).
 struct AppRoot: View {
-    @AppStorage(ShellFlag.key) private var shellOn = false
-
-    var body: some View {
-        Group {
-            if shellOn { MainSplitView(shell: ShellModel.live) } else { RootView() }
-        }
-        .onChange(of: shellOn) { was, now in if was && !now { ShellModel.live.stopWatching() } }
-    }
-}
-
-/// Home, a run of the user's own instruction (new, or a past one from the recent list), or the examples screen.
-struct RootView: View {
-    enum Screen { case home, run(GoalRequest), record(RunRecord), examples }
-    @EnvironmentObject var model: HelperModel
     @EnvironmentObject var downloader: ModelDownloader
-    @State private var screen: Screen = .home
-    // The prompt and its folder live here, not in HomeView: a run's "Edit" brings them back as they were.
-    @State private var goal = ""
-    @State private var folder: String?
-
-    private func go(_ s: Screen) { withAnimation(.easeInOut(duration: 0.25)) { screen = s } }
 
     var body: some View {
-        ZStack {
-            switch screen {
-            case .home:
-                HomeView(goal: $goal, folder: $folder,
-                         onRun: { go(.run($0)) }, onOpen: { go(.record($0)) }, onExamples: { go(.examples) })
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-            case .run(let r):
-                GoalRunView(request: r, onBack: { go(.home) }, onEdit: edit, onRun: { go(.run($0)) })
-                    .id(r.id)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            case .record(let r):
-                GoalRunView(request: nil, record: r, onBack: { go(.home) }, onEdit: edit, onRun: { go(.run($0)) })
-                    .id(r.id)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            case .examples:
-                RunView { go(.home) }
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+        MainSplitView(shell: ShellModel.live)
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                downloader.stashForQuit()
             }
-        }
-        .background(Brand.paper)
-        // the island's Show Details on a session task: its GoalRunView, from its record
-        .onReceive(NotificationCenter.default.publisher(for: RunOverlay.showRecord)) { n in
-            route(details: n.object as? UUID)
-        }
-        // a window that opens (again) while a goal is not over: straight to that goal (its cards, its Stop)
-        .onAppear {
-            MainWindow.applyClosable()      // (a window that came anew: as the run and the goal hold it)
-            route(details: nil, animated: false)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            downloader.stashForQuit()
-        }
-    }
-
-    /// Show Details and a window that opens again: IslandFeed.route — the active goal first, else the record.
-    private func route(details: UUID?, animated: Bool = true) {
-        var showingGoal: UUID? = nil, showingRecord: UUID? = nil
-        if case .run(let r) = screen { showingGoal = r.id }
-        if case .record(let r) = screen { showingRecord = r.id }
-        switch IslandFeed.route(active: GoalRuns.app.active, details: details, showingGoal: showingGoal, showingRecord: showingRecord) {
-        case .goal(let id)?:
-            guard let r = GoalRequests.byId[id] else { return }
-            if animated { go(.run(r)) } else { screen = .run(r) }
-        case .record(let id)?:
-            guard let r = RunHistory.shared.records.first(where: { $0.id == id }) else { return }
-            go(.record(r))
-        case nil: break
-        }
-    }
-
-    private func edit(_ r: GoalRequest) {
-        goal = r.goal; folder = r.folder
-        go(.home)
     }
 }
 
@@ -548,8 +487,6 @@ struct DeskMindApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model = HelperModel()
     @StateObject private var downloader = ModelDownloader()
-    @StateObject private var eyes = EyesDownloader()
-    @StateObject private var history = RunHistory.shared
     @AppStorage(AppLanguage.key) private var language = AppLanguage.system.rawValue
 
     init() {
@@ -568,15 +505,10 @@ struct DeskMindApp: App {
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
     @AppStorage(RunRecorder.wholeScreenKey) private var recordWholeScreen = false
     @AppStorage(RunRecorder.smoothKey) private var recordSmooth = false
-    @AppStorage(LiveView.enabledKey) private var liveView = true
-    /// The 0.5 main window (M1, a developer switch until it is the only one).
-    @AppStorage(ShellFlag.key) private var shellOn = false
-    @AppStorage(ProcessTabs.key) private var traceOn = false
     var body: some Scene {
         WindowGroup(L("DeskMind", lang: AppLanguage.resolve(language))) {
             LocalizedRoot {
                 AppRoot().environmentObject(model).environmentObject(downloader)
-                    .environmentObject(eyes).environmentObject(history)
             }
         }
         .windowResizability(.contentSize)
@@ -594,14 +526,6 @@ struct DeskMindApp: App {
                 // 30 fps for footage where motion matters; the default 10 fps barely slows the run.
                 Toggle(L("Smooth Recordings (30 fps, Slows Tasks About 10%)", lang: AppLanguage.resolve(language)),
                        isOn: $recordSmooth)
-                // A corner card with the window the task works in, live, and the step it is taking.
-                Toggle(L("Show a Live View of the Task", lang: AppLanguage.resolve(language)),
-                       isOn: $liveView)
-                // Developer: the 0.5 main window (conversations, chat, the agent's column), off by default.
-                Toggle(L("Use the New Main Window (0.5 Preview)", lang: AppLanguage.resolve(language)),
-                       isOn: $shellOn)
-                // Developer: the right column's 「过程」 tab (M5), off by default
-                Toggle(L("Show the Process Tab (0.5 Preview)", lang: AppLanguage.resolve(language)), isOn: $traceOn)
                 // every ended task's run records (pictures, trace, model calls); the conversations and the labels stay
                 Button(L("Clear Run Records", lang: AppLanguage.resolve(language))) {
                     let shell = ShellModel.shared
@@ -626,10 +550,8 @@ struct DeskMindApp: App {
                     Text(verbatim: "English").tag(AppLanguage.en.rawValue)
                 }
             }
-            // The 0.5 window's keys (handoff §3.7), only while it is on: the old window keeps its own.
-            if shellOn {
-                ShellCommands(lang: AppLanguage.resolve(language))
-            }
+            // The window's keys (handoff §3.7).
+            ShellCommands(lang: AppLanguage.resolve(language))
             // Help: where to report a problem, and the project.
             CommandGroup(replacing: .help) {
                 Button(L("Report an Issue…", lang: AppLanguage.resolve(language))) {
