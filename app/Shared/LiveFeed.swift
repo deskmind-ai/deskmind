@@ -72,14 +72,17 @@ struct LiveFeed: Equatable {
 
     // MARK: the lines
 
-    static func frameLine(run: String, window: Int, epoch: Int, jpeg: Data, width: Int, height: Int) -> [String: Any] {
-        ["kind": "live.frame", "run_id": run, "window": window, "epoch": epoch, "w": width, "h": height, "jpeg": jpeg.base64EncodedString()]
+    /// `visible`: the part of the window the picture shows, as [x, y, w, h] of the window (0–1) -- all of it, unless
+    /// the window is partly off its display (#125 review: the picture is of the visible part only, and the cursor's
+    /// rect_norm is of the whole window).
+    static func frameLine(run: String, window: Int, epoch: Int, jpeg: Data, width: Int, height: Int, visible: [Double] = [0, 0, 1, 1]) -> [String: Any] {
+        ["kind": "live.frame", "run_id": run, "window": window, "epoch": epoch, "w": width, "h": height, "visible": visible, "jpeg": jpeg.base64EncodedString()]
     }
     static func stateLine(run: String, _ s: State) -> [String: Any] { ["kind": "live.state", "run_id": run, "state": s.rawValue] }
 
     /// A line as the main app reads it.
     enum Line: Equatable {
-        case frame(run: String, window: Int, epoch: Int, jpeg: Data, width: Int, height: Int)
+        case frame(run: String, window: Int, epoch: Int, jpeg: Data, width: Int, height: Int, visible: [Double])
         case state(run: String, State)
     }
     static func read(_ o: [String: Any]) -> Line? {
@@ -87,7 +90,8 @@ struct LiveFeed: Equatable {
         switch o["kind"] as? String {
         case "live.frame":
             guard let w = o["window"] as? Int, let e = o["epoch"] as? Int, let b = o["jpeg"] as? String, let d = Data(base64Encoded: b) else { return nil }
-            return .frame(run: run, window: w, epoch: e, jpeg: d, width: o["w"] as? Int ?? 0, height: o["h"] as? Int ?? 0)
+            let v = (o["visible"] as? [Double]).flatMap { $0.count == 4 && $0[2] > 0 && $0[3] > 0 ? $0 : nil } ?? [0, 0, 1, 1]
+            return .frame(run: run, window: w, epoch: e, jpeg: d, width: o["w"] as? Int ?? 0, height: o["h"] as? Int ?? 0, visible: v)
         case "live.state":
             return (o["state"] as? String).flatMap(State.init(rawValue:)).map { .state(run: run, $0) }
         default: return nil
@@ -97,12 +101,30 @@ struct LiveFeed: Equatable {
     // MARK: the cursor
 
     /// Where the agent's cursor goes on a picture (in its own points, top-left origin): the step's target, a rect in its
-    /// window 0–1, only when the picture is of the step's window; else none.
-    static func cursor(pictureWindow: Int, stepWindow: Int?, rectNorm: [Double]?, picture: CGSize) -> CGPoint? {
-        guard let s = stepWindow, s == pictureWindow, let r = rectNorm, r.count == 4, picture.width > 0, picture.height > 0 else { return nil }
-        let x = (r[0] + r[2] / 2), y = (r[1] + r[3] / 2)
+    /// window 0–1, only when the picture is of the step's window, mapped into the part of it the picture shows
+    /// (`visible`); none when the target is outside that part.
+    static func cursor(pictureWindow: Int, stepWindow: Int?, rectNorm: [Double]?, picture: CGSize, visible: [Double] = [0, 0, 1, 1]) -> CGPoint? {
+        guard let s = stepWindow, s == pictureWindow, let r = rectNorm, r.count == 4, picture.width > 0, picture.height > 0,
+              visible.count == 4, visible[2] > 0, visible[3] > 0 else { return nil }
+        let x = (r[0] + r[2] / 2 - visible[0]) / visible[2], y = (r[1] + r[3] / 2 - visible[1]) / visible[3]
         guard (0...1).contains(x), (0...1).contains(y) else { return nil }
         return CGPoint(x: x * picture.width, y: y * picture.height)
+    }
+
+    /// The part of `window` that `display` shows, as [x, y, w, h] of the window (0–1); nil when none.
+    static func visiblePart(window: CGRect, display: CGRect) -> [Double]? {
+        let v = window.intersection(display)
+        guard !v.isNull, v.width > 0, v.height > 0, window.width > 0, window.height > 0 else { return nil }
+        return [Double((v.minX - window.minX) / window.width), Double((v.minY - window.minY) / window.height),
+                Double(v.width / window.width), Double(v.height / window.height)]
+    }
+
+    /// Of the displays, the one that shows most of the window.
+    static func bestDisplay(window: CGRect, displays: [CGRect]) -> Int? {
+        displays.indices.max { a, b in
+            let x = window.intersection(displays[a]), y = window.intersection(displays[b])
+            return (x.isNull ? 0 : x.width * x.height) < (y.isNull ? 0 : y.width * y.height)
+        }.flatMap { window.intersects(displays[$0]) ? $0 : nil }
     }
 
     /// A step's window number (its object, window:<bundle>#<number>), if it acted in one.

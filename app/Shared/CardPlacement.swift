@@ -140,3 +140,25 @@ struct FrontmostDebounce: Equatable {
         a.stable == b.stable && a.candidate?.state == b.candidate?.state && a.candidate?.since == b.candidate?.since
     }
 }
+
+/// Whether the float is up (A5, plan §1.4, §4.2): a pure function of the main window's settled state, the task and the
+/// card -- never of what placement made of the float (whether it is seen is a measured fact of the panel, given to
+/// CardPlacement.place; its output never comes back here, or the float would show and hide by itself).
+///
+/// | window \ task                 | none       | running, no card    | a card waits          |
+/// |-------------------------------|------------|---------------------|-----------------------|
+/// | front                         | hidden     | hidden              | hidden (the chat)     |
+/// | behind / away                 | hidden     | up (collapsed if    | up, open -- even if   |
+/// |                               |            |   the user said so) |   the user collapsed it|
+enum FloatPolicy {
+    enum Shown: Equatable { case hidden, collapsed, open }
+
+    /// `poppedOut`: the user moved the live view into the float (⌘⇧P): up while the task runs, the window in front or not
+    /// (its card is still answered where placement says: the chat, with the window in front).
+    static func shown(window: MainWindowState, taskActive: Bool, cardWaiting: Bool, userCollapsed: Bool, poppedOut: Bool = false) -> Shown {
+        if poppedOut && window == .front { return taskActive ? (userCollapsed ? .collapsed : .open) : .hidden }
+        guard window != .front, taskActive || cardWaiting else { return .hidden }
+        if cardWaiting { return .open }
+        return userCollapsed ? .collapsed : .open
+    }
+}

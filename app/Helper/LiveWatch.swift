@@ -13,8 +13,9 @@ import Foundation
 protocol LiveFrameSource: AnyObject {
     /// Screen Recording is granted (no picture can be taken without it).
     var permission: Bool { get }
-    /// One picture of the window `window` (a CGWindow number) as JPEG, or nil (gone, hidden, not capturable).
-    func capture(window: Int) -> (jpeg: Data, width: Int, height: Int)?
+    /// One picture of the window `window` (a CGWindow number) as JPEG, and the part of the window it shows ([x, y, w, h]
+    /// of it, 0–1), or nil (gone, hidden, not capturable).
+    func capture(window: Int) -> (jpeg: Data, width: Int, height: Int, visible: [Double])?
 }
 
 enum LiveWatch {
@@ -41,10 +42,10 @@ enum LiveWatch {
         private let queue = DispatchQueue(label: "ai.deskmind.hands.live.watch")
         private var closed = false   // on `queue`
         init(fd: Int32) { self.fd = fd }
-        func send(_ o: [String: Any]) {
+        func send(_ o: [String: Any], now: Bool = false) {
             guard var d = try? JSONSerialization.data(withJSONObject: o) else { return }
             d.append(0x0A)
-            queue.async { [self] in
+            let write = { [self] in
                 guard !closed else { return }
                 let ok = d.withUnsafeBytes { buf -> Bool in
                     var off = 0
@@ -57,6 +58,22 @@ enum LiveWatch {
                     return true
                 }
                 if !ok { closed = true; Darwin.shutdown(fd, SHUT_RDWR) }
+            }
+            if now { write() } else { queue.async(execute: write) }
+        }
+        /// A picture: only the newest waits (#125 review) -- a newer one replaces one not sent yet, so a slow watcher never
+        /// builds a queue of old pictures.
+        private let frameLock = NSLock()
+        private var waiting: [String: Any]?
+        func sendFrame(_ o: [String: Any]) {
+            frameLock.lock()
+            let scheduled = waiting != nil
+            waiting = o
+            frameLock.unlock()
+            guard !scheduled else { return }
+            queue.async { [self] in
+                frameLock.lock(); let o = waiting; waiting = nil; frameLock.unlock()
+                if let o { send(o, now: true) }
             }
         }
         /// No line is written after this returns.
@@ -152,8 +169,8 @@ enum LiveWatch {
                 if keep { told[run] = .streaming }
                 lock.unlock()
                 if keep {
-                    let line = LiveFeed.frameLine(run: run, window: t.id, epoch: t.epoch, jpeg: pic.jpeg, width: pic.width, height: pic.height)
-                    for c in now { c.send(line) }
+                    let line = LiveFeed.frameLine(run: run, window: t.id, epoch: t.epoch, jpeg: pic.jpeg, width: pic.width, height: pic.height, visible: pic.visible)
+                    for c in now { c.sendFrame(line) }
                 }
             }
             Thread.sleep(forTimeInterval: 1 / LiveFeed.fps)

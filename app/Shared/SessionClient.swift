@@ -322,8 +322,9 @@ final class SessionClient {
 
     /// The request bodies, in one place (the helper's ops, S1).
     enum Request {
-        static func open(sessionId: String?, config: String?, lang: String?) -> [String: Any] {
+        static func open(sessionId: String?, config: String?, lang: String?, liveView: Bool? = nil) -> [String: Any] {
             var b: [String: Any] = ["op": Op.open]
+            if let v = liveView { b["live_view"] = v }
             if let s = sessionId { b["session_id"] = s }
             if let c = config { b["config"] = c }
             if let l = lang { b["lang"] = l }
@@ -522,6 +523,9 @@ final class SessionClient {
     var onWaitingForHelper: ((Bool) -> Void)?
     /// The clock the gap grace is measured by (tests set their own).
     var now: () -> Date = Date.init
+    /// session.open's live_view: false from the 0.5 window, which draws its own float (A5): the helper starts no live
+    /// card for its sessions' tasks -- one float, never two. nil: the helper's default (on).
+    var liveView: Bool?
     /// Called after a line changed a session's state (on the thread that fed it).
     var onChange: ((String, SessionState) -> Void)?
     /// A session's refusal of a respond / answer that carries a req_id (harness#71), each as it comes (on the thread
@@ -611,7 +615,7 @@ final class SessionClient {
         let line: (config: String?, lang: String?) = (noModel ? nil : (config ?? d.config).map(Self.normalizeConfig), lang ?? d.lang)
         if let sessionId { lock.lock(); opening.insert(sessionId); lock.unlock() }
         defer { if let sessionId { lock.lock(); opening.remove(sessionId); lock.unlock() } }
-        guard let r = transport.request(Request.open(sessionId: sessionId, config: line.config, lang: line.lang)), r["ok"] as? Bool != false,
+        guard let r = transport.request(Request.open(sessionId: sessionId, config: line.config, lang: line.lang, liveView: liveView)), r["ok"] as? Bool != false,
               let id = r["session_id"] as? String ?? sessionId else { return nil }
         lock.lock()
         // a process it started is a new one: its settings sent again (desired, read when that goes); one found running

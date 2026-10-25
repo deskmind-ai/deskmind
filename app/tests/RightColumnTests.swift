@@ -77,6 +77,8 @@ enum RightColumnTests {
         // the computer used by another conversation, while this one has no task running
         c = col([start, ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"s""#)], other: "整理周报")
         check(c.computerUsedBy == "整理周报", "another conversation's task runs: said, by its title")
+        check(RightColumn.model(SessionReducer.reduce(SessionState(), [SessionTests.taskR1, start, ex(2, #""kind":"task_done","status":"succeeded","reason":"","summary":"s""#)]),
+                                otherRunning: "整理周报", otherId: "ses_o", now: 0).computerUsedById == "ses_o", "and its id: a click switches to it")
         c = col([start], other: "整理周报")
         check(c.computerUsedBy == nil, "this one's own task runs: not")
         check(RightColumn.model(nil, otherRunning: "整理周报", now: 0).computerUsedBy == "整理周报", "nothing shown here: said too")

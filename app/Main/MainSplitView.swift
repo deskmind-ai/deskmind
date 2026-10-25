@@ -10,6 +10,7 @@
 // taken once by Composer: its one @FocusState, the only one the check allows).
 
 import AppKit
+import Combine
 import SwiftUI
 
 /// The handoff's text colours (§3.10): secondary text and orange text at 4.5:1 or better on paper.
@@ -25,6 +26,10 @@ enum ShellColor {
 
 struct MainSplitView: View {
     @ObservedObject var shell: ShellModel
+    /// The float, the island and the notifications of the running task (A5, A7), and the window's settled state.
+    @StateObject private var float = FloatController()
+    @StateObject private var frontmost = FrontmostMonitor()
+    private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @State private var settingsOpen = false
@@ -56,6 +61,14 @@ struct MainSplitView: View {
             shell.start()
         }
         .onChange(of: lang) { _, _ in shell.syncSettings() }     // (the language is a session setting like the model's)
+        .onAppear { float.install(shell) }
+        .onReceive(tick) { _ in driveFloat() }
+        .onChange(of: frontmost.window) { _, _ in driveFloat() }
+    }
+
+    /// The float, the island and the notifications, from the window's state now and settled, and the sessions'.
+    private func driveFloat() {
+        float.update(shell, window: frontmost.window, frontNow: FrontmostMonitor.observe() == .front, lang: lang)
     }
 
     /// The key file (keys, a custom service's URL and model): a session process reads it when it starts, so only a
@@ -97,6 +110,7 @@ extension ShellModel {
                            // a new key's asks the helper did not take: tried again on the main queue's clock
                            retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) })
         transport.isStopped = { [weak m] in m?.stopped ?? true }
+        m.client.liveView = false      // (the window draws the float itself: the helper starts no live card for its tasks)
         return m
     }()
 }
@@ -112,6 +126,8 @@ struct ShellCommands: Commands {
         CommandMenu(L("Conversation", lang: lang)) {
             Button(L("Stop", lang: lang)) { ShellModel.shared?.stop() }
                 .keyboardShortcut(".", modifiers: .command)
+            Button(L("Pop Out the Live View", lang: lang)) { ShellModel.shared?.togglePopOut() }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
             Divider()
             Button(L("Previous Conversation", lang: lang)) { ShellModel.shared?.move(-1) }
                 .keyboardShortcut(.upArrow, modifiers: .command)
@@ -662,7 +678,8 @@ struct AgentPanel: View {
 
     /// The run the dock should watch now (nil: none).
     private var watched: String? {
-        guard monitor.window != .away, let t = shell.current?.runningTask else { return nil }
+        // (in front only: behind, the float has the picture -- §3.2; popped out, too)
+        guard monitor.window == .front, let sid = shell.selected, !shell.poppedOut.contains(sid), let t = shell.current?.runningTask else { return nil }
         return t.runId
     }
 
@@ -674,8 +691,8 @@ struct AgentPanel: View {
     }
 
     private var column: RightColumn {
-        let other = shell.rows.first { $0.id != shell.selected && $0.taskRunning }?.title
-        return RightColumn.model(shell.current, otherRunning: other, now: shell.now())
+        let other = shell.rows.first { $0.id != shell.selected && $0.taskRunning }
+        return RightColumn.model(shell.current, otherRunning: other?.title, otherId: other?.id, now: shell.now())
     }
 
     private func content(_ c: RightColumn) -> some View {
@@ -694,9 +711,15 @@ struct AgentPanel: View {
                 }
                 .frame(maxWidth: .infinity)
                 // the live view of the task's window (A4), while one runs here
-                if let t = shell.current?.runningTask {
+                if let t = shell.current?.runningTask, watched != nil {
                     let last = t.steps.last
                     LiveDockView(dock: dock, stepWindow: LiveFeed.windowNumber(last?.object), target: last?.target?.rectNorm)
+                } else if shell.current?.runningTask != nil {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                        .overlay(Text(L("The live view is in the float", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                                    .multilineTextAlignment(.center).padding(14))
+                        .frame(height: 150)
                 } else {
                     RoundedRectangle(cornerRadius: 12)
                         .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
@@ -706,7 +729,9 @@ struct AgentPanel: View {
                         .frame(height: 150)
                 }
                 if let who = c.computerUsedBy {
-                    Text(L("The computer is being used by 「%@」", who, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+                    Button(L("The computer is being used by 「%@」", who, lang: lang)) { if let id = c.computerUsedById { shell.select(id) } }
+                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+                        .accessibilityHint(L("Shows that conversation", lang: lang))
                 }
                 if c.youAreUsingIt || c.screenLocked {
                     section(L("This Mac", lang: lang)) {

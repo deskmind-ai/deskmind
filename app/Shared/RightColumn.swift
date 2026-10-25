@@ -46,8 +46,10 @@ struct RightColumn: Equatable {
     var screenLocked: Bool
     var plan: [PlanRow]
     var changes: ChangeList
-    /// Another conversation's task is using the computer (its title), while this one is shown.
+    /// Another conversation's task is using the computer (its title, and its id: a click switches to it), while this
+    /// one is shown.
     var computerUsedBy: String?
+    var computerUsedById: String? = nil
 
     static func == (a: RightColumn, b: RightColumn) -> Bool {
         a.status == b.status && a.progress?.step == b.progress?.step && a.progress?.seconds == b.progress?.seconds
@@ -57,7 +59,13 @@ struct RightColumn: Equatable {
 
     /// The column for `s` (the shown session; nil: none), its latest task's, at `now` (seconds since 1970);
     /// `otherRunning`: the title of another conversation whose task runs now, if any.
-    static func model(_ s: SessionState?, otherRunning: String?, now: Double) -> RightColumn {
+    static func model(_ s: SessionState?, otherRunning: String?, otherId: String? = nil, now: Double) -> RightColumn {
+        var c = modelOf(s, otherRunning: otherRunning, now: now)
+        if c.computerUsedBy != nil { c.computerUsedById = otherId }
+        return c
+    }
+
+    private static func modelOf(_ s: SessionState?, otherRunning: String?, now: Double) -> RightColumn {
         let status = s?.status ?? .idle
         guard let s, let t = s.tasks.last else {
             return RightColumn(status: status, progress: nil, youAreUsingIt: false, screenLocked: false, plan: [], changes: ChangeList(),

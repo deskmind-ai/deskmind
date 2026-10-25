@@ -910,11 +910,12 @@ final class ShellModel: ObservableObject {
     /// True when it picked or sent something (a key that did nothing then passes on: ShellModel.keyDown). A click on
     /// an option — by the mouse or VoiceOver's press, the same action — is a click on its card: a move into it.
     @discardableResult
-    func click(_ button: CardModel.Button) -> Bool {
-        guard let id = selected else { return false }
-        if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
+    func click(_ button: CardModel.Button, session: String? = nil) -> Bool {
+        // (`session`: the card's own -- the float answers the running task's card whatever session the window shows)
+        guard let id = session ?? selected else { return false }
+        if id == selected, let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
         // the one predicate (canSend): what it says is what happens
-        guard canSend(button) else {
+        guard canSend(button, session: id) else {
             if !button.role.reachesNoModel && !cloudOn() { _ = cloudAllows() }     // (says why: the cloud model is off)
             return false
         }
@@ -973,6 +974,13 @@ final class ShellModel: ObservableObject {
     /// arriving, ending or voided -- and a request is taken once (`takeFocus`: a re-render does not focus again) and
     /// dropped when the window stops being the key one.
     @Published private(set) var focusRequest = 0
+    /// Conversations whose live view the user popped out into the float (⌘⇧P, handoff §3.7: kept on the conversation):
+    /// the float shows the picture even while the window is in front; the right column shows a placeholder.
+    @Published private(set) var poppedOut: Set<String> = []
+    func togglePopOut() {
+        guard let id = selected else { return }
+        if poppedOut.contains(id) { poppedOut.remove(id) } else { poppedOut.insert(id) }
+    }
     private var focusTaken = 0
     func takeFocus(_ n: Int) -> Bool {
         guard n > focusTaken, windowKey else { return false }
@@ -1147,8 +1155,8 @@ final class ShellModel: ObservableObject {
     func takeBack(_ card: CardModel) { cards.takeBack(Self.cardKey(card)) }
 
     /// 「现在回答」 on an expired card: the task looks again and asks a new card (reask). Sent once.
-    func answerNow(_ runId: String, askId: String) {
-        guard let id = selected, cloudAllows(),
+    func answerNow(_ runId: String, askId: String, session: String? = nil) {
+        guard let id = session ?? selected, cloudAllows(),
               cards.answerNow(runId, askId: askId, sessionId: id, in: client.state(id)) else { return }
         let key = CardStore.key(runId: runId, askId: askId)
         work { [weak self] in
@@ -1203,7 +1211,7 @@ final class ShellModel: ObservableObject {
     func cardPinnedWhole(_ card: CardModel) -> Bool { pinRoom <= 0 || cardHeights[Self.cardKey(card)] == nil || cardFits(card) }
 
     /// Whether this button takes a click now: its card can be answered (canSend).
-    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b) }
+    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b, session: s.sessionId) }
 
     /// THE predicate for one option of one card (#114 Codex review at 7553637): whether pressing it now sends its answer
     /// (or holds it for the take-back). The button's enabled state, its VoiceOver state, the key path (keyWorks) and the
@@ -1213,8 +1221,8 @@ final class ShellModel: ObservableObject {
     /// state, the one CardStore checks as it writes. (A card no longer scrolls inside, and what goes out is laid out
     /// before 「可以」 (A2, invariant 3): a click is never gated on scrolling; an approve-type option's key is, on a card
     /// that does not fit -- keyWorks.)
-    func canSend(_ b: CardModel.Button) -> Bool {
-        guard let id = selected else { return false }
+    func canSend(_ b: CardModel.Button, session: String? = nil) -> Bool {
+        guard let id = session ?? selected else { return false }
         let s = client.state(id)
         if !b.role.reachesNoModel && !cloudOn() { return false }
         let a = CardModel.answer(b)

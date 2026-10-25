@@ -39,7 +39,7 @@ enum LiveWatchTests {
         check(!f.captures("r", now: 9) && f.state("r", permission: true) == .ended, "the task ended: nothing captured, ended")
         // the lines, and the cursor
         let line = LiveFeed.frameLine(run: "r", window: 9, epoch: 2, jpeg: Data([1, 2, 3]), width: 4, height: 3)
-        check(LiveFeed.read(line) == .frame(run: "r", window: 9, epoch: 2, jpeg: Data([1, 2, 3]), width: 4, height: 3), "a picture's line read back")
+        check(LiveFeed.read(line) == .frame(run: "r", window: 9, epoch: 2, jpeg: Data([1, 2, 3]), width: 4, height: 3, visible: [0, 0, 1, 1]), "a picture's line read back")
         check(LiveFeed.read(LiveFeed.stateLine(run: "r", .noPermission)) == .state(run: "r", .noPermission), "a state's line read back")
         check(LiveFeed.read(["kind": "live.frame", "run_id": "r", "window": 1]) == nil, "a picture with no picture: nothing")
         let pic = CGSize(width: 200, height: 100)
@@ -47,6 +47,19 @@ enum LiveWatchTests {
         check(cur.map { abs($0.x - 110) < 0.001 && abs($0.y - 60) < 0.001 } == true, "the cursor at the target's middle: \(String(describing: cur))")
         check(LiveFeed.cursor(pictureWindow: 7, stepWindow: 9, rectNorm: [0.5, 0.5, 0.1, 0.2], picture: pic) == nil, "a step in another window: no cursor on this picture")
         check(LiveFeed.cursor(pictureWindow: 9, stepWindow: 9, rectNorm: [1.5, 0, 0.1, 0.1], picture: pic) == nil, "outside the window: none")
+        // #125 review: a window partly off its display -- the picture is of the visible part; the cursor maps into it
+        let win = CGRect(x: -100, y: 0, width: 400, height: 200), disp = CGRect(x: 0, y: 0, width: 1000, height: 800)
+        let vis = LiveFeed.visiblePart(window: win, display: disp)
+        check(vis == [0.25, 0, 0.75, 1], "the visible part: the right three quarters: \(String(describing: vis))")
+        let shown = CGSize(width: 300, height: 200)
+        let onIt = LiveFeed.cursor(pictureWindow: 1, stepWindow: 1, rectNorm: [0.5, 0.5, 0, 0], picture: shown, visible: vis ?? [])
+        check(onIt.map { abs($0.x - 100) < 0.01 && abs($0.y - 100) < 0.01 } == true, "a target at the window's middle: a third into the picture: \(String(describing: onIt))")
+        check(LiveFeed.cursor(pictureWindow: 1, stepWindow: 1, rectNorm: [0.1, 0.5, 0, 0], picture: shown, visible: vis ?? []) == nil, "a target in the part off the display: no cursor")
+        check(LiveFeed.bestDisplay(window: CGRect(x: 900, y: 0, width: 400, height: 200), displays: [disp, CGRect(x: 1000, y: 0, width: 1000, height: 800)]) == 1,
+              "across two displays: the one showing most of it")
+        check(LiveFeed.bestDisplay(window: CGRect(x: 5000, y: 0, width: 10, height: 10), displays: [disp]) == nil, "on no display: none")
+        let back = LiveFeed.read(LiveFeed.frameLine(run: "r", window: 1, epoch: 1, jpeg: Data([1]), width: 1, height: 1, visible: [0.25, 0, 0.75, 1]))
+        if case .frame(_, _, _, _, _, _, let v)? = back { check(v == [0.25, 0, 0.75, 1], "the visible part carried with the picture") } else { check(false, "the frame read") }
         check(LiveFeed.windowNumber("window:com.apple.TextEdit#812") == 812 && LiveFeed.windowNumber("file:/x") == nil, "a step's window number")
     }
 
@@ -58,11 +71,11 @@ enum LiveWatchTests {
         var onCapture: (() -> Void)? { get { lock.lock(); defer { lock.unlock() }; return _onCapture } set { lock.lock(); _onCapture = newValue; lock.unlock() } }
         var count: Int { lock.lock(); defer { lock.unlock() }; return _count }
         var permission: Bool { get { lock.lock(); defer { lock.unlock() }; return _permission } set { lock.lock(); _permission = newValue; lock.unlock() } }
-        func capture(window: Int) -> (jpeg: Data, width: Int, height: Int)? {
+        func capture(window: Int) -> (jpeg: Data, width: Int, height: Int, visible: [Double])? {
             lock.lock(); _count += 1; lock.unlock()
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
             onCapture?()
-            return (Data([0xFF, 0xD8, UInt8(window & 0xFF)]), 8, 6)
+            return (Data([0xFF, 0xD8, UInt8(window & 0xFF)]), 8, 6, [0, 0, 1, 1])
         }
     }
 
@@ -114,7 +127,7 @@ enum LiveWatchTests {
         got = a.lines(within: 0.8)
         let fs = frames(got)
         check(fs.count >= 2, "a step in a window: pictures, about 5 a second: \(fs.count)")
-        if case .frame(_, let w, let e, _, _, _)? = fs.first { check(w == 812 && e == 1, "of window 812, epoch 1") }
+        if case .frame(_, let w, let e, _, _, _, _)? = fs.first { check(w == 812 && e == 1, "of window 812, epoch 1") }
         // a second watcher (the float, while the dock still watches): one capture, both get it
         let b = Watch(run: "run_a")
         let c0 = fake.count
@@ -150,7 +163,7 @@ enum LiveWatchTests {
         let e = Watch(run: "run_b")
         got = e.lines(within: 0.8)
         fake.onCapture = nil; fake.delay = 0
-        let windows = frames(got).compactMap { (l: LiveFeed.Line) -> Int? in if case .frame(_, let w, _, _, _, _) = l { return w }; return nil }
+        let windows = frames(got).compactMap { (l: LiveFeed.Line) -> Int? in if case .frame(_, let w, _, _, _, _, _) = l { return w }; return nil }
         check(!windows.contains(5), "a picture taken of window 5 while the run moved to 6: dropped: \(windows)")
         e.close()
         // no Screen Recording: said, nothing taken
@@ -171,7 +184,7 @@ enum LiveWatchTests {
     /// Never on disk: the feed's files write no file and log no picture.
     static func staticTests() {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        for f in ["Helper/LiveWatch.swift", "Helper/LiveCapture.swift", "Shared/LiveFeed.swift"] {
+        for f in ["Helper/LiveWatch.swift", "Helper/LiveCapture.swift", "Shared/LiveFeed.swift", "Main/LiveDock.swift"] {
             let code = ((try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? "")
                 .split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
             let writes = ["write(to:", "createFile", "FileHandle", "fopen", "NSLog", "print(", "UIEvents.record", "CGImageDestinationCreateWithURL", "FileManager"]
