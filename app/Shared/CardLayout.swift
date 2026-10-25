@@ -17,6 +17,16 @@
 // | any other | text                                                  | choice-role ones   | the rest                        | free_text |
 //
 // The text is always shown whole: the fields add to it, they never stand in for it (what is approved is what was shown).
+//
+// A2 (plan §1.3, invariant 3): a card never scrolls inside; its options are all on screen as it is. With H2's headline
+// the card is: the headline (its title), what goes beyond the request (one line each) and an action card's fields --
+// what goes out, whole, before 「可以」 -- always shown; the text and the plan's steps folded under 「细节 ▸」. Without
+// one (an older harness) there is nothing to fold: the text is the card's title and body, the steps shown, as before.
+//
+// | headline | always shown                                         | folded under 细节       |
+// |----------|------------------------------------------------------|-------------------------|
+// | yes      | headline · beyond · consent fields · picks (+detail) | text · plan steps       |
+// | no       | text · plan steps · consent fields · picks (+detail) | —                       |
 
 import Foundation
 
@@ -59,6 +69,12 @@ struct CardLayout: Equatable {
     var plan: [PlanRow]
     var foreground: [String]
     var consent: Consent?
+    /// The card's title: H2's headline, else its text (which is then the whole card's words).
+    var title: String
+    /// What goes beyond the request, one per line (H2); always shown.
+    var beyond: [String]
+    /// The text and the plan's steps are folded under 「细节」: only with a headline (else they are the card).
+    var folds: Bool
     /// In the order shown: the list, then the buttons.
     var controls: [Control]
     /// The card takes the user's own words, in its own field (main window only).
@@ -72,6 +88,8 @@ struct CardLayout: Equatable {
     init(_ card: CardModel) {
         kind = card.kind
         text = card.text
+        title = card.headline ?? card.text
+        beyond = card.headline == nil ? [] : card.beyond
         field = card.allowsFreeText
         let listed = card.buttons.filter { $0.role == .choice }
         let rest = card.buttons.filter { $0.role != .choice }
@@ -83,6 +101,7 @@ struct CardLayout: Equatable {
                     changesYours: s.class == "modify_user", sendsOut: s.class == "external" || s.sites.contains { ($0.sends ?? "").isEmpty == false })
         }
         foreground = card.plan?.foreground?.apps ?? []
+        folds = card.headline != nil && (!card.text.isEmpty || !plan.isEmpty)
         consent = card.consent.map { c in
             Consent(action: c.actionText.isEmpty ? c.action : c.actionText, object: c.objectLabel.isEmpty ? c.object : c.objectLabel,
                     site: c.site, outgoing: c.outgoing.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value) })
@@ -121,6 +140,33 @@ enum CardKeys {
     static func number(characters: String?, commandLike: Bool, mainWindowIsKey: Bool, editingText: Bool, isRepeat: Bool = false) -> Int? {
         guard mainWindowIsKey, !editingText else { return nil }
         return digit(characters: characters, commandLike: commandLike, isRepeat: isRepeat)
+    }
+
+    /// What a key does to the pinned card (plan §1.5, with #111's rule kept: fable 10-25 -- only an explicit move puts
+    /// the keys on a card, never time on screen). ⌘⌃⌥ and auto-repeats do nothing here; a field being typed in or a
+    /// composition owns every key (⌘Return is A9's).
+    ///
+    /// | state \ key                  | 1–9                 | Tab / ⇧Tab      | Esc                 | Return              |
+    /// |------------------------------|---------------------|-----------------|---------------------|---------------------|
+    /// | not in the card              | nothing (the chat's)| into the card   | into the card       | nothing (never yes) |
+    /// | in the card                  | picks n → held      | (focus moves)   | out of the card     | nothing             |
+    /// | held (take-back running)     | picks m: starts over| (focus moves)   | takes it back       | sends it now        |
+    /// | typing in a field / composing| text                | text / focus    | the field's         | the field's         |
+    ///
+    /// Space presses the focused control (AppKit's own). Held, 「先别做了」 and Stop act at once, as always.
+    enum KeyAction: Equatable { case none, enterCard, leaveCard, digit(Int), takeBack, sendNow }
+    struct Context: Equatable { var inCard: Bool; var held: Bool; var editing: Bool; var composing: Bool }
+
+    static func action(characters: String?, commandLike: Bool, isRepeat: Bool, _ c: Context) -> KeyAction {
+        guard !commandLike, !isRepeat, !c.editing, !c.composing, let ch = characters else { return .none }
+        switch ch {
+        case "\u{1b}": return c.held ? .takeBack : c.inCard ? .leaveCard : .enterCard
+        case "\t", "\u{19}": return c.inCard ? .none : .enterCard
+        case "\r", "\u{3}": return c.held ? .sendNow : .none
+        default:
+            guard let n = digit(characters: ch, commandLike: false, isRepeat: false) else { return .none }
+            return c.inCard || c.held ? .digit(n) : .none
+        }
     }
 
     /// The event alone: a digit 1–9, no ⌘⌃⌥, not an auto-repeat (where the typing is and the card's state are

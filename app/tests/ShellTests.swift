@@ -45,7 +45,6 @@ enum ShellTests {
         DecisionTests.group("shell.modelNameTests"); modelNameTests()
         DecisionTests.group("shell.backfillOffStreamTests"); backfillOffStreamTests()
         DecisionTests.group("shell.historyWatchDownTests"); historyWatchDownTests()
-        DecisionTests.group("shell.hintOpenOnlyTests"); hintOpenOnlyTests()
         DecisionTests.group("shell.historyOpenedCrashTests"); historyOpenedCrashTests()
         DecisionTests.group("shell.modelOffMidOpenTests"); modelOffMidOpenTests()
         DecisionTests.group("shell.exitAfterBackfillTests"); exitAfterBackfillTests()
@@ -404,7 +403,7 @@ enum ShellTests {
         let (qrun, qopen) = q.states["ses_t"]!.openCard!
         let qcard = CardModel(card: qopen.card, runId: qrun, askId: qopen.askId)
         check(qcard.allowsFreeText, "the missing card takes words")
-        q.cardBody(qcard, contentHeight: 40, visibleHeight: 40, offset: 0)   // (it has "you decide": words wait for its body)
+        q.fit(qcard)   // (it has "you decide": words wait for its body)
         q.answer(qcard, text: "  明天下午三点  ")
         check(sends(mock2) == 0, "words are held for the take-back first")
         qt.advance(CardStore.takeBack)
@@ -603,16 +602,14 @@ enum ShellTests {
         check(!m.cloudOff && sent(mock)?["type"] as? String == "cua", "cloud on again: the next send goes: \(String(describing: sent(mock)))")
     }
 
-    /// #107 review (item 1): an approve-type option takes a click only once the card's whole body has been on screen —
-    /// it fits, or it was scrolled to its end (the scroll geometry, never the text). The way out always works.
+    /// A2 (replacing #107 review item 1's scroll gate): the card never scrolls inside, so its options take a click at
+    /// once; "fits" is the one layout fact (its whole height against the pinned place's room).
     static func cardBodyTests() {
-        check(CardBody.endShown(contentHeight: 100, visibleHeight: 100, offset: 0), "a body that fits: its end is shown")
-        check(!CardBody.endShown(contentHeight: 900, visibleHeight: 200, offset: 0), "a long body at its top: not")
-        check(!CardBody.endShown(contentHeight: 900, visibleHeight: 200, offset: 650), "nearly at its end: not")
-        check(CardBody.endShown(contentHeight: 900, visibleHeight: 200, offset: 700), "scrolled to its end")
-        check(!CardBody.endShown(contentHeight: 0, visibleHeight: 0, offset: 0), "not laid out yet: not")
+        check(CardBody.fits(height: 100, room: 100) && !CardBody.fits(height: 101, room: 100), "fits: no taller than the room")
+        check(!CardBody.fits(height: 0, room: 100) && !CardBody.fits(height: 10, room: 0), "not laid out, or no room: not")
+        check(CardBody.pinRoom(columnHeight: 800) == 400, "the room: half the column")
         check(CardBody.cap(columnHeight: 600) >= CardBody.minHeight && CardBody.cap(columnHeight: 600) <= 200 && CardBody.cap(columnHeight: 3000) == CardBody.maxHeight,
-              "the body's cap: a share of the column, bounded: \(CardBody.cap(columnHeight: 600))")
+              "the queue's cap: a share of the column, bounded: \(CardBody.cap(columnHeight: 600))")
         let mock = Mock()
         mock.replies = [SessionClient.Op.send: ["ok": true]]
         let timers = Timers()
@@ -623,18 +620,10 @@ enum ShellTests {
         let (run, open) = s.openCard!
         let card = CardModel(card: open.card, runId: run, askId: open.askId)
         guard let approve = card.buttons.first(where: { $0.role == .approve }) else { check(false, "the fixture's card has an approve option"); return }
-        check(!m.buttonEnabled(approve, card: card, in: s), "approve: off before the body was seen")
-        m.click(approve)
-        check(sends(mock) == 0, "a click on it then sends nothing")
-        m.cardBody(card, contentHeight: 900, visibleHeight: 200, offset: 300)
-        check(!m.buttonEnabled(approve, card: card, in: s), "half way down: still off")
-        m.cardBody(card, contentHeight: 900, visibleHeight: 200, offset: 700)
-        check(m.buttonEnabled(approve, card: card, in: s), "its end on screen: on")
-        m.cardBody(card, contentHeight: 900, visibleHeight: 200, offset: 0)
-        check(m.buttonEnabled(approve, card: card, in: s), "scrolled back up: stays on (it was all on screen)")
+        check(m.buttonEnabled(approve, card: card, in: s), "approve: on as the card shows, before any layout")
         m.click(approve)
         timers.advance(CardStore.takeBack)
-        check(sent(mock)?["option"] as? Int == approve.index, "then the click sends the approve option (after its take-back)")
+        check(sent(mock)?["option"] as? Int == approve.index, "a click sends the approve option (after its take-back)")
         // another card starts unseen; its way out needs nothing
         let mock2 = Mock()
         mock2.replies = [SessionClient.Op.send: ["ok": true]]
@@ -754,7 +743,7 @@ enum ShellTests {
         let s = m.states["ses_t"]!
         let (run, open) = s.openCard!
         let card = CardModel(card: open.card, runId: run, askId: open.askId)
-        m.cardBody(card, contentHeight: 10, visibleHeight: 10, offset: 0)
+        m.fit(card)
         m.client.reconciling.wait()
         let before = sends(mock2)       // (the session's null, set_config)
         m.click(card.buttons.first { $0.role == .approve }!)
@@ -859,8 +848,9 @@ enum ShellTests {
         check(sheet.contains("Conversations in DeskMind 0.5 need a cloud model."), "the sheet: the 0.5 window's line why")
     }
 
-    /// #107 re-review (4): on a card with an approve-type option, the card's own words wait for its whole body as its
-    /// approve does (words can approve: 「好的」); never read. A card without one takes words at once.
+    /// The card's own words (never read): A2 lays the field out after the card's content, which no longer scrolls inside,
+    /// so on every card the field takes words at once (#107 re-review (4)'s wait was for a scrolled body), held for the
+    /// take-back as a click is.
     static func cardWordsTests() {
         let card: [String: Any] = ["kind": "action", "text": "这会把内容发出去：在 Mail 里点「发送」", "blocking": true, "free_text": true,
                                    "options": [["kind": "approve", "text": "可以"], ["kind": "cancel", "text": "先别做了"]]]
@@ -878,13 +868,9 @@ enum ShellTests {
         guard let (run, open) = m.states["ses_w"]?.openCard else { check(false, "the card is open"); return }
         let c = CardModel(card: open.card, runId: run, askId: open.askId)
         check(c.allowsFreeText && c.buttons.contains { $0.role == .approve }, "a card with an approve and its own field")
-        check(!m.wordsEnabled(c, in: m.states["ses_w"]!), "its field: off before the body was seen")
+        check(m.wordsEnabled(c, in: m.states["ses_w"]!), "its field: on as the card shows")
         m.answer(c, text: "好的")
-        timers.advance(CardStore.takeBack)
-        check(sends(mock) == 0, "words before the body was seen: not sent")
-        m.cardBody(c, contentHeight: 50, visibleHeight: 50, offset: 0)
-        check(m.wordsEnabled(c, in: m.states["ses_w"]!), "its field: on once the body was on screen")
-        m.answer(c, text: "好的")
+        check(sends(mock) == 0, "held for the take-back first")
         timers.advance(CardStore.takeBack)
         check(sent(mock)?["text"] as? String == "好的", "then sent: \(String(describing: sent(mock)))")
         // a card with no approve-type option takes words at once
@@ -905,8 +891,6 @@ enum ShellTests {
         qt.advance(CardStore.takeBack)
         check(sent(mock2)?["text"] as? String == "周二" && q.wordsEnabled(c2, in: q.states["ses_w"]!) == false,
               "no approve-type option: words go without waiting for the body (\(sends(mock2)) sent)")
-        let card2 = CardModel(card: open2.card, runId: run2, askId: open2.askId)
-        check(!ShellModel.wordsWaitForBody(card2) && ShellModel.wordsWaitForBody(c), "which cards' words wait")
     }
 
     /// #107 re-review (3): remembered settings never mark a session opened here. After a settings save and a helper
@@ -992,17 +976,16 @@ enum ShellTests {
         check(m.cloudOff, "cloud off: the chat's row stays")
     }
 
-    /// #107 re-review (effect): the hint under a card whose approve (and own field) wait for the body is neutral, and
-    /// the field says why it is off to VoiceOver.
+    /// A2: a card never scrolls inside and nothing on it waits to be scrolled to -- no ScrollView in the card, no "read
+    /// the whole card first" hint; what goes out is laid out before the buttons.
     static func cardHintTests() {
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let card = text.components(separatedBy: "struct CardView").dropFirst().first ?? ""
-        check(!card.contains("Scroll to the end of the card to approve"), "no approve-only hint under the card")
-        check(card.contains("Text(L(\"Read the whole card first: scroll to its end\""), "the neutral hint under it")
-        let field = card.components(separatedBy: "TextField(L(\"Or answer in your own words\"").dropFirst().first?.components(separatedBy: "Button(L(\"Send\"").first ?? ""
-        check(field.contains(".accessibilityHint(") && field.contains("Read the whole card first: scroll to its end"), "the field's own accessibility hint")
-        check(L("Read the whole card first: scroll to its end", lang: .zhHans) != "Read the whole card first: scroll to its end", "translated")
+        let card = (text.components(separatedBy: "struct CardView").dropFirst().first ?? "").components(separatedBy: "struct KeyCap").first ?? ""
+        let code = card.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        check(!code.contains("ScrollView") && !code.contains("Read the whole card first"), "no scrolling inside the card, nothing to scroll to")
+        let consent = code.range(of: "ConsentFields(consent: c)"), buttons = code.range(of: "ForEach(layout.buttons")
+        check(consent != nil && buttons != nil && consent!.lowerBound < buttons!.lowerBound, "what goes out is laid out before the buttons")
     }
 
     /// #107 re-review (effect): an end's exit line can come before its reply: the session is marked ended by the app
@@ -1941,15 +1924,6 @@ enum ShellTests {
         steps.drain()
         check(configs().count == 3 && configs().last?["config"] as? String == "openai:deepseek|b" && configs().last?["lang"] as? String == "en",
               "the retry carries the latest settings: \(configs().map { $0["config"] ?? "" })")
-    }
-
-    /// Final round (6): the "read the whole card first" hint only while the card is open.
-    static func hintOpenOnlyTests() {
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let card = text.components(separatedBy: "struct CardView").dropFirst().first ?? ""
-        let before = card.components(separatedBy: "Text(L(\"Read the whole card first: scroll to its end\"").first ?? ""
-        check(before.split(separator: "\n").suffix(3).contains { $0.contains("if phase.takesPick && !seen") }, "the hint shows only while the card waits (open, or a pick held)")
     }
 
     /// #107 external review (P2 2): the language is a session setting like the model's: one value for both. A switch

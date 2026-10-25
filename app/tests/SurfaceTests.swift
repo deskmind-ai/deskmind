@@ -751,7 +751,7 @@ enum SurfaceTests {
         guard let (s, _) = g.task, let p = r.m.pinned(s) else { check(false, "the goal's card is pinned"); return }
         let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
         r.m.cardShown(m)
-        r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+        r.m.fit(m)
         r.timers.advance(5)
         let keys = r.m.cardKeyHandlers
         _ = keys.onKey("\t", false, true, false, false, false)

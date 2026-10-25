@@ -324,7 +324,7 @@ struct GoalRunView: View {
         // (the shown task's own card only, while its session is the selected one: GoalShown)
         if let s = shown.session, let p = shown.pinned {
             let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-            CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s, bodyCap: CardBody.maxHeight)
+            CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s)
                 .id(ShellModel.cardKey(m))
                 .padding(.horizontal, 28).padding(.bottom, 10)
         }

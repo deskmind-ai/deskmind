@@ -454,7 +454,7 @@ enum TaskResultTests {
             let card = CardModel(resultCard: probe.state.task(rid)!.resultCard!, runId: rid)
             for b in card.buttons {
                 let r = make()
-                r.m.cardBody(card, contentHeight: 1, visibleHeight: 1, offset: 0)
+                r.m.fit(card)
                 let enabled = r.m.canSend(b), shown = r.m.buttonEnabled(b, card: card, in: r.state)
                 let n = r.wire.count("respond")
                 r.m.click(b)
@@ -471,7 +471,7 @@ enum TaskResultTests {
                     let r = Rig()
                     r.ask("a1")
                     let m = r.model("a1")!
-                    r.m.cardShown(m); r.m.cardBody(m, contentHeight: 1, visibleHeight: 1, offset: 0)
+                    r.m.cardShown(m); r.m.fit(m)
                     r.timers.advance(2); r.m.enterCardMode(m)
                     switch phase {
                     case "pending": r.click("a1", .skipStep)

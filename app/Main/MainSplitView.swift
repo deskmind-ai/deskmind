@@ -15,6 +15,10 @@ import SwiftUI
 enum ShellColor {
     static let secondary = Color(hex: ShellPalette.secondary)
     static let orangeText = Color(hex: ShellPalette.orangeText)
+    static let panel = Color(hex: ShellPalette.panel)
+    static let panelSelected = Color(hex: ShellPalette.panelSelected)
+    static let banner = Color(hex: ShellPalette.banner)
+    static let problem = Color(hex: ShellPalette.problem)
 }
 
 struct MainSplitView: View {
@@ -84,7 +88,7 @@ extension ShellModel {
         // the language as the setting has it now (not ResolvedLang.current, which the window updates in its own time)
         // (the app's one ModelsOffSync: the engine setter and the helper's connect push through the same one)
         let m = ShellModel(client: SessionClient(transport: transport, modelsSync: .shared), config: { MainSplitView.modelConfig() },
-                           lang: { (AppLanguage(rawValue: UserDefaults.standard.string(forKey: "language") ?? AppLanguage.system.rawValue) ?? .en).resolved },
+                           lang: { AppLanguage.current() },
                            cloudOn: { CloudModelSettings.engineIsCloud },
                            // every save of the model settings, from whichever window (ModelSettingsSaved), while the app runs
                            keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default,
@@ -136,7 +140,7 @@ struct SessionList: View {
             .font(.system(size: 13, weight: .semibold, design: .rounded))
             .foregroundStyle(Brand.ink)
             .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(shell.selected == nil ? Brand.mist.opacity(0.25) : Color.clear)
+            .background(shell.selected == nil ? ShellColor.panelSelected : Color.clear)
             .help(L("New conversation (⌘N)", lang: lang))
             .accessibilityHint(L("Starts a new conversation", lang: lang))
             List(selection: Binding(get: { shell.selected }, set: { id in if let id { shell.select(id) } })) {
@@ -153,7 +157,7 @@ struct SessionList: View {
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
         }
-        .background(Brand.card.opacity(0.6))
+        .background(ShellColor.panel)
         .alert(L("Rename conversation", lang: lang), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(L("Name", lang: lang), text: $newName)
             Button(L("Cancel", lang: lang), role: .cancel) { renaming = nil }
@@ -187,7 +191,7 @@ struct SessionRowView: View {
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(row.title), \(status)")
+        .accessibilityLabel(L("%@, %@", row.title, status, lang: lang))
     }
 }
 
@@ -230,9 +234,14 @@ struct ChatColumn: View {
     let openSettings: () -> Void
     @Environment(\.lang) private var lang
     @State private var announced: String?
+    /// 「跳到卡片」: the card to scroll the chat to (one too tall to pin stays in place there).
+    @State private var jumpTo: String?
 
     var body: some View {
-        GeometryReader { g in column(height: g.size.height) }
+        GeometryReader { g in
+            column(height: g.size.height)
+                .onChange(of: g.size.height, initial: true) { _, h in shell.pinRoom(columnHeight: h) }
+        }
             .background(Brand.paper)
             // 1–9 pick the pinned card's options (only while this window is the key one and no field is typed in)
             .background(CardKeyMonitor(shell.cardKeyHandlers))
@@ -270,10 +279,13 @@ struct ChatColumn: View {
                 .onChange(of: s?.lastSeq) { _, _ in withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } }
                 .onChange(of: s?.streamingMessage?.text.count) { _, _ in proxy.scrollTo("bottom") }
                 .onChange(of: shell.selected) { _, _ in proxy.scrollTo("bottom") }
+                .onChange(of: jumpTo) { _, id in
+                    if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }; jumpTo = nil }
+                }
             }
             .frame(minHeight: 0, maxHeight: .infinity)
             .layoutPriority(0)
-            if let s { pinned(s, bodyCap: CardBody.cap(columnHeight: height)).layoutPriority(1) }
+            if let s { pinned(s, queueCap: CardBody.cap(columnHeight: height)).layoutPriority(1) }
             if let n = shell.notice {
                 Text(n).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.bottom, 4)
@@ -322,17 +334,31 @@ struct ChatColumn: View {
         ForEach(s.shownOutbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
     }
 
-    /// Above the composer: the open card (handoff §3.3, pinned while it waits; its body scrolls within `bodyCap`) and
-    /// the queue (scrolls past a few).
-    @ViewBuilder private func pinned(_ s: SessionState, bodyCap: Double) -> some View {
+    /// Above the composer: the open card (handoff §3.3, pinned while it waits) -- whole when it fits the pinned place
+    /// (ShellModel.cardPinnedWhole), else one line, its title and 「跳到卡片」, the card itself in place in the chat (A2) --
+    /// and the queue (scrolls past a few).
+    @ViewBuilder private func pinned(_ s: SessionState, queueCap: Double) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let p = shell.pinned(s) {
                 let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-                CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s, bodyCap: bodyCap)
-                    .id(ShellModel.cardKey(m))
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                if shell.cardPinnedWhole(m) {
+                    CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s)
+                        .id(ShellModel.cardKey(m))
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                } else {
+                    HStack(spacing: 8) {
+                        Text(L("Waiting for you", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                        Text(CardLayout(m).title).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
+                        Spacer()
+                        Button(L("Go to the card", lang: lang)) { jumpTo = TaskRow.cardAnchor(m) }
+                            .buttonStyle(InkButtonStyle(prominent: false))
+                            .accessibilityHint(L("Scrolls the chat to the card", lang: lang))
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Brand.card))
+                }
             }
-            if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, bodyCap)) }
+            if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, queueCap)) }
         }
         .padding(.horizontal, 22)
         .animation(.easeOut(duration: 0.2), value: shell.pinned(s)?.card.askId)
@@ -343,7 +369,8 @@ struct ChatColumn: View {
         guard let id, id != announced, let s, let p = shell.pinned(s) else { return }
         announced = id
         let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, phase: p.phase, lang: lang)).post()
+        // (and how to reach it by keys: Tab moves into the card, its options' keys work then -- fable 10-25)
+        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, phase: p.phase, lang: lang) + " " + L("Press Tab to move into the card.", lang: lang)).post()
     }
 }
 
@@ -378,7 +405,7 @@ struct CloudOffRow: View {
             Button(L("Open model settings", lang: lang), action: openSettings).buttonStyle(InkButtonStyle(prominent: true))
         }
         .padding(.horizontal, 22).padding(.vertical, 8)
-        .background(Brand.dot.opacity(0.10))
+        .background(ShellColor.banner)
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityElement(children: .contain)
     }
@@ -390,7 +417,7 @@ struct Banner: View {
         Text(text).font(.system(size: 12)).foregroundStyle(Brand.ink)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 22).padding(.vertical, 8)
-            .background(Brand.dot.opacity(0.10))
+            .background(ShellColor.banner)
     }
 }
 
@@ -473,7 +500,7 @@ struct ErrorRow: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Brand.dot.opacity(0.07)))
+        .background(RoundedRectangle(cornerRadius: 12).fill(ShellColor.problem))
         .accessibilityElement(children: .contain)
     }
 }
@@ -561,10 +588,10 @@ struct QueuedBubble: View {
 
 // (CardView, the card by its kind: Main/CardViews.swift)
 
-/// The card body's content height and how far it is scrolled ([height, offset]).
-struct CardBodyGeometry: PreferenceKey {
-    static let defaultValue: [Double] = []
-    static func reduce(value: inout [Double], nextValue: () -> [Double]) { let n = nextValue(); if !n.isEmpty { value = n } }
+/// A card's height as laid out (ShellModel.cardLaidOut).
+struct CardHeight: PreferenceKey {
+    static let defaultValue: Double = 0
+    static func reduce(value: inout Double, nextValue: () -> Double) { value = max(value, nextValue()) }
 }
 
 /// The card body's visible height.
@@ -649,7 +676,7 @@ struct AgentPanel: View {
         }
         .padding(18)
         .frame(maxHeight: .infinity)
-        .background(Brand.card.opacity(0.6))
+        .background(ShellColor.panel)
     }
 
     /// 小方's face for the state (LiveView.face): looking while it works, up when it waits for you, happy when done,

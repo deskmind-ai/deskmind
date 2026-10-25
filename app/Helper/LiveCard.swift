@@ -633,7 +633,7 @@ private final class CardView: NSView {
         CATransaction.commit()
         for b in buttons where !b.isHidden { b.alphaValue = hovering || collapsed ? 1 : 0 }
         resetTracking()
-        setAccessibilityLabel("\(title.stringValue). \(line.stringValue)")
+        setAccessibilityLabel(L("%@. %@", title.stringValue, line.stringValue, lang: ResolvedLang.current))
     }
 
     func setStatus(_ s: LiveView.Status) {

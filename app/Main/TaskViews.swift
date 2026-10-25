@@ -46,13 +46,20 @@ struct TaskRow: View {
                 Text(step.displayText).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2)
                     .accessibilityLabel(L("Current step: %@", step.displayText, lang: lang))
             }
-            // (the pinned card is above the composer; the rest are a line each, in their phase)
+            // (the pinned card is above the composer -- or here, whole, when it is too tall to pin: A2; the rest are a line
+            // each, in their phase)
+            if let p = shell.pinned(session), p.runId == task.runId {
+                let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+                if !shell.cardPinnedWhole(m) {
+                    CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: session).id(Self.cardAnchor(m))
+                }
+            }
             ForEach(task.cards.filter { $0.askId != shell.pinned(session)?.card.askId }, id: \.askId) { c in
                 Text(ShellText.cardLine(shell.phase(task.runId, c, in: session), kind: c.card.kind, lang: lang))
                     .font(.system(size: 11)).foregroundStyle(ShellColor.secondary).lineLimit(2)
             }
             if !task.running {
-                let summary = task.done?.summary ?? task.end?.summary ?? ""
+                let summary = ShellText.summary(task, lang: lang)
                 if !summary.isEmpty { Text(summary).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
                 if let a = task.answer, !a.isEmpty, a != summary { Text(a).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
                 ResultSection(shell: shell, task: task, session: session)
@@ -63,6 +70,9 @@ struct TaskRow: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L("Computer task: %@", task.raw, lang: lang))
     }
+
+    /// Where 「跳到卡片」 scrolls to: a card drawn in place in the chat.
+    static func cardAnchor(_ card: CardModel) -> String { "card/" + ShellModel.cardKey(card) }
 }
 
 /// The result card (its text says what was done, and why it can't be undone when it can't), its buttons — enabled
@@ -78,7 +88,7 @@ struct ResultSection: View {
         if let rc = task.resultCard, !rc.options.isEmpty {
             let m = CardModel(resultCard: rc, runId: task.runId)
             VStack(alignment: .leading, spacing: 6) {
-                CardView(shell: shell, card: m, phase: .open, askedAt: nil, session: session, bodyCap: CardBody.maxHeight)
+                CardView(shell: shell, card: m, phase: .open, askedAt: nil, session: session)
                     .id(ShellModel.cardKey(m))
                 // (the countdown refreshes each 30 s; whether undo can be clicked never reads the clock)
                 TimelineView(.periodic(from: .now, by: 30)) { _ in

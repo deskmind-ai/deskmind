@@ -5,8 +5,13 @@
 // (%1$@, %2$@) where the two languages put them in a different order. Nothing here translates data: task titles
 // from the task YAML, and app names macOS already reports in its own language, pass through as they are.
 //
-// Compiled into both executables. The main app chooses the language (Settings: English by default); the helper
-// has no settings of its own and speaks whatever the main app's last request asked for (the "lang" field).
+// Compiled into both executables. One language per screen, and one source for it (owner, 10-25): the main app's
+// "language" setting -- follow the system (the default), 中文 or English -- read only through
+// `AppLanguage.resolve`. The main app keeps ResolvedLang.current on it and sends it with every request; the helper
+// has no settings of its own and speaks whatever the main app's last request asked for (the "lang" field); a session
+// is opened and reconfigured with the same language (ShellModel.sessionSettings), so what its model writes follows
+// it too. tests/L10nTests.swift: every key the code passes to L has its Chinese, neither language's text carries the
+// other's words, and the window's views put no text on screen outside L.
 
 import Foundation
 
@@ -15,23 +20,35 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     case system, en, zhHans = "zh-Hans"
     var id: String { rawValue }
 
-    var resolved: ResolvedLang {
-        switch self {
+    static let key = "language"
+
+    /// THE language the app speaks, from the setting as stored (`stored`: its raw value, nil when never set). Nothing
+    /// set, or something this version does not know: follow the system.
+    static func resolve(_ stored: String?, system: () -> ResolvedLang = { ResolvedLang.fromSystem() }) -> ResolvedLang {
+        switch AppLanguage(rawValue: stored ?? "") ?? .system {
         case .en: .en
         case .zhHans: .zhHans
-        case .system: ResolvedLang.fromSystem()
+        case .system: system()
         }
     }
+
+    /// The setting as stored in `defaults`, resolved.
+    static func current(_ defaults: UserDefaults = .standard) -> ResolvedLang { resolve(defaults.string(forKey: key)) }
+
+    /// The choice shown for the stored value (anything unknown shows as following the system, which it does).
+    static func choice(_ stored: String?) -> AppLanguage { AppLanguage(rawValue: stored ?? "") ?? .system }
+
+    var resolved: ResolvedLang { Self.resolve(rawValue) }
 }
 
 /// A language the strings actually exist in.
 enum ResolvedLang: String {
     case en, zhHans = "zh-Hans"
 
-    /// Any Chinese in the user's preferred languages (zh-Hans, zh-Hant, zh-CN, ...) reads Simplified Chinese;
+    /// The user's first preferred language: any Chinese (zh-Hans, zh-Hant, zh-CN, ...) reads Simplified Chinese;
     /// anything else reads English.
-    static func fromSystem() -> ResolvedLang {
-        (Locale.preferredLanguages.first ?? "en").hasPrefix("zh") ? .zhHans : .en
+    static func fromSystem(_ preferred: [String] = Locale.preferredLanguages) -> ResolvedLang {
+        (preferred.first ?? "en").hasPrefix("zh") ? .zhHans : .en
     }
 
     /// The language for code outside a view: the main app keeps it in step with its setting, the helper sets it
@@ -50,6 +67,10 @@ enum L10n {
     static let zh: [String: String] = [
         // MARK: Brand, language picker
         "Follow system": "跟随系统",
+        "DeskMind": "DeskMind",
+        // Two parts of one VoiceOver label (a name and its state; a title and its line).
+        "%@, %@": "%1$@，%2$@",
+        "%@. %@": "%1$@。%2$@",
         "Language": "语言",
 
         // MARK: Cloud model (Main/CloudModel.swift)
@@ -59,7 +80,7 @@ enum L10n {
         "Set up…": "设置…",
         "Change": "更改",
         "Which model thinks": "由哪个模型来想",
-        "Use a cloud model (the harness engine)": "使用云端模型（harness 引擎）",
+        "Use a cloud model (the harness engine)": "使用云端模型（云端引擎）",
         "Service": "服务",
         "API key": "API 密钥",
         "Base URL (…/v1)": "接口地址（…/v1）",
@@ -267,7 +288,7 @@ enum L10n {
         "The log could not be saved": "日志没能保存",
         "DeskMind Hands did not answer.": "DeskMind Hands 没有响应。",
         "Opens a GitHub issue for you to check and submit. Nothing is sent from DeskMind.":
-            "会打开一个 GitHub issue 页面，由你检查后提交；DeskMind 不会发送任何内容。",
+            "会在 GitHub 上打开一个问题反馈页面，由你检查后提交；DeskMind 不会发送任何内容。",
         "This run hit an error. Run it again; if it keeps happening, report it on GitHub.":
             "这次运行出错了。再跑一次；如果反复出现，请在 GitHub 上反馈。",
         "Report an Issue…": "反馈问题…",
@@ -382,7 +403,7 @@ enum L10n {
         "Record this run": "录制这次运行",
         "Include DeskMind's Window in Recordings": "录制时包含 DeskMind 窗口",
         "Record the Whole Screen": "录制整个屏幕",
-        "Only the apps this task uses are recorded, other apps stay out; it goes to Movies › DeskMind.": "只录制这次任务用到的 app，其他 app 不会出现；录像保存在“影片 › DeskMind”。",
+        "Only the apps this task uses are recorded, other apps stay out; it goes to Movies › DeskMind.": "只录制这次任务用到的应用，其他应用不会出现；录像保存在“影片 › DeskMind”。",
         "Recorded": "已录制",
         "Watch": "观看",
         "Show Decisions While Running": "运行时显示决策浮层",
@@ -427,8 +448,8 @@ enum L10n {
             "端口 %d 被其他程序占用，DeskMind 不会和它通信。请退出那个程序（或重启 Mac），然后点“重试”。",
         "This also deletes their step screenshots and records from this Mac. Recordings stay in Movies › DeskMind.":
             "同时会从这台 Mac 上删除这些任务的步骤截图和运行记录。录像会保留在“影片 › DeskMind”里。",
-        "Found it useful? Star DeskMind on GitHub.": "觉得有用？在 GitHub 上给 DeskMind 点个 star。",
-        "Star on GitHub": "去 GitHub 点 star",
+        "Found it useful? Star DeskMind on GitHub.": "觉得有用？在 GitHub 上给 DeskMind 点个星标。",
+        "Star on GitHub": "去 GitHub 点星标",
         "Don't show again": "不再显示",
         "DeskMind couldn't finish the task": "DeskMind 没能完成任务",
 
@@ -501,7 +522,6 @@ enum L10n {
         "Cloud models are off. Conversations need one: nothing is sent until it is on.": "云端模型已关闭。对话要用云端模型：打开之前，什么都不会发出去。",
         "Scroll to the end of the card to approve": "滚到卡片末尾才能同意",
         "Conversations in DeskMind 0.5 need a cloud model.": "DeskMind 0.5 的对话需要云端模型。",
-        "Read the whole card first: scroll to its end": "先看完整张卡：滚到它的末尾",
         "Couldn't start a conversation. Is DeskMind's helper running?": "没能开始对话。DeskMind 的后台助手在运行吗？",
         "DeskMind's helper didn't answer. Your message is kept below; send it again.": "后台助手没有回应，你的消息留在下面了，可以重新发送。",
         // a goal from the home screen that never got its task (Shared/GoalRun.swift: GoalRunScreen)
@@ -537,6 +557,12 @@ enum L10n {
         "The Mac's state didn't allow it": "电脑当时的状态不允许",
         "Done, but not confirmed. Please check": "做了，没能确认，请你看一下",
         "Interrupted": "中断了",
+        "Undone": "已撤回",
+        "Card details": "细节",
+        "Go to the card": "跳到卡片",
+        "Scrolls the chat to the card": "把聊天滚到这张卡片",
+        "Press Tab to move into the card.": "按 Tab 进入卡片。",
+        "All changes were undone (%d)": "改动都撤回了（%d 处）",
         "No API key for the model": "模型没有 API 密钥",
         "The model's service rejected the API key": "模型服务不接受这个 API 密钥",
         "The model's service is out of quota or rate-limited": "模型服务额度不够，或者被限流了",
@@ -643,7 +669,7 @@ enum L10n {
         "Answers no; the task ends cancelled": "回答不做，任务以取消结束",
         "Undoes what the task changed": "撤回任务改过的东西",
         "Message": "消息",
-        "Return queues it for after the task; Command-Return sends it to the task now": "回车排队，任务做完后发出；Command-回车立刻交给任务",
+        "Return queues it for after the task; Command-Return sends it to the task now": "回车排队，任务做完后发出；⌘-回车立刻交给任务",
         "Return sends; start with /cua to run a computer task": "回车发送；以 /cua 开头就开一个电脑任务",
         "Stops the reply": "停止这条回复",
         "Queue": "排队",
