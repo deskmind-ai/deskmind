@@ -468,7 +468,9 @@ enum HarnessRun {
         }
         LiveCard.finish(stopped ? .stopped : ending(state.finished?["harness_status"] as? String))
         let tail = String(decoding: ((try? Data(contentsOf: errURL)) ?? Data()).suffix(600), as: UTF8.self)
-        Runner.pruneHarnessRuns(keep: 10)    // after the run, so this one counts among the ten kept
+        // the run records' rule (M5: 30 days / 1 GB, oldest first), off the run's end: this run's own folder is still
+        // being written to, and the helper's sessions' runs are live
+        DispatchQueue.global(qos: .utility).async { RunRetention.prune(live: { SessionHost.liveRuns().union([runID]) }) }
         // a lingering process has no exit status yet (reading it would raise); a run that wrote task_done needs none
         var done = HarnessEvents.done(state: state, terminationStatus: lingers ? 0 : p.terminationStatus, stopped: stopped, stderrTail: tail)
         // stopped because cloud models went off: said so (the harness records it as a stop by the app; the window says why)

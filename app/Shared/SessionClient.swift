@@ -548,6 +548,12 @@ final class SessionClient {
         self.modelsSync.onAck { [weak self] in self?.convergeAllLater() }
     }
 
+    /// Every session's newest state (under the lock: any thread).
+    func allStates() -> [SessionState] {
+        lock.lock(); defer { lock.unlock() }
+        return Array(states.values)
+    }
+
     func state(_ sessionId: String) -> SessionState {
         lock.lock(); defer { lock.unlock() }
         return states[sessionId] ?? SessionState(sessionId: sessionId)

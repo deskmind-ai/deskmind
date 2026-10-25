@@ -41,7 +41,7 @@ struct FirstRunView: View {
                 Spacer()
                 if flow.step != .language { Button(L("Back", lang: lang)) { flow.apply(.back) } }
                 if flow.canLater && !ready { Button(L("Later", lang: lang)) { move(.later) } }
-                Button(flow.step == .examples ? L("Finish", lang: lang) : L("Next", lang: lang)) { move(.next) }
+                Button(flow.step == .examples ? L("Finish", lang: lang) : L("Next step", lang: lang)) { move(.next) }
                     .buttonStyle(InkButtonStyle(prominent: true)).keyboardShortcut(.defaultAction)
             }
         }

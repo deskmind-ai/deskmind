@@ -496,6 +496,8 @@ struct DeskMindApp: App {
         UIEvents.log = UIEventLog(dir: DeskMindIPC.supportDir, file: UIEventLog.mainFile)
         _uiLogOn = State(initialValue: UIEvents.enabled)
         ActivationRecorder.start()
+        // the run records' rule at launch (M5: 30 days / 1 GB, oldest first), off the main queue
+        DispatchQueue.global(qos: .utility).async { RunRetention.prune(live: []) }
     }
     @State private var uiLogOn = true
 
@@ -503,6 +505,7 @@ struct DeskMindApp: App {
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
     @AppStorage(RunRecorder.wholeScreenKey) private var recordWholeScreen = false
     @AppStorage(RunRecorder.smoothKey) private var recordSmooth = false
+    @AppStorage(ProcessTabs.key) private var traceOn = false
     var body: some Scene {
         WindowGroup(L("DeskMind", lang: AppLanguage.resolve(language))) {
             LocalizedRoot {
@@ -524,6 +527,13 @@ struct DeskMindApp: App {
                 // 30 fps for footage where motion matters; the default 10 fps barely slows the run.
                 Toggle(L("Smooth Recordings (30 fps, Slows Tasks About 10%)", lang: AppLanguage.resolve(language)),
                        isOn: $recordSmooth)
+                // Developer: the right column's 「过程」 tab (M5), off by default
+                Toggle(L("Show the Process Tab (0.5 Preview)", lang: AppLanguage.resolve(language)), isOn: $traceOn)
+                // every ended task's run records (pictures, trace, model calls); the conversations and the labels stay
+                Button(L("Clear Run Records", lang: AppLanguage.resolve(language))) {
+                    let shell = ShellModel.shared
+                    DispatchQueue.global(qos: .userInitiated).async { RunRetention.prune(live: { shell?.liveRunsNow() ?? [] }, everything: true) }
+                }
                 // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
                 Toggle(L("Record Interface Use on This Mac", lang: AppLanguage.resolve(language)),
                        isOn: Binding(get: { uiLogOn }, set: { UIEvents.setEnabled($0) { now in uiLogOn = now } }))   // (as it is: a folder that refuses the switch's file keeps it)
