@@ -2206,7 +2206,8 @@ enum ShellTests {
         // the app's writers post, and the app's one shell observes them; the window compares through the shell only
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let cloud = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
-        let write = cloud.components(separatedBy: "static func write(").dropFirst().first?.components(separatedBy: "static var provider").first ?? ""
+        // (the keys: written through the helper, keys.set -- A11)
+        let write = cloud.components(separatedBy: "static func set(_ pairs:").dropFirst().first?.components(separatedBy: "static var provider").first ?? ""
         let provider = cloud.components(separatedBy: "static var provider: CloudProvider {").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
         let engineConfig = cloud.components(separatedBy: "static var engineConfig: String? {").dropFirst().first?.components(separatedBy: "\n    }").first ?? ""
         check(write.contains("ModelSettingsSaved.post()") && provider.contains("ModelSettingsSaved.post()") && engineConfig.contains("ModelSettingsSaved.post()"),
@@ -2507,7 +2508,7 @@ enum ShellTests {
         let spawn = host.components(separatedBy: "private static func spawn(").dropFirst().first?.components(separatedBy: "static func send(").first ?? ""
         check(spawn.contains("s.keysDigest = keys"), "spawn: the digest kept with the process")
         let list = host.components(separatedBy: "static func list() -> [String: Any] {").dropFirst().first ?? ""
-        check(list.contains("\"keys\": keysNow") && list.contains("i[\"keys\"] = k") && list.contains("i[\"ending\"] = r.ending"),
+        check(list.contains("reply[\"keys\"] = keysNow") && list.contains("i[\"keys\"] = k") && list.contains("i[\"ending\"] = r.ending"),
               "sessions.list: the file's digest now, each open process's, and whether it is ending")
         check(list.contains("(s.started || s.process.isRunning)") && list.contains("i[\"starting\"] = true"),
               "sessions.list: a process spawned, not started yet, is reported (starting) with its digest")

@@ -87,6 +87,7 @@ enum ModelStore {
         let had = files.exists(file)
         if had, !files.move(file, to: aside(file)) { return .failed("old_file") }      // 「旧的 models.env 删不掉」
         guard keychain.write(text), keychain.read() == .value(text) else {
+            _ = keychain.write(now)          // (a write that did not read back: what was there before, as far as it goes)
             if had { _ = files.move(aside(file), to: file) }
             return .failed("keychain")
         }

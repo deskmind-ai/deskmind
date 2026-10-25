@@ -1,3 +1,4 @@
+import Combine
 // DeskMind.app (prototype): the window the user keeps open. It holds no special permission; it registers the
 // helper with launchd, walks the user through granting the helper's permissions (the setup card on the home
 // screen, HomeView), and reconnects whenever the helper restarts.
@@ -26,6 +27,7 @@ final class HelperModel: ObservableObject {
         if service.status == .enabled || service.status == .requiresApproval { try? service.unregister() }
         registration = service.status
         HelperModel.shared = self
+        followKeys()
         // A newer helper ships with this app: replace the installed copy and restart it before connecting.
         if (try? installHelper()) == true {
             note(L("Helper updated", lang: ResolvedLang.current))
@@ -88,6 +90,12 @@ final class HelperModel: ObservableObject {
     @Published var cloudEngine = CloudModelSettings.engineIsCloud
     @Published var cloudConfigured = CloudModelSettings.configured
     func refreshCloud() { cloudEngine = CloudModelSettings.engineIsCloud; cloudConfigured = CloudModelSettings.configured }
+    /// The helper's word on the keys (A11), as it comes: whether the chosen service has its key follows it.
+    private var keysSeen: AnyCancellable?
+    func followKeys() {
+        keysSeen = KeyStatus.shared.$snapshot.receive(on: DispatchQueue.main).sink { [weak self] _ in self?.refreshCloud() }
+        KeyStatus.shared.refresh()
+    }
     /// "Ready" means a real task can run: permissions, and whichever model thinks — the local one downloaded and
     /// running, or the cloud one with its key.
     var requiredDone: Bool { permissionsDone && (cloudEngine ? cloudConfigured : brainReady) }

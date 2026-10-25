@@ -719,5 +719,11 @@ enum L10n {
 
         // MARK: Helper notes (Helper/HandsHelper.swift)
         "Allow it in System Settings, then restart the helper": "请在系统设置里授权，然后重启助手",
+
+        // MARK: the model keys (Main/CloudModel.swift, A11)
+        "Set · ends in %@": "已设置 · 末 4 位 %@",
+        "New API key (empty: keep it)": "新的 API 密钥（留空：不变）",
+        "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is kept in your keychain, by DeskMind's helper only.": "用云端模型时，每个任务的话、它看的窗口、文件夹列表和它读的文件内容都会发给这个服务来思考。密钥存在你的钥匙串里，只有 DeskMind 的助手能读。",
+        "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think — keep tasks with sensitive content on the local model. The key is kept in your keychain, by DeskMind's helper only.": "用云端模型时，每个任务的话、它看的窗口、文件夹列表和它读的文件内容都会发给这个服务来思考——内容敏感的任务请用本地模型。密钥存在你的钥匙串里，只有 DeskMind 的助手能读。",
     ]
 }

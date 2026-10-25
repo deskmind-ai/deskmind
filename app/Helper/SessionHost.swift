@@ -686,9 +686,9 @@ enum SessionHost {
             if let k = r.keys { p["keys"] = k }
             return p
         }
-        var out: [String: Any] = ["ok": true, "sessions": reported, "processes": processes]
-        if let keysNow { out["keys"] = keysNow }
-        return out
+        var reply: [String: Any] = ["ok": true, "sessions": reported, "processes": processes]
+        if let keysNow { reply["keys"] = keysNow }
+        return reply
     }
 
     // MARK: watching

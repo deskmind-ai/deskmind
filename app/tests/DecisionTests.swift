@@ -234,6 +234,7 @@ enum DecisionTests {
         RightColumnTests.run()
         LiveWatchTests.run()
         CardNoticesTests.run()
+        ModelStoreTests.run()
         UIEventsTests.run()
         TaskResultTests.run()
         group("sessionWireTests"); sessionWireTests()
