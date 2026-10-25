@@ -300,16 +300,38 @@ enum L10nTests {
         for c in ["panel", "panelSelected", "banner", "problem", "secondary", "orangeText", "error"] {
             check(split.contains("static let \(c) = Color(ShellPalette.\(c))"), "the window's \(c) is the palette's token")
         }
-        // nothing hard-coded: no colour made anywhere in the 0.5 window and its sheets but from a token (Brand.swift
-        // makes them); Color.clear is no colour
-        let literal = #"(?<![A-Za-z])Color\((hex|red|white|\.sRGB|nsColor)|NSColor\(|NSColor\.[a-z]|(?<![A-Za-z])Color\.(white|black|gray|red|green|blue|orange|yellow|pink|purple|accentColor|primary|secondary)\b|foregroundStyle\(\.(white|black|gray|red|green|blue|orange|yellow|primary|secondary)\b|\.(foregroundColor|tint)\(\.[a-z]+\)"#
-        var named: [String] = []
-        for f in ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift", "Main/CloudModel.swift", "Main/FrontmostMonitor.swift"] {
-            for (i, l) in code(f).components(separatedBy: "\n").enumerated() where l.range(of: literal, options: .regularExpression) != nil {
-                named.append("\(f):\(i + 1)")
+        // nothing hard-coded (owner 10-25; #124 delta review: an allowlist): in the 0.5 window's files and its sheets a
+        // colour is only Brand.*, ShellColor.* or a ShellPalette token (Color(ShellPalette.x)), or .clear -- no Color
+        // made any other way (hex, sRGB, a system or asset colour), no NSColor, no named or semantic colour (.red,
+        // .secondary, .accentColor…) anywhere, no material. Brand.swift makes the colours: NSColor only in init(_ tone:).
+        let named = #"\.(red|green|blue|orange|yellow|pink|purple|white|black|gray|grey|primary|secondary|tertiary|quaternary|accentColor|mint|teal|cyan|indigo|brown)\b"#
+        let forbidden = [#"(?<![A-Za-z])Color\((?!ShellPalette\.)"#, #"(?<![A-Za-z])Color\.(?!clear\b)[a-z]"#, #"NSColor"#,
+                         #"(?<![A-Za-z0-9_)\]])"# + named, #"\.(ultraThin|thin|regular|thick|ultraThick|bar)Material"#, #"Material\."#]
+        var found: [String] = []
+        for f in ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift", "Main/CloudModel.swift", "Main/FrontmostMonitor.swift",
+                  "Main/SessionIsland.swift", "Main/Brand.swift"] {
+            var lines = code(f).components(separatedBy: "\n")
+            if f == "Main/Brand.swift", let at = lines.firstIndex(where: { $0.contains("init(_ tone: ShellPalette.Tone)") }) {
+                for k in at..<min(lines.count, at + 8) { lines[k] = "" }     // (the one place a colour is made)
+            }
+            for (i, l) in lines.enumerated() where forbidden.contains(where: { l.range(of: $0, options: .regularExpression) != nil }) {
+                found.append("\(f):\(i + 1)")
             }
         }
-        check(named.isEmpty, "no colour named outside the tokens in the 0.5 window and its sheets: \(named)")
+        check(found.isEmpty, "no colour outside the tokens in the 0.5 window and its sheets: \(found)")
+        // the allowlist itself, on the shapes it must catch and let through
+        let probe = { (l: String) in forbidden.contains(where: { l.range(of: $0, options: .regularExpression) != nil }) }
+        for bad in [".fill(.red)", ".background(Color(.systemGray))", ".foregroundStyle(.secondary)", "Color(\"Ink\")", "x ? .white : Brand.ink",
+                    ".stroke(Color.blue)", ".background(.ultraThinMaterial)", "NSColor.labelColor", ".shadow(color: .black, radius: 2)", "Color(hex: 0x1)"] {
+            check(probe(bad), "the allowlist catches \(bad)")
+        }
+        for good in [".fill(Brand.card)", ".foregroundStyle(ShellColor.secondary)", ".background(Color.clear)", "Color(ShellPalette.panel)",
+                     ".font(.system(size: 11, weight: .semibold))", ".stroke(Brand.dot.opacity(0.35))"] {
+            check(!probe(good), "the allowlist lets \(good) through")
+        }
+        // 小方 in Dark Mode: its dark-ink images on a light badge
+        check(ShellPalette.contrast(ShellPalette.ink.light, ShellPalette.badge.dark) >= 4.5 && source("Main/Brand.swift").contains("Circle().fill(Color(ShellPalette.badge))"),
+              "小方 on a light badge in Dark Mode")
         check(!split.contains("preferredColorScheme"), "the window follows the system's appearance (no pin: owner 10-25)")
         // no translucent fill behind text in the window's views: what is checked is what is on screen
         let views = ShellTests.windowViewFiles().filter { ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift"].contains($0.name) }
