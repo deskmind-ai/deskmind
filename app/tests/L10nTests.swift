@@ -286,7 +286,7 @@ enum L10nTests {
               String(format: "the solid tints: panel #%06X, selected #%06X, banner #%06X, problem #%06X",
                      ShellPalette.panel, ShellPalette.panelSelected, ShellPalette.banner, ShellPalette.problem))
         check(ShellPalette.blend(0xFFFFFF, 0.5, over: 0x000000) == 0x808080 && ShellPalette.blend(0x123456, 1, over: 0xABCDEF) == 0x123456, "(blend)")
-        // why solid and light: the old translucent panel over the sidebar's Dark Mode material put secondary text
+        // why solid: the old translucent panel over the sidebar's Dark Mode material put secondary text
         // under 2.5:1
         let darkMaterial: UInt32 = 0x1E1E1E
         check(ShellPalette.contrast(ShellPalette.secondary, ShellPalette.blend(ShellPalette.card, 0.6, over: darkMaterial)) < 4.5,
@@ -297,9 +297,6 @@ enum L10nTests {
         for c in ["panel", "panelSelected", "banner", "problem"] {
             check(split.contains("static let \(c) = Color(hex: ShellPalette.\(c))"), "the window's \(c) is the palette's")
         }
-        // the window and its sheet are light in both appearances: the system's own controls (fields, lists) would
-        // otherwise draw Dark Mode's light text on the light palette
-        check(split.components(separatedBy: ".preferredColorScheme(.light)").count - 1 >= 2, "the window and its settings sheet: light in both appearances")
         // no translucent fill behind text in the window's views: what is checked is what is on screen
         let views = ShellTests.windowViewFiles().filter { ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift"].contains($0.name) }
         var tinted: [String] = []
