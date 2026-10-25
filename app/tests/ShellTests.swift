@@ -137,7 +137,7 @@ enum ShellTests {
     static func model(_ mock: Mock, defaults: UserDefaults = scratchDefaults(), config: String? = "openai:local|fake",
                       lang: ResolvedLang = .zhHans, timers: Timers = Timers()) -> ShellModel {
         let client = SessionClient(transport: mock)
-        client.newClientId = { "c_1" }
+        client.makeClientId = { "c_1" }
         return ShellModel(client: client, defaults: defaults, config: { config }, lang: { lang },
                           takeBackAfter: timers.after, now: { timers.now }, work: { $0() }, deliver: { $0() })
     }
@@ -254,19 +254,20 @@ enum ShellTests {
         check(replying.enabled && replying.replying && replying.canStop, "a reply streams: Stop available")
         check(replying.control("还有", sendNow: false) == nil, "a reply streams: Enter sends nothing (the text stays)")
 
-        // a card waits: no typing, Stop always
+        // a card waits (A9, owner 10-25): the composer takes words; Return steers (the card it voids ends by the run's word)
         let card = SessionTests.after("task-card", SessionTests.isKind("ask"))!
         let waiting = ComposerMode.of(card)
-        check(!waiting.enabled && waiting.taskRunning && waiting.canStop, "a card waits: composer off, Stop on")
-        check(waiting.control("顺便", sendNow: false) == nil && waiting.control("顺便", sendNow: true) == nil, "a card waits: neither key sends")
+        check(waiting.enabled && waiting.taskRunning && waiting.canStop, "a card waits: composer on, Stop on")
+        check(waiting.control("顺便", sendNow: false) == .steer("顺便") && waiting.control("顺便", sendNow: true) == .steer("顺便"), "a card waits: Return steers (⌘Return the same)")
+        check(waiting.control("   ", sendNow: false) == nil, "an empty Return: nothing")
 
-        // a task runs, no card: Enter queues (say), ⌘Enter steers
+        // a task runs, no card: Return steers (no queue; ⌘Return is no other gesture)
         let running = SessionTests.after("task-card", SessionTests.isKind("resumed"))!
         let r = ComposerMode.of(running)
         check(r.enabled && r.taskRunning, "a task runs without a card: typing")
-        check(r.control("改成蓝色", sendNow: false) == .say("改成蓝色"), "Enter while a task runs: say (the session queues it)")
-        check(r.control("改成蓝色", sendNow: true) == .steer("改成蓝色"), "⌘Enter while a task runs: steer")
-        check(r.control("/cua 另一件事", sendNow: false) == .say("/cua 另一件事"), "/cua while a task runs: queued as typed (one task per session)")
+        check(r.control("改成蓝色", sendNow: false) == .steer("改成蓝色"), "Return while a task runs: steer")
+        check(r.control("改成蓝色", sendNow: true) == .steer("改成蓝色"), "⌘Return while a task runs: steer")
+        check(r.control("/cua 另一件事", sendNow: false) == .steer("/cua 另一件事"), "/cua while a task runs: the words to the task, as typed")
 
         // the model: submit while a card waits sends nothing and keeps the text
         let mock = Mock()
@@ -276,7 +277,7 @@ enum ShellTests {
         m.selected = "ses_t"
         m.draft = "顺便说一句"
         m.submit()
-        check(sends(mock) == 0 && m.draft == "顺便说一句", "a card waits: nothing sent, the text stays")
+        check((sent(mock)?["type"] as? String) == "steer" && m.draft.isEmpty, "a card waits: Return steers (\(String(describing: sent(mock))))")
         // Stop is always sent, to the running task
         m.stop()
         check(sent(mock) as NSDictionary? == ["type": "stop", "run_id": "run_041c0f37"] as NSDictionary, "Stop while a card waits: the task's stop (\(String(describing: sent(mock))))")
@@ -355,10 +356,11 @@ enum ShellTests {
         check(sends(mock2) == 0, "send now while a card waits: not sent")
         w.queueCancel("q1")
         check(sent(mock2) as NSDictionary? == ["type": "queue_cancel", "id": "q1"] as NSDictionary, "cancel while a card waits: sent (it is not typing)")
-        // Enter while a task runs: a say (queued by the session), the composer emptied
+        // Return while a task runs: a steer (A9), the composer emptied
         m.draft = "再补一句"
         m.submit()
-        check(sent(mock) as NSDictionary? == ["type": "say", "text": "再补一句", "client_id": "c_1"] as NSDictionary && m.draft.isEmpty, "Enter: say, queued by the session")
+        check(sent(mock) as NSDictionary? == ["type": "steer", "text": "再补一句", "run_id": "run_041c0f37", "client_id": "c_1"] as NSDictionary && m.draft.isEmpty,
+              "Return: steer, to the running task: \(String(describing: sent(mock)))")
         m.draft = "现在就改"
         m.submit(sendNow: true)
         check(sent(mock) as NSDictionary? == ["type": "steer", "text": "现在就改", "run_id": "run_041c0f37", "client_id": "c_1"] as NSDictionary, "⌘Enter: steer, to the running task: \(String(describing: sent(mock)))")
@@ -681,19 +683,30 @@ enum ShellTests {
         let movers = ["@FocusState", ".focused(", "defaultFocus", "makeFirstResponder", "becomeFirstResponder", "prefersDefaultFocus", "focusScope", "FocusedValue",
                       "NSApp.activate", ".activate(", "makeKeyAndOrderFront", "orderFrontRegardless", "orderFront(", "makeKey()", "stepAside", "unhide("]
         for (n, code) in files {
-            var code = code
-            // the one focus allowed in the card (lead 10-25): which option has the focus, observed to scroll it into view
-            // -- never assigned (the user's Tab moves it)
-            if n == "Main/CardViews.swift" {
-                check(code.components(separatedBy: "@FocusState private var focusedOption: Int?").count == 2
-                      && code.components(separatedBy: ".focused($focusedOption, equals: c.index)").count == 2
-                      && code.range(of: #"focusedOption\s*=[^=]"#, options: .regularExpression) == nil,
-                      "the card's focus: observed only, never set")
-                code = code.replacingOccurrences(of: "@FocusState private var focusedOption: Int?", with: "").replacingOccurrences(of: ".focused($focusedOption, equals: c.index)", with: "")
+            var c = code
+            // the one focus move allowed (lead 10-25): the composer's @FocusState and its .focused binding, which take
+            // ShellModel.focusRequest (the user's Esc out of a card) -- once each, in Composer, and nowhere else
+            if n == "Main/MainSplitView.swift", let composer = c.range(of: "struct Composer: View {") {
+                let part = String(c[composer.lowerBound...])
+                let ok = part.components(separatedBy: "@FocusState private var focused: Bool").count == 2
+                    && part.components(separatedBy: ".focused($focused)").count == 2
+                    && part.contains("if shell.takeFocus(n) { focused = true }")
+                check(ok, "the composer's focus: one @FocusState, one binding, set only from takeFocus")
+                c = c.replacingOccurrences(of: "@FocusState private var focused: Bool", with: "").replacingOccurrences(of: ".focused($focused)", with: "")
             }
-            let found = movers.filter { code.contains($0) }
+            // and the card's: which option has the focus, observed to scroll it into view -- never assigned
+            if n == "Main/CardViews.swift" {
+                check(c.components(separatedBy: "@FocusState private var focusedOption: Int?").count == 2
+                      && c.components(separatedBy: ".focused($focusedOption, equals: c.index)").count == 2
+                      && c.range(of: #"focusedOption\s*=[^=]"#, options: .regularExpression) == nil,
+                      "the card's focus: observed only, never set")
+                c = c.replacingOccurrences(of: "@FocusState private var focusedOption: Int?", with: "").replacingOccurrences(of: ".focused($focusedOption, equals: c.index)", with: "")
+            }
+            let found = movers.filter { c.contains($0) }
             check(found.isEmpty, "\(n) moves no focus and brings nothing forward (a card's field is focused only by the user's click): \(found)")
         }
+        let shell = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Shared/Shell.swift"), encoding: .utf8)) ?? ""
+        check(shell.components(separatedBy: "focusRequest += 1").count == 2, "one place makes a focus request (Esc out of a card)")
         let all = files.map(\.code).joined(separator: "\n")
         check(all.contains("struct CardView") && all.contains("TextField(L(\"Or answer in your own words\""), "the check reads the card's own field's file")
     }
@@ -2579,7 +2592,7 @@ enum ShellTests {
             if let r = c.open { mock.replies[SessionClient.Op.open] = r }
             var later: [() -> Void] = []
             let client = SessionClient(transport: mock)
-            client.newClientId = { "c_msg" }
+            client.makeClientId = { "c_msg" }
             let m = ShellModel(client: client, defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
                                work: { later.append($0) }, deliver: { $0() })
             let fixture = SessionTests.lines("task-card")
@@ -2592,8 +2605,11 @@ enum ShellTests {
             if case .card = c.after { m.client.feed(fixture[askAt]) }    // a card comes before the send goes
             for f in later { f() }; later = []
             switch c.after {
+            case .card:
+                // (A9: the steer goes; a harness before H5 refuses it card_open)
+                m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": "card_open", "control": "steer", "client_id": "c_msg", "text": "x"])
             case .refusal(let code):
-                m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": code, "control": "say", "client_id": "c_msg", "text": "x"])
+                m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": code, "control": "steer", "client_id": "c_msg", "text": "x"])
             case .accepted:
                 m.client.feed(["kind": "session.message", "session_id": "ses_t", "seq": 99, "msg_id": "u_msg", "role": "user", "text": msg, "client_id": "c_msg"])
             default: break
@@ -2623,10 +2639,13 @@ enum ShellTests {
             for l in fixture.prefix(askAt) { m.client.feed(l) }
             let run = m.client.state("ses_t").runningTask?.runId ?? ""
             m.selected = "ses_t"
+            m.client.makeClientId = { "c_steer" }
             m.draft = "改成蓝色"
-            m.submit(sendNow: true)                                      // ⌘Enter: a steer of the running task
+            m.submit()                                                   // Return: a steer of the running task (A9)
             m.client.feed(fixture[askAt])                                // a card comes before it goes
             for f in later { f() }; later = []
+            // (it goes; a harness before H5 refuses it card_open -- shown not delivered, never sent again by itself)
+            m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": "card_open", "control": "steer", "client_id": "c_steer", "text": "x"])
             let bubble = m.client.state("ses_t").unsent.first
             check(bubble?.refused == "card_open", "the steer: an unsent bubble, card_open")
             for l in fixture[(askAt + 1)...resumedAt] { m.client.feed(l) }   // the card answered; the task goes on

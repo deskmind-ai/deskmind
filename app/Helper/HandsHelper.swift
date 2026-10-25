@@ -284,6 +284,8 @@ func serve() {
             // The main app's language, sent with every request (status polls included): steps, hints and errors
             // follow a switch within a second. English until the first request says otherwise.
             if let lang = ResolvedLang.fromRequest(req["lang"] as? String) { ResolvedLang.current = lang }
+            // The live view's pictures, while the main app watches a run (live.watch): LiveWatch.
+            if LiveWatch.serve(req, fd: c) { return }
             // Chat sessions (session.open / send / end, sessions.list / watch): SessionHost.
             if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {
@@ -326,6 +328,8 @@ struct HandsHelper {
     static func main() {
         // cloud models turned off (models.off): a harness op run going stops by its normal stop path
         SessionHost.onModelsOff = { HarnessRun.stopForModelsOff() }
+        // The live view's pictures (live.watch): ScreenCaptureKit, one picture at a time.
+        LiveWatch.source = ScreenLiveSource()
         // The helper's own UI event log (Shared/UIEvents.swift), next to the main app's.
         UIEvents.log = UIEventLog(dir: DeskMindIPC.supportDir, file: UIEventLog.helperFile)
         if let i = CommandLine.arguments.firstIndex(of: "--probe-ax-to"), i + 1 < CommandLine.arguments.count {

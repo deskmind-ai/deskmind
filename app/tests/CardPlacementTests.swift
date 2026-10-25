@@ -12,6 +12,7 @@ enum CardPlacementTests {
         DecisionTests.group("placement.table"); tableTests()
         DecisionTests.group("placement.debounce"); debounceTests()
         DecisionTests.group("placement.property"); propertyTests()
+        DecisionTests.group("placement.float"); floatTests()
     }
 
     typealias P = CardPlacement
@@ -108,7 +109,8 @@ enum CardPlacementTests {
             var d = FrontmostDebounce(.front)
             var phase = CardPhase.open
             var floatVisible = true
-            let fits = r.next() % 2 == 0
+            // (whether the card fits the float: its structure and its measured height -- none yet, short, too tall)
+            let fits = CardPlacement.fitsFloat(structure: r.next() % 2 == 0, height: [nil, 120, 1000][Int(r.next() % 3)])
             for _ in 0..<60 {
                 t += [0.05, 0.1, 0.2, 0.3, 1.0][Int(r.next() % 5)]
                 switch r.next() % 4 {
@@ -149,6 +151,42 @@ enum CardPlacementTests {
             }
         }
         check(violations.isEmpty, "\(runs) steps: \(violations.prefix(3))")
+    }
+}
+
+extension CardPlacementTests {
+    /// The float's policy, cell by cell; and placement fed the panel's measured visibility never changes the policy
+    /// (no loop: the policy does not read placement).
+    static func floatTests() {
+        typealias F = FloatPolicy
+        let rows: [(MainWindowState, Bool, Bool, Bool, F.Shown)] = [
+            (.front, false, false, false, .hidden), (.front, true, false, false, .hidden), (.front, true, true, true, .hidden),
+            (.behindVisible, false, false, false, .hidden), (.away, false, false, true, .hidden),
+            (.behindVisible, true, false, false, .open), (.away, true, false, true, .collapsed),
+            (.behindVisible, true, true, true, .open), (.away, true, true, false, .open), (.away, false, true, true, .open),
+        ]
+        for (w, task, card, collapsed, want) in rows {
+            check(F.shown(window: w, taskActive: task, cardWaiting: card, userCollapsed: collapsed) == want,
+                  "float: \(w), task \(task), card \(card), collapsed \(collapsed): \(want)")
+        }
+        // #125 Codex review at 2f29d42: whether the card fits the float is its measured height too
+        check(!CardPlacement.fitsFloat(structure: true, height: nil) && !CardPlacement.fitsFloat(structure: true, height: 1000)
+              && CardPlacement.fitsFloat(structure: true, height: 200) && !CardPlacement.fitsFloat(structure: false, height: 100),
+              "fits the float: allowed by its structure and measured within the room (not measured yet: not)")
+        check(CardPlacement.place(.open, fitsFloat: CardPlacement.fitsFloat(structure: true, height: 2000), window: .away, frontNow: false, float: .visible).shown == .floatSummary,
+              "a 100-line card: the float gives its title and the way to the main window")
+        // ⌘⇧P: popped out, the float is up with the window in front too (the card still the chat's then)
+        check(F.shown(window: .front, taskActive: true, cardWaiting: false, userCollapsed: false, poppedOut: true) == .open, "popped out, in front: up")
+        check(F.shown(window: .front, taskActive: false, cardWaiting: false, userCollapsed: false, poppedOut: true) == .hidden, "popped out, no task: not up")
+        check(CardPlacement.place(.open, fitsFloat: true, window: .front, frontNow: true, float: .visible).shown == .chat, "popped out: the card is still the chat's in front")
+        // the panel's fact -- seen, hidden, unknown -- goes into placement only: every combination gives one answer
+        // place, the float's only where it is seen
+        for w in [MainWindowState.behindVisible, .away] {
+            for fact in [CardPlacement.Float.visible, .hidden, .unknown] {
+                let p = CardPlacement.place(.open, fitsFloat: true, window: w, frontNow: false, float: fact)
+                check((p.shown == .floatCard) == (fact == .visible) && (p.takesAnswer == (fact == .visible)), "\(w), float \(fact): \(p.shown)")
+            }
+        }
     }
 }
 

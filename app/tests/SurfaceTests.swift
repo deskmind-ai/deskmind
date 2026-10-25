@@ -180,7 +180,7 @@ enum SurfaceTests {
         init(_ mock: Mock = Mock(), cloudOn: Bool = true, holdWork: Bool = false, holdDeliver: Bool = false) {
             self.mock = mock
             let client = SessionClient(transport: mock)
-            client.newClientId = { "c_1" }
+            client.makeClientId = { "c_1" }
             let held = held
             m = ShellModel(client: client, defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" }, lang: { .zhHans },
                            cloudOn: { cloudOn }, takeBackAfter: timers.after, now: { [timers] in timers.now },

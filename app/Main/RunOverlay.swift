@@ -180,7 +180,8 @@ final class RunOverlay {
         withAnimation(.easeOut(duration: 0.2)) { model.line = line }
     }
 
-    func finish(passed: Bool, summary: String) {
+    /// `notify`: post the result's notification when DeskMind is not active (a chat task's is CardNotices', by id).
+    func finish(passed: Bool, summary: String, notify: Bool = true) {
         if model.takenOver { takeOver(seconds: 0) }   // the screen is the user's again when the task ends
         model.waiting = false; model.holdUntil = nil; stopCountdown()
         model.phase = passed ? .passed : .failed
@@ -188,7 +189,7 @@ final class RunOverlay {
         model.line = summary
         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { model.resultOpen = true }
         // DeskMind is not the active app (the task worked in others): the notification is the result's way in then.
-        if !NSApp.isActive {
+        if notify && !NSApp.isActive {
             let lang = ResolvedLang.current
             Self.notify(title: passed ? L("DeskMind finished the task", lang: lang) : L("DeskMind couldn't finish the task", lang: lang),
                         body: L("%@: %@", model.title, summary, lang: lang))

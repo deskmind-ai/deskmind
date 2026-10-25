@@ -13,6 +13,9 @@ enum CardKeysTests {
         DecisionTests.group("card-keys.table"); tableTests()
         DecisionTests.group("card-keys.model"); modelTests()
         DecisionTests.group("card-keys.review124"); review124Tests()
+        DecisionTests.group("card-keys.focus"); focusTests()
+        DecisionTests.group("card-keys.steer"); steerTests()
+        DecisionTests.group("card-keys.steer-gate"); steerGateRepros(); steerInterleavings()
     }
 
     typealias K = CardKeys
@@ -215,5 +218,280 @@ enum CardKeysTests {
         let view = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift"), encoding: .utf8)) ?? ""
         check(view.contains("if let t = layout.shownText {") && view.contains("private var words: Binding<String> { Binding(get: { shell.cardDraft(card) }")
               && !view.contains("@State private var words"), "CardView draws shownText; its words are the shell's")
+    }
+
+    /// The focus funnel (lead 10-25): only the user's Esc out of a card, in the key window, asks the composer for the
+    /// typing -- once; nothing a card does on its own asks, and a request goes when the window stops being the key one.
+    static func focusTests() {
+        typealias R = CardStoreTests.Rig
+        func pressEsc(_ r: R) { _ = r.m.keyDown(characters: Self.esc, commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false) }
+        let r = R(); r.ask("a1")
+        guard let m = r.model("a1") else { check(false, "the card"); return }
+        r.m.fit(m); r.m.cardShown(m); r.timers.advance(CardKeys.cardOnScreen + 0.1)
+        check(r.m.focusRequest == 0, "a card arrived: no focus request")
+        pressEsc(r)                                    // not in the card: Esc moves into it, asks nothing
+        check(r.m.keysActive(m) && r.m.focusRequest == 0, "Esc into the card: no request")
+        pressEsc(r)                                    // in the card: out of it, back to the composer
+        let n = r.m.focusRequest
+        check(n == 1 && !r.m.keysActive(m), "Esc out of the card: one request")
+        check(r.m.takeFocus(n) && !r.m.takeFocus(n), "taken once (a re-render does not focus again)")
+        // a request made, then the window stops being the key one before the composer takes it: dropped
+        r.m.enterCardMode(m)
+        pressEsc(r)
+        r.m.windowLeft()
+        check(!r.m.takeFocus(r.m.focusRequest), "the window no longer key: the pending request dropped")
+        r.m.windowReturned()
+        check(!r.m.takeFocus(r.m.focusRequest), "and not taken when it is key again")
+        // the card answered, voided, a new one: none of it asks
+        let before = r.m.focusRequest
+        r.resumed("a1"); r.ask("a2"); r.void("a2", "steer"); r.ask("a3")
+        check(r.m.focusRequest == before, "cards arriving, answered, voided: no request")
+        // Esc while typing in a field: the field's, no request
+        let q = R(); q.ask("a1")
+        if let qm = q.model("a1") {
+            q.m.fit(qm); q.m.cardShown(qm); q.timers.advance(2); q.m.enterCardMode(qm)
+            _ = q.m.keyDown(characters: Self.esc, commandLike: false, mainWindowIsKey: true, editingText: true, isRepeat: false)
+            check(q.m.focusRequest == 0, "Esc in a field: no request")
+        }
+    }
+
+    /// A9 (owner 10-25, plan §8): Return with words while a card waits steers the task. In one step the held pick goes
+    /// (never sent), the steer is marked on its way (the card's options take nothing), then it is written; the mark ends
+    /// on every path -- refused (card_open, a harness before H5: the words shown not delivered, never sent again by
+    /// themselves), taken, the card ended -- and the card's own ending is only the run's word (ask_void why steer).
+    static func steerTests() {
+        typealias R = CardStoreTests.Rig
+        let r = R(); r.ask("a1")
+        guard let m = r.model("a1") else { check(false, "the card"); return }
+        r.m.fit(m)
+        let approve = m.buttons.first { $0.role == .approve }!
+        check(r.m.click(approve) && r.phase("a1")?.pending != nil, "a pick held")
+        r.m.client.makeClientId = { "c_steer" }
+        r.m.draft = "改成发给小李"
+        check(r.m.composer.enabled, "the composer takes words while the card waits")
+        r.m.submit()
+        check(r.phase("a1") == .open, "Return: the held pick dropped")
+        r.timers.advance(CardStore.takeBack + 1)
+        check(r.wire.answers("a1").isEmpty, "and never sent")
+        check(r.m.client.state(CardStoreTests.sid).steers.contains { $0.clientId == "c_steer" } && onWay(r.m) && !r.m.canSend(approve), "the steer on its way: the card takes nothing")
+        check(r.wire.count("steer") == 1, "the steer written: \(r.wire.count("steer"))")
+        // a harness before H5 refuses it: the card takes picks again, the words not delivered (and not sent again)
+        r.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "card_open", "control": "steer", "client_id": "c_steer", "text": "x"])
+        check(!onWay(r.m) && r.m.canSend(approve), "refused card_open: the card takes picks again")
+        check(r.m.client.state(CardStoreTests.sid).unsent.contains { $0.id == "c_steer" && $0.refused == "card_open" } && r.wire.count("steer") == 1,
+              "the words shown not delivered, not sent again")
+        // again; this time the session takes it and voids the card (H5): the card ends by the run's word
+        r.m.client.makeClientId = { "c_steer2" }
+        r.m.draft = "还是发给老王"
+        r.m.submit()
+        check(onWay(r.m), "on its way")
+        // the session took it (stored), its ask_void not here yet: still marked, the card takes nothing
+        r.feed(["kind": "session.message", "session_id": CardStoreTests.sid, "seq": 3, "msg_id": "u_s", "role": "user", "text": "还是发给老王", "client_id": "c_steer2"])
+        check(onWay(r.m) && !r.m.canSend(approve), "taken, the card still open: still marked, no click")
+        r.void("a1", "steer")
+        check(!onWay(r.m) && r.phase("a1") == .voided("steer"), "ask_void why steer: the card ended, the mark gone")
+        // an empty Return does nothing
+        let q = R(); q.ask("a1")
+        q.m.draft = "   "
+        q.m.submit()
+        check(q.wire.count("steer") == 0 && !onWay(q.m) && q.phase("a1") == .open, "an empty Return: nothing")
+    }
+
+    // MARK: #125 Codex re-reviews at d08465d and 3c6f5cc: the write lane decides, at the write
+
+    /// A steer for the card is on its way, as the client that writes the lines keeps it.
+    static func onWay(_ m: ShellModel, _ ask: String = "a1") -> Bool {
+        m.client.state(CardStoreTests.sid).steerPending(runId: CardStoreTests.rid, askId: ask)
+    }
+    static func refuse(_ r: CardStoreTests.Rig, _ cid: String) {
+        r.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "card_open", "control": "steer", "client_id": cid, "text": "x"])
+    }
+    /// The wire in order: (type, ask_id).
+    static func written(_ r: CardStoreTests.Rig) -> [(String, String?)] { r.wire.lines.map { ($0.line["type"] as? String ?? "", $0.line["ask_id"] as? String) } }
+    /// The steers' client ids as written, in order (never assumed: read from the wire).
+    static func steerIds(_ r: CardStoreTests.Rig) -> [String] { r.wire.lines.compactMap { $0.line["type"] as? String == "steer" ? $0.line["client_id"] as? String : nil } }
+
+    /// A rig whose write lane holds its jobs until they are run (`step` one, `drain` all): putting a line in and
+    /// writing it are two moves, as on the app's serial queue.
+    final class LaneRig {
+        let r = CardStoreTests.Rig()
+        var q: [() -> Void] = []
+        init(ask: String = "a1") {
+            r.ask(ask, "plan")
+            let m = ShellModel(client: SessionClient(transport: r.wire), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                               lang: { .zhHans }, takeBackAfter: r.timers.after, now: { [r] in r.timers.now }, work: { $0() }, deliver: { $0() },
+                               lane: { [unowned self] in self.q.append($0) })
+            m.selected = CardStoreTests.sid
+            r.m = m
+            for l in r.fed { m.client.feed(l) }
+        }
+        var m: ShellModel { r.m }
+        func step() { if !q.isEmpty { q.removeFirst()() } }
+        func drain() { while !q.isEmpty { step() } }
+    }
+
+    static func steerGateRepros() {
+        typealias R = CardStoreTests.Rig
+        // 1. a steer refused, a pick held, the steer sent again: the held pick's time out writes nothing
+        do {
+            let r = R(); r.ask("a1", "plan")
+            r.m.draft = "改成发给小李"; r.m.submit()
+            let c1 = steerIds(r)[0]
+            refuse(r, c1)
+            r.click("a1", .approve)
+            check(r.phase("a1")?.pending != nil, "1: the pick held once the refused steer let go")
+            r.m.resend(c1)
+            check(r.wire.count("steer") == 2 && onWay(r.m), "1: sent again, on its way again")
+            r.timers.advance(CardStore.takeBack + 1)
+            check(r.wire.answers("a1").isEmpty, "1: the held approve never written after the resent steer: \(written(r))")
+            refuse(r, c1)
+            check(!onWay(r.m), "1: refused again: let go")
+        }
+        // 1b. the resend in the lane, an unrelated line first: the bubble's old refusal is not the resent steer's end
+        do {
+            let l = LaneRig()
+            l.m.draft = "改成发给小李"; l.m.submit(); l.drain()
+            let c1 = steerIds(l.r)[0]
+            refuse(l.r, c1)
+            check(!onWay(l.m), "1b: refused: let go")
+            l.m.resend(c1)
+            l.r.feed(["kind": "session.message", "session_id": CardStoreTests.sid, "seq": 9, "msg_id": "m9", "role": "assistant", "text": "好"])
+            check(onWay(l.m), "1b: the resent steer on its way before its line went")
+            l.r.click("a1", .approve); l.r.timers.advance(CardStore.takeBack + 1); l.drain()
+            check(l.r.wire.answers("a1").isEmpty && l.r.wire.count("steer") == 2, "1b: no answer around the resent steer: \(written(l.r))")
+        }
+        // 1c. (Codex at 3c6f5cc, 1) two quick 「重新发送」: one attempt in the lane, its end the only end
+        do {
+            let l = LaneRig()
+            l.m.draft = "改成发给小李"; l.m.submit(); l.drain()
+            let c1 = steerIds(l.r)[0]
+            refuse(l.r, c1)
+            l.m.resend(c1); l.m.resend(c1)
+            check(l.q.count == 1, "1c: the second click puts nothing in: \(l.q.count)")
+            let approve = l.r.model("a1")!.buttons.first { $0.role == .approve }!
+            check(!l.m.canSend(approve), "1c: the card takes nothing while the attempt waits")
+            l.drain()
+            check(l.r.wire.count("steer") == 2 && onWay(l.m), "1c: written once more, on its way")
+            l.r.click("a1", .approve); l.r.timers.advance(CardStore.takeBack + 1); l.drain()
+            check(l.r.wire.answers("a1").isEmpty, "1c: nothing written: \(written(l.r))")
+        }
+        // 2. typed words while a steer is on its way: the field takes none, the words go nowhere
+        do {
+            let r = R(); r.ask("a1", "plan")
+            r.m.draft = "改成发给小李"; r.m.submit()
+            let c = r.model("a1")!
+            check(!r.m.wordsEnabled(c, in: r.state), "2: the card's field takes no words")
+            r.words("a1", "就这样")
+            r.timers.advance(CardStore.takeBack + 1)
+            check(r.wire.answers("a1").isEmpty, "2: typed words never written: \(written(r))")
+        }
+        // 2b. (Codex at 3c6f5cc, 2) the approve's time out put its answer in the lane, then the steer: the answer was
+        // first, and goes first -- never after the steer
+        do {
+            let l = LaneRig()
+            l.r.click("a1", .approve); l.r.timers.advance(CardStore.takeBack + 1)
+            check(l.q.count == 1, "2b: the answer in the lane, not written")
+            l.m.draft = "改成发给小李"; l.m.submit()
+            l.drain()
+            let order = written(l.r).map(\.0).filter { $0 == "answer" || $0 == "steer" }
+            check(order == ["answer", "steer"], "2b: the wire in the lane's order: \(order)")
+        }
+        // 2c. (Codex at a79b086) a steer in the lane, a new card arrives and is answered: the lane holds the answer
+        // back; the steer refused, the card takes an answer again (never stuck 「已发送」)
+        do {
+            let l = LaneRig()
+            l.r.void("a1", "steer")
+            l.m.draft = "改成发给小李"; l.m.submit()
+            l.r.ask("a2", "plan")
+            l.r.click("a2", .cancel)          // (cancel: written at once -- into the lane, after the steer)
+            l.drain()
+            check(l.r.wire.answers("a2").isEmpty, "2c: the answer not written after the steer")
+            let cid = steerIds(l.r)[0]
+            refuse(l.r, cid)
+            let c = l.r.model("a2")!
+            check(c.buttons.contains { l.m.canSend($0) } && l.m.wordsEnabled(c, in: l.r.state), "2c: the steer over, the card answerable: \(String(describing: l.r.phase("a2")))")
+            l.r.click("a2", .approve); l.r.timers.advance(CardStore.takeBack + 1); l.drain()
+            check(l.r.wire.answers("a2").count == 1, "2c: and its answer goes")
+        }
+        // 3. two steers: the first's refusal leaves the second on its way
+        do {
+            let r = R(); r.ask("a1", "plan")
+            r.m.draft = "改成发给小李"; r.m.submit()
+            r.m.draft = "还是发给老王"; r.m.submit()
+            let ids = steerIds(r)
+            check(ids.count == 2 && Set(ids).count == 2, "3: both written, each its own id")
+            refuse(r, ids[0])
+            let approve = r.model("a1")!.buttons.first { $0.role == .approve }!
+            check(!r.m.canSend(approve), "3: the second still on its way: the card takes nothing")
+            r.click("a1", .approve); r.timers.advance(CardStore.takeBack + 1)
+            check(r.wire.answers("a1").isEmpty, "3: nothing written")
+            refuse(r, ids[1])
+            check(!onWay(r.m) && r.m.canSend(approve), "3: both refused: the card takes picks again")
+        }
+    }
+
+    /// Random orders of the moves that put a line in the lane (steer, resend, pick, words, cancel, float click, a
+    /// time out) and of the lane writing its next line, with the session's own words meanwhile (a refusal of a written
+    /// steer, its taking, ask_void, a new card). Oracle -- the wire and the fed lines only: no answer line for a card
+    /// while a steer written for it (while open) is neither refused after it went nor ended by the card's end; and the
+    /// card's options take nothing then.
+    static func steerInterleavings() {
+        var bad = 0, answers = 0
+        for seed in 0..<300 {
+            var g = CardStoreTests.RNG(x: UInt64(seed) &* 2654435761 &+ 11)
+            let l = LaneRig()
+            let r = l.r
+            var asks = 1, open: String? = "a1", msgSeq = 3
+            var pending: [String: Set<String>] = [:]      // by card: steers written while it was open, not refused since
+            var live: Set<String> = []                     // steers whose last attempt went and is not refused
+            var answered: Set<String> = []                 // cards an answer of ours was written for
+            r.wire.onLine = { line in
+                switch line["type"] as? String {
+                case "steer":
+                    if let cid = line["client_id"] as? String { live.insert(cid); if let o = open { pending[o, default: []].insert(cid) } }
+                case "answer":
+                    answers += 1
+                    if let a = line["ask_id"] as? String { answered.insert(a) }
+                    if let a = line["ask_id"] as? String, !(pending[a] ?? []).isEmpty { bad += 1; print("seed \(seed): answer for \(a) with \(pending[a]!) on its way") }
+                default: break
+                }
+            }
+            for _ in 0..<50 {
+                switch g.next(15) {
+                case 0, 13: l.m.draft = "改一下 \(g.next(100))"; l.m.submit()
+                case 2:
+                    let unsent = l.m.client.state(CardStoreTests.sid).unsent.filter { if case .steer? = $0.original { return true }; return false }
+                    if !unsent.isEmpty { l.m.resend(unsent[g.next(unsent.count)].id) }
+                case 3:
+                    let can = live.sorted()
+                    if !can.isEmpty { let c = can[g.next(can.count)]; live.remove(c); for k in pending.keys { pending[k]?.remove(c) }; refuse(r, c) }
+                case 4:
+                    let can = live.sorted()
+                    if !can.isEmpty {
+                        let c = can[g.next(can.count)]; msgSeq += 1
+                        r.feed(["kind": "session.message", "session_id": CardStoreTests.sid, "seq": msgSeq, "msg_id": "u\(msgSeq)", "role": "user", "text": "改", "client_id": c])
+                    }
+                case 1, 5: if let o = open { r.click(o, .approve) }
+                case 6: if let o = open { r.words(o, "就这样") }
+                case 7, 14: if let o = open { r.click(o, .cancel) }
+                case 8: if let o = open, let c = r.model(o), let b = c.buttons.first(where: { $0.role == .approve }) { l.m.click(b, session: CardStoreTests.sid, place: .float) }
+                case 9: r.timers.advance(Double(g.next(4)) + 0.5)
+                case 10, 11: l.step()
+                default:
+                    if let o = open { r.void(o, "steer"); pending[o] = nil; open = nil }
+                    else { asks += 1; open = "a\(asks)"; r.ask(open!, "plan") }
+                }
+                if let o = open, !(pending[o] ?? []).isEmpty, let c = r.model(o), c.buttons.contains(where: { l.m.canSend($0) }) {
+                    bad += 1; print("seed \(seed): \(o) takes a click with a steer on its way")
+                }
+                // every steer for the open card over, nothing of ours for it in the lane or written: it takes an answer
+                if let o = open, (pending[o] ?? []).isEmpty, l.q.isEmpty, !answered.contains(o), !l.m.client.state(CardStoreTests.sid).steerPending(runId: CardStoreTests.rid, askId: o),
+                   let c = r.model(o), !c.buttons.contains(where: { l.m.canSend($0) }) {
+                    bad += 1; print("seed \(seed): \(o) stuck: no steer on its way, nothing sent, takes no answer (\(String(describing: r.phase(o))))")
+                }
+            }
+            l.drain()
+        }
+        check(bad == 0 && answers > 100, "no answer written, no option taking a click, while a steer for the card is on its way: \(bad) (answers written: \(answers))")
     }
 }

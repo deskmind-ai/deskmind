@@ -72,7 +72,7 @@ enum ShellE2E {
         let m = ShellModel(client: SessionClient(transport: transport), defaults: UserDefaults(suiteName: suite)!,
                            config: { config }, lang: { .zhHans }, cloudOn: { cloud },
                            takeBackAfter: { d, f in ui.asyncAfter(deadline: .now() + d, execute: f) },   // (the take-back on the model's own queue)
-                           work: { DispatchQueue.global().async(execute: $0) }, deliver: { ui.async(execute: $0) }, uiQueue: ui)
+                           work: { DispatchQueue.global().async(execute: $0) }, deliver: { ui.async(execute: $0) }, lane: ShellModel.serialLane(), uiQueue: ui)
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         return m
     }

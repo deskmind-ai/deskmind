@@ -322,8 +322,9 @@ final class SessionClient {
 
     /// The request bodies, in one place (the helper's ops, S1).
     enum Request {
-        static func open(sessionId: String?, config: String?, lang: String?) -> [String: Any] {
+        static func open(sessionId: String?, config: String?, lang: String?, liveView: Bool? = nil) -> [String: Any] {
             var b: [String: Any] = ["op": Op.open]
+            if let v = liveView { b["live_view"] = v }
             if let s = sessionId { b["session_id"] = s }
             if let c = config { b["config"] = c }
             if let l = lang { b["lang"] = l }
@@ -522,6 +523,9 @@ final class SessionClient {
     var onWaitingForHelper: ((Bool) -> Void)?
     /// The clock the gap grace is measured by (tests set their own).
     var now: () -> Date = Date.init
+    /// session.open's live_view: false from the 0.5 window, which draws its own float (A5): the helper starts no live
+    /// card for its sessions' tasks -- one float, never two. nil: the helper's default (on).
+    var liveView: Bool?
     /// Now, in seconds since 1970, for the time an exit this client infers gets (`inferredAt`): the app's model sets its
     /// own clock here (tests drive theirs).
     var clock: () -> Double = { Date().timeIntervalSince1970 }
@@ -618,7 +622,7 @@ final class SessionClient {
         let line: (config: String?, lang: String?) = (noModel ? nil : (config ?? d.config).map(Self.normalizeConfig), lang ?? d.lang)
         if let sessionId { lock.lock(); opening.insert(sessionId); lock.unlock() }
         defer { if let sessionId { lock.lock(); opening.remove(sessionId); lock.unlock() } }
-        guard let r = transport.request(Request.open(sessionId: sessionId, config: line.config, lang: line.lang)), r["ok"] as? Bool != false,
+        guard let r = transport.request(Request.open(sessionId: sessionId, config: line.config, lang: line.lang, liveView: liveView)), r["ok"] as? Bool != false,
               let id = r["session_id"] as? String ?? sessionId else { return nil }
         lock.lock()
         // a process it started is a new one: its settings sent again (desired, read when that goes); one found running
@@ -680,7 +684,49 @@ final class SessionClient {
 
     /// The id the app gives the user's words it sends (say, cua, steer): the session gives it back on what became of
     /// them (harness#57). Tests set their own.
-    var newClientId: () -> String = { "c_" + UUID().uuidString.lowercased() }      // unique for the session's life (harness #59)
+    /// A fresh client id (unique for the session's life: harness #59), made under its own lock -- the window's and the
+    /// background requests' threads ask at once (#125 Codex re-review at 3c6f5cc). Tests set `makeClientId`.
+    func newClientId() -> String { idLock.lock(); defer { idLock.unlock() }; return makeClientId() }
+    var makeClientId: () -> String = { "c_" + UUID().uuidString.lowercased() }
+    private let idLock = NSLock()
+
+    // MARK: steers in the write lane (A9)
+
+    /// A steer attempt is put in the write lane at `seq` (`card`: the card open now, if any -- from now the lane
+    /// writes no answer for it put in after this). False: an attempt with this client id is in the lane already (a
+    /// second 「重新发送」 while the first waits): this one is not put in.
+    func steerEnqueued(_ clientId: String, card: (runId: String, askId: String)?, seq: Int, in sessionId: String) -> Bool {
+        var put = false
+        mutate(sessionId) { st in
+            guard st.steersInLane.insert(clientId).inserted else { return }
+            put = true
+            if let card { st.mark(clientId, runId: card.runId, askId: card.askId, seq: seq) }
+        }
+        return put
+    }
+
+    /// The lane is about to write the steer put in at `seq` (`runId`: the task it names; nil: the running one): marked
+    /// on that task's card open now -- a card that opened after the steer was put in is steered by it all the same (the
+    /// harness voids the card the steer finds open) -- at this attempt's place in the lane.
+    func steerGoesNow(_ clientId: String, runId: String?, seq: Int, in sessionId: String) {
+        mutate(sessionId) { st in
+            guard let run = runId ?? st.runningTask?.runId, let t = st.task(run),
+                  let card = t.cards.last(where: { $0.outcome == .open }) else { return }
+            st.mark(clientId, runId: run, askId: card.askId, seq: seq)
+        }
+    }
+
+    /// The steer's line went (`sent`: from now its refusal is its end) or did not (its end).
+    func steerWritten(_ clientId: String, sent: Bool, in sessionId: String) {
+        mutate(sessionId) { st in
+            st.steersInLane.remove(clientId)
+            if sent { for i in st.steers.indices where st.steers[i].clientId == clientId { st.steers[i].written = true } }
+            else { st.steers.removeAll { $0.clientId == clientId && !$0.written } }
+            // (the steers of cards no longer open, or refused once written, are over)
+            let now = st
+            st.steers.removeAll { s in !now.steerPending(runId: s.runId, askId: s.askId) || (s.written && now.outbox.contains { $0.id == s.clientId && $0.refused != nil }) }
+        }
+    }
 
     /// Blocks while it reopens an ended session (up to a minute): call it off the main thread.
     func send(_ control: SessionControl, to sessionId: String) -> SendResult { send(control, to: sessionId, clientId: nil) }
@@ -712,7 +758,9 @@ final class SessionClient {
             }
             return .refused(why)
         }
-        if control.isTyping && !s.composerEnabled { return refusedBeforeHeld("card_open") }
+        // (a steer goes while a card is open -- A9: the session voids the card first, H5, or refuses card_open, a harness
+        // before it; other typing waits for the card)
+        if control.isTyping && !s.composerEnabled, !{ if case .steer = control { return true }; return false }() { return refusedBeforeHeld("card_open") }
         if case .answer(let a, _) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
         if case .reask(let r) = control, let why = Self.reaskRefusal(r, in: s) { return .refused(why) }
         if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return refusedBeforeHeld(why == "no task is running" ? "task_ended" : why) }

@@ -4,11 +4,13 @@
 //
 // Focus (handoff §3.1): nothing here activates the app or brings a window forward. Only the user's own clicks and
 // keys act; the composer never takes the keyboard by itself when a card arrives, and nothing here ever moves the
-// keyboard focus anywhere — no @FocusState, no .focused, no defaultFocus, no makeFirstResponder (ShellTests checks
-// this file): a card that arrives while the user types must never get the typing (its own field's Return would send
-// it as the answer).
+// keyboard focus by itself — no defaultFocus, no makeFirstResponder (ShellTests checks this file): a card that arrives
+// while the user types must never get the typing (its own field's Return would send it as the answer). The one focus
+// move is the user's own: Esc out of a card in card mode puts the typing back in the composer (ShellModel.focusRequest,
+// taken once by Composer: its one @FocusState, the only one the check allows).
 
 import AppKit
+import Combine
 import SwiftUI
 
 /// The handoff's text colours (§3.10): secondary text and orange text at 4.5:1 or better on paper.
@@ -24,6 +26,7 @@ enum ShellColor {
 
 struct MainSplitView: View {
     @ObservedObject var shell: ShellModel
+
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @State private var settingsOpen = false
@@ -55,6 +58,8 @@ struct MainSplitView: View {
             shell.start()
         }
         .onChange(of: lang) { _, _ in shell.syncSettings() }     // (the language is a session setting like the model's)
+        // the float, the island and the notifications: the app's one, started once, whatever the window does
+        .onAppear { FloatController.shared.start(shell) }
     }
 
     /// The key file (keys, a custom service's URL and model): a session process reads it when it starts, so only a
@@ -94,8 +99,11 @@ extension ShellModel {
                            // every save of the model settings, from whichever window (ModelSettingsSaved), while the app runs
                            keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default,
                            // a new key's asks the helper did not take: tried again on the main queue's clock
-                           retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) })
+                           retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) },
+                           // steer and answer lines: one after another, in the order they were put in (A9)
+                           lane: ShellModel.serialLane())
         transport.isStopped = { [weak m] in m?.stopped ?? true }
+        m.client.liveView = false      // (the window draws the float itself: the helper starts no live card for its tasks)
         m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
         return m
     }()
@@ -112,6 +120,8 @@ struct ShellCommands: Commands {
         CommandMenu(L("Conversation", lang: lang)) {
             Button(L("Stop", lang: lang)) { ShellModel.shared?.stop() }
                 .keyboardShortcut(".", modifiers: .command)
+            Button(L("Pop Out the Live View", lang: lang)) { ShellModel.shared?.togglePopOut() }
+                .keyboardShortcut("p", modifiers: [.command, .shift])
             Divider()
             Button(L("Previous Conversation", lang: lang)) { ShellModel.shared?.move(-1) }
                 .keyboardShortcut(.upArrow, modifiers: .command)
@@ -601,6 +611,8 @@ struct CardBodyVisible: PreferenceKey {
 struct Composer: View {
     @ObservedObject var shell: ShellModel
     @Environment(\.lang) private var lang
+    /// The focus funnel's one consumer (ShellModel.focusRequest: the user's Esc out of a card).
+    @FocusState private var focused: Bool
 
     var body: some View {
         let mode = shell.composer
@@ -610,6 +622,8 @@ struct Composer: View {
                 .font(.system(size: 13.5))
                 .lineLimit(1...8)
                 .disabled(!mode.enabled || shell.opening)
+                .focused($focused)
+                .onChange(of: shell.focusRequest) { _, n in if shell.takeFocus(n) { focused = true } }
                 // Return: the field's own submit, which waits for an input method to commit what is being composed
                 // (pinyin's Return confirms the letters, never sends). ⌘Return sends now; ⇧Return / ⌥Return: a new line.
                 .onSubmit { shell.submit() }
@@ -619,7 +633,7 @@ struct Composer: View {
                     return .ignored
                 }
                 .accessibilityLabel(L("Message", lang: lang))
-                .accessibilityHint(mode.taskRunning ? L("Return queues it for after the task; Command-Return sends it to the task now", lang: lang)
+                .accessibilityHint(mode.taskRunning ? L("Return sends it to the task now", lang: lang)
                                                     : L("Return sends; start with /cua to run a computer task", lang: lang))
             if mode.canStop {
                 Button(L("Stop", lang: lang)) { shell.stop() }
@@ -627,7 +641,7 @@ struct Composer: View {
                     .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
             }
             if !mode.replying {
-                Button(mode.taskRunning ? L("Queue", lang: lang) : L("Send", lang: lang)) { shell.submit() }
+                Button(L("Send", lang: lang)) { shell.submit() }
                     .buttonStyle(InkButtonStyle(prominent: true))
                     .disabled(mode.control(shell.draft, sendNow: false) == nil || shell.opening)
             }
@@ -652,27 +666,125 @@ struct Composer: View {
 struct AgentPanel: View {
     @ObservedObject var shell: ShellModel
     @Environment(\.lang) private var lang
+    /// The live view (A4): watched only while a task runs here and this window is on screen.
+    @StateObject private var dock = LiveDock()
+    @ObservedObject private var monitor = FloatController.shared.monitor      // (the app's one)
 
+    /// The run the dock should watch now (nil: none).
+    private var watched: String? {
+        // (in front only: behind, the float has the picture -- §3.2; popped out, too)
+        guard monitor.window == .front, let sid = shell.selected, !shell.poppedOut.contains(sid), let t = shell.current?.runningTask else { return nil }
+        return t.runId
+    }
+
+    /// The column's blocks (RightColumn.model: only what the events said), each second while a task runs.
     var body: some View {
-        let status = shell.current?.status ?? .idle
-        VStack(spacing: 14) {
-            XiaoFang(mood: Self.mood(status), size: 84)
-                .accessibilityHidden(true)
-            Text(ShellText.status(status, lang: lang))
-                .font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Brand.ink)
-                .multilineTextAlignment(.center)
-                .accessibilityLabel(L("Status: %@", ShellText.status(status, lang: lang), lang: lang))
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-                .overlay(Text(L("The live view of the task's window and its steps will show here.", lang: lang))
-                            .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-                            .multilineTextAlignment(.center).padding(14))
-                .frame(height: 180)
-            Spacer()
+        TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }
+            .onChange(of: watched, initial: true) { _, run in dock.watch(run) }
+            .onDisappear { dock.watch(nil) }
+    }
+
+    private var column: RightColumn {
+        let other = shell.rows.first { $0.id != shell.selected && $0.taskRunning }
+        return RightColumn.model(shell.current, otherRunning: other?.title, otherId: other?.id, now: shell.now())
+    }
+
+    private func content(_ c: RightColumn) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(spacing: 6) {
+                    XiaoFang(mood: Self.mood(c.status), size: 84).accessibilityHidden(true)
+                    Text(ShellText.status(c.status, lang: lang))
+                        .font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Brand.ink)
+                        .multilineTextAlignment(.center)
+                        .accessibilityLabel(L("Status: %@", ShellText.status(c.status, lang: lang), lang: lang))
+                    if let p = c.progress {
+                        Text(L("Step %d · %d:%02d", p.step, p.seconds / 60, p.seconds % 60, lang: lang))
+                            .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                // the live view of the task's window (A4), while one runs here
+                if let t = shell.current?.runningTask, watched != nil {
+                    let last = t.steps.last
+                    LiveDockView(dock: dock, stepWindow: LiveFeed.windowNumber(last?.object), target: last?.target?.rectNorm)
+                } else if shell.current?.runningTask != nil {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                        .overlay(Text(L("The live view is in the float", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                                    .multilineTextAlignment(.center).padding(14))
+                        .frame(height: 150)
+                } else {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                        .overlay(Text(L("The live view of the task's window and its steps will show here.", lang: lang))
+                                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                                    .multilineTextAlignment(.center).padding(14))
+                        .frame(height: 150)
+                }
+                if let who = c.computerUsedBy {
+                    Button(L("The computer is being used by 「%@」", who, lang: lang)) { if let id = c.computerUsedById { shell.select(id) } }
+                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+                        .accessibilityHint(L("Shows that conversation", lang: lang))
+                }
+                if c.youAreUsingIt || c.screenLocked {
+                    section(L("This Mac", lang: lang)) {
+                        if c.youAreUsingIt { line(L("You're using it: the task waits for you to stop", lang: lang)) }
+                        if c.screenLocked { line(L("The screen was locked, so the task stopped", lang: lang)) }
+                    }
+                }
+                if !c.plan.isEmpty {
+                    section(L("Steps", lang: lang)) {
+                        ForEach(c.plan, id: \.n) { r in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(Self.markSymbol(r.mark)).font(.system(size: 11, weight: .semibold)).foregroundStyle(r.mark == .current ? ShellColor.orangeText : ShellColor.secondary)
+                                    .accessibilityHidden(true)
+                                Text(r.purpose).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+                                if r.asksFirst { Text(L("asks before sending", lang: lang)).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel(L("Step %d: %@, %@", r.n, r.purpose, Self.markWord(r.mark, lang: lang), lang: lang))
+                        }
+                    }
+                }
+                if !c.changes.isEmpty {
+                    section(L("Changes and outputs", lang: lang)) {
+                        if c.changes.undone { line(L("All undone", lang: lang)) }
+                        list(L("Created", lang: lang), c.changes.created)
+                        list(L("Modified", lang: lang), c.changes.modified)
+                        list(L("Deleted", lang: lang), c.changes.deleted)
+                        list(L("Sent out", lang: lang), c.changes.external)
+                        if !c.changes.unconfirmed.isEmpty {
+                            line(L("Files that appeared or changed while the task worked in apps; not known to be this task's (not undone)", lang: lang))
+                            ForEach(c.changes.unconfirmed, id: \.self) { line($0) }
+                        }
+                    }
+                }
+            }
+            .padding(18)
         }
-        .padding(18)
         .frame(maxHeight: .infinity)
         .background(ShellColor.panel)
+    }
+
+    @ViewBuilder private func section(_ title: String, @ViewBuilder _ body: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+            body()
+        }
+    }
+    @ViewBuilder private func list(_ label: String, _ items: [String]) -> some View {
+        if !items.isEmpty { line(L("%@: %@", label, items.joined(separator: L(", ", lang: lang)), lang: lang)) }
+    }
+    private func line(_ text: String) -> some View {
+        Text(text).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+    }
+
+    static func markSymbol(_ m: RightColumn.PlanRow.Mark) -> String {
+        switch m { case .done: "✓"; case .current: "▶"; case .todo: "·" }
+    }
+    static func markWord(_ m: RightColumn.PlanRow.Mark, lang: ResolvedLang) -> String {
+        switch m { case .done: L("done", lang: lang); case .current: L("doing now", lang: lang); case .todo: L("not yet", lang: lang) }
     }
 
     /// 小方's face for the state (LiveView.face): looking while it works, up when it waits for you, happy when done,

@@ -552,10 +552,20 @@ enum SessionTests {
         // a card waits: typing is not sent; a stale answer is not sent; the open card's answer is
         let n = mock.requests.count
         check(client.send(.say("顺便说一句"), to: "ses_t") == .refused("card_open") && mock.requests.count == n, "say while a card waits: not sent")
-        check(client.send(.steer("改成别的"), to: "ses_t") == .refused("card_open"), "steer too")
-        // (never dropped: both kept as unsent bubbles, card_open — the user removes them here)
+        // (never dropped: kept as an unsent bubble, card_open — the user removes it here)
         let held = client.state("ses_t").unsent
-        check(held.map(\.text) == ["顺便说一句", "改成别的"] && held.allSatisfy { $0.refused == "card_open" }, "both kept unsent: \(held.map(\.text))")
+        check(held.map(\.text) == ["顺便说一句"] && held.allSatisfy { $0.refused == "card_open" }, "kept unsent: \(held.map(\.text))")
+        // A9 (owner 10-25): a steer goes while a card waits -- the session voids the card first (H5), or refuses
+        // card_open (a harness before it); the client never refuses it itself (another client, the same stream)
+        do {
+            let m2 = MockTransport()
+            m2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.send: ["ok": true]]
+            let c2 = SessionClient(transport: m2)
+            _ = c2.open(sessionId: "ses_t")
+            for l in recorded[...askAt] { c2.feed(l) }
+            check(c2.send(.steer("改成别的"), to: "ses_t") == .sent && (m2.requests.last?["line"] as? [String: Any])?["type"] as? String == "steer",
+                  "steer while a card waits: sent")
+        }
         for o in held { client.dropUnsent(o.id, in: "ses_t") }
         check(client.send(.stop(), to: "ses_t") == .sent, "stop is always sent")
         let (runId, open) = client.state("ses_t").openCard!
@@ -569,7 +579,7 @@ enum SessionTests {
         let watch = mock.requests.last!
         check((watch["after"] as? [String: Int])?["ses_t"] == 2 && (watch["runs"] as? [String: Int])?[runId] == 7, "watch says what the app has: \(watch)")
         check(client.state("ses_t") == final("task-card"), "the whole stream: the reducer's final state")
-        client.newClientId = { "c_fixed" }
+        client.makeClientId = { "c_fixed" }
         check(client.send(.say("好"), to: "ses_t") == .sent, "no card: say is sent")
         check(mock.requests.last as NSDictionary? == ["op": "session.send", "session_id": "ses_t", "line": ["type": "say", "text": "好", "client_id": "c_fixed"]] as NSDictionary, "say line, with its client_id")
         check(client.state("ses_t").outbox == [Outgoing(id: "c_fixed", text: "好", control: "say", sending: true, original: .say("好"))] && client.state("ses_t").unsent.isEmpty, "sent: held as sending, not unsent")
@@ -1674,7 +1684,7 @@ enum SessionTests {
         mock.replies = [SessionClient.Op.send: ["ok": true]]
         let c = SessionClient(transport: mock)
         var n = 0
-        c.newClientId = { n += 1; return "k\(n)" }
+        c.makeClientId = { n += 1; return "k\(n)" }
         _ = c.send(.say("先"), to: "s")
         c.feed(se(nil, #""kind":"session.queue","items":[{"id":"q9","text":"先","client_id":"k1"}]"#))
         check(c.state("s").outbox.isEmpty && c.state("s").queue.first?.clientId == "k1", "queued: the queue's, not the outbox's")
@@ -1691,7 +1701,7 @@ enum SessionTests {
         let reopen = MockTransport()
         reopen.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
         let rc = SessionClient(transport: reopen)
-        rc.newClientId = { "h1" }
+        rc.makeClientId = { "h1" }
         _ = rc.open(sessionId: "s")
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { rc.feed($0) }
@@ -1722,7 +1732,7 @@ enum SessionTests {
         let e1 = MockTransport()
         e1.replies = [SessionClient.Op.send: ["ok": true]]
         let ec = SessionClient(transport: e1)
-        ec.newClientId = { "e1" }
+        ec.makeClientId = { "e1" }
         [se(nil, #""kind":"session.start","last_seq":0,"pid":100"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { ec.feed($0) }
         _ = ec.send(.say("hello"), to: "s")
         [se(nil, #""kind":"session.start","last_seq":1,"pid":200,"resumed":true"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":100,"start_seq":0,"last_seq":1}"#),
@@ -1744,7 +1754,7 @@ enum SessionTests {
         p1.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
         let c1 = SessionClient(transport: p1)
         var k = 0
-        c1.newClientId = { k += 1; return "w\(k)" }
+        c1.makeClientId = { k += 1; return "w\(k)" }
         _ = c1.open(sessionId: "s")
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":0,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { c1.feed($0) }
@@ -1757,7 +1767,7 @@ enum SessionTests {
         let p2 = MockTransport()
         p2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
         let c2 = SessionClient(transport: p2)
-        c2.newClientId = { "v" }
+        c2.makeClientId = { "v" }
         _ = c2.open(sessionId: "s")
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { c2.feed($0) }
         p2.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
@@ -1770,7 +1780,7 @@ enum SessionTests {
         let p3 = MockTransport()
         p3.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]
         let c3 = SessionClient(transport: p3)
-        c3.newClientId = { "z" }
+        c3.makeClientId = { "z" }
         _ = c3.open(sessionId: "s")
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { c3.feed($0) }
         p3.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
@@ -1782,7 +1792,7 @@ enum SessionTests {
         pa.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0], SessionClient.Op.send: ["ok": true]]
         let ca = SessionClient(transport: pa)
         var ka = 0
-        ca.newClientId = { ka += 1; return "a\(ka)" }
+        ca.makeClientId = { ka += 1; return "a\(ka)" }
         _ = ca.open(sessionId: "s")
         ca.feed(se(nil, #""kind":"session.start","last_seq":0"#))
         pa.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
@@ -1797,7 +1807,7 @@ enum SessionTests {
         let pb = MockTransport()
         pb.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0, "pid": 1], SessionClient.Op.send: ["ok": true]]
         let cb = SessionClient(transport: pb)
-        cb.newClientId = { "b1" }
+        cb.makeClientId = { "b1" }
         _ = cb.open(sessionId: "s")
         _ = cb.send(.say("x"), to: "s")
         cb.feed(L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":0}"#))
@@ -1806,7 +1816,7 @@ enum SessionTests {
         let pc = MockTransport()
         pc.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0], SessionClient.Op.send: ["ok": true]]
         let cc = SessionClient(transport: pc)
-        cc.newClientId = { "c1" }
+        cc.makeClientId = { "c1" }
         _ = cc.open(sessionId: "s")
         pc.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]], SessionClient.Op.open: [["ok": true, "session_id": "s", "last_seq": 1]]]
         pc.onRequest = { op in
@@ -1823,7 +1833,7 @@ enum SessionTests {
         let pe = MockTransport()
         pe.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 0, "pid": 1], SessionClient.Op.send: ["ok": true]]
         let ce = SessionClient(transport: pe)
-        ce.newClientId = { "e1" }
+        ce.makeClientId = { "e1" }
         _ = ce.open(sessionId: "s")
         ce.feed(se(nil, #""kind":"session.start","last_seq":0"#))
         pe.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]], SessionClient.Op.open: [["ok": true, "session_id": "s", "last_seq": 0, "pid": 2]]]
@@ -1836,7 +1846,7 @@ enum SessionTests {
         let pf = MockTransport()
         pf.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 3], SessionClient.Op.send: ["ok": true]]
         let cf = SessionClient(transport: pf)
-        cf.newClientId = { "f1" }
+        cf.makeClientId = { "f1" }
         _ = cf.open(sessionId: "s")
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#)].forEach { cf.feed($0) }
@@ -1849,7 +1859,7 @@ enum SessionTests {
         let pg = MockTransport()
         pg.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 2, "already_open": true], SessionClient.Op.send: ["ok": true]]
         let cg = SessionClient(transport: pg)
-        cg.newClientId = { "g1" }
+        cg.makeClientId = { "g1" }
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { cg.feed($0) }
         _ = cg.send(.say("x"), to: "s")
@@ -1859,7 +1869,7 @@ enum SessionTests {
         let ph = MockTransport()
         ph.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1], SessionClient.Op.send: ["ok": true]]
         let ch = SessionClient(transport: ph)
-        ch.newClientId = { "h1" }
+        ch.makeClientId = { "h1" }
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { ch.feed($0) }
         _ = ch.send(.say("y"), to: "s")
@@ -1873,9 +1883,9 @@ enum SessionTests {
         let ci = SessionClient(transport: pi)
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { ci.feed($0) }
-        ci.newClientId = { ci.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#)); return "i1" }
+        ci.makeClientId = { ci.feed(se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#)); return "i1" }
         _ = ci.send(.say("x"), to: "s")
-        ci.newClientId = { "i2" }
+        ci.makeClientId = { "i2" }
         check(ci.state("s").outbox.first?.toNextProcess == false, "held after the start: the current process's")
         ci.feed(se(nil, #""kind":"session.start","last_seq":2,"resumed":true"#))
         check(ci.state("s").unsent.map(\.id) == ["i1"], "replaced without an exit: unsent")
@@ -1884,7 +1894,7 @@ enum SessionTests {
         pj.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 2, "already_open": true], SessionClient.Op.send: ["ok": true]]
         let cj = SessionClient(transport: pj)
         var kj = 0
-        cj.newClientId = { kj += 1; return "j\(kj)" }
+        cj.makeClientId = { kj += 1; return "j\(kj)" }
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          L(#"{"kind":"helper.session_exit","session_id":"s","code":1,"pid":1,"start_seq":0,"last_seq":1}"#)].forEach { cj.feed($0) }
         _ = cj.send(.say("one"), to: "s")
@@ -1895,7 +1905,7 @@ enum SessionTests {
         let pk = MockTransport()
         pk.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 2, "already_open": true], SessionClient.Op.send: ["ok": true]]
         let ck = SessionClient(transport: pk)
-        ck.newClientId = { "k1" }
+        ck.makeClientId = { "k1" }
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#),
          se(nil, #""kind":"session.start","last_seq":1,"resumed":true"#), L(#"{"kind":"helper.session_exit","session_id":"s","code":1}"#)].forEach { ck.feed($0) }
         _ = ck.open(sessionId: "s")
@@ -1907,7 +1917,7 @@ enum SessionTests {
         let pl = MockTransport()
         pl.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 1, "pid": 7], SessionClient.Op.send: ["ok": true]]
         let cl = SessionClient(transport: pl)
-        cl.newClientId = { "l1" }
+        cl.makeClientId = { "l1" }
         [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { cl.feed($0) }
         pl.queued = [SessionClient.Op.send: [["ok": false, "code": "not_open"]]]
         _ = cl.send(.say("w"), to: "s")
@@ -2004,7 +2014,7 @@ enum SessionTests {
         let m = MockTransport()
         m.replies = [SessionClient.Op.send: ["ok": true]]
         let c = SessionClient(transport: m)
-        c.newClientId = { "r1" }
+        c.makeClientId = { "r1" }
         _ = c.send(.cua("整理文件", scope: "/Users/x/项目"), to: "s")
         c.feed(se(nil, #""kind":"session.error","code":"computer_busy","text":"x","control":"cua","client_id":"r1""#))
         check(c.resend("r1", in: "s") == .sent, "the /cua resent")
@@ -2015,7 +2025,7 @@ enum SessionTests {
         let m2 = MockTransport()
         m2.replies = [SessionClient.Op.send: ["ok": true]]
         let c2 = SessionClient(transport: m2)
-        c2.newClientId = { "r2" }
+        c2.makeClientId = { "r2" }
         [taskR1, ex(1, #""kind":"start","raw":"x""#)].forEach { c2.feed($0) }
         _ = c2.send(.steer("改成 b"), to: "s")
         check((m2.requests.last?["line"] as? [String: Any])?["run_id"] as? String == "r1", "the steer names its task")
@@ -2035,7 +2045,7 @@ enum SessionTests {
         let m4 = MockTransport()
         m4.replies = [SessionClient.Op.send: ["ok": true]]
         let c4 = SessionClient(transport: m4)
-        c4.newClientId = { "t1" }
+        c4.makeClientId = { "t1" }
         _ = c4.send(.say("一"), to: "s")
         c4.feed(se(nil, #""kind":"session.error","code":"busy","text":"x","control":"say","client_id":"t1""#))
         let before = m4.requests.count
@@ -2085,7 +2095,7 @@ enum SessionTests {
             let m = MockTransport()
             m.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s", "last_seq": 2, "pid": 2], SessionClient.Op.send: ["ok": true]]
             let c = SessionClient(transport: m)
-            c.newClientId = { "x1" }
+            c.makeClientId = { "x1" }
             m.queued = [SessionClient.Op.open: [["ok": true, "session_id": "s", "last_seq": 0, "pid": 1]]]
             _ = c.open(sessionId: "s")
             [se(nil, #""kind":"session.start","last_seq":0"#), se(1, #""kind":"session.message","msg_id":"u","role":"user","text":"a""#)].forEach { c.feed($0) }

@@ -59,6 +59,16 @@ struct CardPlacement: Equatable {
     var island: Island
     var notification: Notification
 
+    /// The float's card fits it (#125 Codex review at 2f29d42): its structure allows the float (CardModel.answerableInFloat)
+    /// and its whole content -- everything an approval does, laid out as the chat lays it out -- was measured no taller
+    /// than the float's room. Not measured yet: it does not (the float gives its title and 「去主窗口回答」 meanwhile).
+    static func fitsFloat(structure: Bool, height: Double?, room: Double = floatRoom) -> Bool {
+        guard structure, let h = height else { return false }
+        return h > 0 && h <= room
+    }
+    /// The float's card's room, in points.
+    static let floatRoom: Double = 320
+
     /// A notification not answered in this long is shown once more (plan §1.4).
     static let remindAfter: Double = 20
 
@@ -138,5 +148,27 @@ struct FrontmostDebounce: Equatable {
 
     static func == (a: FrontmostDebounce, b: FrontmostDebounce) -> Bool {
         a.stable == b.stable && a.candidate?.state == b.candidate?.state && a.candidate?.since == b.candidate?.since
+    }
+}
+
+/// Whether the float is up (A5, plan §1.4, §4.2): a pure function of the main window's settled state, the task and the
+/// card -- never of what placement made of the float (whether it is seen is a measured fact of the panel, given to
+/// CardPlacement.place; its output never comes back here, or the float would show and hide by itself).
+///
+/// | window \ task                 | none       | running, no card    | a card waits          |
+/// |-------------------------------|------------|---------------------|-----------------------|
+/// | front                         | hidden     | hidden              | hidden (the chat)     |
+/// | behind / away                 | hidden     | up (collapsed if    | up, open -- even if   |
+/// |                               |            |   the user said so) |   the user collapsed it|
+enum FloatPolicy {
+    enum Shown: Equatable { case hidden, collapsed, open }
+
+    /// `poppedOut`: the user moved the live view into the float (⌘⇧P): up while the task runs, the window in front or not
+    /// (its card is still answered where placement says: the chat, with the window in front).
+    static func shown(window: MainWindowState, taskActive: Bool, cardWaiting: Bool, userCollapsed: Bool, poppedOut: Bool = false) -> Shown {
+        if poppedOut && window == .front { return taskActive ? (userCollapsed ? .collapsed : .open) : .hidden }
+        guard window != .front, taskActive || cardWaiting else { return .hidden }
+        if cardWaiting { return .open }
+        return userCollapsed ? .collapsed : .open
     }
 }

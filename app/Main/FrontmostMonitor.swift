@@ -9,6 +9,8 @@ import AppKit
 final class FrontmostMonitor: ObservableObject {
     /// The state that counts now (FrontmostDebounce.stable).
     @Published private(set) var window: MainWindowState
+    /// Told of every change seen, before the settle (the float answers to the window's state now: never two places).
+    var onRaw: (() -> Void)?
     private var debounce: FrontmostDebounce
     private var observers: [NSObjectProtocol] = []
     private var tick: Timer?
@@ -44,6 +46,7 @@ final class FrontmostMonitor: ObservableObject {
     }
 
     private func saw() {
+        onRaw?()
         let t = Date().timeIntervalSince1970
         set(debounce.saw(Self.observe(), at: t))
         // a change waits its 250 ms: looked at again then, by the clock alone

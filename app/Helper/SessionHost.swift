@@ -102,9 +102,11 @@ enum SessionHost {
         var record: (_ run: String, _ ev: [String: Any]) -> Void
         var finish: (_ run: String, _ status: LiveView.Status?) -> Void
 
+        // (every live task's events also go to the live view's feed -- LiveWatch -- with a card or without)
         static let standard = UI(start: { _, goal, onStop in LiveCard.start(bundles: [], goal: goal, onStop: onStop) },
-                                 show: { _, ev in HarnessRun.show(ev) }, record: { _, ev in HarnessRun.recordApp(ev) },
-                                 finish: { _, status in LiveCard.finish(status) })
+                                 show: { run, ev in LiveWatch.note(run: run, ev); HarnessRun.show(ev) },
+                                 record: { run, ev in LiveWatch.note(run: run, ev); HarnessRun.recordApp(ev) },
+                                 finish: { run, status in LiveWatch.ended(run); LiveCard.finish(status) })
     }
 
     static let ops: Set<String> = ["session.open", "session.send", "session.end", "session.delete", "session.history", "sessions.list", "sessions.watch",
@@ -772,6 +774,8 @@ enum SessionHost {
         if s.closedIdle { NSLog("DeskMind Hands: session \(s.id) idle; closed it") }
         s.firstLine.signal()
         if let run = s.cardRun { setup.ui.finish(run, .failed); s.cardRun = nil }
+        // every run of the process that went: its live view ends (the app's watch is told, nothing more is captured)
+        for run in Set(s.cards.keys) { LiveWatch.ended(run) }
     }
 
     private static func lineData(_ e: [String: Any]) -> Data? {
@@ -839,6 +843,8 @@ enum SessionHost {
         // a task that ended without its executor's task_done (the executor died, the app went away): its card ends
         // here, or it would stay up and keep every later task of the session from showing one
         if let run = ended {
+            // (its live view ends too, card or not: #125 review -- a live_view:false session has no card run)
+            LiveWatch.ended(run)
             s.cards[run] = nil
             if s.cardRun == run {
                 setup.ui.finish(run, kind == "session.task_end" ? HarnessRun.ending(e["status"] as? String) : .failed)
@@ -885,6 +891,7 @@ enum SessionHost {
         if s.cardRun == run { for ev in out { setup.ui.show(run, ev) } }
         else { for ev in out { setup.ui.record(run, ev) } }
         if kind == "task_done" {
+            LiveWatch.ended(run)
             s.cards[run] = nil
             if s.cardRun == run { setup.ui.finish(run, HarnessRun.ending(e["status"] as? String)); s.cardRun = nil }
         }

@@ -37,9 +37,10 @@ enum ModelSettingsSaved {
 
 /// What Enter and ⌘Enter do in a session's state (handoff §1.3 输入框, §3.4, §3.7).
 struct ComposerMode: Equatable {
-    /// Typing is taken: false while a card waits (the card is answered on the card).
+    /// Typing is taken (A9, owner 10-25 decisions 3 + 4: while a task runs, a card open or not -- Return with text then
+    /// steers the task, and the card it voids ends by the run's word, ask_void{why: steer}).
     var enabled: Bool
-    /// A computer task runs: Enter queues (the session holds it until the task is done), ⌘Enter sends it now (steer).
+    /// A computer task runs: Return sends the words to it now (steer); no queue, ⌘Return is no other gesture.
     var taskRunning: Bool
     /// A reply streams and no task runs: Enter sends nothing (the session would refuse it busy); Stop stops the reply.
     var replying: Bool
@@ -49,7 +50,7 @@ struct ComposerMode: Equatable {
     static func of(_ s: SessionState?) -> ComposerMode {
         guard let s else { return ComposerMode(enabled: true, taskRunning: false, replying: false) }
         let task = s.runningTask != nil
-        return ComposerMode(enabled: s.composerEnabled, taskRunning: task, replying: !task && s.streamingMessage != nil)
+        return ComposerMode(enabled: s.composerEnabled || task, taskRunning: task, replying: !task && s.streamingMessage != nil)
     }
 
     /// The `/cua` command: the words after it, when the text is that command (it begins with `/cua` and a space or
@@ -67,8 +68,8 @@ struct ComposerMode: Equatable {
     func control(_ text: String, sendNow: Bool) -> SessionControl? {
         guard enabled, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         if taskRunning {
-            // ⌘Enter: to the running task now; Enter: queued by the session (a `/cua` too: one task per session)
-            return sendNow ? .steer(text) : .say(text)
+            // Return (⌘Return the same): to the running task now -- a card open is voided first, by the session (H5)
+            return .steer(text)
         }
         if replying { return nil }
         if let words = Self.cuaCommand(text) { return words.isEmpty ? nil : .cua(words) }
@@ -460,6 +461,19 @@ final class ShellModel: ObservableObject {
     let client: SessionClient
     private let names: SessionNames
     private let work: (@escaping () -> Void) -> Void
+    /// THE place steer and answer lines are written (A9, #125 Codex re-review at 3c6f5cc): one job after another, in
+    /// the order they were put in (`laneSeq`, on the UI queue). An answer's job decides there, right before its write,
+    /// whether a steer for its card put in before it is still on its way (SessionState.steerPending) -- the decision and
+    /// the write on the same lane, so no steer can come between them. The app passes a serial queue (serialLane); nil:
+    /// `work` (tests: inline).
+    private let lane: (@escaping () -> Void) -> Void
+    private var laneSeq = 0
+    private func nextSeq() -> Int { laneSeq += 1; return laneSeq }
+    /// The app's write lane: a serial queue of its own.
+    static func serialLane() -> (@escaping () -> Void) -> Void {
+        let q = DispatchQueue(label: "deskmind.shell.lane", qos: .userInitiated)
+        return { f in q.async(execute: f) }
+    }
     private let deliver: (@escaping () -> Void) -> Void
     /// The model configuration and language sessions are opened with: the app's settings now.
     var config: () -> String?
@@ -512,6 +526,7 @@ final class ShellModel: ObservableObject {
          now: @escaping () -> Double = { Date().timeIntervalSince1970 },
          work: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.global(qos: .userInitiated).async(execute: f) },
          deliver: @escaping (@escaping () -> Void) -> Void = { f in DispatchQueue.main.async(execute: f) },
+         lane: ((@escaping () -> Void) -> Void)? = nil,
          uiQueue: DispatchQueue = .main) {
         self.uiQueue = uiQueue
         uiQueue.setSpecific(key: uiKey, value: true)
@@ -527,6 +542,7 @@ final class ShellModel: ObservableObject {
         self.now = now
         liveSince = now()
         self.work = work
+        self.lane = lane ?? work
         self.deliver = deliver
         client.clock = now        // (an exit the client infers for a session alive this run is stamped by this clock)
         client.onChange = { [weak self] id, _ in self?.changed(id) }
@@ -797,9 +813,22 @@ final class ShellModel: ObservableObject {
         // (from here the words are the session's or an unsent bubble of it — SessionClient.send — never the composer's
         // again: a draft typed meanwhile is never overwritten)
         draft = ""
+        // a steer (A9): put in the write lane, marked on its card first when one is open (steerGoes), then written
+        if case .steer(_, let run) = control {
+            guard let (clientId, seq) = steerGoes(run, in: id) else { return }
+            lane { [weak self] in
+                guard let self else { return }
+                // (a card that opened since it was put in: the steer is its too, from here)
+                self.client.steerGoesNow(clientId, runId: run, seq: seq, in: id)
+                let r = self.client.send(control, to: id, clientId: clientId)
+                self.client.steerWritten(clientId, sent: r == .sent, in: id)
+                if r != .sent { self.deliver { self.notSent(r, text: text, in: id) } }
+            }
+            return
+        }
         work { [weak self] in
             guard let self else { return }
-            let r = self.client.send(control, to: id)
+            let r = self.client.send(control, to: id, clientId: nil)
             if r != .sent { self.deliver { self.notSent(r, text: text, in: id) } }
         }
     }
@@ -913,21 +942,22 @@ final class ShellModel: ObservableObject {
     /// True when it picked or sent something (a key that did nothing then passes on: ShellModel.keyDown). A click on
     /// an option — by the mouse or VoiceOver's press, the same action — is a click on its card: a move into it.
     @discardableResult
-    func click(_ button: CardModel.Button, by: UIEvent.Pick = .click) -> Bool {
-        guard let id = selected else { return false }
-        if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
+    func click(_ button: CardModel.Button, session: String? = nil, by: UIEvent.Pick = .click, place: UIEvent.Place = .chat) -> Bool {
+        // (`session`: the card's own -- the float answers the running task's card whatever session the window shows)
+        guard let id = session ?? selected else { return false }
+        if id == selected, let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
         // the one predicate (canSend): what it says is what happens
-        guard canSend(button) else {
+        guard canSend(button, session: id) else {
             if !button.role.reachesNoModel && !cloudOn() { _ = cloudAllows() }     // (says why: the cloud model is off)
             return false
         }
         let a = CardModel.answer(button)
         if a.askId == nil {
             let action = cards.respond(a, sessionId: id, in: client.state(id))
-            if action != .none { logPick(a, role: button.role, by: by) }
+            if action != .none { logPick(a, role: button.role, by: by, place: place) }
             return act(action, in: id)
         }
-        return pick(a, role: button.role, by: by, immediate: button.role == .cancel, in: id)
+        return pick(a, role: button.role, by: by, place: place, immediate: button.role == .cancel, in: id)
     }
 
     /// The user's own words on a card that takes them (its own field): on a card with an approve-type option, only once
@@ -989,24 +1019,36 @@ final class ShellModel: ObservableObject {
     private func logChanges(from old: SessionState?, to new: SessionState) {
         for (k, e) in UIEvents.cardChanges(from: old, to: new, window: uiWindow(), liveSince: liveSince) {
             if case .cardShown = e { cardShownAt[k] = now() }
-            if case .cardEnded = e { cardShownAt[k] = nil; cardPickedAt[k] = nil }
+            if case .cardEnded = e { cardShownAt[k] = nil; cardPickedAt[k] = nil; placesLogged = placesLogged.filter { !$0.hasPrefix(k + "|") } }
             uiRecord(e)
         }
     }
 
+    /// The cards the float showed (CardPlacement.Shown), by card key and place: each logged once.
+    private var placesLogged: Set<String> = []
+    /// The float shows `card` (A2): whole (`.float`) or its title and 「去主窗口回答」 (`.floatSummary`) -- logged once
+    /// per card and place, as the chat's card_shown is (the time on screen still the card's first).
+    func cardPlaced(_ card: CardModel, place: UIEvent.Place, in s: SessionState) {
+        let key = Self.cardKey(card)
+        guard place != .chat, placesLogged.insert(key + "|" + place.rawValue).inserted else { return }
+        let c = card.askId.flatMap { a in s.task(card.runId)?.cards.first { $0.askId == a } }?.card
+        uiRecord(.cardShown(run: UIEvent.ID(card.runId), ask: card.askId.flatMap(UIEvent.ID.init), kind: UIEvent.CardKind(c?.kind ?? "result"),
+                            place: place, window: uiWindow(), options: card.buttons.count, details: c.map { $0.plan != nil || $0.consent != nil } ?? false))
+    }
+
     /// The card an answer is for, as the log names it.
     private func logCard(_ a: CardAnswer) -> (run: UIEvent.ID?, ask: UIEvent.ID?, kind: UIEvent.CardKind) {
-        let t = selected.flatMap { states[$0] }?.task(a.runId)
+        let t = states.values.lazy.compactMap { $0.task(a.runId) }.first
         let kind: String = a.askId.map { id in t?.cards.first { $0.askId == id }?.card.kind ?? "" } ?? "result"
         return (UIEvent.ID(a.runId), a.askId.flatMap(UIEvent.ID.init), UIEvent.CardKind(kind))
     }
 
-    private func logPick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick) {
+    private func logPick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, place: UIEvent.Place) {
         let c = logCard(a), key = CardStore.key(a)
         // (not known for a card shown before this model began watching: left out, never 0)
         let ms = cardShownAt[key].map { max(0, Int(((now() - $0) * 1000).rounded())) }
         cardPickedAt[key] = now()
-        uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: .chat, ms: ms))
+        uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: place, ms: ms))
     }
 
     /// The answer is being written: what the log will say once the helper took it (write's `sent`).
@@ -1018,6 +1060,24 @@ final class ShellModel: ObservableObject {
     }
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
+    /// The one way the window moves the keyboard focus (lead 10-25): the user's own Esc out of a card in card mode, in
+    /// the key window, asks once for the composer (Composer takes it). Nothing else makes a request -- never a card
+    /// arriving, ending or voided -- and a request is taken once (`takeFocus`: a re-render does not focus again) and
+    /// dropped when the window stops being the key one.
+    @Published private(set) var focusRequest = 0
+    /// Conversations whose live view the user popped out into the float (⌘⇧P, handoff §3.7: kept on the conversation):
+    /// the float shows the picture even while the window is in front; the right column shows a placeholder.
+    @Published private(set) var poppedOut: Set<String> = []
+    func togglePopOut() {
+        guard let id = selected else { return }
+        if poppedOut.contains(id) { poppedOut.remove(id) } else { poppedOut.insert(id) }
+    }
+    private var focusTaken = 0
+    func takeFocus(_ n: Int) -> Bool {
+        guard n > focusTaken, windowKey else { return false }
+        focusTaken = n
+        return true
+    }
     /// An option of a card in place in the chat took the keyboard focus (the user's Tab): the window scrolls it into
     /// view (its ScrollViewReader takes this). Never set by a card arriving.
     @Published private(set) var scrollRequest: (id: String, n: Int)?
@@ -1065,6 +1125,7 @@ final class ShellModel: ObservableObject {
     /// back): card mode ends; the cards on screen are not counted as shown until it returns.
     func windowLeft() {
         if windowKey { windowKey = false }
+        focusTaken = focusRequest              // (a request not taken yet is dropped: the window is not the key one)
         leaveCardMode()
     }
     /// The main window is the key window of the active app again (became key, the app active, restored): the cards on
@@ -1148,7 +1209,10 @@ final class ShellModel: ObservableObject {
             if let p { enterCardMode(p) }
             return false        // (Esc / Tab go on: the focus moves natively; Esc cancels nothing in a field here)
         case .leaveCard:
-            if keyCard != nil { keyCard = nil }
+            if keyCard != nil {
+                keyCard = nil
+                if windowKey { focusRequest += 1 }     // (the focus funnel: back to the composer)
+            }
             return false
         case .takeBack:
             guard let p else { return false }
@@ -1189,14 +1253,17 @@ final class ShellModel: ObservableObject {
     }
 
     /// 「现在回答」 on an expired card: the task looks again and asks a new card (reask). Sent once.
-    func answerNow(_ runId: String, askId: String) {
-        guard let id = selected, cloudAllows(),
+    func answerNow(_ runId: String, askId: String, session: String? = nil) {
+        guard let id = session ?? selected, answerMayGo(runId: runId, askId: askId, in: id), cloudAllows(),
               cards.answerNow(runId, askId: askId, sessionId: id, in: client.state(id)) else { return }
         let key = CardStore.key(runId: runId, askId: askId)
         let kind = states[id]?.task(runId)?.cards.first { $0.askId == askId }?.card.kind ?? ""
         uiRecord(.cardReask(run: UIEvent.ID(runId), ask: UIEvent.ID(askId), kind: UIEvent.CardKind(kind)))
-        work { [weak self] in
+        let seq = nextSeq()
+        lane { [weak self] in
             guard let self else { return }
+            // (decided again at the write, as an answer is: write)
+            if self.client.state(id).steerPending(runId: runId, askId: askId, before: seq) { self.deliver { self.cards.reaskNotSent(key) }; return }
             if self.client.send(.reask(runId: runId), to: id) != .sent { self.deliver { self.cards.reaskNotSent(key) } }
         }
     }
@@ -1204,10 +1271,33 @@ final class ShellModel: ObservableObject {
     /// A card whose own words wait for its whole body: one with an approve-type option (#107 re-review).
     /// Whether the card's own field (and its Send) takes words now: as `answer` sends them (the field is drawn after
     /// the card's content: reaching it is reading past it).
-    func wordsEnabled(_ card: CardModel, in s: SessionState) -> Bool { answerable(card, in: s) }
+    func wordsEnabled(_ card: CardModel, in s: SessionState) -> Bool { answerable(card, in: s) && answerMayGo(runId: card.runId, askId: card.askId, in: s.sessionId ?? selected ?? "") }
 
     static func cardKey(runId: String, askId: String?) -> String { CardStore.key(runId: runId, askId: askId) }
     static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
+
+    /// A steer on its way ends (A9): the session refused it (by its client id), or the card is no longer open -- its
+    /// ending, the run's word (ask_void why steer, H5 voids it before the steer goes on). Taken while the card is still
+    /// open, it stays marked: the card's options must not take a click between the session storing the steer and its
+    /// ask_void (#125 delta check at 4945311). UI queue.
+    /// A steer for `run` (the task it names) is put in the write lane of session `id`, with its client id (a new one,
+    /// or `resending`'s) and its place in the lane; when that task's card is open, in one step its held pick goes (its
+    /// timer finds nothing to send) and the steer is marked on the card (SessionClient.steerEnqueued). nil: the same
+    /// words' attempt is in the lane already (a second 「重新发送」): nothing is put in. UI queue.
+    private func steerGoes(_ run: String?, in id: String, resending: String? = nil) -> (clientId: String, seq: Int)? {
+        let cid = resending ?? client.newClientId(), seq = nextSeq()
+        let open = states[id].flatMap { cards.pinned($0) }.flatMap { p in
+            p.card.outcome == .open && (run == nil || run == p.runId) ? (runId: p.runId, askId: p.card.askId) : nil
+        }
+        guard client.steerEnqueued(cid, card: open, seq: seq, in: id) else { return nil }
+        if let open { cards.stopping(open.runId) }
+        return (cid, seq)
+    }
+
+    /// Whether an answer for the card may be written now, as far as steers go: none of ours for it on its way (the
+    /// client's state, the one the lane reads before it writes). The window's buttons, the keys, typed words, the
+    /// float and 「现在回答」 read it; the lane decides again at the write (write, answerNow).
+    func answerMayGo(runId: String, askId: String?, in id: String) -> Bool { !client.state(id).steerPending(runId: runId, askId: askId) }
 
     /// The layout facts of cards no longer pinned anywhere (nor an open result card) go. UI queue.
     private func dropLayoutFacts() {
@@ -1247,7 +1337,7 @@ final class ShellModel: ObservableObject {
     func cardPinnedWhole(_ card: CardModel) -> Bool { pinRoom <= 0 || cardHeights[Self.cardKey(card)] == nil || cardFits(card) }
 
     /// Whether this button takes a click now: its card can be answered (canSend).
-    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b) }
+    func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b, session: s.sessionId) }
 
     /// THE predicate for one option of one card (#114 Codex review at 7553637): whether pressing it now sends its answer
     /// (or holds it for the take-back). The button's enabled state, its VoiceOver state, the key path (keyWorks) and the
@@ -1257,8 +1347,9 @@ final class ShellModel: ObservableObject {
     /// state, the one CardStore checks as it writes. (A card no longer scrolls inside, and what goes out is laid out
     /// before 「可以」 (A2, invariant 3): a click is never gated on scrolling; an approve-type option's key is, on a card
     /// that does not fit -- keyWorks.)
-    func canSend(_ b: CardModel.Button) -> Bool {
-        guard let id = selected else { return false }
+    func canSend(_ b: CardModel.Button, session: String? = nil) -> Bool {
+        guard let id = session ?? selected else { return false }
+        if !answerMayGo(runId: b.runId, askId: b.askId, in: id) { return false }     // (a steer on its way: A9)
         let s = client.state(id)
         if !b.role.reachesNoModel && !cloudOn() { return false }
         let a = CardModel.answer(b)
@@ -1270,9 +1361,10 @@ final class ShellModel: ObservableObject {
     /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run
     /// out — written once; or written now.
     @discardableResult
-    private func pick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, immediate: Bool, in id: String) -> Bool {
+    private func pick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, place: UIEvent.Place = .chat, immediate: Bool, in id: String) -> Bool {
+        guard answerMayGo(runId: a.runId, askId: a.askId, in: id) else { return false }
         let action = cards.pick(a, sessionId: id, immediate: immediate, now: now(), offEpoch: client.offEpoch, in: client.state(id))
-        if action != .none { logPick(a, role: role, by: by) }   // (before a send at once, which logs its own)
+        if action != .none { logPick(a, role: role, by: by, place: place) }   // (before a send at once, which logs its own)
         return act(action, in: id)
     }
 
@@ -1325,8 +1417,16 @@ final class ShellModel: ObservableObject {
         cards.issue(req, sessionId: id, key: key, answer: a)
         syncOwnReqs()
         let sent = sentEvent(a, key: key)
-        work { [weak self] in
+        let seq = nextSeq()
+        lane { [weak self] in
             guard let self else { return }
+            // the one decision, at the write: a steer for this card put in the lane before this answer, still on its
+            // way -- the answer is not written, and taken back as a write that did not go is (notSent): the card takes
+            // an answer again once the steer is over (#125 Codex re-review at a79b086: it stayed 「已发送」)
+            if self.client.state(id).steerPending(runId: a.runId, askId: a.askId, before: seq) {
+                self.deliver { self.cards.notSent(key, a); self.cards.unissue(req); self.syncOwnReqs() }
+                return
+            }
             let r = self.client.answer(a, in: id, reqId: req)
             // (the log's card_sent once the helper took the line; a write that did not go is no answer)
             if r != .sent { self.deliver { self.cards.notSent(key, a); self.cards.unissue(req); self.syncOwnReqs() } }
@@ -1354,6 +1454,17 @@ final class ShellModel: ObservableObject {
     /// Send again: only while the composer takes words (a card waits: it is answered on the card first — M1 decision 1).
     func resend(_ outgoing: String) {
         guard let id = selected, composer.enabled, cloudAllows() else { return }
+        // a steer sent again: put in the write lane as a first send (steerGoes) -- once while its attempt is in it
+        if let o = client.state(id).unsent.first(where: { $0.id == outgoing }), case .steer(_, let run)? = o.original {
+            guard let (_, seq) = steerGoes(run, in: id, resending: outgoing) else { return }
+            lane { [weak self] in
+                guard let self else { return }
+                self.client.steerGoesNow(outgoing, runId: run, seq: seq, in: id)
+                let r = self.client.resend(outgoing, in: id)
+                self.client.steerWritten(outgoing, sent: r == .sent, in: id)
+            }
+            return
+        }
         work { [weak self] in _ = self?.client.resend(outgoing, in: id) }
     }
 
