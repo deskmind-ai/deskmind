@@ -37,7 +37,14 @@ final class ChatIslandSurface: IslandSurface {
     func show(title: String, line: String, onStop: @escaping () -> Void) { base.show(title: title, line: line, onStop: onStop) }
     func update(step: Int, line: String) { base.update(step: step, line: line) }
     func setAsking(_ on: Bool) { base.setAsking(on) }
-    func finish(passed: Bool, stopped: Bool, summary: String) { base.finish(passed: passed, stopped: stopped, summary: summary) }
+    func finish(passed: Bool, stopped: Bool, summary: String) {
+        // (its end's notification is CardNotices', by run: none of the island's own, never removed -- #125 review)
+        MainActor.assumeIsolated {
+            let o = RunOverlay.shared
+            if stopped { o.model.stoppedByUser = true }
+            o.finish(passed: passed, summary: summary, notify: false)
+        }
+    }
     func notify(title: String, body: String) {}       // (CardNotices posts them, by id)
     var detailsRecord: UUID? { get { nil } set {} }
     var appActive: Bool { base.appActive }
@@ -50,8 +57,40 @@ final class FloatNSPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+/// One per app, whatever happens to the main window (#125 review at 31cb375: owned by the window's view, ⌘W -- the
+/// case the float is for -- froze it on screen and stopped its notifications, and a reopened window made a second): it
+/// drives itself, every half second and on every change of the window seen, from `start`, once.
 @MainActor
 final class FloatController: ObservableObject {
+    static let shared = FloatController()
+    private weak var shell: ShellModel?
+    /// The app's one view of the main window's state (the right column's dock reads it too).
+    let monitor = FrontmostMonitor()
+    private var timer: Timer?
+
+    /// Installs the float and starts driving it, once (later calls do nothing).
+    func start(_ shell: ShellModel) {
+        guard self.shell == nil else { return }
+        self.shell = shell
+        install(shell)
+        monitor.onRaw = { [weak self] in self?.drive() }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.drive() } }
+        drive()
+    }
+
+    private func drive() {
+        guard let shell else { return }
+        update(shell, window: monitor.window, frontNow: FrontmostMonitor.observe() == .front, lang: AppLanguage.current())
+    }
+
+    /// Whether the float takes an answer this moment: the window's state now, not the last tick's (#125 review: after
+    /// the window came forward the float answered for up to 0.75 s while the chat did too).
+    func answersNow() -> Bool {
+        guard let n = now, let card = n.card, let phase = n.phase else { return false }
+        let p = CardPlacement.place(phase, fitsFloat: card.answerableInFloat, window: monitor.window,
+                                    frontNow: FrontmostMonitor.observe() == .front, float: visibility())
+        return p.takesAnswer && p.shown == .floatCard
+    }
     /// What the float shows now (FloatView reads it).
     struct Now {
         var sessionId: String
@@ -70,6 +109,8 @@ final class FloatController: ObservableObject {
     private var panel: FloatNSPanel?
     private var cleaned = false
     private var lastCard: String?
+    /// When the panel was put up: its occlusion is not known at once, and no notification is posted until it is.
+    private var shownAt: Date?
     static let width: CGFloat = 304
 
     /// The state of the window and the sessions changed (or a second went by): the float, the island, the notifications.
@@ -94,6 +135,10 @@ final class FloatController: ObservableObject {
             }
         }
         if window == .front { for r in ended { notices.ended(r, title: "", body: "", seen: true) } }
+        // (forgotten once their runs are gone from every session)
+        let known = Set(shell.states.values.flatMap { $0.tasks.map(\.runId) })
+        ended = ended.filter(known.contains)
+        islands = islands.filter { known.contains($0.key) }
         guard let (sid, s) = running, let task = s.runningTask else {
             now = nil; dock.watch(nil); show(.hidden)
             notices.card(nil, placement: nil, title: "", body: "", now: t)
@@ -117,8 +162,12 @@ final class FloatController: ObservableObject {
             let pl = CardPlacement.place(p.phase, fitsFloat: card.answerableInFloat, window: window, frontNow: frontNow, float: fact,
                                          notified: notices.notified(p.card.askId, now: t))
             placement = pl
-            notices.card(p.card.askId, placement: pl, title: L("DeskMind", lang: lang),
-                         body: p.phase.isExpiredOffer ? "" : CardLayout(card).title, now: t)
+            // (just put up: whether it can be seen is not known yet -- no notification until it is)
+            let settling = shownAt.map { Date().timeIntervalSince($0) < 0.3 } ?? false
+            if !settling {
+                notices.card(p.card.askId, placement: pl, title: L("DeskMind", lang: lang),
+                             body: p.phase.isExpiredOffer ? "" : CardLayout(card).title, now: t)
+            }
         } else {
             notices.card(nil, placement: nil, title: "", body: "", now: t)
         }
@@ -136,14 +185,14 @@ final class FloatController: ObservableObject {
     }
 
     private func show(_ s: FloatPolicy.Shown) {
-        guard s != .hidden else { panel?.orderOut(nil); return }
+        guard s != .hidden else { panel?.orderOut(nil); shownAt = nil; return }
         let p = panel ?? makePanel()
         let screen = NSScreen.main ?? NSScreen.screens.first
         let visible = screen?.visibleFrame ?? .zero
         let size = (p.contentView?.fittingSize).map { NSSize(width: Self.width, height: min($0.height, visible.height * 0.7)) } ?? NSSize(width: Self.width, height: 240)
         let frame = NSRect(x: visible.maxX - size.width - 16, y: visible.minY + 16, width: size.width, height: size.height)
         if p.frame != frame { p.setFrame(frame, display: true) }
-        if !p.isVisible { Activation.showPanel(p) }
+        if !p.isVisible { Activation.showPanel(p); shownAt = Date() }
     }
 
     private func makePanel() -> FloatNSPanel {
@@ -230,17 +279,19 @@ struct FloatCard: View {
             case .floatCard where phase.isExpiredOffer:
                 Text(L("Expired · Answer now", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
                 if placement.takesAnswer, let ask = card.askId {
-                    Button(L("Answer now", lang: lang)) { shell.answerNow(card.runId, askId: ask, session: sessionId) }.buttonStyle(InkButtonStyle(prominent: true))
+                    Button(L("Answer now", lang: lang)) { if FloatController.shared.answersNow() { shell.answerNow(card.runId, askId: ask, session: sessionId) } }
+                        .buttonStyle(InkButtonStyle(prominent: true))
                 }
             case .floatCard:
                 if let held = phase.pending {
                     HStack {
                         Text(L("Picked: %@", CardView.picked(held, card: card), lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
-                        Button(L("Take back", lang: lang)) { shell.takeBack(card) }.buttonStyle(InkButtonStyle(prominent: false))
+                        Button(L("Take back", lang: lang)) { if FloatController.shared.answersNow() { shell.takeBack(card) } }.buttonStyle(InkButtonStyle(prominent: false))
                     }
                 }
                 ForEach(layout.controls, id: \.index) { c in
-                    Button(c.button.text) { _ = shell.click(c.button, session: sessionId) }
+                    // (the window's state now, at the click: in front, the chat answers and this does not)
+                    Button(c.button.text) { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId) } }
                         .buttonStyle(InkButtonStyle(prominent: c.prominent))
                         .disabled(!placement.takesAnswer || !shell.canSend(c.button, session: sessionId))
                 }

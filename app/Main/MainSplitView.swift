@@ -26,10 +26,7 @@ enum ShellColor {
 
 struct MainSplitView: View {
     @ObservedObject var shell: ShellModel
-    /// The float, the island and the notifications of the running task (A5, A7), and the window's settled state.
-    @StateObject private var float = FloatController()
-    @StateObject private var frontmost = FrontmostMonitor()
-    private let tick = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @State private var settingsOpen = false
@@ -61,14 +58,8 @@ struct MainSplitView: View {
             shell.start()
         }
         .onChange(of: lang) { _, _ in shell.syncSettings() }     // (the language is a session setting like the model's)
-        .onAppear { float.install(shell) }
-        .onReceive(tick) { _ in driveFloat() }
-        .onChange(of: frontmost.window) { _, _ in driveFloat() }
-    }
-
-    /// The float, the island and the notifications, from the window's state now and settled, and the sessions'.
-    private func driveFloat() {
-        float.update(shell, window: frontmost.window, frontNow: FrontmostMonitor.observe() == .front, lang: lang)
+        // the float, the island and the notifications: the app's one, started once, whatever the window does
+        .onAppear { FloatController.shared.start(shell) }
     }
 
     /// The key file (keys, a custom service's URL and model): a session process reads it when it starts, so only a
@@ -674,7 +665,7 @@ struct AgentPanel: View {
     @Environment(\.lang) private var lang
     /// The live view (A4): watched only while a task runs here and this window is on screen.
     @StateObject private var dock = LiveDock()
-    @StateObject private var monitor = FrontmostMonitor()
+    @ObservedObject private var monitor = FloatController.shared.monitor      // (the app's one)
 
     /// The run the dock should watch now (nil: none).
     private var watched: String? {

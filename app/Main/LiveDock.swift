@@ -75,7 +75,7 @@ final class LiveDock: ObservableObject {
     }
 
     private func takePicture(run: String, flag: Flag) {
-        guard !flag.value, run == self.run, let p = flag.take() else { return }      // (a watch given up since)
+        guard !flag.value, run == self.run, let p = flag.take(), state != .ended else { return }      // (given up since; or ended)
         picture = p; state = .streaming
     }
 

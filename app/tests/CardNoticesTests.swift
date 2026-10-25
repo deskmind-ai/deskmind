@@ -72,6 +72,26 @@ enum CardNoticesTests {
         check(mock.requests.first { $0["op"] as? String == SessionClient.Op.open }?["live_view"] as? Bool == false, "session.open with live_view false")
         let src = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/MainSplitView.swift"), encoding: .utf8)) ?? ""
         check(src.contains("m.client.liveView = false"), "the window's client asks for no helper live card")
+        // #125 review at 31cb375 (the views are not in this binary: their wiring checked as written)
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        func code(_ f: String) -> String {
+            ((try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? "")
+                .split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
+        }
+        let split = code("Main/MainSplitView.swift"), float = code("Main/FloatPanel.swift")
+        // 1. one float per app, whatever the window does: not the window view's; started once; it drives itself
+        check(!split.contains("FloatController()") && !split.contains("FrontmostMonitor()") && split.contains("FloatController.shared.start(shell)"),
+              "the window starts the app's one float, owns none")
+        check(float.contains("static let shared = FloatController()") && float.contains("guard self.shell == nil else { return }")
+              && float.contains("Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true)") && float.contains("monitor.onRaw = {"),
+              "the float: one, started once, driven by its own timer and every change of the window seen")
+        // 2. a chat task's end: CardNotices' notification only
+        check(float.contains("o.finish(passed: passed, summary: summary, notify: false)") && !float.contains("base.finish("),
+              "the chat island finishes without the island's own notification")
+        // 3. the float answers by the window's state at the click
+        let buttons = float.components(separatedBy: "struct FloatCard").last ?? ""
+        check(buttons.components(separatedBy: "if FloatController.shared.answersNow() {").count - 1 == 3 && float.contains("frontNow: FrontmostMonitor.observe() == .front, float: visibility())"),
+              "every float answer button checks the window's state now")
         // ids are what they are about
         check(CardNotices.askId("ask_1") == "ask:ask_1" && CardNotices.runId("run_1") == "run:run_1", "ids by card and by run")
     }
