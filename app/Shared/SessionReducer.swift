@@ -349,6 +349,16 @@ enum TimelineItem: Equatable {
     case error(Int)                 // a stored session.error, by seq
 }
 
+/// One steer in the app's write lane or on the wire (SessionState.steers): its words' client id, the card that was open
+/// when it was put in the lane, its place in the lane, and whether its line went.
+struct PendingSteer: Equatable {
+    var clientId: String
+    var runId: String
+    var askId: String
+    var seq: Int
+    var written = false
+}
+
 struct SessionState: Equatable {
     var sessionId: String? = nil
     var resumed = false
@@ -392,6 +402,30 @@ struct SessionState: Equatable {
     var unsent: [Outgoing] { outbox.filter { !$0.sending && !retired.contains($0.id) } }
     /// Words their sender gave up on (a GoalRun over: its cua), by client id: never shown, never resent.
     var retired: Set<String> = []
+    /// The steers of the app's on their way to a task whose card was open when they were put in the write lane (A9,
+    /// #125 Codex re-review at 3c6f5cc): kept by the client that writes them (SessionClient.steerEnqueued / steerGoesNow / steerWritten),
+    /// read by the lane before it writes an answer (steerPending) and by the window (the card takes nothing).
+    var steers: [PendingSteer] = []
+    /// The client ids of the steer attempts in the write lane now (put in, not yet written or failed): one per words.
+    var steersInLane: Set<String> = []
+
+    /// The attempt `clientId` marked on the card, at `seq` (it replaces an earlier attempt of the same words).
+    mutating func mark(_ clientId: String, runId: String, askId: String, seq: Int) {
+        steers.removeAll { $0.clientId == clientId }
+        steers.append(PendingSteer(clientId: clientId, runId: runId, askId: askId, seq: seq))
+    }
+
+    /// Whether a steer for the card (`runId`, `askId`) put in the lane before `seq` is still on its way: not yet
+    /// written, or written and not refused -- while the card is still open (its end ends every steer for it: the
+    /// run's word, ask_void why steer). `seq` nil: any.
+    func steerPending(runId: String, askId: String?, before seq: Int? = nil) -> Bool {
+        guard let ask = askId, let t = task(runId), t.cards.contains(where: { $0.askId == ask && $0.outcome == .open }) else { return false }
+        return steers.contains { st in
+            st.runId == runId && st.askId == ask && (seq.map { st.seq < $0 } ?? true)
+                && !(st.written && outbox.contains { $0.id == st.clientId && $0.refused != nil })
+        }
+    }
+
     /// The answers to `stop {client_id}` (harness#72: session.stop_ack, not stored), by the cua's client id.
     var stopAcks: [String: SessionStopAck] = [:]
     /// Cuas a stop cancelled before any task came of them (session.cua_cancelled, stored).

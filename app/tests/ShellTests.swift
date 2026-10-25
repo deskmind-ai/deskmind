@@ -137,7 +137,7 @@ enum ShellTests {
     static func model(_ mock: Mock, defaults: UserDefaults = scratchDefaults(), config: String? = "openai:local|fake",
                       lang: ResolvedLang = .zhHans, timers: Timers = Timers()) -> ShellModel {
         let client = SessionClient(transport: mock)
-        client.newClientId = { "c_1" }
+        client.makeClientId = { "c_1" }
         return ShellModel(client: client, defaults: defaults, config: { config }, lang: { lang },
                           takeBackAfter: timers.after, now: { timers.now }, work: { $0() }, deliver: { $0() })
     }
@@ -2592,7 +2592,7 @@ enum ShellTests {
             if let r = c.open { mock.replies[SessionClient.Op.open] = r }
             var later: [() -> Void] = []
             let client = SessionClient(transport: mock)
-            client.newClientId = { "c_msg" }
+            client.makeClientId = { "c_msg" }
             let m = ShellModel(client: client, defaults: scratchDefaults(), config: { "ds-flash" }, lang: { .zhHans },
                                work: { later.append($0) }, deliver: { $0() })
             let fixture = SessionTests.lines("task-card")
@@ -2639,7 +2639,7 @@ enum ShellTests {
             for l in fixture.prefix(askAt) { m.client.feed(l) }
             let run = m.client.state("ses_t").runningTask?.runId ?? ""
             m.selected = "ses_t"
-            m.client.newClientId = { "c_steer" }
+            m.client.makeClientId = { "c_steer" }
             m.draft = "改成蓝色"
             m.submit()                                                   // Return: a steer of the running task (A9)
             m.client.feed(fixture[askAt])                                // a card comes before it goes

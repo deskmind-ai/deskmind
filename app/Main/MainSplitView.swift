@@ -99,7 +99,9 @@ extension ShellModel {
                            // every save of the model settings, from whichever window (ModelSettingsSaved), while the app runs
                            keyFile: { MainSplitView.envFingerprint() }, savedSettings: .default,
                            // a new key's asks the helper did not take: tried again on the main queue's clock
-                           retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) })
+                           retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) },
+                           // steer and answer lines: one after another, in the order they were put in (A9)
+                           lane: ShellModel.serialLane())
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         m.client.liveView = false      // (the window draws the float itself: the helper starts no live card for its tasks)
         m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
