@@ -102,9 +102,11 @@ enum SessionHost {
         var record: (_ run: String, _ ev: [String: Any]) -> Void
         var finish: (_ run: String, _ status: LiveView.Status?) -> Void
 
+        // (every live task's events also go to the live view's feed -- LiveWatch -- with a card or without)
         static let standard = UI(start: { _, goal, onStop in LiveCard.start(bundles: [], goal: goal, onStop: onStop) },
-                                 show: { _, ev in HarnessRun.show(ev) }, record: { _, ev in HarnessRun.recordApp(ev) },
-                                 finish: { _, status in LiveCard.finish(status) })
+                                 show: { run, ev in LiveWatch.note(run: run, ev); HarnessRun.show(ev) },
+                                 record: { run, ev in LiveWatch.note(run: run, ev); HarnessRun.recordApp(ev) },
+                                 finish: { run, status in LiveWatch.ended(run); LiveCard.finish(status) })
     }
 
     static let ops: Set<String> = ["session.open", "session.send", "session.end", "session.delete", "session.history", "sessions.list", "sessions.watch",

@@ -654,10 +654,21 @@ struct Composer: View {
 struct AgentPanel: View {
     @ObservedObject var shell: ShellModel
     @Environment(\.lang) private var lang
+    /// The live view (A4): watched only while a task runs here and this window is on screen.
+    @StateObject private var dock = LiveDock()
+    @StateObject private var monitor = FrontmostMonitor()
+
+    /// The run the dock should watch now (nil: none).
+    private var watched: String? {
+        guard monitor.window != .away, let t = shell.current?.runningTask else { return nil }
+        return t.runId
+    }
 
     /// The column's blocks (RightColumn.model: only what the events said), each second while a task runs.
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }
+            .onChange(of: watched, initial: true) { _, run in dock.watch(run) }
+            .onDisappear { dock.watch(nil) }
     }
 
     private var column: RightColumn {
@@ -680,13 +691,18 @@ struct AgentPanel: View {
                     }
                 }
                 .frame(maxWidth: .infinity)
-                // (the live view of the task's window: A4)
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-                    .overlay(Text(L("The live view of the task's window and its steps will show here.", lang: lang))
-                                .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-                                .multilineTextAlignment(.center).padding(14))
-                    .frame(height: 150)
+                // the live view of the task's window (A4), while one runs here
+                if let t = shell.current?.runningTask {
+                    let last = t.steps.last
+                    LiveDockView(dock: dock, stepWindow: LiveFeed.windowNumber(last?.object), target: last?.target?.rectNorm)
+                } else {
+                    RoundedRectangle(cornerRadius: 12)
+                        .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+                        .overlay(Text(L("The live view of the task's window and its steps will show here.", lang: lang))
+                                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                                    .multilineTextAlignment(.center).padding(14))
+                        .frame(height: 150)
+                }
                 if let who = c.computerUsedBy {
                     Text(L("The computer is being used by 「%@」", who, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                 }
