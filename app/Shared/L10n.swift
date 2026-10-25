@@ -719,5 +719,38 @@ enum L10n {
 
         // MARK: Helper notes (Helper/HandsHelper.swift)
         "Allow it in System Settings, then restart the helper": "请在系统设置里授权，然后重启助手",
+
+        // MARK: the right column's 「过程」 tab (Main/ProcessPane.swift, M5)
+        "Now": "现在",
+        "Process": "过程",
+        "No record": "没有记录",
+        "Run records cleared": "运行记录已清理",
+        "Original text not saved": "原文未保存",
+        "Timeline": "时间线",
+        "Judges": "判官",
+        "Cost": "成本",
+        "Changes": "改动",
+        "Labels": "标注",
+        "Plan step %d": "计划第 %d 步",
+        "No plan step": "不属于计划步骤",
+        "Picture of step %d": "第 %d 步的截图",
+        "Previous": "上一张",
+        "Next": "下一张",
+        "Close": "关闭",
+        "Shadow: %@": "影子比对：%@",
+        "Right": "对",
+        "Wrong": "不对",
+        "Note": "备注",
+        "%d calls": "%d 次",
+        "Not known to be the task's": "没法确认来源",
+        "Undo: %@": "撤回：%@",
+        "Files written": "写过的文件",
+        "Files not credited": "没算作任务的文件",
+        "Changed by another program": "别的程序改的",
+        "Windows made": "开出的窗口",
+        "Export Labels…": "导出标注…",
+        "Shows this task's process in the right column": "在右栏显示这个任务的过程",
+        "Show the Process Tab (0.5 Preview)": "显示「过程」标签（0.5 预览）",
+        "Clear Run Records": "清除运行记录",
     ]
 }

@@ -20,6 +20,7 @@ struct TaskRow: View {
     /// run, never run-less).
     var stop: (() -> Void)? = nil
     @Environment(\.lang) private var lang
+    @AppStorage(ProcessTabs.key) private var traceOn = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -34,6 +35,12 @@ struct TaskRow: View {
                     Text(ShellText.task(task, lang: lang)).font(.system(size: 12)).foregroundStyle(task.running ? ShellColor.orangeText : ShellColor.secondary)
                 }
                 Spacer()
+                // the task's 「过程」 in the right column (M5): the one way to it from the chat
+                if traceOn, stop == nil {
+                    Button(L("Process", lang: lang)) { shell.showProcess(task.runId) }
+                        .buttonStyle(.link).font(.system(size: 11))
+                        .accessibilityHint(L("Shows this task's process in the right column", lang: lang))
+                }
                 if task.running {
                     Button(L("Stop", lang: lang)) { if let stop { stop() } else { shell.stop() } }
                         .buttonStyle(InkButtonStyle(prominent: false))

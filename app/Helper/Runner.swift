@@ -285,6 +285,9 @@ enum Runner {
             for d in dirs { try? fm.removeItem(at: runs.appendingPathComponent(d)) }
             n += dirs.count
         }
+        // the chat sessions' runs: their records only (RunRetention) -- their events and journal are the conversations'
+        // own history and undo's record, never taken here
+        n += RunRetention.prune(support: support, live: [], everything: true)
         let logs = at(HarnessRun.logs)
         for f in (try? fm.contentsOfDirectory(atPath: logs.path)) ?? [] { try? fm.removeItem(at: logs.appendingPathComponent(f)) }
         try? fm.removeItem(at: at(DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl")))
@@ -292,7 +295,6 @@ enum Runner {
     }
 
     static func pruneRuns(keep: Int) { prune(work.appendingPathComponent("runs"), keep: keep) }
-    static func pruneHarnessRuns(keep: Int) { prune(harnessRuns, keep: keep) }
 
     /// Keep the `keep` most recent run folders, by when they were made (hands names its folders by time, the harness
     /// by a random id, so names are no order), and remove the rest.

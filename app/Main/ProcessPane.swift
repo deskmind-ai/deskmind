@@ -1,0 +1,295 @@
+// The right column's 「过程」 tab (M5, plan §11): one task's run as its folder recorded it -- the timeline (each step, its
+// result, its picture: ← → pages through them, the replay), the judges' questions (each with 「对 / 不对」 and a note),
+// the cost by role, what it changed, and the labels. Drawn from RunDir.Model alone (a cell with no record says
+// 「没有记录」) and the labels' file (Annotations: the only thing written, on this Mac). Read only: it sends nothing,
+// and opens, pages and labels without bringing anything forward or moving the focus.
+
+import AppKit
+import SwiftUI
+
+/// Reads a run's folder and its labels off the main queue, again whenever the task moves on.
+final class ProcessLoader: ObservableObject {
+    @Published private(set) var model: RunDir.Model = .none
+    @Published private(set) var labels: [Annotations.Line] = []
+    private var asked = 0
+
+    func load(session: String, run: String) {
+        asked += 1
+        let ticket = asked
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let m = RunDir.folder(session: session, run: run).map { RunDir.model(RunDir.files(at: $0)) } ?? .none
+            let l = Annotations.current(Annotations.lines(run))
+            DispatchQueue.main.async {
+                guard let self, ticket == self.asked else { return }      // (an older read that came back late)
+                if self.model != m { self.model = m }
+                if self.labels != l { self.labels = l }
+            }
+        }
+    }
+}
+
+struct ProcessPane: View {
+    @ObservedObject var shell: ShellModel
+    let sessionId: String
+    let runId: String
+    @StateObject private var loader = ProcessLoader()
+    @Environment(\.lang) private var lang
+    /// The picture shown large (the step's index), if any.
+    @State private var big: Int?
+    @State private var openJudges: Set<String> = []
+    @State private var notes: [String: String] = [:]
+
+    /// What makes the folder worth reading again: the task's steps, its end, its pictures' arrival.
+    private var trigger: String {
+        let t = shell.states[sessionId]?.task(runId)
+        return "\(sessionId)|\(runId)|\(t?.steps.count ?? -1)|\(t?.ended == true)|\(t?.steps.filter { $0.shot != nil }.count ?? 0)"
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) { content }
+                .padding(.vertical, 4)
+        }
+        .onChange(of: trigger, initial: true) { _, _ in loader.load(session: sessionId, run: runId) }
+        .sheet(isPresented: Binding(get: { big != nil }, set: { if !$0 { big = nil } })) { ShotViewer(pane: self) }
+    }
+
+    @ViewBuilder private var content: some View {
+        let m = loader.model
+        switch m.state {
+        case .none where loader.labels.isEmpty:
+            Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary)
+        case .pruned, .none:
+            if m.state == .pruned { Text(L("Run records cleared", lang: lang)).foregroundStyle(ShellColor.secondary) }
+            if !loader.labels.isEmpty {
+                labelsSection
+                section(L("Timeline", lang: lang)) { noRecord }
+                section(L("Cost", lang: lang)) { noRecord }
+                section(L("Changes", lang: lang)) { noRecord }
+            }
+        case .running, .ended:
+            timeline(m)
+            judges(m)
+            cost(m)
+            changes(m)
+            if !loader.labels.isEmpty { labelsSection }
+        }
+    }
+
+    private var noRecord: some View { Text(L("No record", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary) }
+
+    private func section<C: View>(_ title: String, @ViewBuilder _ c: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
+            c()
+        }
+    }
+
+    // MARK: timeline
+
+    private func timeline(_ m: RunDir.Model) -> some View {
+        section(L("Timeline", lang: lang)) {
+            if m.steps.isEmpty { noRecord }
+            ForEach(Array(m.steps.enumerated()), id: \.element.stepId) { i, s in
+                HStack(alignment: .top, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(s.planStep.map { L("Plan step %d", $0, lang: lang) } ?? L("No plan step", lang: lang))
+                            .font(.system(size: 10)).foregroundStyle(ShellColor.secondary)
+                        Text(s.words).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+                        Text([s.status, s.why].compactMap { $0 }.joined(separator: " · ").nonEmpty ?? L("No record", lang: lang))
+                            .font(.system(size: 10)).foregroundStyle(ShellColor.secondary)
+                        if m.hasTrace, let a = s.act {
+                            if let r = a.epochReason { Text(r).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                            if let c = a.changed { Text(c).font(.system(size: 10, design: .monospaced)).foregroundStyle(ShellColor.secondary).lineLimit(2) }
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    if let img = shot(s) {
+                        Button { big = i } label: { Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(width: 72) }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(L("Picture of step %d", i + 1, lang: lang))
+                    } else {
+                        Text(L("No record", lang: lang)).font(.system(size: 9)).foregroundStyle(ShellColor.secondary).frame(width: 72)
+                    }
+                }
+            }
+        }
+    }
+
+    func shot(_ s: RunDir.Step) -> NSImage? {
+        guard let p = s.shot, let dir = RunDir.folder(session: sessionId, run: runId) else { return nil }
+        return NSImage(contentsOf: dir.appendingPathComponent(p))
+    }
+
+    /// The step pictures as one strip: the replay.
+    struct ShotViewer: View {
+        let pane: ProcessPane
+        @Environment(\.lang) private var lang
+        var body: some View {
+            let steps = pane.loader.model.steps
+            let i = min(max(pane.big ?? 0, 0), max(steps.count - 1, 0))
+            VStack(spacing: 8) {
+                if steps.indices.contains(i) {
+                    Text(steps[i].words).font(.system(size: 12)).foregroundStyle(Brand.ink)
+                    if let img = pane.shot(steps[i]) { Image(nsImage: img).resizable().aspectRatio(contentMode: .fit).frame(maxWidth: 720, maxHeight: 520) }
+                    else { Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(width: 320, height: 200) }
+                }
+                HStack {
+                    Button(L("Previous", lang: lang)) { pane.big = page(steps, from: i, by: -1) }.keyboardShortcut(.leftArrow, modifiers: [])
+                    Button(L("Close", lang: lang)) { pane.big = nil }.keyboardShortcut(.cancelAction)
+                    Button(L("Next", lang: lang)) { pane.big = page(steps, from: i, by: 1) }.keyboardShortcut(.rightArrow, modifiers: [])
+                }
+            }
+            .padding(16)
+        }
+        /// The next step with a picture that way (or where it is).
+        private func page(_ steps: [RunDir.Step], from i: Int, by d: Int) -> Int {
+            var j = i + d
+            while steps.indices.contains(j) { if steps[j].shot != nil { return j }; j += d }
+            return i
+        }
+    }
+
+    // MARK: judges
+
+    private func judges(_ m: RunDir.Model) -> some View {
+        section(L("Judges", lang: lang)) {
+            if m.judges.isEmpty { noRecord }
+            ForEach(m.judges, id: \.judgeId) { j in judgeRow(j) }
+        }
+    }
+
+    private func judgeRow(_ j: RunDir.Judge) -> some View {
+        let label = loader.labels.last { $0.judge_id == j.judgeId }
+        let open = openJudges.contains(j.judgeId)
+        return VStack(alignment: .leading, spacing: 4) {
+            Button {
+                if open { openJudges.remove(j.judgeId) } else { openJudges.insert(j.judgeId) }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(j.question).font(.system(size: 11, weight: .medium))
+                    Text(j.answer ?? L("No record", lang: lang)).font(.system(size: 11))
+                    if let by = j.by { Text(by).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                    if let c = j.confidence { Text(String(format: "%.2f", c)).font(.system(size: 10).monospacedDigit()).foregroundStyle(ShellColor.secondary) }
+                    if let s = j.shadow { Text(L("Shadow: %@", s.agree.map { $0 ? "=" : "≠" } ?? "?", lang: lang)).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                    if let ms = j.ms { Text(String(format: "%.1f s", Double(ms) / 1000)).font(.system(size: 10).monospacedDigit()).foregroundStyle(ShellColor.secondary) }
+                    Spacer()
+                    if let l = label { Text(l.label == .right ? L("Right", lang: lang) : L("Wrong", lang: lang)).font(.system(size: 10, weight: .semibold)) }
+                }
+                .foregroundStyle(Brand.ink)
+            }
+            .buttonStyle(.plain)
+            if open {
+                Text(j.kind ?? L("No record", lang: lang)).font(.system(size: 10)).foregroundStyle(ShellColor.secondary)
+                Text(j.prompt ?? L("No record", lang: lang)).font(.system(size: 10, design: .monospaced)).foregroundStyle(Brand.ink)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                if let opts = j.options {
+                    ForEach(opts, id: \.id) { o in Text("\(o.id): \(o.text)").font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                }
+                ForEach(Array(j.tiers.enumerated()), id: \.offset) { _, t in
+                    Text(t.line)
+                        .font(.system(size: 10)).foregroundStyle(ShellColor.secondary)
+                }
+                HStack {
+                    TextField(L("Note", lang: lang), text: Binding(get: { notes[j.judgeId] ?? label?.note ?? "" }, set: { notes[j.judgeId] = $0 }))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 11))
+                    Button(L("Right", lang: lang)) { mark(j, .right) }
+                    Button(L("Wrong", lang: lang)) { mark(j, .wrong) }
+                }
+            }
+        }
+    }
+
+    /// A label: one line appended (the question's material copied from what the view shows), read back.
+    private func mark(_ j: RunDir.Judge, _ label: Annotations.Label) {
+        let note = (notes[j.judgeId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        Annotations.add(Annotations.Line(judge_id: j.judgeId, run_id: runId, label: label, note: note.isEmpty ? nil : note,
+                                         at: Date().timeIntervalSince1970, sample: Annotations.sample(j)))
+        loader.load(session: sessionId, run: runId)
+    }
+
+    // MARK: cost
+
+    private func cost(_ m: RunDir.Model) -> some View {
+        section(L("Cost", lang: lang)) {
+            if m.cost.isEmpty { noRecord }
+            ForEach(m.cost, id: \.role) { r in
+                HStack(spacing: 8) {
+                    Text(r.role).font(.system(size: 11, weight: r.role == "loop" ? .semibold : .regular))
+                    Spacer()
+                    Text(L("%d calls", r.calls, lang: lang))
+                    Text("\(r.tokensIn) / \(r.tokensOut)")
+                    Text(String(format: "$%.4f", r.costUSD))
+                    Text(String(format: "%.1f s", Double(r.medianMs) / 1000))
+                }
+                .font(.system(size: 10).monospacedDigit()).foregroundStyle(Brand.ink)
+            }
+        }
+    }
+
+    // MARK: changes
+
+    private func changes(_ m: RunDir.Model) -> some View {
+        section(L("Changes", lang: lang)) {
+            if let c = m.changes {
+                list(L("Created", lang: lang), c.created)
+                list(L("Modified", lang: lang), c.modified)
+                list(L("Deleted", lang: lang), c.deleted)
+                list(L("Sent out", lang: lang), c.external)
+                list(L("Not known to be the task's", lang: lang), c.unconfirmed)
+                if let u = c.undo {
+                    Text(L("Undo: %@", [u.effect, u.undone.map { "\($0)" }, u.total.map { "/\($0)" }].compactMap { $0 }.joined(), lang: lang)).font(.system(size: 10))
+                }
+                if m.hasTrace {
+                    list(L("Files written", lang: lang), c.filesWritten ?? [])
+                    list(L("Files not credited", lang: lang), c.notCredited ?? [])
+                    list(L("Changed by another program", lang: lang), c.externalChange ?? [])
+                    list(L("Windows made", lang: lang), c.windowsCreated ?? [])
+                }
+            } else { noRecord }
+        }
+    }
+
+    @ViewBuilder private func list(_ title: String, _ items: [String]) -> some View {
+        if !items.isEmpty {
+            Text(title).font(.system(size: 10, weight: .medium)).foregroundStyle(ShellColor.secondary)
+            ForEach(items, id: \.self) { Text($0).font(.system(size: 10)).foregroundStyle(Brand.ink).lineLimit(2).truncationMode(.middle) }
+        }
+    }
+
+    // MARK: labels
+
+    private var labelsSection: some View {
+        section(L("Labels", lang: lang)) {
+            ForEach(loader.labels, id: \.judge_id) { l in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(l.sample.question).font(.system(size: 11, weight: .medium))
+                        Text(l.sample.answer ?? L("No record", lang: lang)).font(.system(size: 11))
+                        Spacer()
+                        Text(l.label == .right ? L("Right", lang: lang) : L("Wrong", lang: lang)).font(.system(size: 10, weight: .semibold))
+                    }
+                    if let n = l.note { Text(n).font(.system(size: 10)).foregroundStyle(Brand.ink) }
+                    Text(l.sample.prompt ?? L("Original text not saved", lang: lang)).font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(ShellColor.secondary).lineLimit(3)
+                }
+                .foregroundStyle(Brand.ink)
+            }
+            Button(L("Export Labels…", lang: lang)) { export() }
+        }
+    }
+
+    /// The labels' file, as it is, to where the user chooses.
+    private func export() {
+        let p = NSSavePanel()
+        p.nameFieldStringValue = runId + "-labels.jsonl"
+        p.begin { r in
+            guard r == .OK, let url = p.url else { return }
+            _ = Annotations.export(runId, to: url)
+        }
+    }
+}
+
+private extension String {
+    var nonEmpty: String? { isEmpty ? nil : self }
+}

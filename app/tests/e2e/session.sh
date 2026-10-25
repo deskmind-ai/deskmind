@@ -33,7 +33,7 @@ fi
 # the 0.5 window's model (Shared/Shell.swift) on that client, against the same helper
 SHELL_BIN="$OUT/ShellE2E"
 if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$SHELL_BIN" Shared/L10n.swift Shared/Protocol.swift \
-     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/ResultCard.swift Shared/CardModel.swift Shared/UIEvents.swift Shared/CardStore.swift Shared/CardLayout.swift Shared/SessionClient.swift Shared/Shell.swift Shared/GoalRun.swift \
+     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/ResultCard.swift Shared/CardModel.swift Shared/UIEvents.swift Shared/CardStore.swift Shared/CardLayout.swift Shared/SessionClient.swift Shared/ProcessTabs.swift Shared/Shell.swift Shared/GoalRun.swift \
      tests/e2e/PathTransport.swift tests/e2e/ShellE2E.swift > "$OUT/build-shell.log" 2>&1; then
   cat "$OUT/build-shell.log"; exit 1
 fi

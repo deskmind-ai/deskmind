@@ -91,14 +91,6 @@ enum Annotations {
     static func count(_ runId: String, support: URL = DeskMindIPC.supportDir) -> Int { current(lines(runId, support: support)).count }
 }
 
-/// A run id names files: letters, digits, _ and - only (harness RUN_ID).
-enum RunId {
-    static func valid(_ s: String) -> Bool {
-        guard let f = s.unicodeScalars.first, s.count <= 128, CharacterSet.alphanumerics.contains(f), f.isASCII else { return false }
-        return s.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-") }
-    }
-}
-
 extension JSONEncoder {
     /// Keys sorted: the same line for the same label.
     static var sorted: JSONEncoder { let e = JSONEncoder(); e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]; return e }

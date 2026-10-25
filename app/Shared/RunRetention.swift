@@ -104,10 +104,17 @@ enum RunRetention {
     @discardableResult
     static func prune(support: URL = DeskMindIPC.supportDir, live: Set<String>, now: Double = Date().timeIntervalSince1970,
                       everything: Bool = false) -> Int {
-        let all = runs(support: support, live: live)
+        let all = runs(support: support, live: live.union(lockHolder(support: support)))
         let go = everything ? all.filter(mayGo) : plan(all, now: now)
         for r in go { take(r) }
         return go.count
+    }
+
+    /// The run that holds the computer now (sessions/computer.lock), whatever its process's state: a lingering run
+    /// writes into its folder until it lets go (fail closed: a holder that may be gone is still not pruned).
+    static func lockHolder(support: URL) -> Set<String> {
+        let text = try? String(contentsOf: support.appendingPathComponent("sessions/computer.lock"), encoding: .utf8)
+        return SessionWire.Holder.parse(text, alive: { _ in true }).map { [$0.runID] } ?? []
     }
 
     private static func isDir(_ u: URL) -> Bool {

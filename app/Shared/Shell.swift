@@ -689,6 +689,7 @@ final class ShellModel: ObservableObject {
         for id in ids where !deleted.contains(id) {
             let s = client.state(id)
             logChanges(from: states[id], to: s)
+            tabChanges(id, from: states[id], to: s)
             states[id] = s
             // a card that is no longer open: what the app held for it goes (a held answer is never sent then) — on the
             // UI queue only (flush runs there in the app; a test that delivers inline from a client thread hands it over)
@@ -1058,6 +1059,47 @@ final class ShellModel: ObservableObject {
         cardPickedAt[key] = nil
         return .cardSent(run: c.run, ask: c.ask, kind: c.kind, heldMs: max(0, held))
     }
+    // MARK: the right column's tabs (M5: 「现在」 / 「过程」)
+
+    /// Each conversation's tabs (ProcessTabs), by session id.
+    @Published private(set) var tabs: [String: ProcessTabs] = [:]
+    /// A task of this window ended, as it happened here (not a history read): the app prunes the run records then.
+    var onTaskEnded: () -> Void = {}
+
+    /// What a session's change says to its tabs: a task that started, one that ended -- only as they happen here (their
+    /// own times after this model began, as the UI log's changes are -- no time said: live; a history read or a
+    /// relaunch's replay moves no tab).
+    private func tabChanges(_ id: String, from old: SessionState?, to new: SessionState) {
+        var t = tabs[id] ?? ProcessTabs()
+        let before = t
+        var ended = false
+        for task in new.tasks {
+            let was = old?.task(task.runId)
+            if was == nil, task.running, (task.startedAt ?? .infinity) >= liveSince { t.apply(.taskStarted(task.runId)) }
+            if was?.running == true, task.ended, (task.endedAt ?? .infinity) >= liveSince { t.apply(.taskDone(task.runId)); ended = true }
+        }
+        if t != before { tabs[id] = t }
+        if ended { onTaskEnded() }
+    }
+
+    /// The selected conversation's tabs.
+    var currentTabs: ProcessTabs { selected.flatMap { tabs[$0] } ?? ProcessTabs() }
+    /// The user picks a tab in the right column.
+    func pickTab(_ tab: ProcessTabs.Tab) {
+        guard let id = selected else { return }
+        tabs[id, default: ProcessTabs()].apply(.picked(tab))
+    }
+    /// The user clicks a task's message in the chat: its 过程.
+    func showProcess(_ runId: String) {
+        guard let id = selected else { return }
+        tabs[id, default: ProcessTabs()].apply(.clickedTask(runId))
+    }
+    /// The runs whose folders may still be written: a task running, or one whose result card waits (its process
+    /// lingers) -- never pruned (RunRetention).
+    var liveRuns: Set<String> {
+        Set(states.values.flatMap { $0.tasks.filter { $0.running || $0.resultCardState.isOpen }.map(\.runId) })
+    }
+
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
     /// The one way the window moves the keyboard focus (lead 10-25): the user's own Esc out of a card in card mode, in

@@ -246,6 +246,33 @@ enum ProcessTests {
         t.apply(.taskStarted("r2")); t.apply(.clickedTask("r0")); t.apply(.taskDone("r2"))
         check(t.tab == .process && t.run == "r0", "an end while reading an older run: not yanked")
         check(T().shown(traceOn: false) == .now && t.shown(traceOn: false) == .now, "the switch off: 现在 only")
+        // the window's model: a task's end here switches to 过程 and prunes once; a relaunch's replay moves nothing
+        do {
+            let r = CardStoreTests.Rig()
+            var ended = 0
+            r.m.onTaskEnded = { ended += 1 }
+            check(r.m.currentTabs.tab == .now && r.m.currentTabs.run == CardStoreTests.rid, "the task started here: 现在, its run")
+            r.done("succeeded")
+            check(r.m.currentTabs.tab == .process && r.m.currentTabs.run == CardStoreTests.rid && ended == 1, "its end: 过程, one prune: \(ended)")
+            r.m.pickTab(.now)
+            check(r.m.currentTabs.tab == .now, "picked 现在")
+            r.m.showProcess("r0")
+            check(r.m.currentTabs.tab == .process && r.m.currentTabs.run == "r0", "a task message: its 过程")
+            check(r.m.liveRuns.isEmpty || r.m.liveRuns == [CardStoreTests.rid], "live runs: running or lingering only")
+            // a history read: a task that started and ended before this model began (its own times say so)
+            let h = CardStoreTests.Rig.make(CardStoreTests.Wire(), ShellTests.Timers())
+            var replayed = 0
+            h.onTaskEnded = { replayed += 1 }
+            let sid = CardStoreTests.sid
+            for l: [String: Any] in [["kind": "session.message", "session_id": sid, "seq": 1, "msg_id": "u1", "role": "user", "text": "/cua x", "via": "cua"],
+                                     ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "u1", "run_id": "r_old", "raw": "x", "by": "slash"],
+                                     ["kind": "start", "session_id": sid, "run_id": "r_old", "seq": 1, "t": 10.0, "raw": "x"],
+                                     ["kind": "task_done", "session_id": sid, "run_id": "r_old", "seq": 2, "t": 20.0, "status": "succeeded", "reason": "", "summary": "", "result_card": NSNull()]] {
+                h.client.feed(l)
+            }
+            // (its start line may come after its task line: 现在 on its run, the default anyway -- never 过程, never a prune)
+            check(h.currentTabs.tab == .now && h.currentTabs.switched.isEmpty && replayed == 0, "a history read: no switch, no prune: \(h.currentTabs)")
+        }
         // property: random sequences against an oracle written from the table
         var g = CardStoreTests.RNG(x: 5)
         for _ in 0..<500 {

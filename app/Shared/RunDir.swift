@@ -50,7 +50,13 @@ enum RunDir {
     }
 
     struct Judge: Equatable {
-        struct Tier: Equatable { var tier: String; var outcome: String; var choice: String?; var confidence: Double?; var settled: Bool }
+        struct Tier: Equatable {
+            var tier: String; var outcome: String; var choice: String?; var confidence: Double?; var settled: Bool
+            /// The tier's line as the judge view shows it: who, how it went, what it chose, how sure.
+            var line: String {
+                [tier, outcome, choice ?? "", confidence.map { String(format: "%.2f", $0) } ?? ""].filter { !$0.isEmpty }.joined(separator: " · ")
+            }
+        }
         struct Shadow: Equatable { var tier: String; var top: String?; var agree: Bool? }
         struct Option: Equatable, Codable { var id: String; var text: String }
         var judgeId: String
@@ -118,6 +124,12 @@ enum RunDir {
         var hasTrace = false
 
         static let none = Model(state: .none)
+    }
+
+    /// A chat session's run folder (the harness's `sessions/<session>/runs/<run>/`); nil when either id names no folder.
+    static func folder(session: String, run: String, support: URL = DeskMindIPC.supportDir) -> URL? {
+        guard RunId.valid(session), RunId.valid(run) else { return nil }
+        return support.appendingPathComponent("sessions/\(session)/runs/\(run)")
     }
 
     // MARK: reading
@@ -238,5 +250,13 @@ enum RunDir {
         if let s = v as? String { return s }
         guard JSONSerialization.isValidJSONObject(v), let d = try? JSONSerialization.data(withJSONObject: v, options: [.sortedKeys]) else { return "\(v)" }
         return String(decoding: d, as: UTF8.self)
+    }
+}
+
+/// A run id names files: letters, digits, _ and - only (harness RUN_ID).
+enum RunId {
+    static func valid(_ s: String) -> Bool {
+        guard let f = s.unicodeScalars.first, s.count <= 128, CharacterSet.alphanumerics.contains(f), f.isASCII else { return false }
+        return s.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "_" || $0 == "-") }
     }
 }
