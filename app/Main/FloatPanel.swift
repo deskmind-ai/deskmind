@@ -115,10 +115,20 @@ final class FloatController: ObservableObject {
     private var cardHeights: [String: Double] = [:]
     func cardLaidOut(_ card: CardModel, height: Double) {
         let k = ShellModel.cardKey(card)
-        if cardHeights[k] != height { cardHeights[k] = height }
+        guard cardHeights[k] != height else { return }
+        cardHeights[k] = height
+        // (laid out anew: placed and sized now, not on the next tick -- #125 delta check)
+        if let shell { update(shell, window: monitor.window, frontNow: FrontmostMonitor.observe() == .front, lang: AppLanguage.current()) }
+    }
+    /// The float's room for its card now: its share of the screen it is on, less its header, picture and step line
+    /// (when they show) -- judged against what the panel has, not a constant (#125 delta check: a short screen).
+    private var cardRoom: Double {
+        let screen = (panel?.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.height ?? 600
+        let chrome = 24 + 30 + (userCollapsed ? 0 : 150 + 8 + 30)
+        return max(0, Double(screen) * 0.7 - Double(chrome))
     }
     private func fits(_ card: CardModel) -> Bool {
-        CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)])
+        CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)], room: cardRoom)
     }
     static let width: CGFloat = 304
 
@@ -181,6 +191,11 @@ final class FloatController: ObservableObject {
             notices.card(nil, placement: nil, title: "", body: "", now: t)
         }
         now = Now(sessionId: sid, status: s.status, task: task, card: card, phase: pinned?.phase, placement: placement)
+        // (only the card in view keeps its height)
+        let keep = card.map(ShellModel.cardKey)
+        if cardHeights.keys.contains(where: { $0 != keep }) { cardHeights = cardHeights.filter { $0.key == keep } }
+        // (sized to what it shows now)
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.show(policy) } }
         // the float's own picture: a second watcher while it can be seen (the helper takes one picture for both)
         dock.watch(policy == .open && fact == .visible ? task.runId : nil)
     }

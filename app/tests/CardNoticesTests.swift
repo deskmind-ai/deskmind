@@ -99,8 +99,10 @@ enum CardNoticesTests {
               && floatCard.contains("if let t = layout.shownText") && floatCard.contains("FloatController.shared.cardLaidOut(card, height: h)"),
               "the float card: shown text, beyond lines, every consent field, its height measured")
         check(floatCard.contains("shell.select(sessionId); MainWindow.comeBack(g)"), "去主窗口回答: the card's conversation selected, then the window")
-        check(float.contains("CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)])")
-              && !float.contains("fitsFloat: card.answerableInFloat"), "the float's fit: structure and measured height")
+        check(float.contains("CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)], room: cardRoom)")
+              && float.contains("visibleFrame.height") && !float.contains("fitsFloat: card.answerableInFloat"),
+              "the float's fit: structure and measured height, against the room the panel has on its screen")
+        check(float.contains("if let shell { update(shell, window: monitor.window, frontNow: FrontmostMonitor.observe() == .front, lang: AppLanguage.current()) }"), "a card laid out anew: placed and sized at once")
         // ids are what they are about
         check(CardNotices.askId("ask_1") == "ask:ask_1" && CardNotices.runId("run_1") == "run:run_1", "ids by card and by run")
     }

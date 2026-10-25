@@ -26,6 +26,9 @@ enum LiveWatch {
     nonisolated(unsafe) private static var conns: [String: [Conn]] = [:]
     nonisolated(unsafe) private static var loops: Set<String> = []
     nonisolated(unsafe) private static var told: [String: LiveFeed.State] = [:]
+    /// Pictures that could not be taken in a row, by run: "no picture" is said from the second (one miss is a flicker).
+    nonisolated(unsafe) private static var misses: [String: Int] = [:]
+    static let missesBeforeNoPicture = 2
     /// Set at the helper's start (ScreenLiveSource); a test sets its own. None: nothing is captured. (Under `lock`:
     /// a capture thread reads it while it may be set.)
     nonisolated(unsafe) private static var _source: LiveFrameSource?
@@ -166,7 +169,8 @@ enum LiveWatch {
                 // (#125 Codex: the window cannot be taken -- gone, hidden, not capturable: watchers are told, once, so an
                 // older picture is never shown as live)
                 lock.lock()
-                let say = told[run] != .noPicture && feed.captures(run, now: now())
+                misses[run, default: 0] += 1
+                let say = told[run] != .noPicture && feed.captures(run, now: now()) && misses[run, default: 0] >= missesBeforeNoPicture
                 if say { told[run] = .noPicture }
                 let cs2 = conns[run] ?? []
                 lock.unlock()
@@ -174,6 +178,7 @@ enum LiveWatch {
             } else if let (t, pic) = taken {
                 // still wanted, and still of that window (the run may have moved on, or ended, meanwhile)?
                 lock.lock()
+                misses[run] = 0
                 let keep = feed.captures(run, now: now()) && feed.windows[run]?.epoch == t.epoch
                 let now = conns[run] ?? []
                 if keep { told[run] = .streaming }
@@ -190,5 +195,5 @@ enum LiveWatch {
     /// Tests: the feed as it is now.
     static var snapshot: LiveFeed { lock.lock(); defer { lock.unlock() }; return feed }
     /// Tests: start afresh.
-    static func reset() { lock.lock(); feed = LiveFeed(); conns = [:]; told = [:]; lock.unlock() }
+    static func reset() { lock.lock(); feed = LiveFeed(); conns = [:]; told = [:]; misses = [:]; lock.unlock() }
 }

@@ -284,6 +284,9 @@ enum CardKeysTests {
         r.m.draft = "还是发给老王"
         r.m.submit()
         check(!r.m.steering.isEmpty, "on its way")
+        // the session took it (stored), its ask_void not here yet: still marked, the card takes nothing
+        r.feed(["kind": "session.message", "session_id": CardStoreTests.sid, "seq": 3, "msg_id": "u_s", "role": "user", "text": "还是发给老王", "client_id": "c_steer2"])
+        check(!r.m.steering.isEmpty && !r.m.canSend(approve), "taken, the card still open: still marked, no click")
         r.void("a1", "steer")
         check(r.m.steering.isEmpty && r.phase("a1") == .voided("steer"), "ask_void why steer: the card ended, the mark gone")
         // an empty Return does nothing

@@ -1195,14 +1195,15 @@ final class ShellModel: ObservableObject {
     static func cardKey(runId: String, askId: String?) -> String { CardStore.key(runId: runId, askId: askId) }
     static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
 
-    /// A steer on its way ends (A9): the session took it or refused it (by its client id), or the card is no longer
-    /// open. UI queue.
+    /// A steer on its way ends (A9): the session refused it (by its client id), or the card is no longer open -- its
+    /// ending, the run's word (ask_void why steer, H5 voids it before the steer goes on). Taken while the card is still
+    /// open, it stays marked: the card's options must not take a click between the session storing the steer and its
+    /// ask_void (#125 delta check at 4945311). UI queue.
     private func settleSteers(_ id: String, _ s: SessionState) {
         for (key, st) in steering where st.session == id {
             let refused = s.outbox.contains { $0.id == st.clientId && $0.refused != nil }
-            let taken = s.taken.contains(st.clientId)
             let open = cards.pinned(s).map { Self.cardKey(runId: $0.runId, askId: $0.card.askId) == key && $0.card.outcome == .open } ?? false
-            if refused || taken || !open { steering[key] = nil }
+            if refused || !open { steering[key] = nil }
         }
     }
 
