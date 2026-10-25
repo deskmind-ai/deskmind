@@ -116,6 +116,8 @@ struct CardState: Equatable {
     var askId: String
     var card: CardEvent
     var askedAt: Double?
+    /// The time of the line that gave `explicit` (the UI log: an ending seen live, not one replayed).
+    var explicitAt: Double? = nil
     /// What the card shows: its own outcome, else open, or void when its task ended first (SessionReducer.settle).
     var outcome: Outcome = .open
     /// What the run said of it (resumed, ask_void, a newer card): it always wins over what the task's end implies.
@@ -185,6 +187,14 @@ struct TaskState: Equatable {
     var givenAnswer: String? = nil
     var done: TaskDone? = nil
     var doneAt: Double? = nil
+    // The times of the records below, each its own line's (the UI log tells history replayed from what happened live;
+    // a fact's own time, so the state is the same whatever order the streams came in).
+    var endAt: Double? = nil
+    var closedAt: Double? = nil
+    var respondAt: Double? = nil
+    var undoAt: Double? = nil
+    var cardClosedAt: Double? = nil
+    var goneAt: Double? = nil
     var end: SessionTaskEnd? = nil
     var endSeq: Int? = nil          // the session seq of session.task_end
     /// What came of an undo: session.task_undo's (preferred) and result_response's; nil while none was done.
@@ -272,6 +282,19 @@ struct TaskState: Equatable {
         if let why = closed { return .closed(why) }
         return .open(undo: undoOffered, until: undoUntil)
     }
+    /// When the task ended, by the record that says so (the UI log).
+    var endedAt: Double? { doneAt ?? endAt ?? closedAt ?? goneAt }
+    /// The time of the record that put the result card in its state (the UI log), branch for branch as above.
+    var resultAt: Double? {
+        guard let card = resultCard, !card.options.isEmpty else { return nil }
+        if sessionUndoRecord != nil { return undoAt }
+        if respond != nil { return respond?.undo == true && closedWhy != nil ? closedAt : respondAt }
+        if cardClosed != nil { return cardClosedAt }
+        if closed != nil { return closedAt ?? goneAt }
+        return doneAt ?? endAt
+    }
+    /// When `card` ended: the run's word on it, else the task's end it went with.
+    func endedAt(_ card: CardState) -> Double? { card.explicit != nil ? card.explicitAt : endedAt }
     /// session.task_undo as stored.
     var sessionUndoRecord: SessionTaskUndo? = nil
     /// Why the task ended, structured: task_done's, else session.task_end's.
@@ -402,6 +425,8 @@ struct SessionState: Equatable {
     /// Runs whose session.task seq is at or below this belong to processes that are gone: an exit's last_seq, or a
     /// later process's start (only one process runs a session at a time).
     var goneUpTo = 0
+    /// The time of the line that last moved goneUpTo on.
+    var goneAt: Double? = nil
 
     func message(_ id: String) -> ChatMessage? { messages.last { $0.id == id } }
     func task(_ runId: String) -> TaskState? { taskPos[runId].map { tasks[$0] } }
@@ -490,13 +515,13 @@ enum SessionReducer {
         case .taskUndo(let e): settle(&s, e.runId)
         case .taskRespond(let e): settle(&s, e.runId)
         case .steer(let e): settle(&s, e.runId)
-        case .sessionExit, .sessionStart: for i in s.tasks.indices { settle(&s.tasks[i], goneUpTo: s.goneUpTo) }
+        case .sessionExit, .sessionStart: for i in s.tasks.indices { settle(&s.tasks[i], goneUpTo: s.goneUpTo, goneAt: s.goneAt) }
         default: break
         }
     }
 
     private static func settle(_ s: inout SessionState, _ runId: String) {
-        if let i = s.taskPos[runId] { settle(&s.tasks[i], goneUpTo: s.goneUpTo) }
+        if let i = s.taskPos[runId] { settle(&s.tasks[i], goneUpTo: s.goneUpTo, goneAt: s.goneAt) }
     }
 
     /// One executor line of `runId` in its place.
@@ -505,7 +530,7 @@ enum SessionReducer {
         if let seq = line.seq { s.tasks[i].lastSeq = seq }
         if let t = line.t { s.lastEventAt = max(s.lastEventAt ?? t, t) }
         executor(&s.tasks[i], line.event, line.t)
-        settle(&s.tasks[i], goneUpTo: s.goneUpTo)
+        settle(&s.tasks[i], goneUpTo: s.goneUpTo, goneAt: s.goneAt)
     }
 
     // MARK: the order of the chat
@@ -652,7 +677,7 @@ enum SessionReducer {
                 s.starts += 1
                 s.processPid = e.pid
                 s.processStart = e.lastSeq
-                s.goneUpTo = max(s.goneUpTo, e.lastSeq ?? 0)
+                if (e.lastSeq ?? 0) > s.goneUpTo { s.goneUpTo = e.lastSeq ?? 0; s.goneAt = line.t }
             }
         case .sessionExit(let e):
             // the latest process, or one before it (an exit that comes after the next process's start)? By the stored
@@ -682,8 +707,10 @@ enum SessionReducer {
                 else if let st = s.processStart, es <= st { latest = false }
             }
             // its runs are gone whenever this comes; without last_seq, those the app has seen of the latest process
+            let was = s.goneUpTo
             if let l = e.lastSeq { s.goneUpTo = max(s.goneUpTo, l) }
             else if latest { s.goneUpTo = max(s.goneUpTo, s.lastSeq, s.pendingSession.keys.max() ?? 0) }
+            if s.goneUpTo > was { s.goneAt = line.t }
             if latest {
                 s.exited = e.code ?? -1
                 processGone(&s, exited: true)
@@ -756,17 +783,21 @@ enum SessionReducer {
             let i = taskIndex(&s, e.runId)
             s.tasks[i].end = e
             s.tasks[i].endSeq = line.seq
+            s.tasks[i].endAt = line.t
         case .taskClosed(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].closedWhy = e.why
             s.tasks[i].closedSeq = line.seq
+            s.tasks[i].closedAt = line.t
         case .taskUndo(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].sessionUndo = e.unknown == true ? .unknown(e.refused) : .done(undone: e.undone ?? 0, total: e.total ?? 0, refused: e.refused)
             s.tasks[i].sessionUndoRecord = e
+            s.tasks[i].undoAt = line.t
         case .taskRespond(let e):
             let i = taskIndex(&s, e.runId)
             s.tasks[i].respond = e
+            s.tasks[i].respondAt = line.t
 
         case .sessionConfig(let e):
             s.settings = e
@@ -908,18 +939,18 @@ enum SessionReducer {
             // a card asked again (a replay without seq): nothing changes, an answered or voided one stays closed
             if task.cards.contains(where: { $0.askId == a.askId }) { break }
             // a new card: one the run left open before it is replaced (one card waits at a time)
-            for i in task.cards.indices where task.cards[i].explicit == nil { task.cards[i].explicit = .void("replaced") }
+            for i in task.cards.indices where task.cards[i].explicit == nil { task.cards[i].explicit = .void("replaced"); task.cards[i].explicitAt = t }
             task.cards.append(CardState(askId: a.askId, card: a.card, askedAt: t))
         case .waiting(let w):
             if w.askId == nil && task.running { task.userActive = true }
         case .resumed(let r):
             if let id = r.askId {
-                setOutcome(&task, id, r.voided.map { .void($0) } ?? .answered)
+                setOutcome(&task, id, r.voided.map { .void($0) } ?? .answered, at: t)
             } else {
                 task.userActive = false
             }
         case .askVoid(let v):
-            setOutcome(&task, v.askId, .void(v.why))
+            setOutcome(&task, v.askId, .void(v.why), at: t)
         case .consent(let c):
             if let i = task.cards.lastIndex(where: { $0.outcome == .answered }) { task.cards[i].picked = c.picked }
         case .refused(let r):
@@ -950,6 +981,7 @@ enum SessionReducer {
             task.doneAt = t
         case .resultCardClosed(let c):
             task.cardClosed = c.why
+            task.cardClosedAt = t
         case .resultResponse(let r):
             task.resultResponse = r
             if let undone = r.undone { task.responseUndo = .done(undone: undone, total: r.total ?? undone, refused: r.refused) }
@@ -964,8 +996,10 @@ enum SessionReducer {
     static let answerFor = "answer for "
 
     /// The run's word on a card (the first wins): over whatever the task's end implied, which was only provisional.
-    private static func setOutcome(_ task: inout TaskState, _ askId: String, _ outcome: CardState.Outcome) {
-        if let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].explicit == nil { task.cards[i].explicit = outcome }
+    private static func setOutcome(_ task: inout TaskState, _ askId: String, _ outcome: CardState.Outcome, at t: Double?) {
+        if let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].explicit == nil {
+            task.cards[i].explicit = outcome; task.cards[i].explicitAt = t
+        }
     }
 
     /// A step result's status from the wire: one of the results a step can have, else `fallback`.
@@ -985,9 +1019,11 @@ enum SessionReducer {
     /// first); a step shows its result, else running while the task runs, else — the task ended without one — not
     /// finished, the last such one unknown when the end says so (cause last_step_unknown) or the process went away. An
     /// ended task waits for nobody: no open card, no pause, no look-only, no stopping, no preparing.
-    private static func settle(_ task: inout TaskState, goneUpTo: Int) {
+    private static func settle(_ task: inout TaskState, goneUpTo: Int, goneAt: Double?) {
         let gone = task.sessionSeq.map { $0 <= goneUpTo } ?? false
         if task.gone != gone { task.gone = gone }
+        let goneTime = gone ? goneAt : nil
+        if task.goneAt != goneTime { task.goneAt = goneTime }
         let ended = task.ended
         let endedWhy = (task.done != nil || task.end != nil) ? "task_done" : task.gone ? "session_exit" : "executor_exit"
         // (written only where it changes: the arrays stay shared with the state before, which keeps feeding cheap)

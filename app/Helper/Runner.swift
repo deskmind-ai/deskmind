@@ -724,7 +724,7 @@ enum Runner {
                         let info = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(11).utf8))) as? [String: Any]
                         _ = emit(["event": "waiting", "what": info?["what"] as? String ?? "",
                                   "app": info?["app"] as? String ?? ""])
-                        LiveCard.status(.paused, words: L("Paused while you use your Mac", lang: ResolvedLang.current))
+                        LiveCard.status(.paused)
                         continue
                     }
                     if line.hasPrefix("HANDS_RESUME") { _ = emit(["event": "resumed"]); LiveCard.status(.working); continue }
@@ -732,9 +732,7 @@ enum Runner {
                           let q = (try? JSONSerialization.jsonObject(with: Data(line.dropFirst(10).utf8))) as? [String: Any]
                     else { continue }
                     answerLock.lock(); asking = true; answerLock.unlock()
-                    LiveCard.status(.waitingForUser, words: q["approval"] as? Bool == true
-                                    ? L("Waiting for your approval in DeskMind", lang: ResolvedLang.current)
-                                    : L("Waiting for your answer in DeskMind", lang: ResolvedLang.current))
+                    LiveCard.status(.waitingForUser, approval: q["approval"] as? Bool == true)
                     // "options": the alternatives the question lists (hands' ambiguity), answers the user can click.
                     _ = emit(["event": "ask", "question": q["question"] as? String ?? "",
                               "approval": q["approval"] as? Bool ?? false, "options": q["options"] as? [String] ?? []])

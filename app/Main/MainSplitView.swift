@@ -102,6 +102,7 @@ extension ShellModel {
                            retryAfter: { delay, f in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: f) })
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         m.client.liveView = false      // (the window draws the float itself: the helper starts no live card for its tasks)
+        m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
         return m
     }()
 }
