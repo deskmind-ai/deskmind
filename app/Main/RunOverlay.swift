@@ -268,7 +268,7 @@ struct OverlayView: View {
                     } else {
                         Text(L(Island.endWord(model.ending ?? (model.phase == .passed ? .done : .failed)), lang: lang))
                     }
-                    if model.step > 0 { Text(L("· Step %d", model.step, lang: lang)).foregroundStyle(Brand.sage) }
+                    if model.step > 0 { Text(L("· Step %d", model.step, lang: lang)).foregroundStyle(ShellColor.secondary) }
                 }
                 .font(.system(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
                 Text(ScreenShareButtons.status(model, lang: lang) ?? model.line)
@@ -303,7 +303,7 @@ struct OverlayView: View {
                 }
                 .buttonStyle(.plain)
                 Button(action: onDismiss) {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Brand.sage)
+                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(ShellColor.secondary)
                 }
                 .buttonStyle(.plain)
                 .help(L("Dismiss", lang: lang))

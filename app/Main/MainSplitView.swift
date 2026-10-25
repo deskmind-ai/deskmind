@@ -30,6 +30,9 @@ struct MainSplitView: View {
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @State private var settingsOpen = false
+    /// The first run (A12) at this step, while it is shown; on a first launch it starts at the language.
+    @State private var setupAt: FirstRun.Step? = UserDefaults.standard.bool(forKey: FirstRun.doneKey) ? nil : .language
+    @ObservedObject private var keys = KeyStatus.shared
 
     var body: some View {
         NavigationSplitView {
@@ -37,7 +40,7 @@ struct MainSplitView: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         } detail: {
             HStack(spacing: 0) {
-                ChatColumn(shell: shell, openSettings: openSettings)
+                ChatColumn(shell: shell, openSettings: openSettings, unmet: setupAt == nil ? unmet : [], openSetup: { setupAt = $0 })
                     .frame(minWidth: 420, maxWidth: .infinity)
                 Divider()
                 AgentPanel(shell: shell)
@@ -48,6 +51,10 @@ struct MainSplitView: View {
         .background(Brand.paper)
         .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
             CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
+        }
+        .sheet(isPresented: Binding(get: { setupAt != nil }, set: { if !$0 { setupAt = nil } }), onDismiss: settingsClosed) {
+            FirstRunView(shell: shell, flow: FirstRun(step: setupAt ?? .language), done: { setupAt = nil })
+                .environmentObject(model).environment(\.lang, lang)
         }
         .onAppear {
             ShellModel.shared = shell
@@ -70,6 +77,13 @@ struct MainSplitView: View {
     }
 
     private func openSettings() { settingsOpen = true }
+
+    /// What the first run left unmet, as the helper says it now (rows in the empty chat).
+    private var unmet: [FirstRun.Unmet] {
+        guard model.helperReady, keys.snapshot.known else { return [] }
+        return FirstRun.unmet(FirstRun.Facts(accessibility: model.granted(.accessibility), screen: model.granted(.screen),
+                                             keySet: CloudModelSettings.configured(keys.snapshot, CloudModelSettings.provider)))
+    }
 
     /// The sheet's Save already told the shell (ModelSettingsSaved); this compares again, and acts only on what it has
     /// not given its sessions yet (never a second restart for the same save: #107 review at 5999bd9).
@@ -244,6 +258,8 @@ struct StatusDot: View {
 struct ChatColumn: View {
     @ObservedObject var shell: ShellModel
     let openSettings: () -> Void
+    var unmet: [FirstRun.Unmet] = []
+    var openSetup: (FirstRun.Step) -> Void = { _ in }
     @Environment(\.lang) private var lang
     @State private var announced: String?
     /// 「跳到卡片」: the card to scroll the chat to (one too tall to pin stays in place there).
@@ -281,7 +297,7 @@ struct ChatColumn: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        if let s { timeline(s) } else { EmptyChat(opening: shell.opening) }
+                        if let s { timeline(s) } else { EmptyChat(opening: shell.opening, unmet: unmet, openSetup: openSetup) }
                         Color.clear.frame(height: 1).id("bottom")
                     }
                     .padding(.horizontal, 22).padding(.vertical, 16)
@@ -429,6 +445,8 @@ struct Banner: View {
 
 struct EmptyChat: View {
     let opening: Bool
+    var unmet: [FirstRun.Unmet] = []
+    var openSetup: (FirstRun.Step) -> Void = { _ in }
     @Environment(\.lang) private var lang
     var body: some View {
         VStack(spacing: 10) {
@@ -437,6 +455,8 @@ struct EmptyChat: View {
                 .font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
             Text(L("Chat, or start a computer task with /cua followed by what to do.", lang: lang))
                 .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+            // (what the first run left unmet: its step again -- A12)
+            if !unmet.isEmpty { SetupRow(unmet: unmet, open: openSetup).padding(.top, 8) }
         }
         .frame(maxWidth: .infinity).padding(.top, 80)
     }

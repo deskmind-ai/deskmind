@@ -241,7 +241,7 @@ struct LanguagePicker: View {
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .foregroundStyle(Brand.sage)
+        .foregroundStyle(ShellColor.secondary)
         .help(L("Language", lang: lang))
     }
 }
@@ -272,13 +272,13 @@ struct PermissionRow: View {
                 HStack(spacing: 6) {
                     Text(title).font(.system(size: 14, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
                     if optional {
-                        Text(L("Optional", lang: lang)).font(.system(size: 10, weight: .semibold)).foregroundStyle(Brand.sage)
+                        Text(L("Optional", lang: lang)).font(.system(size: 10, weight: .semibold)).foregroundStyle(ShellColor.secondary)
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Capsule().fill(Brand.mist.opacity(0.3)))
                     }
                 }
                 // Two lines when needed: English copy runs longer than Chinese and was cut off mid-sentence.
-                Text(subtitle).font(.system(size: 12)).foregroundStyle(Brand.sage)
+                Text(subtitle).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                     .lineLimit(3).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
@@ -287,7 +287,7 @@ struct PermissionRow: View {
             } else if done {
                 if let doneActionTitle, let doneAction {
                     Button(doneActionTitle, action: doneAction).buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.sage).underline()
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary).underline()
                 }
                 HStack(spacing: 6) {
                     Circle().fill(Brand.dot).frame(width: 7, height: 7)
@@ -385,7 +385,7 @@ struct BrainRow: View {
                              Self.eta(downloader.eta, lang: lang), lang: lang)
                          : String(format: "%.2f / %.2f GB", Double(downloader.bytesDone) / 1e9,
                                   Double(downloader.bytesTotal) / 1e9))
-                        .font(.system(size: 11).monospacedDigit()).foregroundStyle(Brand.sage)
+                        .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
                 }
                 .padding(.leading, 50).padding(.bottom, 6)
             }
@@ -430,7 +430,7 @@ struct HardwareNotes: View {
     var body: some View {
         ForEach(Hardware.notes(lang: lang, modelsMissing: modelsMissing), id: \.self) { note in
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Brand.dot)
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(ShellColor.orangeText)
                 Text(note).fixedSize(horizontal: false, vertical: true)
             }
             .font(.system(size: 11)).foregroundStyle(Brand.ink)
@@ -452,7 +452,7 @@ struct DevTools: View {
                 }
                 Text(L("Helper pid %@ · up %@ s", model.status["pid"].map { "\($0)" } ?? "—",
                        model.status["uptime_s"].map { "\($0)" } ?? "—", lang: lang))
-                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(Brand.sage)
+                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
                 Spacer()
                 LanguagePicker()
             }.buttonStyle(InkButtonStyle(prominent: false))

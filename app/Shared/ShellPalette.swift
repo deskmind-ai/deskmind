@@ -45,6 +45,13 @@ enum ShellPalette {
     /// A problem row: the orange at 7 % over the paper.
     static let problem = tint(dot, 0.07, over: paper)
 
+    /// The island (the notch's black pill, the same in both appearances, as the hardware is): its fill, its text, and
+    /// its two signal colours (done, waiting) -- graphics and short status words on the fill.
+    static let islandFill = Tone(light: 0x000000, dark: 0x000000)
+    static let islandText = Tone(light: 0xFFFFFF, dark: 0xFFFFFF)
+    static let islandDone = Tone(light: 0x4ADE80, dark: 0x4ADE80)
+    static let islandWait = Tone(light: 0xFACC15, dark: 0xFACC15)
+
     /// Text colours and the backgrounds each is drawn on (both appearances: `textOn(_:)`).
     static let textPairs: [(text: Tone, background: Tone)] = [
         (ink, paper), (ink, card), (ink, panel), (ink, panelSelected), (ink, banner),
@@ -52,6 +59,7 @@ enum ShellPalette {
         (orangeText, paper), (orangeText, card), (orangeText, problem), (orangeText, banner),
         (error, card), (error, paper),
         (paper, ink),                       // the prominent button: paper text on an ink capsule
+        (islandText, islandFill), (islandDone, islandFill), (islandWait, islandFill), (islandFill, islandText),
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }

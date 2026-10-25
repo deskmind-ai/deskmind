@@ -720,6 +720,27 @@ enum L10n {
         // MARK: Helper notes (Helper/HandsHelper.swift)
         "Allow it in System Settings, then restart the helper": "请在系统设置里授权，然后重启助手",
 
+        // MARK: the first run (Main/FirstRunView.swift, A12)
+        "Set up DeskMind": "设置 DeskMind",
+        "Step %d of %d": "第 %d 步，共 %d 步",
+        "Skip all": "全部跳过",
+        "Later": "稍后",
+        "Next": "下一步",
+        "Finish": "完成",
+        "Which language should DeskMind use?": "DeskMind 用哪种语言？",
+        "DeskMind's helper needs two permissions to see and use your apps. You can grant them later too.": "DeskMind 的助手需要两项权限才能看到和操作你的应用。也可以稍后再授权。",
+        "Conversations think with a cloud model: add its API key. It is kept in your keychain, by DeskMind's helper only.": "对话要用云端模型来思考：请填上它的 API 密钥。密钥存在你的钥匙串里，只有 DeskMind 的助手能读。",
+        "%@ · Set · ends in %@": "%@ · 已设置 · 末 4 位 %@",
+        "No key yet": "还没有密钥",
+        "Check": "检查",
+        "Try a first task. It goes into the message box; nothing is sent until you press Return.": "试一个任务吧。它会填进输入框；你按回车之前什么都不会发出去。",
+        "/cua Open TextEdit and write a shopping list: milk, eggs, bread": "/cua 打开文本编辑，写一张购物清单：牛奶、鸡蛋、面包",
+        "/cua Find the largest file in my Downloads folder": "/cua 找出“下载”文件夹里最大的文件",
+        "What can you do on my Mac?": "你能在我的 Mac 上做什么？",
+        "The helper's permissions aren't granted yet.": "助手的权限还没授权。",
+        "No model key yet.": "还没有模型密钥。",
+        "Finish setup": "完成设置",
+
         // MARK: the model keys (Main/CloudModel.swift, A11)
         "Set · ends in %@": "已设置 · 末 4 位 %@",
         "New API key (empty: keep it)": "新的 API 密钥（留空：不变）",

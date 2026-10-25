@@ -105,14 +105,20 @@ The code is licensed under the [Apache License 2.0](LICENSE); see also [NOTICE](
 components are listed with their licences in `THIRD_PARTY_NOTICES.txt` inside the app. The DeskMind name, 得心,
 the logo and Xiaofang are not covered by the code licence.
 
-## The harness engine (0.5, behind a developer setting)
+## The harness engine
 
 `DeskMind Hands.app/Contents/Resources/runtime/` also carries `node/` (a pinned Node 24 LTS, signed with the JIT
 entitlement alone) and `harness/harness.mjs` (deskmind-ai/harness bundled into one file, pinned by `HARNESS=` in
-`deps.lock`). A run with `engine: "harness"` in its request goes through `HarnessRun` instead of `hands do`: the helper
-starts the harness, which starts hands' execution layer (`deskmind_hands.executor`) itself, and translates the
-harness's events into the socket events the app reads (`Shared/HarnessEvents.swift`). Turn it on with
-`defaults write ai.deskmind.app engine harness` (`engine.config` picks the model configuration, default `ds-flash`, DeepSeek; keys in Application Support/DeskMind/models.env);
-the model services' keys are read from `~/Library/Application Support/DeskMind/models.env` (`YY_URL=…`, `YY_API_KEY=…`,
-`OPENROUTER_API_KEY=…`) until the app has a place for them. `./runtime.sh --harness-only` builds and self-tests this
-stage on its own.
+`deps.lock`). The main window's conversations run on it: the helper starts one harness `session` process per
+conversation (`Helper/SessionHost.swift`), which starts hands' execution layer (`deskmind_hands.executor`) for each
+computer task; the app reads the session's protocol events as they are. The helper's `op run` (a single task over
+`hands.sock`, used by the rc scripts and the e2e tests) still runs on it too, with its events translated into the
+socket events those scripts read (`Shared/HarnessEvents.swift`).
+
+The model services' keys (`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, `VOLCENGINE_API_KEY`, `YY_URL` + `YY_API_KEY`, a
+custom service's `CUSTOM_*`) are kept in the helper's keychain item (service `ai.deskmind.models`): the app's model
+settings write them through the helper (`keys.set`) and see only whether each is set and its last 4 characters
+(`keys.status`). An `Application Support/DeskMind/models.env` from an earlier version is moved in once and removed
+(`Shared/ModelStore.swift`). An ad-hoc signed helper (`SIGN_ID=-`) is a new binary to the keychain on every rebuild and
+cannot read the item without a prompt -- sign the dev build, or the helper says the keys cannot be read.
+`./runtime.sh --harness-only` builds and self-tests this stage on its own.

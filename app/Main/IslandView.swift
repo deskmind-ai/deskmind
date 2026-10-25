@@ -38,7 +38,7 @@ struct IslandView: View {
             .frame(width: open ? max(Island.expanded.width, collapsedWidth) : collapsedWidth,
                    height: open ? Island.expanded.height : notch.height, alignment: .top)
             .background(UnevenRoundedRectangle(bottomLeadingRadius: open ? 22 : 12, bottomTrailingRadius: open ? 22 : 12,
-                                               style: .continuous).fill(Color.black))
+                                               style: .continuous).fill(Color(ShellPalette.islandFill)))
             .contentShape(Rectangle())
             .onHover { h in withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { hover = h } }
             .onTapGesture { withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { pinned.toggle() } }
@@ -56,9 +56,9 @@ struct IslandView: View {
             HStack(spacing: 6) {
                 if let ending = model.ending {
                     Image(systemName: ending == .done ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .font(.system(size: 12)).foregroundStyle(ending == .done ? Color.green : Brand.dot)
+                        .font(.system(size: 12)).foregroundStyle(ending == .done ? Color(ShellPalette.islandDone) : Brand.dot)
                     Text(L(Island.endWord(ending), lang: lang))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(.white)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(Color(ShellPalette.islandText))
                         .lineLimit(1)
                 } else {
                     Circle().fill(dotColor).frame(width: 7, height: 7)
@@ -66,7 +66,7 @@ struct IslandView: View {
                     // for all of it read as stuck.
                     TimelineView(.periodic(from: .now, by: 1)) { _ in
                         Text(wingText).font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.8)
+                            .foregroundStyle(Color(ShellPalette.islandText)).lineLimit(1).minimumScaleFactor(0.8)
                     }
                 }
             }
@@ -75,16 +75,16 @@ struct IslandView: View {
             Group {
                 if model.phase == .running {
                     Button(action: onStop) {
-                        Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
-                            .frame(width: 20, height: 20).background(Circle().fill(Color.white.opacity(0.18)))
+                        Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.islandText))
+                            .frame(width: 20, height: 20).background(Circle().fill(Color(ShellPalette.islandText).opacity(0.18)))
                     }
                     .buttonStyle(.plain)
                     .help(L("Stop this task (or press ⌘. in the DeskMind window)", lang: lang))
                     .accessibilityLabel(L("Stop", lang: lang))
                 } else {
                     Button(action: onDismiss) {
-                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
-                            .frame(width: 20, height: 20).background(Circle().fill(Color.white.opacity(0.18)))
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.islandText))
+                            .frame(width: 20, height: 20).background(Circle().fill(Color(ShellPalette.islandText).opacity(0.18)))
                     }
                     .buttonStyle(.plain)
                     .help(L("Dismiss", lang: lang))
@@ -103,8 +103,8 @@ struct IslandView: View {
 
     private var dotColor: Color {
         switch model.phase {
-        case .running: model.waiting || model.takenOver ? Color.yellow : Brand.dot
-        case .passed: Color.green
+        case .running: model.waiting || model.takenOver ? Color(ShellPalette.islandWait) : Brand.dot
+        case .passed: Color(ShellPalette.islandDone)
         case .failed: Brand.dot
         }
     }
@@ -112,9 +112,9 @@ struct IslandView: View {
     /// Open: the task, what is happening now (or the stage a starting run is in), and the buttons.
     private var details: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(model.title).font(.system(size: 11)).foregroundStyle(.white.opacity(0.55)).lineLimit(1)
+            Text(model.title).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.islandText).opacity(0.55)).lineLimit(1)
             TimelineView(.periodic(from: .now, by: 1)) { _ in
-                Text(currentLine).font(.system(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(.white)
+                Text(currentLine).font(.system(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(Color(ShellPalette.islandText))
                     .lineLimit(2).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
@@ -158,8 +158,8 @@ struct IslandView: View {
         Button(action: action) {
             Text(title).font(.system(size: 11, weight: .semibold, design: .rounded))
                 .padding(.horizontal, 11).padding(.vertical, 5)
-                .foregroundStyle(prominent ? Color.black : Color.white)
-                .background(Capsule().fill(prominent ? Color.white : Color.white.opacity(0.16)))
+                .foregroundStyle(prominent ? Color(ShellPalette.islandFill) : Color(ShellPalette.islandText))
+                .background(Capsule().fill(prominent ? Color(ShellPalette.islandText) : Color(ShellPalette.islandText).opacity(0.16)))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)

@@ -309,7 +309,11 @@ enum L10nTests {
                          #"(?<![A-Za-z0-9_)\]])"# + named, #"\.(ultraThin|thin|regular|thick|ultraThick|bar)Material"#, #"Material\."#]
         var found: [String] = []
         for f in ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift", "Main/CloudModel.swift", "Main/FrontmostMonitor.swift",
-                  "Main/SessionIsland.swift", "Main/Brand.swift"] {
+                  "Main/SessionIsland.swift", "Main/Brand.swift",
+                  // (A10: everything that remains -- the float, the live dock, the island, the grant panel, the app's
+                  // menus and rows, the first run)
+                  "Main/FloatPanel.swift", "Main/LiveDock.swift", "Main/RunOverlay.swift", "Main/IslandView.swift", "Main/GrantPanel.swift",
+                  "Main/DeskMindApp.swift", "Main/FirstRunView.swift"] {
             var lines = code(f).components(separatedBy: "\n")
             if f == "Main/Brand.swift", let at = lines.firstIndex(where: { $0.contains("init(_ tone: ShellPalette.Tone)") }) {
                 for k in at..<min(lines.count, at + 8) { lines[k] = "" }     // (the one place a colour is made)

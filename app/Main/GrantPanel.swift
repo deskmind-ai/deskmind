@@ -159,24 +159,24 @@ struct GrantAccessory: View {
                     Text(L("“%@” is allowed", grant.title(lang), lang: lang)).font(.system(size: 15, weight: .semibold, design: .rounded))
                     Text(grant == .screen ? L("Restarting the helper to apply it…", lang: lang)
                                           : L("You can go back to DeskMind now.", lang: lang))
-                        .font(.system(size: 12)).foregroundStyle(Brand.sage)
+                        .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 } else if dropped {
                     Text(L("Added. Now turn on the switch next to “DeskMind Hands”", lang: lang))
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                     Text(L("This confirms itself once the switch is on", lang: lang))
-                        .font(.system(size: 12)).foregroundStyle(Brand.sage)
+                        .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 } else {
                     Text(L("Drag the icon on the right into the “%@” list above", grant.title(lang), lang: lang))
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                     Text(L("Then turn on the switch next to it", lang: lang))
-                        .font(.system(size: 12)).foregroundStyle(Brand.sage)
+                        .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 }
             }
             .foregroundStyle(Brand.ink)
             Spacer(minLength: 0)
             if !granted && !dropped {
                 VStack(spacing: 2) {
-                    Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(Brand.dot)
+                    Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(ShellColor.orangeText)
                         .offset(y: nudge ? -4 : 2)
                         .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: nudge)
                     ZStack {
@@ -203,7 +203,7 @@ struct GrantAccessory: View {
         .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(Brand.line, lineWidth: 1))
         .overlay(alignment: .topTrailing) {
             Button(action: onClose) {
-                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(Brand.sage)
+                Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(ShellColor.secondary)
                     .padding(8)
             }.buttonStyle(.plain)
         }
