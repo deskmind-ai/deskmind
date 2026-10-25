@@ -302,3 +302,115 @@ struct CardStore: Equatable {
     /// The refusal hint of a run's result card (its code), if one of this client's answers got one.
     func hint(_ runId: String) -> String? { hints[runId] }
 }
+
+// MARK: - the UI event log's part (Shared/UIEvents.swift)
+
+extension UIEvents {
+    /// What one change of a session's state says of its cards, for the log -- only what happened live: each change
+    /// has the time of the record that made it (CardState.askedAt, TaskState.endedAt(card), TaskState.resultAt), and one written
+    /// before `liveSince` (the app began watching) is history being replayed -- a relaunch, a history fill, a backfill
+    /// -- and is not put down again (#123 review at 20e66ab). A line with no time is never from the stored log (it always
+    /// has one) and counts as live.
+    /// - a card shown: in `new` and open, not in `old`, asked live;
+    /// - a card's ending: open in `old`, ended in `new`, ended live;
+    /// - the result card shown (open in `new`, not in `old`) and ended, live;
+    /// - an undo's outcome: from an offered or running undo in `old`, live.
+    /// Read from the run's word alone (CardState.outcome, ResultCardState), never from what the app holds.
+    static func changes(from old: SessionState?, to new: SessionState, window: UIEvent.Window, liveSince: Double = -.infinity) -> [UIEvent] {
+        cardChanges(from: old, to: new, window: window, liveSince: liveSince).map(\.event)
+    }
+
+    /// The same, each with the card it is about, by the session's own ids (CardStore.key: the run's, the ask's).
+    static func cardChanges(from old: SessionState?, to new: SessionState, window: UIEvent.Window,
+                            liveSince: Double = -.infinity) -> [(key: String, event: UIEvent)] {
+        func live(_ t: Double?) -> Bool { (t ?? .infinity) >= liveSince }
+        var out: [(key: String, event: UIEvent)] = []
+        for t in new.tasks {
+            let before = old?.task(t.runId)
+            let run = UIEvent.ID(t.runId)
+            for c in t.cards {
+                let was = before?.cards.first { $0.askId == c.askId }
+                let kind = UIEvent.CardKind(c.card.kind), ask = UIEvent.ID(c.askId)
+                let key = CardStore.key(runId: t.runId, askId: c.askId)
+                if was == nil, c.outcome == .open, live(c.askedAt) {
+                    out.append((key, .cardShown(run: run, ask: ask, kind: kind, place: .chat, window: window,
+                                                options: c.card.options.count, details: c.card.plan != nil || c.card.consent != nil)))
+                }
+                if was?.outcome == .open, c.outcome != .open, live(t.endedAt(c)) {
+                    out.append((key, .cardEnded(run: run, ask: ask, kind: kind, why: ending(c.outcome))))
+                }
+            }
+            let r0 = before?.resultCardState ?? ResultCardState.none, r1 = t.resultCardState
+            guard r0 != r1, live(t.resultAt) else { continue }
+            if !r0.isOpen, r1.isOpen, let card = t.resultCard {
+                out.append((t.runId, .cardShown(run: run, ask: nil, kind: .result, place: .chat, window: window,
+                                                options: card.options.count, details: card.plan != nil || card.consent != nil)))
+            }
+            if r0.isOpen, !r1.isOpen { out.append((t.runId, .cardEnded(run: run, ask: nil, kind: .result, why: resultEnding(r1)))) }
+            if let u = undo(from: r0, to: r1) { out.append((t.runId, .undo(run: run, outcome: u))) }
+        }
+        return out
+    }
+
+    /// How a result card left open: answered (好的, or undo asked: its outcome is the `undo` event), or closed --
+    /// its time ran out (expired), or another task / the process ended it.
+    static func resultEnding(_ r: ResultCardState) -> UIEvent.Ending {
+        switch r {
+        case .closed(let why): return why == "linger" || why == "deadline" ? .expired : .ended
+        case .none: return .ended
+        default: return .answered
+        }
+    }
+
+    static func ending(_ o: CardState.Outcome) -> UIEvent.Ending {
+        switch o {
+        case .open, .answered: return .answered
+        case .void(let why):
+            switch why {
+            case CardState.timeout: return .expired
+            case "steer": return .steer
+            case "stop": return .stop
+            case "replaced": return .replaced
+            default: return .ended       // ended, task_done, session_exit, executor_exit
+            }
+        }
+    }
+
+    /// An undo's outcome, when the result card's state comes to one: undone (all of it), partial (some refused), cut
+    /// off (unknown), or expired (asked too late, or the card closed while undo was offered — by why).
+    static func undo(from r0: ResultCardState, to r1: ResultCardState) -> UIEvent.Undo? {
+        // (only from an undo offered or running: a task first seen, or seen already undone, says nothing)
+        switch r0 {
+        case .open(true, _), .undoing: break
+        default: return nil
+        }
+        switch r1 {
+        case .undone(let n, let total, let refused): return refused == nil && n == total ? .undone : .partial
+        case .undoUnknown: return .unknown
+        case .undoExpired: return .expiredLate
+        case .closed(let why):
+            guard r0.undoEnabled else { return nil }
+            switch why {
+            case "linger", "deadline": return .expiredTime
+            case "new_task": return .expiredNewTask
+            case "session_exit", "session_end": return .expiredHelperQuit
+            default: return .expiredOther
+            }
+        default: return nil
+        }
+    }
+}
+
+extension UIEvent.Option {
+    init(_ role: CardModel.Role) {
+        switch role {
+        case .approve: self = .approve
+        case .choice: self = .choice
+        case .skipStep: self = .skipStep
+        case .delegate: self = .delegate
+        case .cancel: self = .cancel
+        case .undo: self = .undo
+        case .other: self = .other
+        }
+    }
+}

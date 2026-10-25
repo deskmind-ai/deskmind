@@ -555,7 +555,12 @@ struct DeskMindApp: App {
     init() {
         // Before the helper model logs anything or sends its first request.
         ResolvedLang.current = AppLanguage.current()
+        // The UI event log, this Mac only (Shared/UIEvents.swift); the switch is read from its file.
+        UIEvents.log = UIEventLog(dir: DeskMindIPC.supportDir, file: UIEventLog.mainFile)
+        _uiLogOn = State(initialValue: UIEvents.enabled)
+        ActivationRecorder.start()
     }
+    @State private var uiLogOn = true
 
     @AppStorage(DecisionPanel.alwaysKey) private var showDecisions = false
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
@@ -592,6 +597,18 @@ struct DeskMindApp: App {
                 // Developer: the 0.5 main window (conversations, chat, the agent's column), off by default.
                 Toggle(L("Use the New Main Window (0.5 Preview)", lang: AppLanguage.resolve(language)),
                        isOn: $shellOn)
+                // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
+                Toggle(L("Record Interface Use on This Mac", lang: AppLanguage.resolve(language)),
+                       isOn: Binding(get: { uiLogOn }, set: { UIEvents.setEnabled($0) { now in uiLogOn = now } }))   // (as it is: a folder that refuses the switch's file keeps it)
+                Button(L("Clear Interface Use Records", lang: AppLanguage.resolve(language))) {
+                    // (done, or the user is told: the helper may hold the log's lock for a while)
+                    UIEvents.clear { ok in
+                        guard !ok else { return }
+                        let a = NSAlert()
+                        a.messageText = L("Couldn't clear the interface use records. Try again in a moment.", lang: AppLanguage.resolve(language))
+                        a.runModal()
+                    }
+                }
                 // The language of every screen and of what the session writes: the system's (default), or forced.
                 Picker(L("Language", lang: AppLanguage.resolve(language)), selection: $language) {
                     Text(L("Follow system", lang: AppLanguage.resolve(language))).tag(AppLanguage.system.rawValue)

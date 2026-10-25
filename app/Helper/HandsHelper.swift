@@ -283,7 +283,7 @@ func serve() {
             let req = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
             // The main app's language, sent with every request (status polls included): steps, hints and errors
             // follow a switch within a second. English until the first request says otherwise.
-            if let lang = (req["lang"] as? String).flatMap(ResolvedLang.init(rawValue:)) { ResolvedLang.current = lang }
+            if let lang = ResolvedLang.fromRequest(req["lang"] as? String) { ResolvedLang.current = lang }
             // Chat sessions (session.open / send / end, sessions.list / watch): SessionHost.
             if SessionHost.serve(req, fd: c) { return }
             if req["op"] as? String == "run" {
@@ -326,6 +326,8 @@ struct HandsHelper {
     static func main() {
         // cloud models turned off (models.off): a harness op run going stops by its normal stop path
         SessionHost.onModelsOff = { HarnessRun.stopForModelsOff() }
+        // The helper's own UI event log (Shared/UIEvents.swift), next to the main app's.
+        UIEvents.log = UIEventLog(dir: DeskMindIPC.supportDir, file: UIEventLog.helperFile)
         if let i = CommandLine.arguments.firstIndex(of: "--probe-ax-to"), i + 1 < CommandLine.arguments.count {
             // Diagnostic: an instance started by LaunchServices reports what TCC grants *it*.
             try? "\(AXIsProcessTrusted() ? 1 : 0) \(CGPreflightScreenCaptureAccess() ? 1 : 0)"
