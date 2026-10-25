@@ -921,7 +921,7 @@ final class ShellModel: ObservableObject {
     /// True when it picked or sent something (a key that did nothing then passes on: ShellModel.keyDown). A click on
     /// an option — by the mouse or VoiceOver's press, the same action — is a click on its card: a move into it.
     @discardableResult
-    func click(_ button: CardModel.Button, session: String? = nil, by: UIEvent.Pick = .click) -> Bool {
+    func click(_ button: CardModel.Button, session: String? = nil, by: UIEvent.Pick = .click, place: UIEvent.Place = .chat) -> Bool {
         // (`session`: the card's own -- the float answers the running task's card whatever session the window shows)
         guard let id = session ?? selected else { return false }
         if id == selected, let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
@@ -933,10 +933,10 @@ final class ShellModel: ObservableObject {
         let a = CardModel.answer(button)
         if a.askId == nil {
             let action = cards.respond(a, sessionId: id, in: client.state(id))
-            if action != .none { logPick(a, role: button.role, by: by) }
+            if action != .none { logPick(a, role: button.role, by: by, place: place) }
             return act(action, in: id)
         }
-        return pick(a, role: button.role, by: by, immediate: button.role == .cancel, in: id)
+        return pick(a, role: button.role, by: by, place: place, immediate: button.role == .cancel, in: id)
     }
 
     /// The user's own words on a card that takes them (its own field): on a card with an approve-type option, only once
@@ -998,24 +998,36 @@ final class ShellModel: ObservableObject {
     private func logChanges(from old: SessionState?, to new: SessionState) {
         for (k, e) in UIEvents.cardChanges(from: old, to: new, window: uiWindow(), liveSince: liveSince) {
             if case .cardShown = e { cardShownAt[k] = now() }
-            if case .cardEnded = e { cardShownAt[k] = nil; cardPickedAt[k] = nil }
+            if case .cardEnded = e { cardShownAt[k] = nil; cardPickedAt[k] = nil; placesLogged = placesLogged.filter { !$0.hasPrefix(k + "|") } }
             uiRecord(e)
         }
     }
 
+    /// The cards the float showed (CardPlacement.Shown), by card key and place: each logged once.
+    private var placesLogged: Set<String> = []
+    /// The float shows `card` (A2): whole (`.float`) or its title and 「去主窗口回答」 (`.floatSummary`) -- logged once
+    /// per card and place, as the chat's card_shown is (the time on screen still the card's first).
+    func cardPlaced(_ card: CardModel, place: UIEvent.Place, in s: SessionState) {
+        let key = Self.cardKey(card)
+        guard place != .chat, placesLogged.insert(key + "|" + place.rawValue).inserted else { return }
+        let c = card.askId.flatMap { a in s.task(card.runId)?.cards.first { $0.askId == a } }?.card
+        uiRecord(.cardShown(run: UIEvent.ID(card.runId), ask: card.askId.flatMap(UIEvent.ID.init), kind: UIEvent.CardKind(c?.kind ?? "result"),
+                            place: place, window: uiWindow(), options: card.buttons.count, details: c.map { $0.plan != nil || $0.consent != nil } ?? false))
+    }
+
     /// The card an answer is for, as the log names it.
     private func logCard(_ a: CardAnswer) -> (run: UIEvent.ID?, ask: UIEvent.ID?, kind: UIEvent.CardKind) {
-        let t = selected.flatMap { states[$0] }?.task(a.runId)
+        let t = states.values.lazy.compactMap { $0.task(a.runId) }.first
         let kind: String = a.askId.map { id in t?.cards.first { $0.askId == id }?.card.kind ?? "" } ?? "result"
         return (UIEvent.ID(a.runId), a.askId.flatMap(UIEvent.ID.init), UIEvent.CardKind(kind))
     }
 
-    private func logPick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick) {
+    private func logPick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, place: UIEvent.Place) {
         let c = logCard(a), key = CardStore.key(a)
         // (not known for a card shown before this model began watching: left out, never 0)
         let ms = cardShownAt[key].map { max(0, Int(((now() - $0) * 1000).rounded())) }
         cardPickedAt[key] = now()
-        uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: .chat, ms: ms))
+        uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: place, ms: ms))
     }
 
     /// The answer is being written: what the log will say once the helper took it (write's `sent`).
@@ -1353,10 +1365,10 @@ final class ShellModel: ObservableObject {
     /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run
     /// out — written once; or written now.
     @discardableResult
-    private func pick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, immediate: Bool, in id: String) -> Bool {
+    private func pick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, place: UIEvent.Place = .chat, immediate: Bool, in id: String) -> Bool {
         guard answerMayGo(CardStore.key(runId: a.runId, askId: a.askId)) else { return false }
         let action = cards.pick(a, sessionId: id, immediate: immediate, now: now(), offEpoch: client.offEpoch, in: client.state(id))
-        if action != .none { logPick(a, role: role, by: by) }   // (before a send at once, which logs its own)
+        if action != .none { logPick(a, role: role, by: by, place: place) }   // (before a send at once, which logs its own)
         return act(action, in: id)
     }
 

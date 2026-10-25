@@ -181,6 +181,12 @@ final class FloatController: ObservableObject {
             let pl = CardPlacement.place(p.phase, fitsFloat: fits(card), window: window, frontNow: frontNow, float: fact,
                                          notified: notices.notified(p.card.askId, now: t))
             placement = pl
+            // (logged once it can be seen: the panel on screen and not covered)
+            switch fact == .visible ? pl.shown : .ended {
+            case .floatCard: shell.cardPlaced(card, place: .float, in: s)
+            case .floatSummary: shell.cardPlaced(card, place: .floatSummary, in: s)
+            default: break
+            }
             // (just put up: whether it can be seen is not known yet -- no notification until it is)
             let settling = shownAt.map { Date().timeIntervalSince($0) < 0.3 } ?? false
             if !settling {
@@ -298,7 +304,7 @@ struct FloatCard: View {
         VStack(alignment: .leading, spacing: 6) {
             switch placement.shown {
             case .floatCard where phase.isExpiredOffer:
-                title(layout)
+                summaryTitle(layout)
                 Text(L("Expired · Answer now", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
                 if placement.takesAnswer, let ask = card.askId {
                     Button(L("Answer now", lang: lang)) { if FloatController.shared.answersNow() { shell.answerNow(card.runId, askId: ask, session: sessionId) } }
@@ -314,7 +320,7 @@ struct FloatCard: View {
                 }
                 options(layout)
             default:
-                title(layout)
+                summaryTitle(layout)
                 // (the card's own conversation selected first: the window shows it, not the one it showed -- #125 Codex)
                 Button(action: Activation.onClick { g in shell.select(sessionId); MainWindow.comeBack(g) }) { Text(L("Answer in the main window", lang: lang)) }
                     .buttonStyle(InkButtonStyle(prominent: true))
@@ -333,6 +339,15 @@ struct FloatCard: View {
                 .accessibilityHidden(true)
         }
     }
+
+    /// The title where the card is not shown whole (its summary, an expired card): at most two lines, so that the
+    /// button under it is always in the float -- with no headline the title is the card's whole text (#125 Codex
+    /// re-review at d08465d).
+    @ViewBuilder private func summaryTitle(_ layout: CardLayout) -> some View {
+        Text(layout.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
+            .lineLimit(FloatCard.summaryLines).truncationMode(.tail)
+    }
+    static let summaryLines = 2
 
     @ViewBuilder private func title(_ layout: CardLayout) -> some View {
         Text(layout.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
@@ -353,7 +368,7 @@ struct FloatCard: View {
     @ViewBuilder private func options(_ layout: CardLayout) -> some View {
         ForEach(layout.controls, id: \.index) { c in
             // (the window's state now, at the click: in front, the chat answers and this does not)
-            Button(c.button.text) { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId) } }
+            Button(c.button.text) { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId, place: .float) } }
                 .buttonStyle(InkButtonStyle(prominent: c.prominent))
                 .disabled(!placement.takesAnswer || !shell.canSend(c.button, session: sessionId))
         }

@@ -103,6 +103,29 @@ enum CardNoticesTests {
               && float.contains("visibleFrame.height") && !float.contains("fitsFloat: card.answerableInFloat"),
               "the float's fit: structure and measured height, against the room the panel has on its screen")
         check(float.contains("if let shell { update(shell, window: monitor.window, frontNow: FrontmostMonitor.observe() == .front, lang: AppLanguage.current()) }"), "a card laid out anew: placed and sized at once")
+        // #125 Codex re-review at d08465d: the summary's title is bounded, its button always under it
+        check(float.contains("static let summaryLines = 2") && float.contains(".lineLimit(FloatCard.summaryLines).truncationMode(.tail)"), "the summary title: two lines at most")
+        let shown = float.components(separatedBy: "struct FloatCard").last ?? ""
+        check(shown.components(separatedBy: "summaryTitle(layout)").count - 1 == 2 && !shown.contains("            default:\n                title(layout)"),
+              "the summary and the expired card use the bounded title")
+        // the float's places in the UI log (A2 with #123): shown whole / as its summary once it can be seen, its picks
+        check(float.contains("switch fact == .visible ? pl.shown : .ended {") && float.contains("shell.cardPlaced(card, place: .float, in: s)")
+              && float.contains("shell.cardPlaced(card, place: .floatSummary, in: s)") && float.contains("shell.click(c.button, session: sessionId, place: .float)"),
+              "the float logs where it shows the card and that its picks are the float's")
+        do {
+            let r = CardStoreTests.Rig(); r.ask("a1", "plan")
+            var log: [UIEvent] = []
+            r.m.uiRecord = { log.append($0) }
+            let c = r.model("a1")!
+            r.m.cardPlaced(c, place: .floatSummary, in: r.state); r.m.cardPlaced(c, place: .floatSummary, in: r.state)
+            r.m.cardPlaced(c, place: .float, in: r.state); r.m.cardPlaced(c, place: .chat, in: r.state)
+            let places = log.compactMap { e -> UIEvent.Place? in if case .cardShown(_, _, _, let p, _, _, _) = e { return p }; return nil }
+            check(places == [.floatSummary, .float], "each float place logged once, the chat's not from here: \(places)")
+            r.m.fit(c)
+            _ = r.m.click(c.buttons.first { $0.role == .approve }!, session: CardStoreTests.sid, place: .float)
+            let picks = log.compactMap { e -> UIEvent.Place? in if case .cardPick(_, _, _, _, _, let p, _) = e { return p }; return nil }
+            check(picks == [.float], "a float pick: place float: \(picks)")
+        }
         // ids are what they are about
         check(CardNotices.askId("ask_1") == "ask:ask_1" && CardNotices.runId("run_1") == "run:run_1", "ids by card and by run")
     }
