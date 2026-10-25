@@ -4,9 +4,10 @@
 //
 // Focus (handoff §3.1): nothing here activates the app or brings a window forward. Only the user's own clicks and
 // keys act; the composer never takes the keyboard by itself when a card arrives, and nothing here ever moves the
-// keyboard focus anywhere — no @FocusState, no .focused, no defaultFocus, no makeFirstResponder (ShellTests checks
-// this file): a card that arrives while the user types must never get the typing (its own field's Return would send
-// it as the answer).
+// keyboard focus by itself — no defaultFocus, no makeFirstResponder (ShellTests checks this file): a card that arrives
+// while the user types must never get the typing (its own field's Return would send it as the answer). The one focus
+// move is the user's own: Esc out of a card in card mode puts the typing back in the composer (ShellModel.focusRequest,
+// taken once by Composer: its one @FocusState, the only one the check allows).
 
 import AppKit
 import SwiftUI
@@ -598,6 +599,8 @@ struct CardBodyVisible: PreferenceKey {
 struct Composer: View {
     @ObservedObject var shell: ShellModel
     @Environment(\.lang) private var lang
+    /// The focus funnel's one consumer (ShellModel.focusRequest: the user's Esc out of a card).
+    @FocusState private var focused: Bool
 
     var body: some View {
         let mode = shell.composer
@@ -607,6 +610,8 @@ struct Composer: View {
                 .font(.system(size: 13.5))
                 .lineLimit(1...8)
                 .disabled(!mode.enabled || shell.opening)
+                .focused($focused)
+                .onChange(of: shell.focusRequest) { _, n in if shell.takeFocus(n) { focused = true } }
                 // Return: the field's own submit, which waits for an input method to commit what is being composed
                 // (pinyin's Return confirms the letters, never sends). ⌘Return sends now; ⇧Return / ⌥Return: a new line.
                 .onSubmit { shell.submit() }

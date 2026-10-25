@@ -681,9 +681,22 @@ enum ShellTests {
         let movers = ["@FocusState", ".focused(", "defaultFocus", "makeFirstResponder", "becomeFirstResponder", "prefersDefaultFocus", "focusScope", "FocusedValue",
                       "NSApp.activate", ".activate(", "makeKeyAndOrderFront", "orderFrontRegardless", "orderFront(", "makeKey()", "stepAside", "unhide("]
         for (n, code) in files {
-            let found = movers.filter { code.contains($0) }
+            var c = code
+            // the one focus move allowed (lead 10-25): the composer's @FocusState and its .focused binding, which take
+            // ShellModel.focusRequest (the user's Esc out of a card) -- once each, in Composer, and nowhere else
+            if n == "Main/MainSplitView.swift", let composer = c.range(of: "struct Composer: View {") {
+                let part = String(c[composer.lowerBound...])
+                let ok = part.components(separatedBy: "@FocusState private var focused: Bool").count == 2
+                    && part.components(separatedBy: ".focused($focused)").count == 2
+                    && part.contains("if shell.takeFocus(n) { focused = true }")
+                check(ok, "the composer's focus: one @FocusState, one binding, set only from takeFocus")
+                c = c.replacingOccurrences(of: "@FocusState private var focused: Bool", with: "").replacingOccurrences(of: ".focused($focused)", with: "")
+            }
+            let found = movers.filter { c.contains($0) }
             check(found.isEmpty, "\(n) moves no focus and brings nothing forward (a card's field is focused only by the user's click): \(found)")
         }
+        let shell = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Shared/Shell.swift"), encoding: .utf8)) ?? ""
+        check(shell.components(separatedBy: "focusRequest += 1").count == 2, "one place makes a focus request (Esc out of a card)")
         let all = files.map(\.code).joined(separator: "\n")
         check(all.contains("struct CardView") && all.contains("TextField(L(\"Or answer in your own words\""), "the check reads the card's own field's file")
     }

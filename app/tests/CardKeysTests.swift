@@ -13,6 +13,7 @@ enum CardKeysTests {
         DecisionTests.group("card-keys.table"); tableTests()
         DecisionTests.group("card-keys.model"); modelTests()
         DecisionTests.group("card-keys.review124"); review124Tests()
+        DecisionTests.group("card-keys.focus"); focusTests()
     }
 
     typealias K = CardKeys
@@ -166,5 +167,40 @@ enum CardKeysTests {
         f.m.setDetails(m, open: true)
         f.resumed("a1")
         check(f.m.cardHeights.isEmpty && f.m.openDetails.isEmpty, "answered: its height and fold forgotten")
+    }
+
+    /// The focus funnel (lead 10-25): only the user's Esc out of a card, in the key window, asks the composer for the
+    /// typing -- once; nothing a card does on its own asks, and a request goes when the window stops being the key one.
+    static func focusTests() {
+        typealias R = CardStoreTests.Rig
+        func pressEsc(_ r: R) { _ = r.m.keyDown(characters: Self.esc, commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false) }
+        let r = R(); r.ask("a1")
+        guard let m = r.model("a1") else { check(false, "the card"); return }
+        r.m.fit(m); r.m.cardShown(m); r.timers.advance(CardKeys.cardOnScreen + 0.1)
+        check(r.m.focusRequest == 0, "a card arrived: no focus request")
+        pressEsc(r)                                    // not in the card: Esc moves into it, asks nothing
+        check(r.m.keysActive(m) && r.m.focusRequest == 0, "Esc into the card: no request")
+        pressEsc(r)                                    // in the card: out of it, back to the composer
+        let n = r.m.focusRequest
+        check(n == 1 && !r.m.keysActive(m), "Esc out of the card: one request")
+        check(r.m.takeFocus(n) && !r.m.takeFocus(n), "taken once (a re-render does not focus again)")
+        // a request made, then the window stops being the key one before the composer takes it: dropped
+        r.m.enterCardMode(m)
+        pressEsc(r)
+        r.m.windowLeft()
+        check(!r.m.takeFocus(r.m.focusRequest), "the window no longer key: the pending request dropped")
+        r.m.windowReturned()
+        check(!r.m.takeFocus(r.m.focusRequest), "and not taken when it is key again")
+        // the card answered, voided, a new one: none of it asks
+        let before = r.m.focusRequest
+        r.resumed("a1"); r.ask("a2"); r.void("a2", "steer"); r.ask("a3")
+        check(r.m.focusRequest == before, "cards arriving, answered, voided: no request")
+        // Esc while typing in a field: the field's, no request
+        let q = R(); q.ask("a1")
+        if let qm = q.model("a1") {
+            q.m.fit(qm); q.m.cardShown(qm); q.timers.advance(2); q.m.enterCardMode(qm)
+            _ = q.m.keyDown(characters: Self.esc, commandLike: false, mainWindowIsKey: true, editingText: true, isRepeat: false)
+            check(q.m.focusRequest == 0, "Esc in a field: no request")
+        }
     }
 }

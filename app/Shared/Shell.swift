@@ -961,6 +961,17 @@ final class ShellModel: ObservableObject {
     private var shownAt: [String: Double] = [:]
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
+    /// The one way the window moves the keyboard focus (lead 10-25): the user's own Esc out of a card in card mode, in
+    /// the key window, asks once for the composer (Composer takes it). Nothing else makes a request -- never a card
+    /// arriving, ending or voided -- and a request is taken once (`takeFocus`: a re-render does not focus again) and
+    /// dropped when the window stops being the key one.
+    @Published private(set) var focusRequest = 0
+    private var focusTaken = 0
+    func takeFocus(_ n: Int) -> Bool {
+        guard n > focusTaken, windowKey else { return false }
+        focusTaken = n
+        return true
+    }
     /// The main window is the key window of the active app (CardKeyMonitor's notifications; true until told otherwise).
     @Published private(set) var windowKey = true
     /// A field in the main window is being edited / an input method composes there (CardKeyMonitor: on every key-down
@@ -1001,6 +1012,7 @@ final class ShellModel: ObservableObject {
     /// back): card mode ends; the cards on screen are not counted as shown until it returns.
     func windowLeft() {
         if windowKey { windowKey = false }
+        focusTaken = focusRequest              // (a request not taken yet is dropped: the window is not the key one)
         leaveCardMode()
     }
     /// The main window is the key window of the active app again (became key, the app active, restored): the cards on
@@ -1082,7 +1094,10 @@ final class ShellModel: ObservableObject {
             if let p { enterCardMode(p) }
             return false        // (Esc / Tab go on: the focus moves natively; Esc cancels nothing in a field here)
         case .leaveCard:
-            if keyCard != nil { keyCard = nil }
+            if keyCard != nil {
+                keyCard = nil
+                if windowKey { focusRequest += 1 }     // (the focus funnel: back to the composer)
+            }
             return false
         case .takeBack:
             guard let p else { return false }
