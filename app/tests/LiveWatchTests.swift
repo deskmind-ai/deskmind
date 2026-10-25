@@ -65,7 +65,8 @@ enum LiveWatchTests {
 
     final class FakeSource: LiveFrameSource {
         private let lock = NSLock()
-        private var _count = 0, _permission = true, _delay: Double = 0
+        private var _count = 0, _permission = true, _delay: Double = 0, _fail: Set<Int> = []
+        var fail: Set<Int> { get { lock.lock(); defer { lock.unlock() }; return _fail } set { lock.lock(); _fail = newValue; lock.unlock() } }
         private var _onCapture: (() -> Void)?
         var delay: Double { get { lock.lock(); defer { lock.unlock() }; return _delay } set { lock.lock(); _delay = newValue; lock.unlock() } }
         var onCapture: (() -> Void)? { get { lock.lock(); defer { lock.unlock() }; return _onCapture } set { lock.lock(); _onCapture = newValue; lock.unlock() } }
@@ -75,6 +76,7 @@ enum LiveWatchTests {
             lock.lock(); _count += 1; lock.unlock()
             if delay > 0 { Thread.sleep(forTimeInterval: delay) }
             onCapture?()
+            if fail.contains(window) { return nil }
             return (Data([0xFF, 0xD8, UInt8(window & 0xFF)]), 8, 6, [0, 0, 1, 1])
         }
     }
@@ -166,6 +168,18 @@ enum LiveWatchTests {
         let windows = frames(got).compactMap { (l: LiveFeed.Line) -> Int? in if case .frame(_, let w, _, _, _, _, _) = l { return w }; return nil }
         check(!windows.contains(5), "a picture taken of window 5 while the run moved to 6: dropped: \(windows)")
         e.close()
+        // #125 Codex review at 2f29d42: the run moves to a window that cannot be taken: watchers are told no picture
+        LiveWatch.reset()
+        fake.fail = [44]
+        LiveWatch.note(run: "run_d", ["event": "step", "object": "window:x#43"])
+        let w = Watch(run: "run_d")
+        got = w.lines(within: 0.5)
+        check(!frames(got).isEmpty, "window 43: pictures")
+        LiveWatch.note(run: "run_d", ["event": "step", "object": "window:x#44"])
+        got = w.lines(within: 0.6)
+        check(states(got).contains(.noPicture), "window 44 cannot be taken: no picture said (\(states(got)))")
+        w.close(); fake.fail = []
+        Thread.sleep(forTimeInterval: LiveFeed.grace + 0.3)
         // no Screen Recording: said, nothing taken
         LiveWatch.reset()
         fake.permission = false

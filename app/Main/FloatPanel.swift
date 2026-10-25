@@ -87,7 +87,7 @@ final class FloatController: ObservableObject {
     /// the window came forward the float answered for up to 0.75 s while the chat did too).
     func answersNow() -> Bool {
         guard let n = now, let card = n.card, let phase = n.phase else { return false }
-        let p = CardPlacement.place(phase, fitsFloat: card.answerableInFloat, window: monitor.window,
+        let p = CardPlacement.place(phase, fitsFloat: fits(card), window: monitor.window,
                                     frontNow: FrontmostMonitor.observe() == .front, float: visibility())
         return p.takesAnswer && p.shown == .floatCard
     }
@@ -111,6 +111,15 @@ final class FloatController: ObservableObject {
     private var lastCard: String?
     /// When the panel was put up: its occlusion is not known at once, and no notification is posted until it is.
     private var shownAt: Date?
+    /// Each card's whole content's height as the float lays it out (FloatCard measures it): whether it fits the float.
+    private var cardHeights: [String: Double] = [:]
+    func cardLaidOut(_ card: CardModel, height: Double) {
+        let k = ShellModel.cardKey(card)
+        if cardHeights[k] != height { cardHeights[k] = height }
+    }
+    private func fits(_ card: CardModel) -> Bool {
+        CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)])
+    }
     static let width: CGFloat = 304
 
     /// The state of the window and the sessions changed (or a second went by): the float, the island, the notifications.
@@ -159,7 +168,7 @@ final class FloatController: ObservableObject {
         let fact = visibility()
         var placement: CardPlacement?
         if let p = pinned, let card {
-            let pl = CardPlacement.place(p.phase, fitsFloat: card.answerableInFloat, window: window, frontNow: frontNow, float: fact,
+            let pl = CardPlacement.place(p.phase, fitsFloat: fits(card), window: window, frontNow: frontNow, float: fact,
                                          notified: notices.notified(p.card.askId, now: t))
             placement = pl
             // (just put up: whether it can be seen is not known yet -- no notification until it is)
@@ -255,8 +264,12 @@ struct FloatView: View {
     }
 }
 
-/// The card in the float: its options when placement says it is answerable here, else its title and the way to the
-/// main window; held for its take-back as in the chat; expired: 「已过期 · 现在回答」.
+/// The card in the float, laid out from the same CardLayout the chat uses (#125 Codex review at 2f29d42): its title,
+/// its text when nothing folds it, what goes beyond the request, every field of what an approval does -- the action,
+/// what it acts on, the site, what goes out -- then its options, when placement says it is answerable here. Its whole
+/// height is measured (a copy laid out unseen) and reported: a card that does not fit the float's room is the main
+/// window's (CardPlacement.fitsFloat), and the float gives its title and 「去主窗口回答」. Held: its take-back row;
+/// expired: 「已过期 · 现在回答」.
 struct FloatCard: View {
     @ObservedObject var shell: ShellModel
     let sessionId: String
@@ -268,38 +281,66 @@ struct FloatCard: View {
     var body: some View {
         let layout = CardLayout(card)
         VStack(alignment: .leading, spacing: 6) {
-            Text(layout.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
-            if let t = layout.shownText { Text(t).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true) }
-            if let c = layout.consent {
-                ForEach(Array(c.outgoing.enumerated()), id: \.offset) { _, o in
-                    Text(L("%@: %@", o.label, o.value, lang: lang)).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
-                }
-            }
             switch placement.shown {
             case .floatCard where phase.isExpiredOffer:
+                title(layout)
                 Text(L("Expired · Answer now", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
                 if placement.takesAnswer, let ask = card.askId {
                     Button(L("Answer now", lang: lang)) { if FloatController.shared.answersNow() { shell.answerNow(card.runId, askId: ask, session: sessionId) } }
                         .buttonStyle(InkButtonStyle(prominent: true))
                 }
             case .floatCard:
+                whole(layout)
                 if let held = phase.pending {
                     HStack {
                         Text(L("Picked: %@", CardView.picked(held, card: card), lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
                         Button(L("Take back", lang: lang)) { if FloatController.shared.answersNow() { shell.takeBack(card) } }.buttonStyle(InkButtonStyle(prominent: false))
                     }
                 }
-                ForEach(layout.controls, id: \.index) { c in
-                    // (the window's state now, at the click: in front, the chat answers and this does not)
-                    Button(c.button.text) { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId) } }
-                        .buttonStyle(InkButtonStyle(prominent: c.prominent))
-                        .disabled(!placement.takesAnswer || !shell.canSend(c.button, session: sessionId))
-                }
+                options(layout)
             default:
-                Button(action: Activation.onClick { MainWindow.comeBack($0) }) { Text(L("Answer in the main window", lang: lang)) }
+                title(layout)
+                // (the card's own conversation selected first: the window shows it, not the one it showed -- #125 Codex)
+                Button(action: Activation.onClick { g in shell.select(sessionId); MainWindow.comeBack(g) }) { Text(L("Answer in the main window", lang: lang)) }
                     .buttonStyle(InkButtonStyle(prominent: true))
                     .accessibilityHint(L("Brings DeskMind's window forward on the card", lang: lang))
             }
+        }
+        // the whole card's height, laid out unseen at the float's width: whether it fits
+        .background(alignment: .topLeading) {
+            VStack(alignment: .leading, spacing: 6) { whole(layout); options(layout) }
+                .frame(width: FloatController.width - 24, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .hidden()
+                .background(GeometryReader { g in Color.clear.preference(key: CardHeight.self, value: g.size.height) })
+                .onPreferenceChange(CardHeight.self) { h in FloatController.shared.cardLaidOut(card, height: h) }
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder private func title(_ layout: CardLayout) -> some View {
+        Text(layout.title).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Everything an approval does, as the chat shows it (folded text and plan steps aside: with a headline, the
+    /// beyond lines and the consent fields say it).
+    @ViewBuilder private func whole(_ layout: CardLayout) -> some View {
+        title(layout)
+        if let t = layout.shownText { Text(t).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true) }
+        if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
+        ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
+            Text(line).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+        }
+        if let c = layout.consent { ConsentFields(consent: c) }
+    }
+
+    @ViewBuilder private func options(_ layout: CardLayout) -> some View {
+        ForEach(layout.controls, id: \.index) { c in
+            // (the window's state now, at the click: in front, the chat answers and this does not)
+            Button(c.button.text) { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId) } }
+                .buttonStyle(InkButtonStyle(prominent: c.prominent))
+                .disabled(!placement.takesAnswer || !shell.canSend(c.button, session: sessionId))
         }
     }
 }

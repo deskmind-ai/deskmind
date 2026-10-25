@@ -578,6 +578,7 @@ enum L10n {
         "No picture of the window yet": "还没有窗口的画面",
         "Expired · Answer now": "已过期 · 现在回答",
         "Pop Out the Live View": "把实时画面弹出成浮窗",
+        "Return sends it to the task now": "回车立刻交给任务",
         "The live view is in the float": "实时画面在浮窗里",
         "Shows that conversation": "切到那个对话",
         "Picked: %@": "已选：%@",

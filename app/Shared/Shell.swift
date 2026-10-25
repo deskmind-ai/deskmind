@@ -37,9 +37,10 @@ enum ModelSettingsSaved {
 
 /// What Enter and ⌘Enter do in a session's state (handoff §1.3 输入框, §3.4, §3.7).
 struct ComposerMode: Equatable {
-    /// Typing is taken: false while a card waits (the card is answered on the card).
+    /// Typing is taken (A9, owner 10-25 decisions 3 + 4: while a task runs, a card open or not -- Return with text then
+    /// steers the task, and the card it voids ends by the run's word, ask_void{why: steer}).
     var enabled: Bool
-    /// A computer task runs: Enter queues (the session holds it until the task is done), ⌘Enter sends it now (steer).
+    /// A computer task runs: Return sends the words to it now (steer); no queue, ⌘Return is no other gesture.
     var taskRunning: Bool
     /// A reply streams and no task runs: Enter sends nothing (the session would refuse it busy); Stop stops the reply.
     var replying: Bool
@@ -49,7 +50,7 @@ struct ComposerMode: Equatable {
     static func of(_ s: SessionState?) -> ComposerMode {
         guard let s else { return ComposerMode(enabled: true, taskRunning: false, replying: false) }
         let task = s.runningTask != nil
-        return ComposerMode(enabled: s.composerEnabled, taskRunning: task, replying: !task && s.streamingMessage != nil)
+        return ComposerMode(enabled: s.composerEnabled || task, taskRunning: task, replying: !task && s.streamingMessage != nil)
     }
 
     /// The `/cua` command: the words after it, when the text is that command (it begins with `/cua` and a space or
@@ -67,8 +68,8 @@ struct ComposerMode: Equatable {
     func control(_ text: String, sendNow: Bool) -> SessionControl? {
         guard enabled, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         if taskRunning {
-            // ⌘Enter: to the running task now; Enter: queued by the session (a `/cua` too: one task per session)
-            return sendNow ? .steer(text) : .say(text)
+            // Return (⌘Return the same): to the running task now -- a card open is voided first, by the session (H5)
+            return .steer(text)
         }
         if replying { return nil }
         if let words = Self.cuaCommand(text) { return words.isEmpty ? nil : .cua(words) }
@@ -678,6 +679,7 @@ final class ShellModel: ObservableObject {
                 var c = self.cards
                 c.settle(id, self.client.state(id))
                 if c != self.cards { self.cards = c; self.syncOwnReqs() }
+                self.settleSteers(id, self.client.state(id))
             }
         }
         // the open session's problems are seen as they come (once per new stored line or process end: never a loop of
@@ -794,10 +796,25 @@ final class ShellModel: ObservableObject {
         // (from here the words are the session's or an unsent bubble of it — SessionClient.send — never the composer's
         // again: a draft typed meanwhile is never overwritten)
         draft = ""
+        // a steer while a card is open (A9): in one step, the held pick goes (its timer finds nothing to send), the steer
+        // is marked on its way (the card takes nothing), then it is written
+        var steerKey: String?, clientId: String?
+        if case .steer = control, let s = states[id], let p = cards.pinned(s), p.card.outcome == .open {
+            let key = Self.cardKey(runId: p.runId, askId: p.card.askId)
+            cards.stopping(p.runId)
+            let cid = client.newClientId()
+            steering[key] = (id, cid)
+            steerKey = key; clientId = cid
+        }
         work { [weak self] in
             guard let self else { return }
-            let r = self.client.send(control, to: id)
-            if r != .sent { self.deliver { self.notSent(r, text: text, in: id) } }
+            let r = self.client.send(control, to: id, clientId: clientId)
+            if r != .sent {
+                self.deliver {
+                    if let k = steerKey { self.steering[k] = nil }
+                    self.notSent(r, text: text, in: id)
+                }
+            }
         }
     }
 
@@ -969,6 +986,11 @@ final class ShellModel: ObservableObject {
     private var shownAt: [String: Double] = [:]
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
+    /// A steer of ours on its way while a card is open (A9), by card key: its client id. The card's options take nothing
+    /// meanwhile (canSend). Its end, on every path: the send did not go, the session took the line, the session refused
+    /// it (card_open from a harness before H5: the words shown not delivered, never sent again), or the card ended -- the
+    /// card's own ending only ever the run's word.
+    @Published private(set) var steering: [String: (session: String, clientId: String)] = [:]
     /// The one way the window moves the keyboard focus (lead 10-25): the user's own Esc out of a card in card mode, in
     /// the key window, asks once for the composer (Composer takes it). Nothing else makes a request -- never a card
     /// arriving, ending or voided -- and a request is taken once (`takeFocus`: a re-render does not focus again) and
@@ -1173,6 +1195,17 @@ final class ShellModel: ObservableObject {
     static func cardKey(runId: String, askId: String?) -> String { CardStore.key(runId: runId, askId: askId) }
     static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
 
+    /// A steer on its way ends (A9): the session took it or refused it (by its client id), or the card is no longer
+    /// open. UI queue.
+    private func settleSteers(_ id: String, _ s: SessionState) {
+        for (key, st) in steering where st.session == id {
+            let refused = s.outbox.contains { $0.id == st.clientId && $0.refused != nil }
+            let taken = s.taken.contains(st.clientId)
+            let open = cards.pinned(s).map { Self.cardKey(runId: $0.runId, askId: $0.card.askId) == key && $0.card.outcome == .open } ?? false
+            if refused || taken || !open { steering[key] = nil }
+        }
+    }
+
     /// The layout facts of cards no longer pinned anywhere (nor an open result card) go. UI queue.
     private func dropLayoutFacts() {
         let pinnedKeys = Set(states.values.compactMap { cards.pinned($0) }.map { Self.cardKey(runId: $0.runId, askId: $0.card.askId) })
@@ -1223,6 +1256,7 @@ final class ShellModel: ObservableObject {
     /// that does not fit -- keyWorks.)
     func canSend(_ b: CardModel.Button, session: String? = nil) -> Bool {
         guard let id = session ?? selected else { return false }
+        if steering[Self.cardKey(runId: b.runId, askId: b.askId)] != nil { return false }     // (a steer on its way: A9)
         let s = client.state(id)
         if !b.role.reachesNoModel && !cloudOn() { return false }
         let a = CardModel.answer(b)

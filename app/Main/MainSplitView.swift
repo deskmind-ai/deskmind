@@ -630,7 +630,7 @@ struct Composer: View {
                     return .ignored
                 }
                 .accessibilityLabel(L("Message", lang: lang))
-                .accessibilityHint(mode.taskRunning ? L("Return queues it for after the task; Command-Return sends it to the task now", lang: lang)
+                .accessibilityHint(mode.taskRunning ? L("Return sends it to the task now", lang: lang)
                                                     : L("Return sends; start with /cua to run a computer task", lang: lang))
             if mode.canStop {
                 Button(L("Stop", lang: lang)) { shell.stop() }
@@ -638,7 +638,7 @@ struct Composer: View {
                     .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
             }
             if !mode.replying {
-                Button(mode.taskRunning ? L("Queue", lang: lang) : L("Send", lang: lang)) { shell.submit() }
+                Button(L("Send", lang: lang)) { shell.submit() }
                     .buttonStyle(InkButtonStyle(prominent: true))
                     .disabled(mode.control(shell.draft, sendNow: false) == nil || shell.opening)
             }

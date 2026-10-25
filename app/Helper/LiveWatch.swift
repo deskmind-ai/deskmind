@@ -161,7 +161,17 @@ enum LiveWatch {
             if say { told[run] = st }
             lock.unlock()
             if say { for c in cs { c.send(LiveFeed.stateLine(run: run, st)) } }
-            if st == .streaming, let t = target, let pic = src?.capture(window: t.id) {
+            let taken = st == .streaming ? target.flatMap { t in src?.capture(window: t.id).map { (t, $0) } } : nil
+            if st == .streaming, taken == nil {
+                // (#125 Codex: the window cannot be taken -- gone, hidden, not capturable: watchers are told, once, so an
+                // older picture is never shown as live)
+                lock.lock()
+                let say = told[run] != .noPicture && feed.captures(run, now: now())
+                if say { told[run] = .noPicture }
+                let cs2 = conns[run] ?? []
+                lock.unlock()
+                if say { for c in cs2 { c.send(LiveFeed.stateLine(run: run, .noPicture)) } }
+            } else if let (t, pic) = taken {
                 // still wanted, and still of that window (the run may have moved on, or ended, meanwhile)?
                 lock.lock()
                 let keep = feed.captures(run, now: now()) && feed.windows[run]?.epoch == t.epoch

@@ -14,6 +14,7 @@ enum CardKeysTests {
         DecisionTests.group("card-keys.model"); modelTests()
         DecisionTests.group("card-keys.review124"); review124Tests()
         DecisionTests.group("card-keys.focus"); focusTests()
+        DecisionTests.group("card-keys.steer"); steerTests()
     }
 
     typealias K = CardKeys
@@ -251,5 +252,44 @@ enum CardKeysTests {
             _ = q.m.keyDown(characters: Self.esc, commandLike: false, mainWindowIsKey: true, editingText: true, isRepeat: false)
             check(q.m.focusRequest == 0, "Esc in a field: no request")
         }
+    }
+
+    /// A9 (owner 10-25, plan §8): Return with words while a card waits steers the task. In one step the held pick goes
+    /// (never sent), the steer is marked on its way (the card's options take nothing), then it is written; the mark ends
+    /// on every path -- refused (card_open, a harness before H5: the words shown not delivered, never sent again by
+    /// themselves), taken, the card ended -- and the card's own ending is only the run's word (ask_void why steer).
+    static func steerTests() {
+        typealias R = CardStoreTests.Rig
+        let r = R(); r.ask("a1")
+        guard let m = r.model("a1") else { check(false, "the card"); return }
+        r.m.fit(m)
+        let approve = m.buttons.first { $0.role == .approve }!
+        check(r.m.click(approve) && r.phase("a1")?.pending != nil, "a pick held")
+        r.m.client.newClientId = { "c_steer" }
+        r.m.draft = "改成发给小李"
+        check(r.m.composer.enabled, "the composer takes words while the card waits")
+        r.m.submit()
+        check(r.phase("a1") == .open, "Return: the held pick dropped")
+        r.timers.advance(CardStore.takeBack + 1)
+        check(r.wire.answers("a1").isEmpty, "and never sent")
+        check(r.m.steering.values.contains { $0.clientId == "c_steer" } && !r.m.canSend(approve), "the steer on its way: the card takes nothing")
+        check(r.wire.count("steer") == 1, "the steer written: \(r.wire.count("steer"))")
+        // a harness before H5 refuses it: the card takes picks again, the words not delivered (and not sent again)
+        r.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "card_open", "control": "steer", "client_id": "c_steer", "text": "x"])
+        check(r.m.steering.isEmpty && r.m.canSend(approve), "refused card_open: the card takes picks again")
+        check(r.m.client.state(CardStoreTests.sid).unsent.contains { $0.id == "c_steer" && $0.refused == "card_open" } && r.wire.count("steer") == 1,
+              "the words shown not delivered, not sent again")
+        // again; this time the session takes it and voids the card (H5): the card ends by the run's word
+        r.m.client.newClientId = { "c_steer2" }
+        r.m.draft = "还是发给老王"
+        r.m.submit()
+        check(!r.m.steering.isEmpty, "on its way")
+        r.void("a1", "steer")
+        check(r.m.steering.isEmpty && r.phase("a1") == .voided("steer"), "ask_void why steer: the card ended, the mark gone")
+        // an empty Return does nothing
+        let q = R(); q.ask("a1")
+        q.m.draft = "   "
+        q.m.submit()
+        check(q.wire.count("steer") == 0 && q.m.steering.isEmpty && q.phase("a1") == .open, "an empty Return: nothing")
     }
 }

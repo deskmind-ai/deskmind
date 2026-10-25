@@ -92,6 +92,15 @@ enum CardNoticesTests {
         let buttons = float.components(separatedBy: "struct FloatCard").last ?? ""
         check(buttons.components(separatedBy: "if FloatController.shared.answersNow() {").count - 1 == 3 && float.contains("frontNow: FrontmostMonitor.observe() == .front, float: visibility())"),
               "every float answer button checks the window's state now")
+        // #125 Codex review at 2f29d42: the float's card says all an approval does, from the chat's CardLayout; the way
+        // to the main window selects the card's own conversation first
+        let floatCard = float.components(separatedBy: "struct FloatCard").last ?? ""
+        check(floatCard.contains("if let c = layout.consent { ConsentFields(consent: c) }") && floatCard.contains("ForEach(Array(layout.beyond.enumerated())")
+              && floatCard.contains("if let t = layout.shownText") && floatCard.contains("FloatController.shared.cardLaidOut(card, height: h)"),
+              "the float card: shown text, beyond lines, every consent field, its height measured")
+        check(floatCard.contains("shell.select(sessionId); MainWindow.comeBack(g)"), "去主窗口回答: the card's conversation selected, then the window")
+        check(float.contains("CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)])")
+              && !float.contains("fitsFloat: card.answerableInFloat"), "the float's fit: structure and measured height")
         // ids are what they are about
         check(CardNotices.askId("ask_1") == "ask:ask_1" && CardNotices.runId("run_1") == "run:run_1", "ids by card and by run")
     }

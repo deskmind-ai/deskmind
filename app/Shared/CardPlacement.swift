@@ -59,6 +59,16 @@ struct CardPlacement: Equatable {
     var island: Island
     var notification: Notification
 
+    /// The float's card fits it (#125 Codex review at 2f29d42): its structure allows the float (CardModel.answerableInFloat)
+    /// and its whole content -- everything an approval does, laid out as the chat lays it out -- was measured no taller
+    /// than the float's room. Not measured yet: it does not (the float gives its title and 「去主窗口回答」 meanwhile).
+    static func fitsFloat(structure: Bool, height: Double?, room: Double = floatRoom) -> Bool {
+        guard structure, let h = height else { return false }
+        return h > 0 && h <= room
+    }
+    /// The float's card's room, in points.
+    static let floatRoom: Double = 320
+
     /// A notification not answered in this long is shown once more (plan §1.4).
     static let remindAfter: Double = 20
 

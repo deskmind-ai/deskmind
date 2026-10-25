@@ -254,19 +254,20 @@ enum ShellTests {
         check(replying.enabled && replying.replying && replying.canStop, "a reply streams: Stop available")
         check(replying.control("还有", sendNow: false) == nil, "a reply streams: Enter sends nothing (the text stays)")
 
-        // a card waits: no typing, Stop always
+        // a card waits (A9, owner 10-25): the composer takes words; Return steers (the card it voids ends by the run's word)
         let card = SessionTests.after("task-card", SessionTests.isKind("ask"))!
         let waiting = ComposerMode.of(card)
-        check(!waiting.enabled && waiting.taskRunning && waiting.canStop, "a card waits: composer off, Stop on")
-        check(waiting.control("顺便", sendNow: false) == nil && waiting.control("顺便", sendNow: true) == nil, "a card waits: neither key sends")
+        check(waiting.enabled && waiting.taskRunning && waiting.canStop, "a card waits: composer on, Stop on")
+        check(waiting.control("顺便", sendNow: false) == .steer("顺便") && waiting.control("顺便", sendNow: true) == .steer("顺便"), "a card waits: Return steers (⌘Return the same)")
+        check(waiting.control("   ", sendNow: false) == nil, "an empty Return: nothing")
 
-        // a task runs, no card: Enter queues (say), ⌘Enter steers
+        // a task runs, no card: Return steers (no queue; ⌘Return is no other gesture)
         let running = SessionTests.after("task-card", SessionTests.isKind("resumed"))!
         let r = ComposerMode.of(running)
         check(r.enabled && r.taskRunning, "a task runs without a card: typing")
-        check(r.control("改成蓝色", sendNow: false) == .say("改成蓝色"), "Enter while a task runs: say (the session queues it)")
-        check(r.control("改成蓝色", sendNow: true) == .steer("改成蓝色"), "⌘Enter while a task runs: steer")
-        check(r.control("/cua 另一件事", sendNow: false) == .say("/cua 另一件事"), "/cua while a task runs: queued as typed (one task per session)")
+        check(r.control("改成蓝色", sendNow: false) == .steer("改成蓝色"), "Return while a task runs: steer")
+        check(r.control("改成蓝色", sendNow: true) == .steer("改成蓝色"), "⌘Return while a task runs: steer")
+        check(r.control("/cua 另一件事", sendNow: false) == .steer("/cua 另一件事"), "/cua while a task runs: the words to the task, as typed")
 
         // the model: submit while a card waits sends nothing and keeps the text
         let mock = Mock()
@@ -276,7 +277,7 @@ enum ShellTests {
         m.selected = "ses_t"
         m.draft = "顺便说一句"
         m.submit()
-        check(sends(mock) == 0 && m.draft == "顺便说一句", "a card waits: nothing sent, the text stays")
+        check((sent(mock)?["type"] as? String) == "steer" && m.draft.isEmpty, "a card waits: Return steers (\(String(describing: sent(mock))))")
         // Stop is always sent, to the running task
         m.stop()
         check(sent(mock) as NSDictionary? == ["type": "stop", "run_id": "run_041c0f37"] as NSDictionary, "Stop while a card waits: the task's stop (\(String(describing: sent(mock))))")
@@ -355,10 +356,11 @@ enum ShellTests {
         check(sends(mock2) == 0, "send now while a card waits: not sent")
         w.queueCancel("q1")
         check(sent(mock2) as NSDictionary? == ["type": "queue_cancel", "id": "q1"] as NSDictionary, "cancel while a card waits: sent (it is not typing)")
-        // Enter while a task runs: a say (queued by the session), the composer emptied
+        // Return while a task runs: a steer (A9), the composer emptied
         m.draft = "再补一句"
         m.submit()
-        check(sent(mock) as NSDictionary? == ["type": "say", "text": "再补一句", "client_id": "c_1"] as NSDictionary && m.draft.isEmpty, "Enter: say, queued by the session")
+        check(sent(mock) as NSDictionary? == ["type": "steer", "text": "再补一句", "run_id": "run_041c0f37", "client_id": "c_1"] as NSDictionary && m.draft.isEmpty,
+              "Return: steer, to the running task: \(String(describing: sent(mock)))")
         m.draft = "现在就改"
         m.submit(sendNow: true)
         check(sent(mock) as NSDictionary? == ["type": "steer", "text": "现在就改", "run_id": "run_041c0f37", "client_id": "c_1"] as NSDictionary, "⌘Enter: steer, to the running task: \(String(describing: sent(mock)))")
@@ -2603,8 +2605,11 @@ enum ShellTests {
             if case .card = c.after { m.client.feed(fixture[askAt]) }    // a card comes before the send goes
             for f in later { f() }; later = []
             switch c.after {
+            case .card:
+                // (A9: the steer goes; a harness before H5 refuses it card_open)
+                m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": "card_open", "control": "steer", "client_id": "c_msg", "text": "x"])
             case .refusal(let code):
-                m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": code, "control": "say", "client_id": "c_msg", "text": "x"])
+                m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": code, "control": "steer", "client_id": "c_msg", "text": "x"])
             case .accepted:
                 m.client.feed(["kind": "session.message", "session_id": "ses_t", "seq": 99, "msg_id": "u_msg", "role": "user", "text": msg, "client_id": "c_msg"])
             default: break
@@ -2634,10 +2639,13 @@ enum ShellTests {
             for l in fixture.prefix(askAt) { m.client.feed(l) }
             let run = m.client.state("ses_t").runningTask?.runId ?? ""
             m.selected = "ses_t"
+            m.client.newClientId = { "c_steer" }
             m.draft = "改成蓝色"
-            m.submit(sendNow: true)                                      // ⌘Enter: a steer of the running task
+            m.submit()                                                   // Return: a steer of the running task (A9)
             m.client.feed(fixture[askAt])                                // a card comes before it goes
             for f in later { f() }; later = []
+            // (it goes; a harness before H5 refuses it card_open -- shown not delivered, never sent again by itself)
+            m.client.feed(["kind": "session.error", "session_id": "ses_t", "code": "card_open", "control": "steer", "client_id": "c_steer", "text": "x"])
             let bubble = m.client.state("ses_t").unsent.first
             check(bubble?.refused == "card_open", "the steer: an unsent bubble, card_open")
             for l in fixture[(askAt + 1)...resumedAt] { m.client.feed(l) }   // the card answered; the task goes on

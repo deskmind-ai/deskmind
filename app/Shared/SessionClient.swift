@@ -708,7 +708,9 @@ final class SessionClient {
             }
             return .refused(why)
         }
-        if control.isTyping && !s.composerEnabled { return refusedBeforeHeld("card_open") }
+        // (a steer goes while a card is open -- A9: the session voids the card first, H5, or refuses card_open, a harness
+        // before it; other typing waits for the card)
+        if control.isTyping && !s.composerEnabled, !{ if case .steer = control { return true }; return false }() { return refusedBeforeHeld("card_open") }
         if case .answer(let a, _) = control, let why = Self.refusal(a, in: s) { return .refused(why) }
         if case .reask(let r) = control, let why = Self.reaskRefusal(r, in: s) { return .refused(why) }
         if s.exited != nil, let why = Self.goneWithProcess(control, in: s) { return refusedBeforeHeld(why == "no task is running" ? "task_ended" : why) }

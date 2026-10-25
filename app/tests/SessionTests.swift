@@ -552,10 +552,20 @@ enum SessionTests {
         // a card waits: typing is not sent; a stale answer is not sent; the open card's answer is
         let n = mock.requests.count
         check(client.send(.say("顺便说一句"), to: "ses_t") == .refused("card_open") && mock.requests.count == n, "say while a card waits: not sent")
-        check(client.send(.steer("改成别的"), to: "ses_t") == .refused("card_open"), "steer too")
-        // (never dropped: both kept as unsent bubbles, card_open — the user removes them here)
+        // (never dropped: kept as an unsent bubble, card_open — the user removes it here)
         let held = client.state("ses_t").unsent
-        check(held.map(\.text) == ["顺便说一句", "改成别的"] && held.allSatisfy { $0.refused == "card_open" }, "both kept unsent: \(held.map(\.text))")
+        check(held.map(\.text) == ["顺便说一句"] && held.allSatisfy { $0.refused == "card_open" }, "kept unsent: \(held.map(\.text))")
+        // A9 (owner 10-25): a steer goes while a card waits -- the session voids the card first (H5), or refuses
+        // card_open (a harness before it); the client never refuses it itself (another client, the same stream)
+        do {
+            let m2 = MockTransport()
+            m2.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_t"], SessionClient.Op.send: ["ok": true]]
+            let c2 = SessionClient(transport: m2)
+            _ = c2.open(sessionId: "ses_t")
+            for l in recorded[...askAt] { c2.feed(l) }
+            check(c2.send(.steer("改成别的"), to: "ses_t") == .sent && (m2.requests.last?["line"] as? [String: Any])?["type"] as? String == "steer",
+                  "steer while a card waits: sent")
+        }
         for o in held { client.dropUnsent(o.id, in: "ses_t") }
         check(client.send(.stop(), to: "ses_t") == .sent, "stop is always sent")
         let (runId, open) = client.state("ses_t").openCard!
