@@ -100,40 +100,84 @@ protocol TaskRecorder: AnyObject {
 /// (`recording.json`), which is how the app learns it. A new start while a movie is still being made is fine: the
 /// capture is free. Pure: what happened, to what the helper does (Helper/ScreenRecorder.swift follows it).
 ///
-/// | what happened                     | capture                 | the helper                                   |
-/// |-----------------------------------|-------------------------|----------------------------------------------|
-/// | start for run r                   | r (one before: ended)   | end the one before (its movie made), capture |
-/// | r's task ended (any way)          | none if it was r's      | end the capture, make r's movie              |
-/// | cancel (for r, or any)            | none if it matches      | end the capture, make its movie              |
-/// | the helper quits                  | none                    | end the capture                              |
+/// One state machine under the recorder's one lock (#127 Codex at 29841c4: a start registered, unlocked, then set up
+/// the capture under a second lock -- a stop in the gap left a capture nobody owned). A start is accepted only for a
+/// run the helper itself knows is live now and that has not ended or been cancelled (a late start, sent before the
+/// run's end and come after it, is refused): ends and cancels are kept per run (tombstones) even when nothing records.
+/// The start's token is checked again, under the lock, once the capture is set up (outside it): a stop, an end or a
+/// newer start meanwhile, and the starter tears its capture down.
+///
+/// | state                   | start(r)                      | set up (token)          | r ended / cancelled    |
+/// |-------------------------|-------------------------------|-------------------------|------------------------|
+/// | idle                    | r live, no tombstone:         | --                      | tombstone              |
+/// |                         |   starting(r, t); else refused |                         |                        |
+/// | starting(r, t)          | the newer: starting(r2, t2)   | t: recording(r, t);     | idle (+ tombstone): the |
+/// |                         |   (t torn down when it is set |   any other: torn down  |   starter tears down   |
+/// |                         |   up)                         |                         |                        |
+/// | recording(r, t)         | the newer: r's movie, then    | --                      | idle; r's movie        |
+/// |                         |   starting(r2, t2)            |                         |                        |
+/// | the helper quits        | idle; the capture ended       |                         |                        |
 struct RecordingOwner: Equatable {
     /// Written beside the run when its movie is made: {"path": …}.
     static let savedFile = "recording.json"
-    enum Event: Equatable { case start(run: String?), runEnded(run: String), cancel(run: String?), quit }
-    enum Do: Equatable { case capture(run: String?), end(run: String?) }
-    /// The run being captured (`.some(nil)`: an op run's, bound to none).
-    private(set) var capturing: String??
+
+    enum State: Equatable { case idle, starting(run: String?, token: Int), recording(run: String?, token: Int) }
+    enum Event: Equatable {
+        /// `live`: the helper's own word that the run is running now (SessionHost); an op run's (run nil): always.
+        case start(run: String?, live: Bool)
+        /// The capture of `token` is set up (`ok`) or could not be.
+        case setUp(token: Int, ok: Bool)
+        case runEnded(run: String), cancel(run: String?), quit
+    }
+    enum Do: Equatable {
+        case refuse
+        /// Set up a capture for the run under this token (outside the lock).
+        case setUp(run: String?, token: Int)
+        /// Keep the capture just set up: it is the active one.
+        case keep(token: Int)
+        /// Throw away the capture just set up (a stop, an end or a newer start came first).
+        case tearDown(token: Int)
+        /// End the active capture and make its movie.
+        case end(run: String?)
+    }
+    private(set) var state: State = .idle
+    /// Runs ended or cancelled, for the session's life: never recorded after.
+    private(set) var tombstones: Set<String> = []
+    private var lastToken = 0
+
+    /// The run being captured (`.some(nil)`: an op run's).
+    var capturing: String?? { if case .recording(let r, _) = state { return .some(r) }; return nil }
 
     mutating func apply(_ e: Event) -> [Do] {
         switch e {
-        case .start(let run):
+        case .start(let run, let live):
+            if let r = run, tombstones.contains(r) || !live { return [.refuse] }
             var out: [Do] = []
-            if let c = capturing { out.append(.end(run: c)) }
-            capturing = .some(run)
-            out.append(.capture(run: run))
+            if case .recording(let r, _) = state { out.append(.end(run: r)) }
+            lastToken += 1
+            state = .starting(run: run, token: lastToken)
+            out.append(.setUp(run: run, token: lastToken))
             return out
+        case .setUp(let token, let ok):
+            guard case .starting(let r, let t) = state, t == token else { return ok ? [.tearDown(token: token)] : [] }
+            state = ok ? .recording(run: r, token: t) : .idle
+            return ok ? [.keep(token: token)] : []
         case .runEnded(let run):
-            guard capturing == .some(run) else { return [] }
-            capturing = nil
-            return [.end(run: run)]
+            tombstones.insert(run)
+            return stop(if: { $0 == run })
         case .cancel(let run):
-            guard let c = capturing, run == nil || c == run else { return [] }
-            capturing = nil
-            return [.end(run: c)]
+            if let run { tombstones.insert(run) }
+            return stop(if: { run == nil || $0 == run })
         case .quit:
-            guard let c = capturing else { return [] }
-            capturing = nil
-            return [.end(run: c)]
+            return stop(if: { _ in true })
+        }
+    }
+
+    private mutating func stop(if matches: (String?) -> Bool) -> [Do] {
+        switch state {
+        case .starting(let r, _) where matches(r): state = .idle; return []       // (the starter tears down at its check)
+        case .recording(let r, _) where matches(r): state = .idle; return [.end(run: r)]
+        default: return []
         }
     }
 }

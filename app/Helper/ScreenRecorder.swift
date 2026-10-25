@@ -112,14 +112,20 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
     static func start(_ req: [String: Any]) -> [String: Any] {
         guard CGPreflightScreenCaptureAccess() else { return ["ok": false, "error": "no_screen_recording"] }
         let forRun = req["for_run"] as? String
+        // (the helper's own word that the run runs now: a start that comes after its end is refused)
+        let live = forRun.map { SessionHost.liveRuns().contains($0) } ?? true
         lock.lock()
+        let first = owner.apply(.start(run: forRun, live: live))
+        guard let token = first.compactMap({ if case .setUp(_, let t) = $0 { return t }; return nil }).first else {
+            lock.unlock()
+            return ["ok": false, "code": "not_live", "error": "the task is not running (ended, or its recording cancelled)"]
+        }
         // (one before, never stopped -- its run's end lost, the app quit mid-run: its movie made now, in the background)
-        let ends = owner.apply(.start(run: forRun))
-        let stale = ends.contains { if case .end = $0 { return true }; return false } ? active : nil
+        let stale = first.contains(.end(run: active?.forRun)) ? active : nil
         if stale != nil { active = nil }
         lock.unlock()
         if let stale { finish(stale) }
-        lock.lock(); defer { lock.unlock() }
+        // set up outside the lock (it takes a moment); its token checked again under it after
         let folder = URL(fileURLWithPath: req["path"] as? String ?? "")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let rec = ScreenRecorder(folder: folder, bundles: Set(req["bundles"] as? [String] ?? []),
@@ -130,8 +136,17 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         rec.forRun = forRun
         rec.session = req["session_id"] as? String
         rec.preflight = Self.preflight(bundles: rec.bundles)
-        if let error = rec.begin() { _ = owner.apply(.cancel(run: forRun)); return ["ok": false, "error": error] }
-        active = rec
+        let error = rec.begin()
+        lock.lock()
+        let then = owner.apply(.setUp(token: token, ok: error == nil))
+        if then == [.keep(token: token)] { active = rec }
+        lock.unlock()
+        if let error { return ["ok": false, "error": error] }
+        guard then == [.keep(token: token)] else {
+            // (a stop, an end or a newer start came while it was set up: thrown away, nothing kept)
+            rec.endCapture()
+            return ["ok": false, "code": "cancelled", "error": "stopped while it started"]
+        }
         return ["ok": true, "path": folder.path, "preflight": rec.preflight]
     }
 

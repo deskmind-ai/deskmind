@@ -37,65 +37,80 @@ enum RecordingTests {
         check(d.apply(.taskStarted(session: "old", run: "x")).isEmpty, "(#127 delta) the last choice never turns an existing conversation on")
     }
 
-    /// (#127 Codex at 24cbf17) The helper owns the recording (RecordingOwner, the model Helper/ScreenRecorder.swift
-    /// follows): random lifecycles with the app's messages lost (a start, a cancel -- the app asks a cancel again until
-    /// it is answered), runs ending every way, the helper quitting, movies made in the background. Whenever no run wants
-    /// recording, the capture has stopped within that event; consecutive tasks each get their own movie.
+    /// (#127 Codex at 24cbf17 and 29841c4) The helper owns the recording (RecordingOwner, the model
+    /// Helper/ScreenRecorder.swift follows under its one lock): random interleavings of the app's starts (late ones
+    /// too: sent before the run's end, come after it), lost cancels asked again, runs ending every way, the capture's
+    /// setup as a move of its own (between the start's registering and its check), the helper quitting. Never an
+    /// active capture the owner does not own, nor one for a run that is not running or was cancelled; every capture
+    /// kept makes its own movie, once.
     static func sequenceTests() {
         typealias O = RecordingOwner
         var g = CardStoreTests.RNG(x: 21)
-        for seed in 0..<800 {
+        for seed in 0..<1000 {
             var o = O()
-            var running: Set<String> = []        // tasks running (a run ends only once it started)
-            var wanted: String? = nil            // the run the app wants recorded (switch on, its task running)
-            var cancelOwed: Set<String> = []     // cancels the app keeps asking until the helper answers
-            var captured: [String] = [], movies: [String] = []
+            var running: Set<String> = []        // tasks running now (the helper's own word: SessionHost)
+            var cancelled: Set<String> = []      // runs the app cancelled (the helper may not have heard yet)
+            var pending: [(run: String?, token: Int)] = []     // set-ups in progress (outside the lock)
+            var active: (run: String?, token: Int)? = nil      // the capture kept
+            var kept: [String] = [], movies: [String] = []
+            var asks: [String] = []              // the app's starts on their way (may come late, or never)
             func run(_ e: O.Event) {
                 for d in o.apply(e) {
                     switch d {
-                    case .capture(let r): if let r { captured.append(r) }
-                    case .end(let r): if let r { movies.append(r) }      // (made in the background: one per capture)
+                    case .refuse: break
+                    case .setUp(let r, let t): pending.append((r, t))
+                    case .keep(let t):
+                        guard let i = pending.firstIndex(where: { $0.token == t }) else { break }
+                        active = pending.remove(at: i); if let r = active?.run { kept.append(r) }
+                    case .tearDown(let t): pending.removeAll { $0.token == t }
+                    case .end(let r):
+                        if active?.run == r, let rr = r { movies.append(rr) }
+                        active = nil
                     }
                 }
             }
-            for step in 0..<30 {
+            for step in 0..<40 {
                 let r = "r\(step)"
-                switch g.next(6) {
-                case 0:   // a task starts with the switch on: the app asks -- the ask may be lost
-                    if running.isEmpty { running.insert(r); wanted = r; if g.next(4) != 0 { run(.start(run: r)) } }
-                case 1:   // a task ends, any way: the helper sees it itself
-                    if let t = running.first { running.remove(t); if wanted == t { wanted = nil }; run(.runEnded(run: t)) }
-                case 2:   // the switch off mid-task: a cancel, maybe lost -- owed until answered
-                    if let w = wanted { wanted = nil; if g.next(3) != 0 { run(.cancel(run: w)) } else { cancelOwed.insert(w) } }
-                case 3:   // the app asks an owed cancel again
-                    if let c = cancelOwed.first, g.next(2) == 0 { run(.cancel(run: c)); cancelOwed.remove(c) }
-                case 4:   // the helper quits (and comes back): its tasks gone with it
-                    if g.next(5) == 0 { run(.quit); running = []; wanted = nil; cancelOwed = [] }
+                switch g.next(7) {
+                case 0:   // a task starts (switch on): the app's start on its way
+                    if running.isEmpty { running.insert(r); asks.append(r) }
+                case 1:   // a start arrives -- maybe after its run's end, maybe never
+                    if !asks.isEmpty { let a = asks.removeFirst(); if g.next(5) != 0 { run(.start(run: a, live: running.contains(a))) } }
+                case 2:   // a set-up finishes (ok, or it failed)
+                    if let p = pending.first { pending.removeFirst(); let ok = g.next(5) != 0; pending.insert(p, at: 0); run(.setUp(token: p.token, ok: ok)); pending.removeAll { $0.token == p.token } }
+                case 3:   // a task ends, any way: the helper sees it
+                    if let t = running.first { running.remove(t); run(.runEnded(run: t)) }
+                case 4:   // the switch off: a cancel (maybe lost; the app asks it again: modelled as arriving now or later)
+                    if let t = running.first, !cancelled.contains(t) { cancelled.insert(t); run(.cancel(run: t)) }
+                case 5:   // the helper quits (its tasks gone with it)
+                    if g.next(6) == 0 { run(.quit); running = []; pending = []; active = nil; asks = [] }
                 default: break
                 }
-                // nothing is captured that no run wants -- but a run whose cancel the app is still asking, still running
-                if case .some(let c?) = o.capturing {
-                    if !(c == wanted || (cancelOwed.contains(c) && running.contains(c))) {
-                        check(false, "seed \(seed) step \(step): captures \(c) with no run wanting it"); return
-                    }
+                if let a = active {
+                    let owned = o.capturing == .some(a.run)
+                    let ok = a.run.map { running.contains($0) && !cancelled.contains($0) } ?? true
+                    if !owned || !ok { check(false, "seed \(seed) step \(step): a capture of \(String(describing: a.run)) owned \(owned), wanted \(ok)"); return }
                 }
             }
-            for c in cancelOwed { run(.cancel(run: c)) }
             for t in running { run(.runEnded(run: t)) }
-            if o.capturing != nil { check(false, "seed \(seed): still capturing after every run ended"); return }
-            // every capture made its own movie, once
-            if captured != movies { check(false, "seed \(seed): captures \(captured) vs movies \(movies)"); return }
+            for p in pending { run(.setUp(token: p.token, ok: true)) }
+            if active != nil || o.capturing != nil { check(false, "seed \(seed): still capturing after every run ended"); return }
+            if kept != movies { check(false, "seed \(seed): kept \(kept) vs movies \(movies)"); return }
         }
-        // the rows
+        // the rows (Codex's repros among them)
         var o = O()
-        check(o.apply(.start(run: "a")) == [.capture(run: "a")], "a start: captured")
-        check(o.apply(.start(run: "b")) == [.end(run: "a"), .capture(run: "b")], "the next task's start, the last never stopped: its movie, then this")
-        check(o.apply(.runEnded(run: "a")).isEmpty && o.capturing == "b", "an old run's end: not this one's")
-        check(o.apply(.cancel(run: "x")).isEmpty && o.capturing == "b", "a cancel for another run: nothing")
+        check(o.apply(.start(run: "a", live: true)) == [.setUp(run: "a", token: 1)] && o.apply(.setUp(token: 1, ok: true)) == [.keep(token: 1)], "a start: set up, kept")
+        check(o.apply(.start(run: "b", live: true)) == [.end(run: "a"), .setUp(run: "b", token: 2)], "the next task's start: the last one's movie, then this")
+        _ = o.apply(.setUp(token: 2, ok: true))
         check(o.apply(.runEnded(run: "b")) == [.end(run: "b")] && o.capturing == nil, "its run ends: stopped by the helper")
-        check(o.apply(.cancel(run: "b")).isEmpty, "the app's cancel after: harmless")
-        _ = o.apply(.start(run: "c"))
-        check(o.apply(.quit) == [.end(run: "c")], "the helper quits: stopped")
+        check(o.apply(.start(run: "b", live: true)) == [.refuse], "(Codex 1) a late start for an ended run: refused (its tombstone)")
+        check(o.apply(.start(run: "c", live: false)) == [.refuse], "(Codex 1) a start for a run the helper does not know running: refused")
+        check(o.apply(.cancel(run: "d")).isEmpty && o.apply(.start(run: "d", live: true)) == [.refuse], "a cancel before its start: kept, the start refused")
+        _ = o.apply(.start(run: "e", live: true))
+        check(o.apply(.cancel(run: "e")).isEmpty && o.apply(.setUp(token: 3, ok: true)) == [.tearDown(token: 3)] && o.capturing == nil,
+              "(Codex 2) a stop while it is set up: the set-up torn down, nothing kept")
+        _ = o.apply(.start(run: "f", live: true)); _ = o.apply(.setUp(token: 4, ok: true))
+        check(o.apply(.quit) == [.end(run: "f")], "the helper quits: stopped")
     }
 
     final class FakeRecorder: TaskRecorder {
@@ -173,7 +188,8 @@ enum RecordingTests {
         check(host.contains("ScreenRecorder.runEnded(run)") && helper.contains("ScreenRecorder.quit()")
               && helper.contains("ScreenRecorder.stop(forRun: req[\"for_run\"] as? String, wait: false)"),
               "(#127 Codex at 24cbf17) the helper stops a recording at its run's end and its own quit; a cancel answers at once")
-        check(screen.contains("owner.apply(.start(run: forRun))") && screen.contains("owner.apply(.runEnded(run: run))")
+        check(screen.contains("owner.apply(.start(run: forRun, live: live))") && screen.contains("owner.apply(.setUp(token: token, ok: error == nil))")
+              && screen.contains("SessionHost.liveRuns().contains($0)") && screen.contains("owner.apply(.runEnded(run: run))")
               && screen.contains("owner.apply(.cancel(run: forRun))") && screen.contains("RecordingOwner.savedFile"),
               "the recorder follows RecordingOwner; the movie's path beside the run")
     }

@@ -81,7 +81,13 @@ enum ModelStore {
     /// One read of the settings, the move from models.env done on the way: the text the processes use (nil: unknown).
     static func current(keychain: Keychain, file: URL, files: Files = Disk()) -> String? {
         lock.lock(); defer { lock.unlock() }
-        let fileText = files.read(file)
+        var fileText = files.read(file)
+        // (a file whose secrets are redacted -- "…<last 4>", the store's own retired copy -- is never moved in: retired,
+        // and read as no file)
+        if let r = fileText, redacted(r) {
+            _ = files.retire(file, as: r)
+            fileText = nil
+        }
         let read = keychain.read()
         // (a keychain date may be cut to the second: a file within a second of it may be the newer -- ambiguity never
         // retires a credential, so it is taken as newer and moved in; only a file plainly older loses -- #127 Codex)
@@ -134,6 +140,11 @@ enum ModelStore {
         return files.retire(file, as: redact(text))
     }
 
+    /// Whether a text has a secret redacted the store's way ("…" and at most 4 characters): never a key to keep.
+    static func redacted(_ text: String) -> Bool {
+        parse(text).contains { k, v in secret(k) && v.hasPrefix("…") && v.count <= 5 }
+    }
+
     /// What is retired: every secret's value (`secret(_:)`) as "…<last 4>", the rest as written -- the user can still
     /// compare the settings, and no full key is ever written anywhere but the keychain (#127 Codex at 24cbf17).
     static func redact(_ text: String) -> String {
@@ -166,13 +177,22 @@ enum ModelStore {
         }
         /// Rewritten as `text` (redacted: no full key leaves the keychain), then to the Trash; no Trash: renamed
         /// models.env.replaced-<date> beside it. True: it is no longer at `u`.
+        /// models.env moved off its name first (so nothing at that name is ever the redacted text: #127 Codex at
+        /// 29841c4), the redacted copy written to a file of its own and put in the Trash (no Trash: kept beside as
+        /// models.env.replaced-<date>), then the original unlinked.
         func retire(_ u: URL, as text: String) -> Bool {
             let fm = FileManager.default
             guard fm.fileExists(atPath: u.path) else { return true }
-            guard (try? Data(text.utf8).write(to: u, options: .atomic)) != nil else { return false }
-            if (try? fm.trashItem(at: u, resultingItemURL: nil)) != nil { return true }
+            let dir = u.deletingLastPathComponent(), id = UUID().uuidString.prefix(8)
+            let away = dir.appendingPathComponent(".\(u.lastPathComponent).retiring-\(id)")
+            guard (try? fm.moveItem(at: u, to: away)) != nil else { return false }
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            return (try? fm.moveItem(at: u, to: u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".replaced-" + stamp))) != nil
+            let copy = dir.appendingPathComponent(u.lastPathComponent + ".replaced-" + stamp)
+            if fm.createFile(atPath: copy.path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]) {
+                _ = try? fm.trashItem(at: copy, resultingItemURL: nil)
+            }
+            try? fm.removeItem(at: away)
+            return true
         }
     }
 

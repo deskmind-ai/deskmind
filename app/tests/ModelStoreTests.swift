@@ -206,6 +206,16 @@ enum ModelStoreTests {
                   "retired redacted: \(fs.trash)")
             check(S.redact("A_TOKEN=abcdefgh\nB_SECRET=12\nURL=https://x\n") == "A_TOKEN=…efgh\nB_SECRET=…12\nURL=https://x\n", "every secret redacted, the rest as written")
         }
+        // (#127 Codex at 29841c4) a redacted file at models.env (a crash mid-retire, a copy put back): never moved in
+        // over the real key -- retired, the keychain's key kept
+        do {
+            let c = Clock(), kc = FakeKeychain(c), fs = FakeFiles(c)
+            _ = kc.write("DEEPSEEK_API_KEY=sk-real5678\n")
+            fs.put(file, "DEEPSEEK_API_KEY=…5678\n")
+            check(S.current(keychain: kc, file: file, files: fs).map(S.parse)?["DEEPSEEK_API_KEY"] == "sk-real5678" && kc.item == "DEEPSEEK_API_KEY=sk-real5678\n"
+                  && fs.read(file) == nil, "a redacted file: never moved in")
+            check(S.redacted("A_KEY=…1234\n") && !S.redacted("A_KEY=sk-1234\n") && !S.redacted("URL=…abcd\n"), "what counts as redacted")
+        }
         // no dates known (an item without one): the file is taken as newer -- only an older version or the user wrote it
         check(S.plan(file: old, keychain: .value("DEEPSEEK_API_KEY=x\n")) == S.Plan(write: old, removeFile: true, use: old), "no dates: the file")
     }
