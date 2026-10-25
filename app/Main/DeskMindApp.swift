@@ -600,7 +600,7 @@ struct DeskMindApp: App {
                        isOn: $shellOn)
                 // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
                 Toggle(L("Record Interface Use on This Mac", lang: (AppLanguage(rawValue: language) ?? .en).resolved),
-                       isOn: Binding(get: { uiLogOn }, set: { UIEvents.setEnabled($0); uiLogOn = UIEvents.enabled }))   // (as it is: a folder that refuses the switch's file keeps it)
+                       isOn: Binding(get: { uiLogOn }, set: { UIEvents.setEnabled($0) { now in uiLogOn = now } }))   // (as it is: a folder that refuses the switch's file keeps it)
                 Button(L("Clear Interface Use Records", lang: (AppLanguage(rawValue: language) ?? .en).resolved)) { UIEvents.clear() }
             }
             // The 0.5 window's keys (handoff §3.7), only while it is on: the old window keeps its own.

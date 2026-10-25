@@ -161,44 +161,66 @@ final class UIEventLog {
             .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
     }
 
-    /// Runs `f` holding the lock both processes write under (best effort: no lock file, no lock; the write that
-    /// follows fails the same way and is the one counted).
-    private func locked(_ f: () -> Void) {
+    /// How long a write or a Clear waits for the lock the other process holds, at most (#123 Codex re-review at
+    /// 85a6d11: the wait was unbounded, and a helper stuck in IO held the main thread's Clear). Then it gives up.
+    static let lockWait: Double = 0.2
+
+    /// Runs `f` holding the lock both processes write under, tried without blocking for at most `lockWait`; true when
+    /// it ran. Not had in time: `f` does not run (a write is dropped, a Clear not done) and the failure is counted.
+    /// (No lock file at all -- the folder refuses it --: `f` runs, and the write that follows fails the same way.)
+    @discardableResult
+    private func locked(_ f: () -> Void) -> Bool {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let fd = open(dir.appendingPathComponent(Self.lockFile).path, O_CREAT | O_RDWR, 0o600)
-        guard fd >= 0 else { f(); return }
+        guard fd >= 0 else { f(); return true }
         defer { close(fd) }
-        flock(fd, LOCK_EX)
+        let until = Date().addingTimeInterval(Self.lockWait)
+        while flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            if Date() >= until { failedWrites += 1; return false }
+            usleep(5_000)
+        }
         defer { flock(fd, LOCK_UN) }
         f()
+        return true
     }
 
     /// Waits for every line recorded so far to be written (tests; Clear).
     func flush() { queue.sync {} }
 
-    func setEnabled(_ on: Bool) {
-        queue.sync {
-            let off = dir.appendingPathComponent(Self.offFile)
-            if on {
-                if FileManager.default.fileExists(atPath: off.path), (try? FileManager.default.removeItem(at: off)) == nil { failedWrites += 1 }
-            } else {
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-                if !FileManager.default.createFile(atPath: off.path, contents: Data()) { failedWrites += 1 }
-            }
+    /// Turns the switch on or off on the log's queue, never on the caller's thread; `done` (on the main queue) once it
+    /// is written, with the switch as it is then.
+    func setEnabled(_ on: Bool, done: ((Bool) -> Void)? = nil) {
+        queue.async { [self] in
+            setSwitch(on)
+            let now = enabled
+            if let done { DispatchQueue.main.async { done(now) } }
+        }
+    }
+
+    private func setSwitch(_ on: Bool) {
+        let off = dir.appendingPathComponent(Self.offFile)
+        if on {
+            if FileManager.default.fileExists(atPath: off.path), (try? FileManager.default.removeItem(at: off)) == nil { failedWrites += 1 }
+        } else {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            if !FileManager.default.createFile(atPath: off.path, contents: Data()) { failedWrites += 1 }
         }
     }
 
     /// Removes both logs of both processes (the switch stays as it is), under the lock, moving the generation on:
-    /// what either process recorded before it is never written after it.
-    func clear() {
-        queue.sync {
-            locked {
+    /// what either process recorded before it is never written after it. On the log's queue, never the caller's thread
+    /// (the menu's: the main thread never waits on the other process); `done` (on the main queue): whether it was done
+    /// -- false when the lock was not had within `lockWait`.
+    func clear(done: ((Bool) -> Void)? = nil) {
+        queue.async { [self] in
+            let ok = locked {
                 let next = generation() + 1
                 if (try? "\(next)\n".write(to: dir.appendingPathComponent(Self.genFile), atomically: true, encoding: .utf8)) == nil { failedWrites += 1 }
                 for f in [Self.mainFile, Self.helperFile] {
                     for name in [f, f + ".1"] { try? FileManager.default.removeItem(at: dir.appendingPathComponent(name)) }
                 }
             }
+            if let done { DispatchQueue.main.async { done(ok) } }
         }
     }
 
@@ -244,8 +266,9 @@ enum UIEvents {
 
     static func record(_ e: UIEvent) { log?.record(e) }
     static var enabled: Bool { log?.enabled ?? false }
-    static func setEnabled(_ on: Bool) { log?.setEnabled(on) }
-    static func clear() { log?.clear() }
+    /// Off the caller's thread; `done` on the main queue (the switch as it is then; whether Clear was done).
+    static func setEnabled(_ on: Bool, done: ((Bool) -> Void)? = nil) { log?.setEnabled(on, done: done) }
+    static func clear(done: ((Bool) -> Void)? = nil) { log?.clear(done: done) }
 
     /// The funnel's call behind an activation: one made in the `activationWindow` seconds before it, else none.
     static let activationWindow = 1.0

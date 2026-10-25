@@ -487,6 +487,7 @@ final class ShellModel: ObservableObject {
         liveSince = now()
         self.work = work
         self.deliver = deliver
+        client.clock = now        // (an exit the client infers for a session alive this run is stamped by this clock)
         client.onChange = { [weak self] id, _ in self?.changed(id) }
         // each refusal of an answer as it comes: one of ours goes to the UI queue to be matched; any other is dropped here
         client.onAnswerRefusal = { [weak self] id, e in self?.answerRefused(id, e) }

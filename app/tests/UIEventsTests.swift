@@ -17,6 +17,8 @@ enum UIEventsTests {
         DecisionTests.group("ui-events.undo"); undoTests()
         DecisionTests.group("ui-events.activation"); activationTests()
         DecisionTests.group("ui-events.sample"); sampleTests()
+        DecisionTests.group("ui-events.lockBound"); lockBoundTests()
+        DecisionTests.group("ui-events.inferredExit"); inferredExitTests()
     }
 
     static var appDir: URL { URL(fileURLWithPath: FileManager.default.currentDirectoryPath) }
@@ -133,19 +135,19 @@ enum UIEventsTests {
         // the switch: off writes nothing, on again writes; both processes read the same file
         let d = tempDir(), log = UIEventLog(dir: d, file: UIEventLog.mainFile), helper = UIEventLog(dir: d, file: UIEventLog.helperFile)
         check(log.enabled && helper.enabled, "on by default")
-        log.setEnabled(false)
+        log.setEnabled(false); log.flush()
         check(!log.enabled && !helper.enabled, "off: for the helper's log too")
         log.record(.activation(by: .none, input: .none)); helper.record(.activation(by: .none, input: .none)); log.flush(); helper.flush()
         check(lines(log.url).isEmpty && lines(helper.url).isEmpty, "off: nothing written")
-        log.setEnabled(true)
+        log.setEnabled(true); log.flush()
         log.record(.activation(by: .none, input: .none)); helper.record(.activation(by: .none, input: .none)); log.flush(); helper.flush()
         check(lines(log.url).count == 1 && lines(helper.url).count == 1, "on again: written, each to its own file")
         // Clear: every log file, both processes', rotated ones too; the switch stays
         try? Data("x\n".utf8).write(to: log.rotated)
-        log.clear()
+        log.clear(); log.flush()
         let left = ((try? FileManager.default.contentsOfDirectory(atPath: d.path)) ?? []).filter { $0.contains("jsonl") }
         check(left.isEmpty && log.enabled, "Clear: no log file left (\(left)), still on")
-        log.setEnabled(false); log.clear()
+        log.setEnabled(false); log.flush(); log.clear(); log.flush()
         check(!log.enabled, "Clear keeps the switch off")
         // #123 Codex review at 19236f0: Clear while the other process's queue is behind -- an event the helper recorded
         // before the Clear and writes after it is dropped, not written into the cleared file; one recorded after goes in
@@ -155,7 +157,7 @@ enum UIEventsTests {
             check(lines(helper.url).count == 1, "the helper's line written")
             helper.hold()
             helper.record(.liveCardOpen)          // recorded now, written when the queue goes on
-            app.clear()
+            app.clear(); app.flush()
             helper.release(); helper.flush()
             check(!FileManager.default.fileExists(atPath: helper.url.path), "recorded before Clear, written after: dropped (the file stays cleared)")
             helper.record(.liveCardOpen); helper.flush()
@@ -467,5 +469,81 @@ enum UIEventsTests {
             let strings = o.filter { $0.value is String }.map(\.key).filter { !["e", "kind", "place", "window", "option", "by", "why", "outcome", "run_id", "ask_id", "input"].contains($0) }
             check(o["t"] is Int && o["e"] is String && strings.isEmpty, "a line: time, name, known fields only: \(l)")
         }
+    }
+
+    /// #123 Codex re-review at 85a6d11: the main thread never waits on the other process. The lock held elsewhere (here:
+    /// by the test, as a stuck helper would): Clear and the switch return at once; Clear reports it was not done
+    /// within the bound; a write gives up within the bound and is counted.
+    static func lockBoundTests() {
+        let d = tempDir(), log = UIEventLog(dir: d, file: UIEventLog.mainFile)
+        log.record(.reopenAsked); log.flush()
+        let fd = open(d.appendingPathComponent(UIEventLog.lockFile).path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0, flock(fd, LOCK_EX | LOCK_NB) == 0 else { check(false, "the test holds the lock"); return }
+        var cleared: Bool?
+        let t0 = Date()
+        log.clear { cleared = $0 }
+        log.setEnabled(false) { _ in }
+        check(Date().timeIntervalSince(t0) < 0.05, "Clear and the switch return at once on the caller's thread: \(Date().timeIntervalSince(t0))")
+        let until = Date().addingTimeInterval(UIEventLog.lockWait + 1)
+        while cleared == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        check(cleared == false && Date().timeIntervalSince(t0) < UIEventLog.lockWait + 0.5, "Clear not done within the bound, and said so: \(String(describing: cleared))")
+        check(lines(log.url).count == 1, "nothing was removed without the lock")
+        log.setEnabled(true) { _ in }
+        let before = log.failures
+        let t1 = Date()
+        log.record(.reopenAsked); log.flush()
+        check(Date().timeIntervalSince(t1) < UIEventLog.lockWait + 0.5 && log.failures > before && lines(log.url).count == 1,
+              "a write gives up within the bound, counted, nothing written")
+        flock(fd, LOCK_UN); close(fd)
+        cleared = nil
+        log.clear { cleared = $0 }
+        while cleared == nil && Date() < until.addingTimeInterval(1) { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        check(cleared == true && !FileManager.default.fileExists(atPath: log.url.path), "the lock free: Clear done")
+    }
+
+    /// #123 Codex re-review at 85a6d11 (the second bug of the inferred-exit family, redesigned from provenance): an exit
+    /// the client infers is live (stamped now) for a session it saw alive this run, history (its stored time) for one
+    /// it never did -- whichever way the exit is inferred.
+    static func inferredExitTests() {
+        enum Seen: String, CaseIterable { case never, historyOpen = "history open", start = "session.start", watchOpen = "watch open", opened = "opened here" }
+        let sid = "ses_x", old = 1_000.0, now = 5_000.0
+        func client(_ seen: Seen) -> (SessionTests.MockTransport, SessionClient) {
+            let mock = SessionTests.MockTransport()
+            let c = SessionClient(transport: mock)
+            c.clock = { now }
+            c.feed(["kind": "session.message", "session_id": sid, "seq": 1, "t": old, "msg_id": "u", "role": "user", "text": "旧的"])
+            switch seen {
+            case .never: break
+            case .historyOpen:
+                mock.replies[SessionClient.Op.history] = ["ok": true, "open": true, "last_seq": 1, "lines": [[String: Any]]()]
+                _ = c.history(sid)
+            case .start: c.feed(["kind": "session.start", "session_id": sid, "resumed": true, "last_seq": 1])
+            case .watchOpen:
+                mock.streamLines = [["kind": "helper.watching", "open": [sid]]]
+                _ = c.watch()
+                mock.streamLines = []
+            case .opened:
+                mock.replies[SessionClient.Op.open] = ["ok": true, "session_id": sid]
+                _ = c.open(sessionId: sid)
+            }
+            return (mock, c)
+        }
+        // the time any inferred exit of the session gets, by what this run saw of it
+        for seen in Seen.allCases {
+            let (_, c) = client(seen)
+            check(c.inferredAt(sid) == (seen == .never ? old : now), "\(seen.rawValue): an inferred exit is \(seen == .never ? "history" : "live")")
+        }
+        // end to end: a history read finds no process -- the exit it infers carries that time into the state
+        for seen in [Seen.never, .historyOpen, .opened] {   // (watch open: once its stream ends the watch is down, and no exit is inferred then)
+            let (mock, c) = client(seen)
+            mock.replies[SessionClient.Op.history] = ["ok": true, "open": false, "last_seq": 2, "lines": [[String: Any]]()]
+            _ = c.history(sid)
+            let s = c.state(sid)
+            check(s.exited != nil && s.goneAt == (seen == .never ? old : now), "\(seen.rawValue), then a history read with no process: gone at \(String(describing: s.goneAt))")
+        }
+        // every exit the client infers takes its time from there (history read, a send's not_open, a reconnect)
+        let src = source("Shared/SessionClient.swift")
+        check(src.components(separatedBy: "ProtocolLine(t: inferredAt(").count - 1 == 3 && !src.contains("event: .sessionExit(HelperSessionExit(code: nil)))))"),
+              "the three inferred exits are stamped by inferredAt")
     }
 }

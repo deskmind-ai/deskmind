@@ -522,6 +522,13 @@ final class SessionClient {
     var onWaitingForHelper: ((Bool) -> Void)?
     /// The clock the gap grace is measured by (tests set their own).
     var now: () -> Date = Date.init
+    /// Now, in seconds since 1970, for the time an exit this client infers gets (`inferredAt`): the app's model sets its
+    /// own clock here (tests drive theirs).
+    var clock: () -> Double = { Date().timeIntervalSince1970 }
+    /// The sessions this client has seen alive since it was made: a process of theirs ran in this run -- a session.start
+    /// heard, the helper's watch listing it open, a history read or an open saying it runs (under `lock`). A fact of its
+    /// own, not read from times (#123 Codex re-review at 85a6d11).
+    private var aliveThisRun: Set<String> = []
     /// Called after a line changed a session's state (on the thread that fed it).
     var onChange: ((String, SessionState) -> Void)?
     /// A session's refusal of a respond / answer that carries a req_id (harness#71), each as it comes (on the thread
@@ -618,6 +625,7 @@ final class SessionClient {
         // is converged too
         if r["already_open"] as? Bool != true { generation[id, default: 0] += 1 }
         dirty.insert(id)
+        aliveThisRun.insert(id)
         lock.unlock()
         // opened (a configuration, or null): a "not stored" banner from before is past — cleared before its set_config
         // goes, so a refusal of that one stays shown
@@ -1143,10 +1151,18 @@ final class SessionClient {
     /// could not (an older helper without the op: open it instead).
     func history(_ sessionId: String, markExit: Bool = true) -> Bool { readHistory(sessionId, markExit: markExit).ok }
 
-    /// The time an exit this client infers (no line of the helper's says it) is given: the session's newest stored
-    /// line's, else 0 -- so it is as old as what it was inferred from. A history read of a session long gone infers an
-    /// exit of the past, never one the user saw happen now (the UI log: UIEvents.changes; #123 Codex review at 19236f0).
-    private func inferredAt(_ sessionId: String) -> Double { state(sessionId).lastEventAt ?? 0 }
+    /// The time an exit this client infers (no line of the helper's says it) is given, by where it was inferred from
+    /// (#123 Codex reviews at 19236f0 and 85a6d11, the second of the family: decided from provenance, not times):
+    ///
+    /// | the session in this run                                  | an inferred exit (history, not_open, reconnect) |
+    /// |----------------------------------------------------------|--------------------------------------------------|
+    /// | never seen alive (only its stored log read)              | history: its newest stored line's time, else 0   |
+    /// | seen alive (session.start, watch open, history/open open) | live: now                                        |
+    func inferredAt(_ sessionId: String) -> Double {
+        lock.lock(); defer { lock.unlock() }
+        if aliveThisRun.contains(sessionId) { return clock() }
+        return states[sessionId]?.lastEventAt ?? 0
+    }
 
     /// session.history, the last stored seq it says, and whether a process of it runs.
     private func readHistory(_ sessionId: String, markExit: Bool) -> (ok: Bool, lastSeq: Int?, open: Bool?) {
@@ -1155,6 +1171,7 @@ final class SessionClient {
         for t in s.tasks { runs[t.runId] = t.lastSeq }
         guard let r = transport.request(Request.history(sessionId: sessionId, after: s.lastSeq, runs: runs)), r["ok"] as? Bool == true,
               let lines = r["lines"] as? [[String: Any]] else { return (false, nil, nil) }
+        if r["open"] as? Bool == true { lock.lock(); aliveThisRun.insert(sessionId); lock.unlock() }
         for l in lines { feed(l) }
         // no process for it here: read as exited only while the watch is up (a helper restarting has none yet; the
         // watch's helper.watching says which ran when it is back)
@@ -1229,7 +1246,7 @@ final class SessionClient {
             let ok = transport.stream(Request.watch(after: c.after, runs: c.runs), onLine: { [weak self] obj in
                 guard let self else { return false }
                 if obj["kind"] as? String == "helper.watching", let open = obj["open"] as? [String] {
-                    self.lock.lock(); self.watchDown = false; self.lock.unlock()
+                    self.lock.lock(); self.watchDown = false; self.aliveThisRun.formUnion(open); self.lock.unlock()
                     if let theirs = obj["models_off"] as? Bool { self.helperSays(modelsOff: theirs) }
                     // a session with no process now gets no replay from the watch: what it stored while this app was
                     // away (a reply finished, a task ended) is read from its log after the cursor, through the reducer
@@ -1334,6 +1351,7 @@ final class SessionClient {
         if deleted.contains(id) { lock.unlock(); return .ignored }
         if let onlyIf, !onlyIf() { lock.unlock(); return .ignored }
         if case .sessionExit(let e) = line.event, e.idle == true { idleClosed.insert(id) }
+        if case .sessionStart = line.event { aliveThisRun.insert(id) }
         // the answer to a set_config of this app's: stored (session.config), or not (busy: sent once more; then, or
         // bad_config, shown)
         var busyAgain = false, notApplied: String?
