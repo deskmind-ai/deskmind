@@ -66,7 +66,7 @@ struct MainSplitView: View {
     /// change here needs a new process (set_config carries the rest in place). The shell keeps what it last gave
     /// (ShellModel.keyFile, syncSettings).
     static func envFingerprint() -> String {
-        ModelKeys.fingerprint(CloudModelSettings.read())
+        KeyStatus.shared.now.digest ?? ""     // (the helper's digest of what it keeps: A11 -- never a key here)
     }
 
     private func openSettings() { settingsOpen = true }
@@ -83,7 +83,7 @@ struct MainSplitView: View {
         // (as the harness reads it: a model name saved with spaces around it by an older version, without them)
         if let c = CloudModelSettings.engineConfig, !c.isEmpty { return SessionClient.normalizeConfig(c) }
         let p = CloudModelSettings.provider
-        return SessionClient.normalizeConfig(CloudModelSettings.config(for: p, model: CloudModelSettings.read()["CUSTOM_MODEL"] ?? ""))
+        return SessionClient.normalizeConfig(CloudModelSettings.config(for: p, model: KeyStatus.shared.now.settings["CUSTOM_MODEL"] ?? ""))
     }
 }
 

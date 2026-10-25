@@ -196,23 +196,11 @@ enum HarnessRun {
     static var bundle: URL { Runner.runtime.appendingPathComponent("harness/harness.mjs") }
     static var available: Bool { FileManager.default.isExecutableFile(atPath: node.path) && FileManager.default.fileExists(atPath: bundle.path) }
 
-    /// The model services' settings, until the app has a place for keys: KEY=VALUE lines in
-    /// Application Support/DeskMind/models.env (DEEPSEEK_API_KEY for the default config, OPENROUTER_API_KEY,
-    /// VOLCENGINE_API_KEY, YY_URL + YY_API_KEY for the in-house gateway). Values never logged.
-    static func modelEnv() -> [String: String] {
-        let url = DeskMindIPC.supportDir.appendingPathComponent("models.env")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [:] }
-        var out: [String: String] = [:]
-        for raw in text.split(separator: "\n") {
-            let line = raw.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty, !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { continue }
-            let k = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
-            var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
-            if v.hasPrefix("\"") && v.hasSuffix("\"") && v.count >= 2 { v = String(v.dropFirst().dropLast()) }
-            if !k.isEmpty { out[k] = v }
-        }
-        return out
-    }
+    /// The model services' settings (DEEPSEEK_API_KEY for the default config, OPENROUTER_API_KEY, VOLCENGINE_API_KEY,
+    /// YY_URL + YY_API_KEY for the in-house gateway): the helper's keychain item, models.env moved in on the way
+    /// (A11: ModelKeychain / ModelStore). nil: not known -- the keychain could not be read and there is no file; never
+    /// taken for "none set". Values never logged.
+    static func modelEnv() -> [String: String]? { ModelKeychain.env() }
 
     /// `harness.mjs model-check --config X` with the keys from models.env: {ok, model, ms} or {ok: false, error}.
     /// The harness strips anything key-like from a service's error; nothing here logs the environment.
@@ -222,7 +210,7 @@ enum HarnessRun {
         p.executableURL = node
         p.arguments = [bundle.path, "model-check", "--config", config]
         var env: [String: String] = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin"]
-        for (k, v) in modelEnv() { env[k] = v }
+        for (k, v) in modelEnv() ?? [:] { env[k] = v }      // (the same one read, migration and all: A11)
         for (k, v) in extra where k.range(of: "^[A-Z][A-Z0-9_]*$", options: .regularExpression) != nil { env[k] = v }   // the sheet's unsaved values
         p.environment = env
         let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
@@ -282,7 +270,7 @@ enum HarnessRun {
                 + "HANDS_TAKEOVER_FILE=\"\(Runner.takeoverFile.path)\" " + eyes
                 + "\"\(python)\" -m deskmind_hands.executor",
         ]
-        for (k, v) in keys ?? modelEnv() where env[k] == nil { env[k] = v }
+        for (k, v) in keys ?? modelEnv() ?? [:] where env[k] == nil { env[k] = v }
         return env
     }
 

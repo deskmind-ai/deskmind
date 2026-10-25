@@ -218,6 +218,19 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     case "brain_status":
         if req["start"] as? Bool == true { BrainServer.ensure() }
         return ["ok": true].merging(BrainServer.status()) { a, _ in a }
+    case "keys.status":
+        // The model settings as the app may know them (A11): set or not, each key by its last 4, the settings that are
+        // no secret, the digest -- never a value.
+        return ModelStore.status(ModelStore.current(keychain: ModelKeychain.store, file: ModelKeychain.legacyFile))
+    case "keys.set":
+        // A change from the app's settings: {set: {NAME: value}, unset: [NAME]}, merged into what is kept. Answered with
+        // the status; nothing is ever echoed.
+        let r = ModelStore.set(req["set"] as? [String: String] ?? [:], unset: req["unset"] as? [String] ?? [],
+                               keychain: ModelKeychain.store, file: ModelKeychain.legacyFile)
+        switch r {
+        case .set(let text): return ModelStore.status(text)
+        case .failed(let why): return ["ok": false, "error": why]
+        }
     case "model_check":
         // The settings sheet's "Test": one tiny question to a cloud model. `env` carries what is typed in the sheet
         // (key, URL, model) for this check only — nothing is written until the user saves.

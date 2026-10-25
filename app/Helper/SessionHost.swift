@@ -415,7 +415,10 @@ enum SessionHost {
         defer { lock.lock(); spawning[id] = nil; lock.unlock() }
         setup.beforeKeys()
         // ONE read of the keys file: the environment the process gets and the digest the helper reports are of it
-        let keysEnv = HarnessRun.modelEnv()
+        guard let keysEnv = HarnessRun.modelEnv() else {
+            // the keys could not be read (the keychain refused, no file): no process starts on an empty key (A11)
+            throw NSError(domain: "DeskMind", code: 1, userInfo: [NSLocalizedDescriptionKey: "keys_unreadable"])
+        }
         let keys = ModelKeys.digest(env: keysEnv)
         lock.lock(); spawning[id] = .some(keys); lock.unlock()
         p.environment = setup.environment(keysEnv)
@@ -651,7 +654,7 @@ enum SessionHost {
             return ["ok": false, "error": "no list from the harness (exit \(p.terminationStatus))"]
         }
         // (the file now, read before the processes' digests: a save meanwhile shows as owed, never as applied)
-        let keysNow = ModelKeys.digest(env: HarnessRun.modelEnv())
+        let keysNow = HarnessRun.modelEnv().map { ModelKeys.digest(env: $0) }      // (nil: not known -- not reported)
         lock.lock()
         // a process spawned whose session.start has not come yet (`starting`) has read its keys already: reported with
         // its digest too (#107 review at 85d81f6: missed, a key saved while it started left it on the old one)
@@ -683,7 +686,9 @@ enum SessionHost {
             if let k = r.keys { p["keys"] = k }
             return p
         }
-        return ["ok": true, "keys": keysNow, "sessions": reported, "processes": processes]
+        var out: [String: Any] = ["ok": true, "sessions": reported, "processes": processes]
+        if let keysNow { out["keys"] = keysNow }
+        return out
     }
 
     // MARK: watching
