@@ -93,8 +93,16 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         self.wholeScreen = wholeScreen; self.mode = RecordingCapture.mode(smooth: smooth); self.goal = goal
     }
 
-    /// The chat task the recording is for (record_start's `for_run`; nil: an op run's): only its steps add apps.
-    nonisolated(unsafe) static var forRun: String?
+    /// The chat task this recording is for (record_start's `for_run`; nil: an op run's): only its steps add apps. Set
+    /// once, before the recording is the active one; read through `records(_:)`, under the lock (#127 Codex: a static
+    /// written on the request thread and read on the session's was a data race).
+    private(set) var forRun: String?
+
+    /// Whether the active recording is the one for `run`'s task.
+    static func records(_ run: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active?.forRun == run
+    }
 
     static func start(_ req: [String: Any]) -> [String: Any] {
         // A recording nobody stopped (the app quit mid-run): finished now, its files written for the run it filmed,
@@ -120,6 +128,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
                                  wholeScreen: req["whole_screen"] as? Bool ?? false,
                                  smooth: req["smooth"] as? Bool ?? false, goal: req["goal"] as? String ?? "")
         rec.requestedDisplay = (req["display"] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
+        rec.forRun = req["for_run"] as? String
         rec.preflight = Self.preflight(bundles: rec.bundles)
         if let error = rec.begin() { return ["ok": false, "error": error] }
         active = rec

@@ -7,8 +7,9 @@
 // against the file's (#127 review: a moved-aside copy and a marker went wrong a third way; the fact is the dates).
 // A file written after the item (an older version after a downgrade, a hand edit) is the newest settings; one plainly
 // written before it (a crash between keys.set's write and its removal) is not; within a second either way it is taken
-// as the newer (ambiguity never retires a credential). A file retired goes to the Trash, never unlinked. A crash
-// anywhere leaves one of these states:
+// as the newer (ambiguity never retires a credential). A file whose settings the keychain now holds is unlinked (no
+// plaintext key stays on disk); one that says something else goes to the Trash. A crash anywhere leaves one of these
+// states:
 //
 // | state                                   | keychain after          | models.env after                | used               |
 // |-----------------------------------------|-------------------------|---------------------------------|--------------------|
@@ -91,7 +92,7 @@ enum ModelStore {
         let p = plan(file: fileText, keychain: read, fileNewer: newer)
         var remove = p.removeFile
         if let w = p.write { remove = keychain.write(w) && keychain.read() == .value(w) }
-        if remove, fileText != nil { _ = files.remove(file) }
+        if remove, let f = fileText { _ = drop(file, f, holding: p.use, files: files) }
         return p.use
     }
 
@@ -116,27 +117,41 @@ enum ModelStore {
             if read != nil { _ = keychain.write(now) }      // (a write that did not read back: what was there before)
             return .failed("keychain")
         }
-        // the file retired (to the Trash) -- or the change undone: a file left beside a newer item could be taken for
-        // the newer one (within a second) and bring the old settings back
-        guard files.remove(file) else {
+        // the file gone -- or the change undone: a file left beside a newer item could be taken for the newer one
+        // (within a second) and bring the old settings back
+        guard files.read(file).map({ drop(file, $0, holding: text, files: files) }) ?? true else {
             if read != nil { _ = keychain.write(now) }
             return .failed("old_file")
         }
         return .set(text)
     }
 
-    /// The file system as these moves see it (a test's own, with failures). `remove`: retired -- never unlinked.
+    /// models.env, gone from its place: unlinked when the keychain holds exactly what it said (read back: nothing is
+    /// lost, and no plaintext key stays on disk -- #127 Codex); retired to the Trash when it says something else (an
+    /// older file, one a change replaced: what the user put there never just vanishes).
+    private static func drop(_ file: URL, _ text: String, holding: String?, files: Files) -> Bool {
+        if let h = holding, same(text, h) { return files.remove(file) }
+        return files.retire(file)
+    }
+
+    /// The file system as these moves see it (a test's own, with failures). `remove`: unlinked; `retire`: to the
+    /// Trash (or renamed beside it).
     protocol Files {
         func read(_ u: URL) -> String?
         func modified(_ u: URL) -> Date?
         func remove(_ u: URL) -> Bool
+        func retire(_ u: URL) -> Bool
     }
     struct Disk: Files {
         func read(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
         func modified(_ u: URL) -> Date? { (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+        func remove(_ u: URL) -> Bool {
+            guard FileManager.default.fileExists(atPath: u.path) else { return true }
+            return (try? FileManager.default.removeItem(at: u)) != nil
+        }
         /// To the Trash (what the user put there never just vanishes: a restored backup, a hand edit); no Trash: renamed
         /// models.env.replaced-<date> beside it. True: it is no longer at `u`.
-        func remove(_ u: URL) -> Bool {
+        func retire(_ u: URL) -> Bool {
             let fm = FileManager.default
             guard fm.fileExists(atPath: u.path) else { return true }
             if (try? fm.trashItem(at: u, resultingItemURL: nil)) != nil { return true }

@@ -15,8 +15,8 @@ final class RunRecorder {
     private(set) var fileURL: URL?
 
     var isRecording: Bool { fileURL != nil }
-    /// Recording, or a start on its way (the app's quit stops either).
-    var busy: Bool { gate.state != .idle }
+    /// Recording, or a start or a stop not confirmed (the app's quit sends record_stop for any of them).
+    var busy: Bool { gate.busy }
 
     /// The View menu's two recording settings: DeskMind's own window in the recording (off: the island and panels
     /// only), and the whole screen instead of the task's apps (off: other apps are left out).
@@ -33,7 +33,8 @@ final class RunRecorder {
         return dir.appendingPathComponent(MovieName.folder(goal: goal, date: Date()), isDirectory: true)
     }
 
-    /// The start / stop across the helper's slow answer (RecorderGate: a stop while the start is on its way is owed).
+    /// The start / stop across the helper's slow answers (RecorderGate: a stop while the start is on its way is owed;
+    /// a start whose answer was lost keeps the stop owed until the helper confirms).
     private var gate = RecorderGate()
     private var owedDone: ((URL?) -> Void)?
 
@@ -50,25 +51,28 @@ final class RunRecorder {
         if let forRun { body["for_run"] = forRun }
         DispatchQueue.global().async {
             let reply = DeskMindIPC.request(body, timeout: 25)
-            let ok = reply?["ok"] as? Bool == true
+            // ok, refused (the helper said no), or unknown (no answer: it may be recording -- the stop stays owed)
+            let answer: RecorderGate.Answer = reply == nil ? .unknown : reply?["ok"] as? Bool == true ? .ok : .refused
             DispatchQueue.main.async {
-                let sends = self.gate.apply(.answered(ok: ok))
-                if ok && sends.isEmpty { self.fileURL = url }
+                let sends = self.gate.apply(.answered(answer))
                 if sends == [.stop] {
                     // (a stop came while the start was on its way: stopped at once, its movie to whoever stopped)
                     let done = self.owedDone; self.owedDone = nil
                     self.sendStop(done ?? { _ in })
-                } else if !ok, let done = self.owedDone {
+                } else if self.gate.state == .recording {
+                    self.fileURL = url
+                } else if let done = self.owedDone {
                     self.owedDone = nil; done(nil)
                 }
-                started(ok && sends.isEmpty)
+                // (unknown: taken as recording -- the task's end still stops it)
+                started(self.gate.state == .recording)
             }
         }
     }
 
     /// Stop and finish the recording; `done` gets the movie to show (nil if nothing was recorded). A start still on its
-    /// way: owed -- stopped as soon as it answers. The helper makes the delivery copy and the step file first, which
-    /// takes a while for a long run.
+    /// way: owed -- stopped as soon as it answers. A stop not yet confirmed: asked again. The helper makes the delivery
+    /// copy and the step file first, which takes a while for a long run.
     func stop(done: @escaping (URL?) -> Void) {
         let wasStarting = { if case .starting = gate.state { return true }; return false }()
         let sends = gate.apply(.stop)
@@ -77,11 +81,15 @@ final class RunRecorder {
         done(nil)
     }
 
+    /// record_stop; its answer (any answer: the helper says what it stopped, or that nothing recorded) confirms it.
     private func sendStop(_ done: @escaping (URL?) -> Void) {
         DispatchQueue.global().async {
             let reply = DeskMindIPC.request(["op": "record_stop"], timeout: 900)
             let url = (reply?["path"] as? String).map { URL(fileURLWithPath: $0) }
-            DispatchQueue.main.async { done(url) }
+            DispatchQueue.main.async {
+                _ = self.gate.apply(.stopAnswered(confirmed: reply != nil))
+                done(url)
+            }
         }
     }
 }

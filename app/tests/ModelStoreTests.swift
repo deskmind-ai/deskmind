@@ -42,11 +42,18 @@ enum ModelStoreTests {
         let clock: Clock
         var files: [String: (text: String, at: Date)] = [:]
         var failRemove = false
+        /// What went to the Trash (retired), in order.
+        var trash: [String] = []
         init(_ c: Clock) { clock = c }
         func put(_ u: URL, _ text: String) { files[u.path] = (text, clock.tick()) }
         func read(_ u: URL) -> String? { files[u.path]?.text }
         func modified(_ u: URL) -> Date? { files[u.path]?.at }
         func remove(_ u: URL) -> Bool { if failRemove && files[u.path] != nil { return false }; files[u.path] = nil; return true }
+        func retire(_ u: URL) -> Bool {
+            if failRemove && files[u.path] != nil { return false }
+            if let t = files[u.path]?.text { trash.append(t) }
+            files[u.path] = nil; return true
+        }
     }
     static let file = URL(fileURLWithPath: "/fake/models.env")
 
@@ -171,6 +178,23 @@ enum ModelStoreTests {
             fs.files[file.path] = ("DEEPSEEK_API_KEY=sk-file3333\n", kc.at!.addingTimeInterval(-0.5))
             check(S.current(keychain: kc, file: file, files: fs).map(S.parse)?["DEEPSEEK_API_KEY"] == "sk-file3333", "half a second before: ambiguous -- the file")
         }
+        // (#127 Codex) a confirmed move: the file unlinked, no plaintext key left; a file that says something else: Trash
+        do {
+            let c = Clock(), kc = FakeKeychain(c), fs = FakeFiles(c)
+            fs.put(file, old)
+            _ = S.current(keychain: kc, file: file, files: fs)
+            check(kc.item == old && fs.read(file) == nil && fs.trash.isEmpty, "moved in, read back equal: unlinked, nothing in the Trash")
+            fs.files[file.path] = ("DEEPSEEK_API_KEY=sk-older\n", kc.at!.addingTimeInterval(-60))
+            _ = S.current(keychain: kc, file: file, files: fs)
+            check(fs.read(file) == nil && fs.trash == ["DEEPSEEK_API_KEY=sk-older\n"], "an older file that says something else: to the Trash")
+            fs.put(file, "DEEPSEEK_API_KEY=sk-file1111\n")
+            _ = S.current(keychain: kc, file: file, files: fs)
+            fs.trash = []
+            fs.files[file.path] = ("DEEPSEEK_API_KEY=sk-file1111\n", kc.at!.addingTimeInterval(-60))
+            if case .set = S.set(["OPENROUTER_API_KEY": "or-1"], keychain: kc, file: file, files: fs) {
+                check(fs.read(file) == nil && fs.trash.isEmpty, "keys.set with an old file the item holds: unlinked")
+            } else { check(false, "keys.set") }
+        }
         // no dates known (an item without one): the file is taken as newer -- only an older version or the user wrote it
         check(S.plan(file: old, keychain: .value("DEEPSEEK_API_KEY=x\n")) == S.Plan(write: old, removeFile: true, use: old), "no dates: the file")
     }
@@ -224,6 +248,7 @@ enum ModelStoreTests {
             func read(_ u: URL) -> String? { l.lock(); defer { l.unlock() }; return m[u.path]?.0 }
             func modified(_ u: URL) -> Date? { l.lock(); defer { l.unlock() }; return m[u.path]?.1 }
             func remove(_ u: URL) -> Bool { l.lock(); m[u.path] = nil; l.unlock(); return true }
+            func retire(_ u: URL) -> Bool { remove(u) }
         }
         var lost = 0, ok = 0
         for _ in 0..<120 {

@@ -85,31 +85,44 @@ protocol TaskRecorder: AnyObject {
     func step(_ n: Int, _ words: String)
 }
 
-/// The recorder's own state across the helper's slow answer (#127 delta: record_start waits up to 25 s): a stop that
-/// comes while the start is on its way is owed, and a start that succeeds with a stop owed is stopped at once -- the
-/// helper never records past the task, unseen. Pure: what happened, to what is sent.
+/// The recorder's own state across the helper's slow answers (#127 delta and Codex: record_start waits up to 25 s, and
+/// its answer may never come). A stop while the start is on its way is owed. A start's answer is one of three: ok,
+/// refused (the helper said no: nothing records), unknown (timed out, lost: it may be recording). Unknown keeps the
+/// obligation: the helper is told to stop (record_stop, harmless when nothing records) as soon as the recording is not
+/// wanted, and again -- at the next stop, at the quit -- until it confirms. Pure: what happened, to what is sent.
 ///
-/// | state         | begin                | the start's answer: ok          | not ok | stop                    |
-/// |---------------|----------------------|---------------------------------|--------|-------------------------|
-/// | idle          | starting; send start | --                              | --     | nothing (no movie)      |
-/// | starting      | nothing              | recording (stop owed: idle;     | idle   | starting, stop owed     |
-/// |               |                      |   send stop)                    |        |                         |
-/// | recording     | nothing              | --                              | --     | idle; send stop         |
+/// | state         | begin        | start: ok          | refused | unknown            | stop               | stop's answer  |
+/// |---------------|--------------|--------------------|---------|--------------------|--------------------|----------------|
+/// | idle          | starting;    | --                 | --      | --                 | nothing            | --             |
+/// |               |   send start |                    |         |                    |                    |                |
+/// | starting      | nothing      | recording (owed:   | idle    | recording (owed:   | starting, owed     | --             |
+/// |               |              |   stopping; stop)  |         |   stopping; stop)  |                    |                |
+/// | recording     | nothing      | --                 | --      | --                 | stopping; stop     | --             |
+/// | stopping      | nothing      | --                 | --      | --                 | send stop again    | confirmed:     |
+/// |               |              |                    |         |                    |                    |   idle; else   |
+/// |               |              |                    |         |                    |                    |   stopping     |
 struct RecorderGate: Equatable {
-    enum State: Equatable { case idle, starting(stopOwed: Bool), recording }
-    enum Event: Equatable { case begin, answered(ok: Bool), stop }
+    enum State: Equatable { case idle, starting(stopOwed: Bool), recording, stopping }
+    enum Answer: Equatable { case ok, refused, unknown }
+    enum Event: Equatable { case begin, answered(Answer), stop, stopAnswered(confirmed: Bool) }
     enum Send: Equatable { case start, stop }
     private(set) var state: State = .idle
+
+    /// Something may be recording, or a start or a stop is still to be confirmed: the app's quit sends record_stop.
+    var busy: Bool { state != .idle }
 
     mutating func apply(_ e: Event) -> [Send] {
         switch (state, e) {
         case (.idle, .begin): state = .starting(stopOwed: false); return [.start]
-        case (.starting(let owed), .answered(let ok)):
-            if ok && owed { state = .idle; return [.stop] }
-            state = ok ? .recording : .idle
+        case (.starting(let owed), .answered(let a)):
+            if a == .refused { state = .idle; return [] }
+            if owed { state = .stopping; return [.stop] }
+            state = .recording
             return []
         case (.starting, .stop): state = .starting(stopOwed: true); return []
-        case (.recording, .stop): state = .idle; return [.stop]
+        case (.recording, .stop): state = .stopping; return [.stop]
+        case (.stopping, .stop): return [.stop]
+        case (.stopping, .stopAnswered(let confirmed)): if confirmed { state = .idle }; return []
         default: return []
         }
     }

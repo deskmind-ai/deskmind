@@ -122,33 +122,62 @@ enum RecordingTests {
         check(d.selected == nil && d.recordsNext && d.recording.defaultOn, "a draft conversation: the switch on, kept")
     }
 
-    /// (#127 delta, 1) The recorder's gate over the helper's slow answer: a stop while the start is on its way is
-    /// owed, and the helper never records past the stop. Random interleavings, the helper's answer as a move of its own.
+    /// (#127 delta, 1; Codex at bde8298) The recorder's gate over the helper's slow and lost answers: a stop while the
+    /// start is on its way is owed; a lost answer keeps it owed; the helper never records once the app no longer wants
+    /// it, after the stops are answered. Random interleavings, each helper answer (and its loss) a move of its own.
     static func gateTests() {
+        typealias G = RecorderGate
         var g = CardStoreTests.RNG(x: 8)
-        for seed in 0..<500 {
-            var gate = RecorderGate(), helperRecording = false, inFlight = false, wants = false
-            for _ in 0..<20 {
-                switch g.next(3) {
-                case 0: wants = true; for s in gate.apply(.begin) { if s == .start { if inFlight { check(false, "seed \(seed): two starts"); return }; inFlight = true } }
-                case 1: wants = false; for s in gate.apply(.stop) where s == .stop { helperRecording = false }
-                default:
-                    guard inFlight else { continue }
-                    inFlight = false
-                    let ok = g.next(3) != 0
-                    if ok { helperRecording = true }
-                    for s in gate.apply(.answered(ok: ok)) where s == .stop { helperRecording = false }
+        for seed in 0..<800 {
+            var gate = G(), helperRecording = false, startInFlight = false, stopsInFlight = 0, wants = false
+            func send(_ ss: [G.Send]) {
+                for s in ss {
+                    switch s {
+                    case .start: if startInFlight { check(false, "seed \(seed): two starts") }; startInFlight = true
+                    case .stop: stopsInFlight += 1
+                    }
                 }
-                // the helper never records once the app no longer wants it, with no start left on its way
-                if !wants && !inFlight && helperRecording { check(false, "seed \(seed): the helper records past the stop"); return }
+            }
+            for _ in 0..<24 {
+                switch g.next(5) {
+                case 0: wants = true; send(gate.apply(.begin))
+                case 1: wants = false; send(gate.apply(.stop))
+                case 2:
+                    guard startInFlight else { continue }
+                    startInFlight = false
+                    // the helper starts (or says no); the app hears ok, refused, or nothing (the answer lost)
+                    let ran = g.next(3) != 0
+                    if ran { helperRecording = true }
+                    let answer: G.Answer = g.next(3) == 0 ? .unknown : (ran ? .ok : .refused)
+                    send(gate.apply(.answered(answer)))
+                case 3:
+                    guard stopsInFlight > 0 else { continue }
+                    stopsInFlight -= 1
+                    helperRecording = false        // (record_stop: whatever records stops)
+                    send(gate.apply(.stopAnswered(confirmed: g.next(4) != 0)))
+                default:
+                    // the app quits: record_stop while busy
+                    if gate.busy && g.next(6) == 0 { helperRecording = false; startInFlight = false; stopsInFlight = 0; wants = false; gate = G() }
+                }
+            }
+            // the app no longer wants it, every answer in: the helper is not recording -- or the app still says busy
+            // (its quit sends record_stop)
+            if !wants && !startInFlight && stopsInFlight == 0 && helperRecording && !gate.busy {
+                check(false, "seed \(seed): the helper records unseen (\(gate.state))"); return
             }
         }
-        // the rows: ended / switched off before the answer
-        var gate = RecorderGate()
-        check(gate.apply(.begin) == [.start] && gate.apply(.stop).isEmpty && gate.state == .starting(stopOwed: true), "stopped while starting: owed")
-        check(gate.apply(.answered(ok: true)) == [.stop] && gate.state == .idle, "the late success: stopped at once")
-        var h = RecorderGate(); _ = h.apply(.begin); _ = h.apply(.stop)
-        check(h.apply(.answered(ok: false)).isEmpty && h.state == .idle, "the late failure: nothing to stop")
+        // the rows: ended / switched off before the answer; an answer lost
+        var a = G()
+        check(a.apply(.begin) == [.start] && a.apply(.stop).isEmpty && a.state == .starting(stopOwed: true), "stopped while starting: owed")
+        check(a.apply(.answered(.ok)) == [.stop] && a.state == .stopping, "the late success: stopped at once")
+        check(a.apply(.stopAnswered(confirmed: true)).isEmpty && a.state == .idle && !a.busy, "confirmed: idle")
+        var b = G(); _ = b.apply(.begin); _ = b.apply(.stop)
+        check(b.apply(.answered(.refused)).isEmpty && b.state == .idle, "the late refusal: nothing to stop")
+        var c = G(); _ = c.apply(.begin); _ = c.apply(.stop)
+        check(c.apply(.answered(.unknown)) == [.stop], "(Codex) the answer lost after a stop: the stop sent all the same")
+        check(c.apply(.stopAnswered(confirmed: false)).isEmpty && c.busy && c.apply(.stop) == [.stop], "the stop's answer lost: still busy, asked again")
+        var d = G(); _ = d.apply(.begin)
+        check(d.apply(.answered(.unknown)).isEmpty && d.state == .recording && d.apply(.stop) == [.stop], "the start's answer lost: taken as recording, stopped at the end")
         // the helper takes a start for the task that holds the computer, none for another
         check(RecordStart.allowed(acting: false, holderRun: nil, forRun: nil), "nothing acting: yes")
         check(RecordStart.allowed(acting: true, holderRun: "r1", forRun: "r1"), "(#127 delta, 2) the task holding the computer: its own recording, yes")
@@ -159,7 +188,10 @@ enum RecordingTests {
         let host = (try? String(contentsOf: dir.appendingPathComponent("Helper/SessionHost.swift"), encoding: .utf8)) ?? ""
         check(helper.contains("RecordStart.allowed(acting: ComputerLock.acting, holderRun: ComputerLock.read()?.runID, forRun: forRun)"),
               "record_start decides by the rule")
-        check(host.contains("if ScreenRecorder.forRun == run { recordApp(ev) }"), "(#127 delta, 6) only the recorded task's steps add apps")
+        check(host.contains("if ScreenRecorder.records(run) { recordApp(ev) }"), "(#127 delta, 6) only the recorded task's steps add apps")
+        let screen = (try? String(contentsOf: dir.appendingPathComponent("Helper/ScreenRecorder.swift"), encoding: .utf8)) ?? ""
+        check(!screen.contains("nonisolated(unsafe) static var forRun") && screen.contains("rec.forRun = req[\"for_run\"]")
+              && screen.contains("return active?.forRun == run"), "(#127 Codex) the task the recording is for: the recording's own, read under its lock")
     }
 
     /// Only this path asks the helper to record: record_start in RunRecorder alone, RunRecorder.begin from

@@ -174,7 +174,6 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         guard RecordStart.allowed(acting: ComputerLock.acting, holderRun: ComputerLock.read()?.runID, forRun: forRun) else {
             return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
         }
-        ScreenRecorder.forRun = forRun
         return ScreenRecorder.start(req)
     case "record_stop":
         return ScreenRecorder.stop()
