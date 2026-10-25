@@ -29,6 +29,9 @@ enum SessionE2E {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
         let a = CommandLine.arguments
+        // (never the user's Application Support or keychain: the test's own folder -- A11's store is a file in it;
+        // #127 review: the unsigned test binary moved the developer's models.env into a keychain item it owned)
+        if a.count >= 3 { DeskMindIPC.supportOverride = URL(fileURLWithPath: a[1] == "serve" && a.count >= 4 ? a[3] : a[2]) }
         if a.count == 3, a[1] == "lock" { lock(dir: a[2]) }
         if a.count == 3, a[1] == "linger" { linger(dir: a[2]) }
         if a.count == 3, a[1] == "holdrun" { holdRun(dir: a[2]) }

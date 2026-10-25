@@ -742,6 +742,8 @@ enum L10n {
         "Finish setup": "完成设置",
 
         // MARK: the model keys (Main/CloudModel.swift, A11)
+        "The keys in the keychain can't be read (another build of DeskMind saved them, or the keychain is locked). Enter the key again and save: it replaces them.": "钥匙串里的密钥读不出来（是另一个版本的 DeskMind 存的，或者钥匙串锁着）。重新输入密钥并保存，就会替换掉它们。",
+        "The keys in the keychain can't be read": "钥匙串里的密钥读不出来",
         "Set · ends in %@": "已设置 · 末 4 位 %@",
         "New API key (empty: keep it)": "新的 API 密钥（留空：不变）",
         "With a cloud model, each task's words, the windows it looks at, folder listings and the file contents it reads are sent to this service to think. The key is kept in your keychain, by DeskMind's helper only.": "用云端模型时，每个任务的话、它看的窗口、文件夹列表和它读的文件内容都会发给这个服务来思考。密钥存在你的钥匙串里，只有 DeskMind 的助手能读。",

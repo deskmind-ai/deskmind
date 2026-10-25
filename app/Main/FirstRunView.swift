@@ -91,7 +91,9 @@ struct FirstRunView: View {
                 .font(.system(size: 13)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
                 let p = CloudModelSettings.provider
-                if let last4 = keys.snapshot.keys[p.keyEnv], !last4.isEmpty {
+                if keys.snapshot.known && !keys.snapshot.readable {
+                    Label(L("The keys in the keychain can't be read", lang: lang), systemImage: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(ShellColor.error)
+                } else if let last4 = keys.snapshot.keys[p.keyEnv], !last4.isEmpty {
                     Label(L("%@ · Set · ends in %@", p.title, last4, lang: lang), systemImage: "checkmark.circle").font(.system(size: 12)).foregroundStyle(Brand.ink)
                 } else {
                     Label(L("No key yet", lang: lang), systemImage: "key").font(.system(size: 12)).foregroundStyle(ShellColor.secondary)

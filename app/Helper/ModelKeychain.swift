@@ -26,15 +26,43 @@ final class ModelKeychain: ModelStore.Keychain {
         return .value(text)
     }
 
+    /// The query with no dialog ever: a background helper never prompts (an item it may not touch without one fails).
+    private var quiet: [String: Any] {
+        var q = base
+        q[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+        return q
+    }
+
+    func modified() -> Date? {
+        var q = quiet
+        q[kSecReturnAttributes as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess, let a = out as? [String: Any] else { return nil }
+        return a[kSecAttrModificationDate as String] as? Date
+    }
+
     func write(_ text: String) -> Bool {
         let data = Data(text.utf8)
-        let s = SecItemUpdate(base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        let s = SecItemUpdate(quiet as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if s == errSecSuccess { return true }
         guard s == errSecItemNotFound else { return false }
-        var add = base
-        add[kSecValueData as String] = data
-        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+        return add(data)
+    }
+
+    /// The user's own save over an item this helper cannot read (another build made it, the keychain refuses): it is
+    /// deleted and written anew, this helper's.
+    func replace(_ text: String) -> Bool {
+        let s = SecItemDelete(quiet as CFDictionary)
+        guard s == errSecSuccess || s == errSecItemNotFound else { return false }
+        return add(Data(text.utf8))
+    }
+
+    private func add(_ data: Data) -> Bool {
+        var a = quiet
+        a[kSecValueData as String] = data
+        a[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(a as CFDictionary, nil) == errSecSuccess
     }
 
     /// models.env's old place (moved in once, then removed: ModelStore.current).
@@ -61,4 +89,6 @@ final class FileKeychain: ModelStore.Keychain {
         return (try? String(contentsOf: url, encoding: .utf8)).map { .value($0) } ?? .failed
     }
     func write(_ text: String) -> Bool { (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil }
+    func replace(_ text: String) -> Bool { write(text) }
+    func modified() -> Date? { (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
 }

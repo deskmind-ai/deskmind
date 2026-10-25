@@ -225,8 +225,9 @@ func handle(_ req: [String: Any]) -> [String: Any] {
     case "keys.set":
         // A change from the app's settings: {set: {NAME: value}, unset: [NAME]}, merged into what is kept. Answered with
         // the status; nothing is ever echoed.
+        // (`replace`: only the user's own save, over an item this helper cannot read -- the sheet says so first)
         let r = ModelStore.set(req["set"] as? [String: String] ?? [:], unset: req["unset"] as? [String] ?? [],
-                               keychain: ModelKeychain.store, file: ModelKeychain.legacyFile)
+                               replace: req["replace"] as? Bool == true, keychain: ModelKeychain.store, file: ModelKeychain.legacyFile)
         switch r {
         case .set(let text): return ModelStore.status(text)
         case .failed(let why): return ["ok": false, "error": why]

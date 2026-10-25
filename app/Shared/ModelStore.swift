@@ -1,24 +1,29 @@
 // Where the model services' keys live (A11, decision 6): one item in the keychain, the helper's -- it starts the session
 // processes, whose environment carries them. The main app writes a new key through the helper (`keys.set`) and is told
 // only whether one is set, each key's last 4 characters, the settings that are no secret, and the digest; it never
-// reads a value back. The old Application Support/DeskMind/models.env is moved in once and removed, only after the
-// keychain read back what it held.
+// reads a value back. The old Application Support/DeskMind/models.env is moved in and removed.
+//
+// The one fact that decides between the two places: which was written last -- the keychain item's modification date
+// against the file's (#127 review: a moved-aside copy and a marker went wrong a third way; the fact is the dates).
+// A file written after the item (an older version after a downgrade, a hand edit) is the newest settings; one written
+// before it (a removal that failed after a keys.set) is not. A crash anywhere leaves one of these states:
 //
 // | state                                   | keychain after          | models.env after                | used               |
 // |-----------------------------------------|-------------------------|---------------------------------|--------------------|
 // | file only                               | the file's              | removed, after the read back    | the file's         |
 // | keychain only                           | as it was               | --                              | the keychain's     |
 // | both, the same                          | as it was               | removed                         | the keychain's     |
-// | both, different                         | the file's (Q4)         | removed, after the read back    | the file's         |
+// | both, different, the file newer         | the file's              | removed, after the read back    | the file's         |
+// | both, different, the keychain newer     | as it was               | removed                         | the keychain's     |
 // | neither                                 | --                      | --                              | none: not set      |
 // | the keychain write (or read back) fails | as it was               | kept (tried again next read)    | the file's         |
-// | the keychain read fails (not "none")    | as it was               | kept                            | the file's, else   |
-// |                                         |                         |                                 |   unknown          |
+// | the keychain read fails (not "none")    | as it was               | kept                            | the file's if it   |
+// |                                         |                         |                                 |   is the newer,    |
+// |                                         |                         |                                 |   else unknown     |
 //
-// "Both, different" can only be a downgrade or a hand edit -- both newer than the keychain item -- because a key set
-// from the app (keys.set) moves models.env aside before it writes, and puts it back when the write fails: the file is
-// never older than the keychain item (fable 10-25). Over any sequence of moves, writes and failures, the settings in
-// use are the last ones successfully set, by the file or by keys.set (ModelStoreTests).
+// keys.set writes the item, reads it back, then removes the file -- a removal that fails leaves an older file, which
+// the next read removes. Over any sequence of reads, changes, hand-written files and failures, the settings in use are
+// the last ones successfully set (ModelStoreTests). One read or change at a time in the process (a lock).
 
 import Foundation
 
@@ -29,91 +34,101 @@ enum ModelStore {
     /// The keychain as one item (the helper's; a test's own in tests).
     protocol Keychain: AnyObject {
         func read() -> Read
+        /// When the item was last written (nil: not known).
+        func modified() -> Date?
         /// True: written.
         func write(_ text: String) -> Bool
+        /// The item removed and written anew (an item this helper cannot read -- another build's, a locked one --
+        /// replaced at the user's own save). True: written.
+        func replace(_ text: String) -> Bool
     }
+
+    /// One read or change of the settings at a time, in this process (#127 review: the helper serves each connection
+    /// on its own thread; a keys.set and a read's migration interleaved lost a change reported as made).
+    private static let lock = NSRecursiveLock()
 
     /// What one read decides: what to write, whether the file goes, which text the processes use.
     struct Plan: Equatable {
         var write: String?
-        /// Remove models.env -- only once the keychain read back `write` (or already held the file's text).
+        /// Remove models.env -- only once the keychain read back `write` (or already held the file's text, or is newer).
         var removeFile: Bool
         /// The settings in use (nil: unknown -- the keychain could not be read and there is no file).
         var use: String?
     }
 
-    /// The plan from the file's text (nil: no file) and the keychain's read.
-    static func plan(file: String?, keychain: Read) -> Plan {
+    /// The plan from the file's text (nil: no file) and the keychain's read; `fileNewer`: the file was written after
+    /// the item (nil dates: the file is taken as newer -- it can only be an older version's or the user's).
+    static func plan(file: String?, keychain: Read, fileNewer: Bool = true) -> Plan {
         switch (file, keychain) {
         case (nil, .value(let k)): return Plan(write: nil, removeFile: false, use: k)
         case (nil, .none): return Plan(write: nil, removeFile: false, use: "")
         case (nil, .failed): return Plan(write: nil, removeFile: false, use: nil)
         case (let f?, .value(let k)) where same(f, k): return Plan(write: nil, removeFile: true, use: k)
+        case (_?, .value(let k)) where !fileNewer: return Plan(write: nil, removeFile: true, use: k)
         case (let f?, .value), (let f?, .none): return Plan(write: f, removeFile: true, use: f)
-        case (let f?, .failed): return Plan(write: nil, removeFile: false, use: f)
+        // (the item unreadable: the file only when it is the newer -- an older one is no longer what was set)
+        case (let f?, .failed): return Plan(write: nil, removeFile: false, use: fileNewer ? f : nil)
         }
     }
 
     /// The same settings (the same pairs, whatever their order, comments and quoting).
     static func same(_ a: String, _ b: String) -> Bool { parse(a) == parse(b) }
 
-    /// One read of the settings, the migration done on the way: the text the processes use (nil: unknown). `file`:
-    /// models.env's place; the file goes only after the keychain read back what was written.
+    /// One read of the settings, the move from models.env done on the way: the text the processes use (nil: unknown).
     static func current(keychain: Keychain, file: URL, files: Files = Disk()) -> String? {
+        lock.lock(); defer { lock.unlock() }
         let fileText = files.read(file)
         let read = keychain.read()
-        let p = plan(file: fileText, keychain: read)
+        // (a keychain date may be cut to the second: a file within a second of it is taken as older -- the case a
+        // keys.set whose removal failed leaves; a hand edit that close after a save is not)
+        let newer: Bool = {
+            guard fileText != nil, let f = files.modified(file), let k = keychain.modified() else { return true }
+            return f.timeIntervalSince(k) > 1
+        }()
+        let p = plan(file: fileText, keychain: read, fileNewer: newer)
         var remove = p.removeFile
-        if let w = p.write {
-            remove = keychain.write(w) && keychain.read() == .value(w)
-        }
+        if let w = p.write { remove = keychain.write(w) && keychain.read() == .value(w) }
         if remove, fileText != nil { _ = files.remove(file) }
-        // (a keys.set cut short after its write: its moved-aside copy goes once the keychain holds the settings)
-        if case .value = read { _ = files.remove(aside(file)) }
         return p.use
     }
 
     enum SetResult: Equatable { case set(String), failed(String) }
 
     /// A change from the app, merged into the settings now (`set`: these pairs; `unset`: these names) -- keys the app
-    /// never shows are kept. models.env is moved aside first and put back if the keychain write (or its read back)
-    /// fails; one that cannot be moved aside fails the change, nothing written.
-    static func set(_ pairs: [String: String], unset: [String] = [], keychain: Keychain, file: URL, files: Files = Disk()) -> SetResult {
-        guard let now = current(keychain: keychain, file: file, files: files) else { return .failed("unreadable") }
+    /// never shows are kept. Written, read back, then models.env removed (a removal that fails leaves a file older than
+    /// the item: the next read removes it). `replace`: the user's own save over an item this helper cannot read --
+    /// that item is removed and the settings written anew (from models.env if there is one). Never on its own.
+    static func set(_ pairs: [String: String], unset: [String] = [], replace: Bool = false, keychain: Keychain, file: URL,
+                    files: Files = Disk()) -> SetResult {
+        lock.lock(); defer { lock.unlock() }
+        let read = current(keychain: keychain, file: file, files: files)
+        guard read != nil || replace else { return .failed("unreadable") }
+        let now = read ?? files.read(file) ?? ""
         var env = parse(now)
         for (k, v) in pairs where validName(k) && !v.isEmpty { env[k] = v }
         for k in unset { env[k] = nil }
         let text = ModelKeys.fingerprint(env)
-        let had = files.exists(file)
-        if had, !files.move(file, to: aside(file)) { return .failed("old_file") }      // 「旧的 models.env 删不掉」
-        guard keychain.write(text), keychain.read() == .value(text) else {
-            _ = keychain.write(now)          // (a write that did not read back: what was there before, as far as it goes)
-            if had { _ = files.move(aside(file), to: file) }
+        let wrote = read == nil ? keychain.replace(text) : keychain.write(text)
+        guard wrote, keychain.read() == .value(text) else {
+            if read != nil { _ = keychain.write(now) }      // (a write that did not read back: what was there before)
             return .failed("keychain")
         }
-        if had { _ = files.remove(aside(file)) }
+        _ = files.remove(file)
         return .set(text)
     }
-
-    static func aside(_ file: URL) -> URL { file.appendingPathExtension("old") }
 
     /// The file system as these moves see it (a test's own, with failures).
     protocol Files {
         func read(_ u: URL) -> String?
-        func exists(_ u: URL) -> Bool
+        func modified(_ u: URL) -> Date?
         func remove(_ u: URL) -> Bool
-        func move(_ a: URL, to b: URL) -> Bool
     }
     struct Disk: Files {
         func read(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
-        func exists(_ u: URL) -> Bool { FileManager.default.fileExists(atPath: u.path) }
+        func modified(_ u: URL) -> Date? { (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
         func remove(_ u: URL) -> Bool {
-            guard exists(u) else { return true }
+            guard FileManager.default.fileExists(atPath: u.path) else { return true }
             return (try? FileManager.default.removeItem(at: u)) != nil
-        }
-        func move(_ a: URL, to b: URL) -> Bool {
-            _ = remove(b)
-            return (try? FileManager.default.moveItem(at: a, to: b)) != nil
         }
     }
 

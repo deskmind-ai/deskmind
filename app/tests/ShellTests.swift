@@ -1167,9 +1167,9 @@ enum ShellTests {
         check(ModelChoice.modelName("  deepseek-chat \n") == "deepseek-chat" && ModelChoice.modelName("a b") == "a b", "trimmed at its ends only")
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CloudModel.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let persist = text.components(separatedBy: "private func persist()").dropFirst().first?.components(separatedBy: "private func save()").first ?? ""
-        check(persist.contains("ModelChoice.modelName(modelID)") && !persist.contains("model: modelID") && !persist.contains("= modelID"),
-              "persist saves the trimmed name")
+        let save = text.components(separatedBy: "private func save()").dropFirst().first?.components(separatedBy: "\n    }\n").first ?? ""
+        check(save.contains("ModelChoice.modelName(modelID)") && !save.contains("model: modelID") && !save.contains("= modelID"),
+              "the save sends the trimmed name")
     }
 
     /// Final round (6, E1): the stored lines a watch reconnect reads come off the stream's thread (the live lines go on

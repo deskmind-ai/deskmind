@@ -32,6 +32,8 @@ enum HelperE2E {
         if args.count >= 3, args[1] == "term-child" { termChild(pidFile: args[2]) }
         guard args.count >= 2 else { print("usage: HelperE2E <out dir> [recording|savelog|sigterm ...]"); exit(2) }
         out = URL(fileURLWithPath: args[1])
+        // (never the user's Application Support or keychain: A11's store is a file in here -- #127 review)
+        DeskMindIPC.supportOverride = out.appendingPathComponent("support")
         // Sections to run (default all): sigterm, savelog, recording. Recording goes last: capturing the screen
         // registers this process with LaunchServices, and every process it starts afterwards (the 120 SIGTERM
         // children, unzip) would leave a Dock tile for the terminal that macOS never removes.
@@ -234,8 +236,9 @@ enum HelperE2E {
         try? fm.createDirectory(at: d, withIntermediateDirectories: true)
         let runtime = Runner.runtime
         guard runtime.path.hasPrefix(out.path) else { check(false, "linger: the fake runtime is beside this binary (\(runtime.path))"); return }
+        let supportBefore = DeskMindIPC.supportOverride
         DeskMindIPC.supportOverride = out.appendingPathComponent("support-run")
-        defer { DeskMindIPC.supportOverride = nil }
+        defer { DeskMindIPC.supportOverride = supportBefore }      // (back to the test's own: never the user's)
         try? fm.removeItem(at: ComputerLock.file)
         let node = runtime.appendingPathComponent("node/bin/node")
         for dir in [node.deletingLastPathComponent(), runtime.appendingPathComponent("harness"), runtime.appendingPathComponent("hands")] {

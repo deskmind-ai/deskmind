@@ -75,13 +75,16 @@ enum CloudModelSettings {
 
     /// A change, merged by the helper into what it keeps (other services' keys stay: switching providers loses
     /// nothing). Synchronous (the helper answers at once); off the main thread or from a sheet's save.
-    static func set(_ pairs: [String: String], unset: [String] = []) throws {
-        guard let r = DeskMindIPC.request(["op": "keys.set", "set": pairs, "unset": unset], timeout: 10) else {
+    /// `replace`: the user's own save over keys the helper cannot read (another build's keychain item, a locked
+    /// keychain): that item is replaced. Off the main thread.
+    static func set(_ pairs: [String: String], unset: [String] = [], replace: Bool = false) throws {
+        guard let r = DeskMindIPC.request(["op": "keys.set", "set": pairs, "unset": unset, "replace": replace], timeout: 10) else {
             throw SaveError.refused("no answer from the helper")
         }
         guard r["ok"] as? Bool == true else {
             let why = r["error"] as? String
-            throw SaveError.refused(why == "old_file" ? "the old models.env could not be removed" : (why ?? "not saved"))
+            throw SaveError.refused(why == "old_file" ? "the old models.env could not be removed"
+                                    : why == "unreadable" ? "the keys in the keychain can't be read" : (why ?? "not saved"))
         }
         KeyStatus.shared.apply(r)
         // each writer of the model settings says so (the keys here, the service and the configuration below): the
@@ -159,6 +162,7 @@ struct CloudModelSheet: View {
     @State private var result: String? = nil
     @State private var resultOK = false
     @ObservedObject private var keys = KeyStatus.shared
+    @State private var saving = false
     private var status: KeyStatus.Snapshot { keys.snapshot }
 
     var body: some View {
@@ -176,7 +180,11 @@ struct CloudModelSheet: View {
                 }
                 .onChange(of: provider) { _, p in load(p) }
                 // (the key as the helper knows it: set or not, its last 4 -- never shown, never read back)
-                if let last4 = status.keys[provider.keyEnv], !last4.isEmpty {
+                if status.known && !status.readable {
+                    // (the truth, and the way out: the user's own save replaces them -- #127 review)
+                    Text(L("The keys in the keychain can't be read (another build of DeskMind saved them, or the keychain is locked). Enter the key again and save: it replaces them.", lang: lang))
+                        .font(.system(size: 11)).foregroundStyle(ShellColor.error).fixedSize(horizontal: false, vertical: true)
+                } else if let last4 = status.keys[provider.keyEnv], !last4.isEmpty {
                     Text(L("Set · ends in %@", last4, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
                 }
                 SecureField(status.keys[provider.keyEnv] == nil ? L("API key", lang: lang) : L("New API key (empty: keep it)", lang: lang), text: $key)
@@ -201,11 +209,15 @@ struct CloudModelSheet: View {
             HStack {
                 Spacer()
                 Button(L("Cancel", lang: lang)) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(L("Save", lang: lang)) { save() }.keyboardShortcut(.defaultAction)
+                Button(L("Save", lang: lang)) { save() }.keyboardShortcut(.defaultAction).disabled(saving)
                     .disabled(useCloud && ((key.isEmpty && status.keys[provider.keyEnv] == nil) || (provider.custom && (url.isEmpty || modelID.isEmpty))))
             }
         }
         .padding(22).frame(width: 440)
+        // (the custom service's URL and model as the helper keeps them, once its answer comes)
+        .onChange(of: keys.snapshot) { _, s in
+            if url.isEmpty && modelID.isEmpty { url = s.settings["CUSTOM_URL"] ?? ""; modelID = s.settings["CUSTOM_MODEL"] ?? "" }
+        }
         .onAppear {
             savedCloud = CloudModelSettings.engineIsCloud
             useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)
@@ -245,21 +257,34 @@ struct CloudModelSheet: View {
         }
     }
 
-    private func persist() throws {
+    /// The keys through the helper, off the main thread; then the service and its configuration, the engine, done.
+    private func save() {
         let model = ModelChoice.modelName(modelID)         // (a pasted name's spaces never saved)
         var pairs: [String: String] = [:]
-        if !key.isEmpty { pairs[provider.keyEnv] = key }   // (empty: the key kept as it is)
-        if provider.custom { pairs["CUSTOM_URL"] = url; pairs["CUSTOM_MODEL"] = model }
-        if !pairs.isEmpty { try CloudModelSettings.set(pairs) }
-        CloudModelSettings.provider = provider
-        CloudModelSettings.engineConfig = CloudModelSettings.config(for: provider, model: model)
-    }
-
-    private func save() {
-        do { if useCloud { try persist() } } catch { result = error.localizedDescription; resultOK = false; return }
-        // the engine only if the user moved the switch (a privacy setting, shared with the window as it was)
-        if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }
-        model.refreshCloud()
-        dismiss()
+        if useCloud {
+            if !key.isEmpty { pairs[provider.keyEnv] = key }   // (empty: the key kept as it is)
+            if provider.custom { pairs["CUSTOM_URL"] = url; pairs["CUSTOM_MODEL"] = model }
+        }
+        // (keys the helper cannot read: the user's save replaces them -- the sheet said so)
+        let replace = status.known && !status.readable
+        saving = true
+        Task.detached {
+            var failure: String?
+            if !pairs.isEmpty {
+                do { try CloudModelSettings.set(pairs, replace: replace) } catch { failure = error.localizedDescription }
+            }
+            await MainActor.run {
+                saving = false
+                if let failure { result = failure; resultOK = false; return }
+                if useCloud {
+                    CloudModelSettings.provider = provider
+                    CloudModelSettings.engineConfig = CloudModelSettings.config(for: provider, model: model)
+                }
+                // the engine only if the user moved the switch (a privacy setting, shared with the window as it was)
+                if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }
+                self.model.refreshCloud()
+                dismiss()
+            }
+        }
     }
 }
