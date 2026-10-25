@@ -13,6 +13,7 @@ enum RecordingTests {
         DecisionTests.group("recording.sequences"); sequenceTests()
         DecisionTests.group("recording.shell"); shellTests()
         DecisionTests.group("recording.static"); staticTests()
+        DecisionTests.group("recording.gate"); gateTests()
     }
 
     static func tableTests() {
@@ -33,7 +34,7 @@ enum RecordingTests {
         _ = r.apply(.startFailed(run: "r6"))
         check(r.apply(.taskEnded(run: "r6")).isEmpty && r.recordingRun == nil, "a start that failed: nothing to stop")
         var d = T(); d.defaultOn = true
-        check(d.apply(.taskStarted(session: "new", run: "x")) == [.start(session: "new", run: "x")], "the last choice is a new conversation's start")
+        check(d.apply(.taskStarted(session: "old", run: "x")).isEmpty, "(#127 delta) the last choice never turns an existing conversation on")
     }
 
     /// Random lifecycles -- tasks starting and ending every way, steers (nothing for the recording), switches,
@@ -73,7 +74,7 @@ enum RecordingTests {
     final class FakeRecorder: TaskRecorder {
         var log: [String] = []
         var ok = true
-        func start(goal: String, started: @escaping (Bool) -> Void) { log.append("start:\(goal)"); started(ok) }
+        func start(goal: String, run: String, started: @escaping (Bool) -> Void) { log.append("start:\(goal)"); started(ok) }
         func stop(done: @escaping (URL?) -> Void) { log.append("stop"); done(URL(fileURLWithPath: "/tmp/movie.mov")) }
         func step(_ n: Int, _ words: String) { log.append("step:\(n)") }
     }
@@ -103,10 +104,62 @@ enum RecordingTests {
         // the executor killed: the session ends the task (task_end) -- stopped, the movie on its row
         m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 4, "run_id": "r2", "status": "failed"])
         check(rec.log.last == "stop" && rec.log.filter { $0 == "stop" }.count == 1 && m.movies["r2"] == "/tmp/movie.mov", "its end: stopped once, 「已录制」: \(rec.log)")
+        // (#127 delta, 3) another conversation that never touched the switch: not recorded though the last choice is on
+        let other = "ses_other"
+        m.client.feed(["kind": "session.message", "session_id": other, "seq": 1, "msg_id": "o1", "role": "user", "text": "/cua b", "via": "cua"])
+        m.client.feed(["kind": "session.task", "session_id": other, "seq": 2, "msg_id": "o1", "run_id": "ro", "raw": "别的", "by": "slash"])
+        m.client.feed(["kind": "start", "session_id": other, "run_id": "ro", "seq": 1, "raw": "别的"])
+        check(!rec.log.contains("start:别的"), "an untouched conversation: not recorded")
+        m.client.feed(["kind": "task_done", "session_id": other, "run_id": "ro", "seq": 2, "status": "succeeded", "reason": "", "summary": "", "result_card": NSNull()])
         rec.ok = false
         task("r3", seq: 5, raw: "再来")
         m.client.feed(["kind": "task_done", "session_id": sid, "run_id": "r3", "seq": 2, "status": "stopped", "reason": "", "summary": "", "result_card": NSNull()])
         check(rec.log.filter { $0 == "stop" }.count == 1, "a start that failed: no stop after it: \(rec.log)")
+        // (#127 Codex) a new conversation (none selected yet): the switch is kept and carried to its session
+        let d = ShellModel(client: SessionClient(transport: CardStoreTests.Wire()), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                           lang: { .zhHans }, takeBackAfter: timers.after, now: { timers.now }, work: { $0() }, deliver: { $0() })
+        d.setRecording(true)
+        check(d.selected == nil && d.recordsNext && d.recording.defaultOn, "a draft conversation: the switch on, kept")
+    }
+
+    /// (#127 delta, 1) The recorder's gate over the helper's slow answer: a stop while the start is on its way is
+    /// owed, and the helper never records past the stop. Random interleavings, the helper's answer as a move of its own.
+    static func gateTests() {
+        var g = CardStoreTests.RNG(x: 8)
+        for seed in 0..<500 {
+            var gate = RecorderGate(), helperRecording = false, inFlight = false, wants = false
+            for _ in 0..<20 {
+                switch g.next(3) {
+                case 0: wants = true; for s in gate.apply(.begin) { if s == .start { if inFlight { check(false, "seed \(seed): two starts"); return }; inFlight = true } }
+                case 1: wants = false; for s in gate.apply(.stop) where s == .stop { helperRecording = false }
+                default:
+                    guard inFlight else { continue }
+                    inFlight = false
+                    let ok = g.next(3) != 0
+                    if ok { helperRecording = true }
+                    for s in gate.apply(.answered(ok: ok)) where s == .stop { helperRecording = false }
+                }
+                // the helper never records once the app no longer wants it, with no start left on its way
+                if !wants && !inFlight && helperRecording { check(false, "seed \(seed): the helper records past the stop"); return }
+            }
+        }
+        // the rows: ended / switched off before the answer
+        var gate = RecorderGate()
+        check(gate.apply(.begin) == [.start] && gate.apply(.stop).isEmpty && gate.state == .starting(stopOwed: true), "stopped while starting: owed")
+        check(gate.apply(.answered(ok: true)) == [.stop] && gate.state == .idle, "the late success: stopped at once")
+        var h = RecorderGate(); _ = h.apply(.begin); _ = h.apply(.stop)
+        check(h.apply(.answered(ok: false)).isEmpty && h.state == .idle, "the late failure: nothing to stop")
+        // the helper takes a start for the task that holds the computer, none for another
+        check(RecordStart.allowed(acting: false, holderRun: nil, forRun: nil), "nothing acting: yes")
+        check(RecordStart.allowed(acting: true, holderRun: "r1", forRun: "r1"), "(#127 delta, 2) the task holding the computer: its own recording, yes")
+        check(!RecordStart.allowed(acting: true, holderRun: "r1", forRun: "r2") && !RecordStart.allowed(acting: true, holderRun: "r1", forRun: nil),
+              "another task acting: no")
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let helper = (try? String(contentsOf: dir.appendingPathComponent("Helper/HandsHelper.swift"), encoding: .utf8)) ?? ""
+        let host = (try? String(contentsOf: dir.appendingPathComponent("Helper/SessionHost.swift"), encoding: .utf8)) ?? ""
+        check(helper.contains("RecordStart.allowed(acting: ComputerLock.acting, holderRun: ComputerLock.read()?.runID, forRun: forRun)"),
+              "record_start decides by the rule")
+        check(host.contains("if ScreenRecorder.forRun == run { recordApp(ev) }"), "(#127 delta, 6) only the recorded task's steps add apps")
     }
 
     /// Only this path asks the helper to record: record_start in RunRecorder alone, RunRecorder.begin from

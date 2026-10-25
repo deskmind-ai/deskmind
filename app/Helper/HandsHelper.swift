@@ -168,9 +168,13 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         return ["ok": true]
     case "record_start":
         // The task's apps (or the whole screen), recorded by the helper, which holds Screen Recording: ScreenRecorder.
-        // Not while another task acts on this Mac: the run it is for would be refused (computer_busy), and nothing of a
-        // refused request may start on the desktop.
-        if ComputerLock.acting { return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"] }
+        // Not while another task acts on this Mac (the run it is for would be refused, computer_busy) -- but the
+        // recording of the task that holds it (`for_run`: the chat's 「录制这个任务」) is passive capture of that task.
+        let forRun = req["for_run"] as? String
+        guard RecordStart.allowed(acting: ComputerLock.acting, holderRun: ComputerLock.read()?.runID, forRun: forRun) else {
+            return ["ok": false, "code": "computer_busy", "error": "another task is using this Mac"]
+        }
+        ScreenRecorder.forRun = forRun
         return ScreenRecorder.start(req)
     case "record_stop":
         return ScreenRecorder.stop()

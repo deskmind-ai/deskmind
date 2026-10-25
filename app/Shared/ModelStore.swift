@@ -5,8 +5,10 @@
 //
 // The one fact that decides between the two places: which was written last -- the keychain item's modification date
 // against the file's (#127 review: a moved-aside copy and a marker went wrong a third way; the fact is the dates).
-// A file written after the item (an older version after a downgrade, a hand edit) is the newest settings; one written
-// before it (a removal that failed after a keys.set) is not. A crash anywhere leaves one of these states:
+// A file written after the item (an older version after a downgrade, a hand edit) is the newest settings; one plainly
+// written before it (a crash between keys.set's write and its removal) is not; within a second either way it is taken
+// as the newer (ambiguity never retires a credential). A file retired goes to the Trash, never unlinked. A crash
+// anywhere leaves one of these states:
 //
 // | state                                   | keychain after          | models.env after                | used               |
 // |-----------------------------------------|-------------------------|---------------------------------|--------------------|
@@ -21,9 +23,10 @@
 // |                                         |                         |                                 |   is the newer,    |
 // |                                         |                         |                                 |   else unknown     |
 //
-// keys.set writes the item, reads it back, then removes the file -- a removal that fails leaves an older file, which
-// the next read removes. Over any sequence of reads, changes, hand-written files and failures, the settings in use are
-// the last ones successfully set (ModelStoreTests). One read or change at a time in the process (a lock).
+// keys.set writes the item, reads it back, then retires the file -- one it cannot retire undoes the write and fails
+// the change (a file left beside a newer item could be taken for the newer one). Over any sequence of reads, changes,
+// hand-written files and failures, the settings in use are the last ones successfully set (ModelStoreTests). One read
+// or change at a time in the process (a lock).
 
 import Foundation
 
@@ -79,11 +82,11 @@ enum ModelStore {
         lock.lock(); defer { lock.unlock() }
         let fileText = files.read(file)
         let read = keychain.read()
-        // (a keychain date may be cut to the second: a file within a second of it is taken as older -- the case a
-        // keys.set whose removal failed leaves; a hand edit that close after a save is not)
+        // (a keychain date may be cut to the second: a file within a second of it may be the newer -- ambiguity never
+        // retires a credential, so it is taken as newer and moved in; only a file plainly older loses -- #127 Codex)
         let newer: Bool = {
             guard fileText != nil, let f = files.modified(file), let k = keychain.modified() else { return true }
-            return f.timeIntervalSince(k) > 1
+            return f.timeIntervalSince(k) > -1
         }()
         let p = plan(file: fileText, keychain: read, fileNewer: newer)
         var remove = p.removeFile
@@ -113,11 +116,16 @@ enum ModelStore {
             if read != nil { _ = keychain.write(now) }      // (a write that did not read back: what was there before)
             return .failed("keychain")
         }
-        _ = files.remove(file)
+        // the file retired (to the Trash) -- or the change undone: a file left beside a newer item could be taken for
+        // the newer one (within a second) and bring the old settings back
+        guard files.remove(file) else {
+            if read != nil { _ = keychain.write(now) }
+            return .failed("old_file")
+        }
         return .set(text)
     }
 
-    /// The file system as these moves see it (a test's own, with failures).
+    /// The file system as these moves see it (a test's own, with failures). `remove`: retired -- never unlinked.
     protocol Files {
         func read(_ u: URL) -> String?
         func modified(_ u: URL) -> Date?
@@ -126,9 +134,14 @@ enum ModelStore {
     struct Disk: Files {
         func read(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
         func modified(_ u: URL) -> Date? { (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
+        /// To the Trash (what the user put there never just vanishes: a restored backup, a hand edit); no Trash: renamed
+        /// models.env.replaced-<date> beside it. True: it is no longer at `u`.
         func remove(_ u: URL) -> Bool {
-            guard FileManager.default.fileExists(atPath: u.path) else { return true }
-            return (try? FileManager.default.removeItem(at: u)) != nil
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: u.path) else { return true }
+            if (try? fm.trashItem(at: u, resultingItemURL: nil)) != nil { return true }
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            return (try? fm.moveItem(at: u, to: u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".replaced-" + stamp))) != nil
         }
     }
 

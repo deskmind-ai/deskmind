@@ -147,8 +147,10 @@ struct SetupRow: View {
         VStack(spacing: 6) {
             ForEach(Array(unmet.enumerated()), id: \.offset) { _, u in
                 HStack(spacing: 8) {
-                    Text(u == .permissions ? L("The helper's permissions aren't granted yet.", lang: lang) : L("No model key yet.", lang: lang))
+                    Text(u == .permissions ? L("The helper's permissions aren't granted yet.", lang: lang)
+                         : u == .keyUnreadable ? L("The keys in the keychain can't be read", lang: lang) : L("No model key yet.", lang: lang))
                         .font(.system(size: 12)).foregroundStyle(Brand.ink)
+                    // (unreadable keys: the key step too, where a save replaces them)
                     Button(L("Finish setup", lang: lang)) { open(u == .permissions ? .permissions : .key) }
                         .buttonStyle(InkButtonStyle(prominent: false))
                 }

@@ -29,6 +29,7 @@ enum FirstRunTests {
         check(F.unmet(F.Facts(accessibility: true, screen: true, keySet: true)) == [], "all met: nothing said")
         check(F.unmet(F.Facts(accessibility: true, screen: false, keySet: false)) == [.permissions, .key], "a permission and the key missing: both rows")
         check(F.unmet(F.Facts(accessibility: true, screen: true, keySet: false)) == [.key], "only the key")
+        check(F.unmet(F.Facts(accessibility: true, screen: true, keySet: false), keysReadable: false) == [.keyUnreadable], "(#127 delta) unreadable keys: said as that, never 'no key'")
         check(F.examples.count == 3 && F.examples.allSatisfy { L($0, lang: .zhHans) != $0 }, "three examples, each in Chinese too")
     }
 

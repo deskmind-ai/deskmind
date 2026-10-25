@@ -51,9 +51,10 @@ struct FirstRun: Equatable {
     var canLater: Bool { step != .language && step != .done }
 
     /// What is still unmet once the flow is over: rows in the empty chat (in this order).
-    enum Unmet: Equatable { case permissions, key }
-    static func unmet(_ f: Facts) -> [Unmet] {
-        (f.accessibility && f.screen ? [] : [.permissions]) + (f.keySet ? [] : [.key])
+    enum Unmet: Equatable { case permissions, key, keyUnreadable }
+    /// `keysReadable`: false when the helper cannot read the keychain -- said as that, never as "no key".
+    static func unmet(_ f: Facts, keysReadable: Bool = true) -> [Unmet] {
+        (f.accessibility && f.screen ? [] : [.permissions]) + (!keysReadable ? [.keyUnreadable] : f.keySet ? [] : [.key])
     }
 
     /// The flag: the flow was finished (or skipped) once.

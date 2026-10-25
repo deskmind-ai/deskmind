@@ -93,6 +93,9 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         self.wholeScreen = wholeScreen; self.mode = RecordingCapture.mode(smooth: smooth); self.goal = goal
     }
 
+    /// The chat task the recording is for (record_start's `for_run`; nil: an op run's): only its steps add apps.
+    nonisolated(unsafe) static var forRun: String?
+
     static func start(_ req: [String: Any]) -> [String: Any] {
         // A recording nobody stopped (the app quit mid-run): finished now, its files written for the run it filmed,
         // and this one starts. Refused instead, every later run went unrecorded while that one grew for half an hour.

@@ -536,6 +536,7 @@ final class ShellModel: ObservableObject {
         self.lane = lane ?? work
         self.deliver = deliver
         recording.defaultOn = defaults.bool(forKey: TaskRecording.defaultKey)
+        recording.on = (defaults.dictionary(forKey: TaskRecording.conversationsKey) as? [String: Bool]) ?? [:]
         movies = (defaults.dictionary(forKey: TaskRecording.moviesKey) as? [String: String]) ?? [:]
         client.clock = now        // (an exit the client infers for a session alive this run is stamped by this clock)
         client.onChange = { [weak self] id, _ in self?.changed(id) }
@@ -847,6 +848,7 @@ final class ShellModel: ObservableObject {
                 self.opening = false
                 if self.drafts[""] == text { self.drafts[""] = "" }
                 self.states[id] = self.client.state(id)
+                self.seedRecording(id)          // (a new conversation: the last 「录制这个任务」 choice)
                 if self.selected == nil { self.selected = id }
                 self.rebuild()
             }
@@ -1058,14 +1060,22 @@ final class ShellModel: ObservableObject {
     @Published private(set) var movies: [String: String] = [:]
     private var stepsNoted: [String: Int] = [:]
 
-    /// The selected conversation's switch.
+    /// The selected conversation's switch (no conversation yet: the one a new conversation starts with).
     var recordsNext: Bool { selected.map { recording.isOn($0) } ?? recording.defaultOn }
     func setRecording(_ on: Bool) {
-        guard let id = selected else { return }
-        defaults.set(on, forKey: TaskRecording.defaultKey)     // (the next conversation starts with this choice)
+        defaults.set(on, forKey: TaskRecording.defaultKey)     // (the next new conversation starts with this choice)
         recording.defaultOn = on
+        guard let id = selected else { return }
         record(recording.apply(.toggled(session: id, on: on)), in: id)
+        saveRecordingSwitches()
     }
+    /// A conversation just made here: seeded with the last choice (record.default) -- never an existing one.
+    private func seedRecording(_ id: String) {
+        guard recording.on[id] == nil else { return }
+        _ = recording.apply(.toggled(session: id, on: recording.defaultOn))
+        saveRecordingSwitches()
+    }
+    private func saveRecordingSwitches() { defaults.set(recording.on, forKey: TaskRecording.conversationsKey) }
 
     /// `state`: the session's newest (a flush tells the recording before it stores it).
     private func record(_ actions: [TaskRecording.Action], in id: String, state: SessionState? = nil) {
@@ -1073,7 +1083,7 @@ final class ShellModel: ObservableObject {
             switch a {
             case .start(_, let run):
                 let goal = (state ?? states[id])?.task(run)?.raw ?? ""
-                recorder?.start(goal: goal) { [weak self] ok in
+                recorder?.start(goal: goal, run: run) { [weak self] ok in
                     guard let self, !ok else { return }
                     _ = self.recording.apply(.startFailed(run: run))
                 }

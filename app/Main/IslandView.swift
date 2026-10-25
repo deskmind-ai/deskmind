@@ -240,7 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// gone). Left recording, it refused the next run's recording.
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
-            guard RunRecorder.shared.isRecording else { return }
+            guard RunRecorder.shared.busy else { return }       // (recording, or a start on its way)
             _ = DeskMindIPC.request(["op": "record_stop"], timeout: 1)
         }
     }

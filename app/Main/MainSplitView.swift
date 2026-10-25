@@ -82,7 +82,8 @@ struct MainSplitView: View {
     private var unmet: [FirstRun.Unmet] {
         guard model.helperReady, keys.snapshot.known else { return [] }
         return FirstRun.unmet(FirstRun.Facts(accessibility: model.granted(.accessibility), screen: model.granted(.screen),
-                                             keySet: CloudModelSettings.configured(keys.snapshot, CloudModelSettings.provider)))
+                                             keySet: CloudModelSettings.configured(keys.snapshot, CloudModelSettings.provider)),
+                              keysReadable: keys.snapshot.readable)
     }
 
     /// The sheet's Save already told the shell (ModelSettingsSaved); this compares again, and acts only on what it has

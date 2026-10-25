@@ -89,6 +89,14 @@ enum ModelStoreTests {
             check(env["OPENROUTER_API_KEY"] == "or-9999" && env["DEEPSEEK_API_KEY"] == "sk-bbbb2222" && fs.read(file) == nil,
                   "keys.set merges (the file's key kept, the new one added), the file gone: \(env.keys.sorted())")
         } else { check(false, "keys.set") }
+        // the file cannot be retired: the change undone, refused -- never a newer item beside an older file
+        fs.put(file, b)
+        _ = S.current(keychain: kc, file: file, files: fs)
+        fs.put(file, b); fs.failRemove = true
+        let before = kc.item
+        check(S.set(["OPENROUTER_API_KEY": "or-7777"], keychain: kc, file: file, files: fs) == .failed("old_file") && kc.item == before,
+              "the file cannot be retired: the change undone, refused")
+        fs.failRemove = false
         if case .set(let t) = S.set([:], unset: ["OPENROUTER_API_KEY"], keychain: kc, file: file, files: fs) {
             check(S.parse(t).keys.sorted() == ["DEEPSEEK_API_KEY"], "unset removes that name only")
         } else { check(false, "unset") }
@@ -150,6 +158,18 @@ enum ModelStoreTests {
             fs.put(file, old)
             check(S.current(keychain: kc, file: file, files: fs).map(S.parse)?["DEEPSEEK_API_KEY"] == "sk-file1111" && kc.item == old,
                   "killed before the write: the file's settings, moved in")
+        }
+        // (#127 Codex) a file written within the second after the item, with a new key: it may be the newer -- it wins,
+        // moved in, never retired unread
+        do {
+            let c = Clock(), kc = FakeKeychain(c), fs = FakeFiles(c)
+            _ = kc.write("DEEPSEEK_API_KEY=sk-old0000\n")
+            fs.files[file.path] = ("DEEPSEEK_API_KEY=sk-new1111\n", kc.at!.addingTimeInterval(0.5))
+            check(S.current(keychain: kc, file: file, files: fs).map(S.parse)?["DEEPSEEK_API_KEY"] == "sk-new1111" && kc.item == "DEEPSEEK_API_KEY=sk-new1111\n",
+                  "a file half a second after the item: the newer, moved in")
+            _ = kc.write("DEEPSEEK_API_KEY=sk-kc2222\n")
+            fs.files[file.path] = ("DEEPSEEK_API_KEY=sk-file3333\n", kc.at!.addingTimeInterval(-0.5))
+            check(S.current(keychain: kc, file: file, files: fs).map(S.parse)?["DEEPSEEK_API_KEY"] == "sk-file3333", "half a second before: ambiguous -- the file")
         }
         // no dates known (an item without one): the file is taken as newer -- only an older version or the user wrote it
         check(S.plan(file: old, keychain: .value("DEEPSEEK_API_KEY=x\n")) == S.Plan(write: old, removeFile: true, use: old), "no dates: the file")
