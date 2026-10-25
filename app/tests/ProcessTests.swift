@@ -89,6 +89,12 @@ enum ProcessTests {
         check(running.state == .running && running.changes?.final == false && running.changes?.modified == ["/tmp/x/笔记.txt"], "running: the last changes so far")
         let torn = RunDir.model(RunDir.Files(events: jsonl(Array(events.prefix(6))) + "{\"seq\": 7, \"kind\": \"chan", trace: nil))
         check(torn.state == .running && torn.steps.count == 1, "a torn last line: what parses, no crash")
+        // (#126) a picture's path outside the run's shots/: never read
+        for bad in ["/etc/x.png", "shots/../../x.png", "../x.png", "shots/a/b.png", "shots/", "shots/.hidden", "x.png"] {
+            check(RunDir.contained(bad) == nil, "not contained: \(bad)")
+        }
+        let escaping = events.map { e -> [String: Any] in var e = e; if e["kind"] as? String == "step_result" && e["step_id"] as? String == "st_1" { e["shot"] = "/tmp/st_1.png" }; return e }
+        check(RunDir.model(RunDir.Files(events: jsonl(escaping), shots: ["st_1.png"])).steps[0].shot == nil, "an absolute shot path: no picture")
         check(RunDir.model(RunDir.Files(events: nil)) == .none && RunDir.model(RunDir.Files(events: "")) == .none, "no events: none (没有记录)")
         check(RunDir.model(RunDir.Files(events: jsonl(events), trace: jsonl(trace), shots: ["st_1.png"], pruned: true)).state == .pruned,
               "the marker: pruned (运行记录已清理), whatever stray file came after it")
@@ -124,6 +130,14 @@ enum ProcessTests {
               "the last line counts, its sample whole: \(cur.first.map { "\($0)" } ?? "")")
         check(cur[1].sample.prompt == nil, "labelled with no material: prompt null (原文未保存)")
         check(Annotations.count("run_1", support: support) == 2, "the count")
+        // (#126) the labels view, from the line alone: options and every tier's answer
+        let shown = Annotations.shown(cur[0])
+        check(shown.options == ["matches: yes", "mismatch: no"] && shown.tiers == ["frontier · answered · matches"] && shown.prompt == a.prompt
+              && shown.answer == "matches" && shown.by == "frontier" && shown.label == .wrong && shown.note == "它其实没对上",
+              "the labels view shows the sample whole: \(shown)")
+        check(Annotations.shown(cur[1]).prompt == nil && Annotations.shown(cur[1]).tiers.count == 1, "no material: 原文未保存, the tiers still")
+        let mode = (try? FileManager.default.attributesOfItem(atPath: Annotations.file("run_1", support: support).path)[.posixPermissions]) as? NSNumber
+        check(mode?.intValue == 0o600, "the labels file is the user's only: \(String(describing: mode))")
         let out = temp().appendingPathComponent("export.jsonl")
         check(Annotations.export("run_1", to: out, support: support)
               && (try? String(contentsOf: out, encoding: .utf8)) == (try? String(contentsOf: Annotations.file("run_1", support: support), encoding: .utf8)),
@@ -158,7 +172,9 @@ enum ProcessTests {
             ("one older than 30 days", [r("a", 31, 10), r("b", 2, 10)], ["a"]),
             ("over 1 GB: the oldest until it fits", [r("a", 3, gb / 2), r("b", 2, gb / 2), r("c", 1, gb / 2)], ["a"]),
             ("over 1 GB by a lot", [r("a", 3, gb), r("b", 2, gb), r("c", 1, 10)], ["a", "b"]),
-            ("running (no task_done): never", [r("a", nil, 2 * gb), r("b", 40, 10)], ["b"]),
+            ("age not known: kept, and not counted", [r("a", nil, 2 * gb), r("b", 40, 10)], ["b"]),
+            ("(#126) a never-ending run of 1.2 GB does not strip the young ones", [r("x", nil, gb * 6 / 5), r("y1", 0.01, gb / 100), r("y2", 0.02, gb / 100)], []),
+            ("a live run of 2 GB: kept, the young ones too", [r("l", 1, 2 * gb, live: true), r("y", 1, 10)], []),
             ("live (its late shots landing): never", [r("a", 40, 10, live: true)], []),
             ("pruned, nothing left: nothing to take", [r("a", 40, 0, pruned: true)], []),
             ("pruned, a stray shot came: taken again", [r("a", 1, 5, pruned: true)], ["a"]),
@@ -179,7 +195,7 @@ enum ProcessTests {
             }
             let may = runs.filter(R.mayGo).sorted { ($0.ended!, $0.id) < ($1.ended!, $1.id) }
             let strays = Set(may.filter(\.pruned).map(\.id))
-            let total = runs.reduce(Int64(0)) { $0 + $1.bytes }
+            let total = may.reduce(Int64(0)) { $0 + $1.bytes }
             var want: Set<String> = []
             for k in 0...may.count {
                 let taken = Set(may.prefix(k).map(\.id)).union(strays)
@@ -189,7 +205,7 @@ enum ProcessTests {
             }
             let got = Set(R.plan(runs, now: now).map(\.id))
             if got != want { check(false, "plan vs oracle: \(got.sorted()) vs \(want.sorted()) for \(runs.map { "\($0.id):\($0.ended ?? -1):\($0.bytes):\($0.kind):\($0.live):\($0.pruned)" })"); break }
-            if runs.contains(where: { $0.ended == nil || $0.live }) && got.contains(where: { id in runs.contains { $0.id == id && ($0.ended == nil || $0.live) } }) {
+            if got.contains(where: { id in runs.contains { $0.id == id && ($0.ended == nil || $0.live) } }) {
                 check(false, "a running or live run taken"); break
             }
         }
@@ -226,10 +242,30 @@ enum ProcessTests {
         // a stray shot after the pass: taken by the next, the marker stays
         fm.createFile(atPath: old.appendingPathComponent("trace.jsonl").path, contents: Data("late\n".utf8))
         check(R.prune(support: support, live: ["run_live"], now: t0) >= 1 && !has(old, "trace.jsonl") && has(old, R.marker), "a stray record: taken again")
-        // 「清除运行记录」: every ended, not live run
+        // 「清除运行记录」: every run not live
         let cleared = R.prune(support: support, live: ["run_live"], now: t0, everything: true)
         check(cleared >= 1 && !has(young, "trace.jsonl") && has(young, "events.jsonl")
-              && has(going, "trace.jsonl") && has(liveRun, "trace.jsonl") && fm.fileExists(atPath: ann.path), "clear all: ended runs' records; running, live, annotations kept")
+              && !has(going, "trace.jsonl") && has(liveRun, "trace.jsonl") && fm.fileExists(atPath: ann.path), "clear all: every run not live (an unended one too); live runs and annotations kept")
+        // (#126) a killed old-window run (no task_done) 90 days on: aged by its events' last write, taken; a session run
+        // closed without an end, young: kept; a symlinked run folder: never followed
+        let s2 = temp()
+        let killed = s2.appendingPathComponent("work/harness-runs/killed")
+        try? fm.createDirectory(at: killed.appendingPathComponent("shots"), withIntermediateDirectories: true)
+        try? "{\"kind\":\"step\",\"t\":1}\n".write(to: killed.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+        let open = s2.appendingPathComponent("sessions/s1/runs/open")
+        mk(open, done: nil)
+        fm.createFile(atPath: open.appendingPathComponent("runtime.jsonl").path, contents: Data(repeating: 1, count: 10))
+        let outside = s2.appendingPathComponent("outside")
+        mk(outside, done: 1)
+        try? fm.createSymbolicLink(at: s2.appendingPathComponent("sessions/s1/runs/link"), withDestinationURL: outside)
+        check(R.prune(support: s2, live: [], now: Date().timeIntervalSince1970 + 90 * day) == 2, "90 days on: the killed run and the unended one, not the link")
+        check(!fm.fileExists(atPath: killed.path), "the killed old-window run: taken whole")
+        check(!has(open, "runtime.jsonl") && !has(open, "trace.jsonl") && has(open, "events.jsonl") && has(open, R.marker), "the unended session run: its records (runtime.jsonl too) taken")
+        check(has(outside, "trace.jsonl") && has(outside, "shots"), "the symlinked run folder: never followed")
+        let s3 = temp(), fresh = s3.appendingPathComponent("sessions/s1/runs/fresh")
+        mk(fresh, done: nil)
+        check(R.prune(support: s3, live: [], now: Date().timeIntervalSince1970) == 0 && has(fresh, "trace.jsonl"), "unended and young: kept")
+        check(R.prune(support: s3, live: ["fresh"], now: Date().timeIntervalSince1970 + 90 * day) == 0, "live (a fact): never")
         // the age from task_done's own t, not the folder's date
         check(R.run(young, kind: .session, live: []).ended.map { abs($0 - (t0 - day)) < 1 } == true, "age: task_done's t")
     }
@@ -239,27 +275,48 @@ enum ProcessTests {
     static func tabTests() {
         typealias T = ProcessTabs
         var t = T()
-        t.apply(.taskStarted("r1")); check(t.tab == .now && t.run == "r1", "a task starts: 现在")
+        t.apply(.taskStarted("r1")); check(t.tab == .now && t.run == "r1", "a task starts: the tab as it is, its run")
         t.apply(.taskDone("r1")); check(t.tab == .process && t.run == "r1", "its end: 过程")
-        t.apply(.picked(.now)); t.apply(.taskDone("r1")); check(t.tab == .now, "picked 现在 after: never again for it")
-        t.apply(.clickedTask("r0")); check(t.tab == .process && t.run == "r0", "a task message clicked: its 过程")
-        t.apply(.taskStarted("r2")); t.apply(.clickedTask("r0")); t.apply(.taskDone("r2"))
-        check(t.tab == .process && t.run == "r0", "an end while reading an older run: not yanked")
+        t.apply(.picked(.now)); t.apply(.taskStarted("r2")); t.apply(.taskDone("r2"))
+        check(t.tab == .now && t.run == "r2", "picked 现在: no switch to 过程 in this conversation")
+        t.apply(.picked(.process)); t.apply(.taskStarted("r3")); t.apply(.taskDone("r3"))
+        check(t.tab == .process && t.run == "r3", "picked 过程 again: switches again")
+        t.apply(.clickedTask("old")); check(t.tab == .process && t.run == "old", "a task message clicked: its 过程")
+        t.apply(.taskStarted("B")); check(t.tab == .process && t.run == "old", "(#126) a queued task starts while reading 'old': not yanked")
+        t.apply(.taskDone("B")); check(t.run == "old", "its end: still 'old'")
+        t.apply(.taskDone("old")); check(t.tab == .process && t.run == "old", "the run they read ends: there")
         check(T().shown(traceOn: false) == .now && t.shown(traceOn: false) == .now, "the switch off: 现在 only")
-        // the window's model: a task's end here switches to 过程 and prunes once; a relaunch's replay moves nothing
+        // property: random sequences against an oracle written from the table
+        var g = CardStoreTests.RNG(x: 5)
+        for _ in 0..<500 {
+            var s = T(), tab = T.Tab.now, run: String? = nil, opened = false, stayNow = false
+            for _ in 0..<20 {
+                let r = "r\(g.next(3))"
+                let e: T.Event = [.taskStarted(r), .taskDone(r), .picked(g.next(2) == 0 ? .now : .process), .clickedTask(r)][g.next(4)]
+                switch e {
+                case .taskStarted(let x): if !opened { run = x }
+                case .taskDone(let x): if !stayNow && !(opened && run != x) { tab = .process; run = x; opened = false }
+                case .picked(let p): tab = p; stayNow = p == .now; if p == .now { opened = false }
+                case .clickedTask(let x): tab = .process; run = x; opened = true; stayNow = false
+                }
+                s.apply(e)
+                if s.tab != tab || s.run != run { check(false, "tabs vs the table after \(e): \(s) vs \(tab) \(run ?? "-")"); return }
+                // never yanked: a run the user opened stays until they move
+                if opened && s.run != run { check(false, "yanked"); return }
+            }
+        }
+        // the window's model: a task's end here switches to 过程 and prunes once; a history read does neither
         do {
             let r = CardStoreTests.Rig()
             var ended = 0
             r.m.onTaskEnded = { ended += 1 }
-            check(r.m.currentTabs.tab == .now && r.m.currentTabs.run == CardStoreTests.rid, "the task started here: 现在, its run")
+            check(r.m.currentTabs.run == CardStoreTests.rid, "the task started here: its run")
             r.done("succeeded")
             check(r.m.currentTabs.tab == .process && r.m.currentTabs.run == CardStoreTests.rid && ended == 1, "its end: 过程, one prune: \(ended)")
             r.m.pickTab(.now)
             check(r.m.currentTabs.tab == .now, "picked 现在")
             r.m.showProcess("r0")
             check(r.m.currentTabs.tab == .process && r.m.currentTabs.run == "r0", "a task message: its 过程")
-            check(r.m.liveRuns.isEmpty || r.m.liveRuns == [CardStoreTests.rid], "live runs: running or lingering only")
-            // a history read: a task that started and ended before this model began (its own times say so)
             let h = CardStoreTests.Rig.make(CardStoreTests.Wire(), ShellTests.Timers())
             var replayed = 0
             h.onTaskEnded = { replayed += 1 }
@@ -270,26 +327,7 @@ enum ProcessTests {
                                      ["kind": "task_done", "session_id": sid, "run_id": "r_old", "seq": 2, "t": 20.0, "status": "succeeded", "reason": "", "summary": "", "result_card": NSNull()]] {
                 h.client.feed(l)
             }
-            // (its start line may come after its task line: 现在 on its run, the default anyway -- never 过程, never a prune)
-            check(h.currentTabs.tab == .now && h.currentTabs.switched.isEmpty && replayed == 0, "a history read: no switch, no prune: \(h.currentTabs)")
-        }
-        // property: random sequences against an oracle written from the table
-        var g = CardStoreTests.RNG(x: 5)
-        for _ in 0..<500 {
-            var s = T(), tab = T.Tab.now, run: String? = nil, ended: Set<String> = []
-            for _ in 0..<20 {
-                let r = "r\(g.next(3))"
-                let e: T.Event = [.taskStarted(r), .taskDone(r), .picked(g.next(2) == 0 ? .now : .process), .clickedTask(r)][g.next(4)]
-                switch e {
-                case .taskStarted(let x): tab = .now; run = x
-                case .taskDone(let x):
-                    if !ended.contains(x) { ended.insert(x); if !(tab == .process && run != nil && run != x) { tab = .process; run = x } }
-                case .picked(let p): tab = p
-                case .clickedTask(let x): tab = .process; run = x
-                }
-                s.apply(e)
-                if s.tab != tab || s.run != run { check(false, "tabs vs the table after \(e): \(s) vs \(tab) \(run ?? "-")"); return }
-            }
+            check(h.currentTabs.tab == .now && replayed == 0, "a history read: no switch, no prune: \(h.currentTabs)")
         }
     }
 

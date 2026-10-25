@@ -697,7 +697,7 @@ struct AgentPanel: View {
             }
             if shell.currentTabs.shown(traceOn: traceOn) == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
-                ProcessPane(shell: shell, sessionId: sid, runId: run).id(sid + "/" + run)
+                ProcessPane(sessionId: sid, runId: run, trigger: ProcessPane.trigger(shell.states[sid]?.task(run))).equatable().id(sid + "/" + run)
             } else if shell.currentTabs.shown(traceOn: traceOn) == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

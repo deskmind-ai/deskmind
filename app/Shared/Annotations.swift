@@ -55,8 +55,9 @@ enum Annotations {
         guard RunId.valid(l.run_id), let data = try? JSONEncoder.sorted.encode(l) else { return false }
         let fm = FileManager.default
         let dir = folder(support: support), f = file(l.run_id, support: support)
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: f.path) { fm.createFile(atPath: f.path, contents: nil) }
+        // (the user's words and their windows' text: this user's only -- the folder 0700, the file 0600)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        if !fm.fileExists(atPath: f.path) { fm.createFile(atPath: f.path, contents: nil, attributes: [.posixPermissions: 0o600]) }
         guard let h = try? FileHandle(forWritingTo: f) else { return false }
         defer { try? h.close() }
         do { try h.seekToEnd(); try h.write(contentsOf: data + Data("\n".utf8)); return true } catch { return false }
@@ -85,6 +86,29 @@ enum Annotations {
     static func export(_ runId: String, to url: URL, support: URL = DeskMindIPC.supportDir) -> Bool {
         guard RunId.valid(runId), let d = try? Data(contentsOf: file(runId, support: support)) else { return false }
         return (try? d.write(to: url, options: .atomic)) != nil
+    }
+
+    /// A label as the labels view shows it (invariant 12): all of it from the line's own copy, nothing from the run's
+    /// folder -- the question, its answer and who settled it, the prompt (nil: 原文未保存), every option, every tier's
+    /// answer, the shadow comparison, the label and the note.
+    struct Shown: Equatable {
+        var question: String
+        var answer: String?
+        var by: String?
+        var prompt: String?
+        var options: [String]
+        var tiers: [String]
+        var shadow: String?
+        var label: Label
+        var note: String?
+    }
+    static func shown(_ l: Line) -> Shown {
+        let s = l.sample
+        return Shown(question: s.question, answer: s.answer, by: s.by, prompt: s.prompt,
+                     options: (s.options ?? []).map { "\($0.id): \($0.text)" },
+                     tiers: s.tiers.map { RunDir.Judge.Tier(tier: $0.tier, outcome: $0.outcome, choice: $0.choice, confidence: $0.confidence, settled: $0.settled).line },
+                     shadow: s.shadow_top.map { top in "\(top)\(s.shadow_agree.map { $0 ? " =" : " ≠" } ?? "")" },
+                     label: l.label, note: l.note)
     }
 
     /// How many labels the run has (a problem report may say this much, nothing more).

@@ -178,9 +178,9 @@ enum RunDir {
             case "step_result":
                 guard let i = index[id] else { continue }
                 m.steps[i].status = str(e["status"]); m.steps[i].why = str(e["why"]).flatMap { $0.isEmpty ? nil : $0 }
-                if let s = str(e["shot"]), f.shots.contains(shotName(s)) { m.steps[i].shot = s }
+                if let s = str(e["shot"]).flatMap(contained), f.shots.contains(shotName(s)) { m.steps[i].shot = s }
             case "shot_ready":
-                guard let i = index[id], let s = str(e["shot"]), f.shots.contains(shotName(s)) else { continue }
+                guard let i = index[id], let s = str(e["shot"]).flatMap(contained), f.shots.contains(shotName(s)) else { continue }
                 m.steps[i].shot = s
             default: break
             }
@@ -231,6 +231,13 @@ enum RunDir {
 
     /// A step's picture by its name under shots/ (the event says it relative to the run folder: "shots/3.png").
     static func shotName(_ s: String) -> String { (s as NSString).lastPathComponent }
+    /// The picture's path only when it names a file right under the run's shots/ ("shots/<name>"): never one outside
+    /// the run folder (#126 review: an absolute path or a ".." was read as given).
+    static func contained(_ s: String) -> String? {
+        let parts = s.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0] == "shots", let n = parts.last, !n.isEmpty, n != ".", n != "..", !n.hasPrefix(".") else { return nil }
+        return s
+    }
 
     private static func rows(_ calls: [[String: Any]]) -> [CostRow] {
         let by = Dictionary(grouping: calls, by: { str($0["role"]) ?? "" })

@@ -28,11 +28,40 @@ final class ProcessLoader: ObservableObject {
     }
 }
 
-struct ProcessPane: View {
-    @ObservedObject var shell: ShellModel
+/// The step pictures, decoded off the main queue once each and kept (at most `limit`, the oldest asked for first to go).
+final class ShotCache: ObservableObject {
+    static let limit = 48
+    @Published private(set) var images: [String: NSImage] = [:]
+    private var order: [String] = [], loading: Set<String> = []
+
+    /// The picture at `url`, if decoded; asked for once, decoded off the main queue.
+    func image(_ url: URL) -> NSImage? {
+        let k = url.path
+        if let i = images[k] { return i }
+        guard loading.insert(k).inserted else { return nil }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let img = NSImage(contentsOf: url)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.loading.remove(k)
+                guard let img else { return }
+                self.images[k] = img; self.order.append(k)
+                while self.order.count > Self.limit { self.images[self.order.removeFirst()] = nil }
+            }
+        }
+        return nil
+    }
+}
+
+/// Drawn again only when its own inputs change (`trigger`: the task's steps, end, pictures) -- not on every change of
+/// the window's model (#126 review).
+struct ProcessPane: View, Equatable {
     let sessionId: String
     let runId: String
+    let trigger: String
+    static func == (a: ProcessPane, b: ProcessPane) -> Bool { a.sessionId == b.sessionId && a.runId == b.runId && a.trigger == b.trigger }
     @StateObject private var loader = ProcessLoader()
+    @StateObject private var shots = ShotCache()
     @Environment(\.lang) private var lang
     /// The picture shown large (the step's index), if any.
     @State private var big: Int?
@@ -40,9 +69,8 @@ struct ProcessPane: View {
     @State private var notes: [String: String] = [:]
 
     /// What makes the folder worth reading again: the task's steps, its end, its pictures' arrival.
-    private var trigger: String {
-        let t = shell.states[sessionId]?.task(runId)
-        return "\(sessionId)|\(runId)|\(t?.steps.count ?? -1)|\(t?.ended == true)|\(t?.steps.filter { $0.shot != nil }.count ?? 0)"
+    static func trigger(_ t: TaskState?) -> String {
+        "\(t?.steps.count ?? -1)|\(t?.ended == true)|\(t?.steps.filter { $0.shot != nil && !$0.shotPending }.count ?? 0)"
     }
 
     var body: some View {
@@ -117,8 +145,8 @@ struct ProcessPane: View {
     }
 
     func shot(_ s: RunDir.Step) -> NSImage? {
-        guard let p = s.shot, let dir = RunDir.folder(session: sessionId, run: runId) else { return nil }
-        return NSImage(contentsOf: dir.appendingPathComponent(p))
+        guard let p = s.shot.flatMap(RunDir.contained), let dir = RunDir.folder(session: sessionId, run: runId) else { return nil }
+        return shots.image(dir.appendingPathComponent(p))
     }
 
     /// The step pictures as one strip: the replay.
@@ -191,7 +219,7 @@ struct ProcessPane: View {
                         .font(.system(size: 10)).foregroundStyle(ShellColor.secondary)
                 }
                 HStack {
-                    TextField(L("Note", lang: lang), text: Binding(get: { notes[j.judgeId] ?? label?.note ?? "" }, set: { notes[j.judgeId] = $0 }))
+                    TextField(L("Note", lang: lang), text: Binding(get: { shownNote(j, label) }, set: { notes[j.judgeId] = $0 }))
                         .textFieldStyle(.roundedBorder).font(.system(size: 11))
                     Button(L("Right", lang: lang)) { mark(j, .right) }
                     Button(L("Wrong", lang: lang)) { mark(j, .wrong) }
@@ -201,8 +229,11 @@ struct ProcessPane: View {
     }
 
     /// A label: one line appended (the question's material copied from what the view shows), read back.
+    /// The note the field shows: what was typed, else the label's own (a relabel keeps it: #126 review).
+    private func shownNote(_ j: RunDir.Judge, _ label: Annotations.Line?) -> String { notes[j.judgeId] ?? label?.note ?? "" }
+
     private func mark(_ j: RunDir.Judge, _ label: Annotations.Label) {
-        let note = (notes[j.judgeId] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let note = shownNote(j, loader.labels.last { $0.judge_id == j.judgeId }).trimmingCharacters(in: .whitespacesAndNewlines)
         Annotations.add(Annotations.Line(judge_id: j.judgeId, run_id: runId, label: label, note: note.isEmpty ? nil : note,
                                          at: Date().timeIntervalSince1970, sample: Annotations.sample(j)))
         loader.load(session: sessionId, run: runId)
@@ -261,17 +292,22 @@ struct ProcessPane: View {
 
     private var labelsSection: some View {
         section(L("Labels", lang: lang)) {
-            ForEach(loader.labels, id: \.judge_id) { l in
+            ForEach(loader.labels, id: \.judge_id) { line in
+                let l = Annotations.shown(line)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
-                        Text(l.sample.question).font(.system(size: 11, weight: .medium))
-                        Text(l.sample.answer ?? L("No record", lang: lang)).font(.system(size: 11))
+                        Text(l.question).font(.system(size: 11, weight: .medium))
+                        Text(l.answer ?? L("No record", lang: lang)).font(.system(size: 11))
+                        if let by = l.by { Text(by).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
                         Spacer()
                         Text(l.label == .right ? L("Right", lang: lang) : L("Wrong", lang: lang)).font(.system(size: 10, weight: .semibold))
                     }
                     if let n = l.note { Text(n).font(.system(size: 10)).foregroundStyle(Brand.ink) }
-                    Text(l.sample.prompt ?? L("Original text not saved", lang: lang)).font(.system(size: 10, design: .monospaced))
+                    Text(l.prompt ?? L("Original text not saved", lang: lang)).font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(ShellColor.secondary).lineLimit(3)
+                    ForEach(l.options, id: \.self) { Text($0).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                    ForEach(Array(l.tiers.enumerated()), id: \.offset) { _, t in Text(t).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                    if let sh = l.shadow { Text(L("Shadow: %@", sh, lang: lang)).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
                 }
                 .foregroundStyle(Brand.ink)
             }

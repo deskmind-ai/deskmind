@@ -287,7 +287,7 @@ enum Runner {
         }
         // the chat sessions' runs: their records only (RunRetention) -- their events and journal are the conversations'
         // own history and undo's record, never taken here
-        n += RunRetention.prune(support: support, live: [], everything: true)
+        n += RunRetention.prune(support: support, live: SessionHost.liveRuns(), everything: true)
         let logs = at(HarnessRun.logs)
         for f in (try? fm.contentsOfDirectory(atPath: logs.path)) ?? [] { try? fm.removeItem(at: logs.appendingPathComponent(f)) }
         try? fm.removeItem(at: at(DeskMindIPC.supportDir.appendingPathComponent("feedback.jsonl")))

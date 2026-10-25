@@ -1,14 +1,19 @@
 // The right column's two tabs, 「现在」 and 「过程」 (M5, plan §11.4), per conversation: which one shows and which run 过程
 // shows, from what happened -- pure. Switching sends nothing anywhere (the pane is read only).
 //
-// | what happened                                         | tab                                                  |
-// |-------------------------------------------------------|------------------------------------------------------|
-// | a task starts                                         | 现在, and 过程 is that task's                          |
-// | task_done for a run the pane is not on another run of | 过程 for it, once per run                              |
-// | task_done while 过程 shows an older run                 | stays (never yanked from what the user reads)        |
-// | the user picks a tab                                  | that tab; a run auto-switched once is never again    |
-// | the user clicks a task message in the chat            | 过程 for that run                                     |
-// | ui05.trace off                                        | no 过程 tab: always 现在 (ProcessTabs.shown)            |
+// | what happened                                  | tab                                                         |
+// |------------------------------------------------|-------------------------------------------------------------|
+// | a task starts                                  | the tab as it is; 过程's run the new task's -- unless the     |
+// |                                                |   user opened another run's 过程 (not yanked off it)          |
+// | task_done                                      | 过程 for that run -- unless the user picked 现在 in this      |
+// |                                                |   conversation (until they pick 过程 again), or reads       |
+// |                                                |   another run's 过程 they opened                              |
+// | the user picks a tab                           | that tab (现在: no switch to 过程 from now; 过程: switches      |
+// |                                                |   again)                                                    |
+// | the user clicks a task message in the chat     | 过程 for that run (theirs: kept until they move)              |
+// | ui05.trace off                                 | no 过程 tab: always 现在 (ProcessTabs.shown)                   |
+//
+// (§11.4's wording, #126 review: once the user picks 现在, no switch to 过程 in that conversation until they pick it.)
 
 import Foundation
 
@@ -24,22 +29,25 @@ struct ProcessTabs: Equatable {
     var tab: Tab = .now
     /// The run 过程 shows (nil: the conversation's latest).
     var run: String?
-    /// Runs whose end switched to 过程 already, or passed while the user read another run: not switched for again.
-    var switched: Set<String> = []
+    /// The user opened `run`'s 过程 themselves (a task message): a task's start or end does not move it.
+    var opened = false
+    /// The user picked 现在: no switch to 过程 until they pick 过程 (or open a task's).
+    var stayNow = false
 
     mutating func apply(_ e: Event) {
         switch e {
         case .taskStarted(let r):
-            tab = .now; run = r
+            guard !opened else { return }
+            run = r
         case .taskDone(let r):
-            guard switched.insert(r).inserted else { return }
-            // (过程 on an older run: the user reads it -- not yanked)
-            if tab == .process, let shown = run, shown != r { return }
-            tab = .process; run = r
+            guard !stayNow, !(opened && run != r) else { return }
+            tab = .process; run = r; opened = false
         case .picked(let t):
             tab = t
+            stayNow = t == .now
+            if t == .now { opened = false }
         case .clickedTask(let r):
-            tab = .process; run = r
+            tab = .process; run = r; opened = true; stayNow = false
         }
     }
 

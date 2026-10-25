@@ -116,6 +116,13 @@ enum SessionHost {
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var sessions: [String: Session] = [:]
+
+    /// The runs this helper's sessions have going now -- running, a card open, an undo owed (their activity, from their
+    /// own lines): live, never pruned (RunRetention).
+    static func liveRuns() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        return sessions.values.reduce(into: Set<String>()) { $0.formUnion($1.activity.running.union($1.activity.open).union($1.activity.undo)) }
+    }
     nonisolated(unsafe) private static var opening: Set<String> = []
     /// Sessions being spawned, not in `sessions` yet: listed (`starting`) from before their read of models.env to
     /// their entry in `sessions`, with that read's digest once it is made (nil before: unknown). #107 review at
