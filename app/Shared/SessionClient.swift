@@ -773,7 +773,7 @@ final class SessionClient {
         // the session reads as exited here too; it is opened again once and the line sent again — unless the app ended
         // it, or the line was for what went with the process (a stop, a steer, a card's answer: never opens a session)
         if r?["code"] as? String == "not_open" {
-            if state(sessionId).exited == nil { feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil)))) }
+            if state(sessionId).exited == nil { feed(ProtocolLine(t: inferredAt(sessionId), sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil)))) }
             if let why = Self.goneWithProcess(control, in: state(sessionId)) { return notSent(.refused(why)) }
             lock.lock()
             let ended = endedByApp.contains(sessionId)
@@ -1143,6 +1143,11 @@ final class SessionClient {
     /// could not (an older helper without the op: open it instead).
     func history(_ sessionId: String, markExit: Bool = true) -> Bool { readHistory(sessionId, markExit: markExit).ok }
 
+    /// The time an exit this client infers (no line of the helper's says it) is given: the session's newest stored
+    /// line's, else 0 -- so it is as old as what it was inferred from. A history read of a session long gone infers an
+    /// exit of the past, never one the user saw happen now (the UI log: UIEvents.changes; #123 Codex review at 19236f0).
+    private func inferredAt(_ sessionId: String) -> Double { state(sessionId).lastEventAt ?? 0 }
+
     /// session.history, the last stored seq it says, and whether a process of it runs.
     private func readHistory(_ sessionId: String, markExit: Bool) -> (ok: Bool, lastSeq: Int?, open: Bool?) {
         let s = state(sessionId)
@@ -1156,7 +1161,7 @@ final class SessionClient {
         lock.lock(); let down = watchDown; lock.unlock()
         if markExit, !down, r["open"] as? Bool == false, state(sessionId).exited == nil {
             lock.lock(); idleClosed.insert(sessionId); lock.unlock()
-            feed(ProtocolLine(sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: (r["last_seq"] as? NSNumber)?.intValue))))
+            feed(ProtocolLine(t: inferredAt(sessionId), sessionId: sessionId, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: (r["last_seq"] as? NSNumber)?.intValue))))
         }
         return (true, (r["last_seq"] as? NSNumber)?.intValue, r["open"] as? Bool)
     }
@@ -1282,7 +1287,7 @@ final class SessionClient {
     /// `generations`: only a session still at the process generation these were read at (no open or start since).
     private func notRunning(_ ids: Set<String>, idle: Set<String> = [], lastSeqs: [String: Int] = [:], generations: [String: Int]? = nil) {
         for id in ids {
-            let line = ProtocolLine(sessionId: id, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: lastSeqs[id], idle: idle.contains(id) ? true : nil)))
+            let line = ProtocolLine(t: inferredAt(id), sessionId: id, event: .sessionExit(HelperSessionExit(code: nil, lastSeq: lastSeqs[id], idle: idle.contains(id) ? true : nil)))
             feed(line) { [self] in
                 // (under the lock the exit is applied under)
                 if endedByApp.contains(id) || states[id]?.exited != nil { return false }

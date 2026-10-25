@@ -121,7 +121,7 @@ enum UIEventsTests {
             for _ in 0..<row.n { log.record(.activation(by: .button, input: .none)) }
             log.flush()
             let main = lines(log.url), rot = FileManager.default.fileExists(atPath: log.rotated.path) ? lines(log.rotated) : nil
-            let files = (try? FileManager.default.contentsOfDirectory(atPath: d.path)) ?? []
+            let files = ((try? FileManager.default.contentsOfDirectory(atPath: d.path)) ?? []).filter { $0.contains("jsonl") }
             check(main.count == row.main && rot?.count == row.rotated && files.count <= 2,
                   "\(row.n) events: \(main.count) in the file, \(rot?.count ?? -1) in .1 (files \(files.sorted()))")
             // the newest lines are kept, in order
@@ -147,6 +147,22 @@ enum UIEventsTests {
         check(left.isEmpty && log.enabled, "Clear: no log file left (\(left)), still on")
         log.setEnabled(false); log.clear()
         check(!log.enabled, "Clear keeps the switch off")
+        // #123 Codex review at 19236f0: Clear while the other process's queue is behind -- an event the helper recorded
+        // before the Clear and writes after it is dropped, not written into the cleared file; one recorded after goes in
+        do {
+            let d = tempDir(), app = UIEventLog(dir: d, file: UIEventLog.mainFile), helper = UIEventLog(dir: d, file: UIEventLog.helperFile)
+            helper.record(.liveCardOpen); helper.flush()
+            check(lines(helper.url).count == 1, "the helper's line written")
+            helper.hold()
+            helper.record(.liveCardOpen)          // recorded now, written when the queue goes on
+            app.clear()
+            helper.release(); helper.flush()
+            check(!FileManager.default.fileExists(atPath: helper.url.path), "recorded before Clear, written after: dropped (the file stays cleared)")
+            helper.record(.liveCardOpen); helper.flush()
+            check(lines(helper.url).count == 1 && app.generation() == 1, "recorded after Clear: written")
+            app.record(.reopenAsked); app.flush()
+            check(lines(app.url).count == 1, "the app's own after Clear: written")
+        }
         // a write that fails is counted, never thrown or retried
         let blocked = tempDir().appendingPathComponent("not-a-dir")
         try? Data("x".utf8).write(to: blocked)
@@ -268,6 +284,25 @@ enum UIEventsTests {
                 check(undos == [.undo(run: UIEvent.ID("run_9ace806b"), outcome: .undone)], "\(label): the undo once: \(undos)")
                 check(names.filter { $0 == "card_shown" }.count == 1 && names.filter { $0 == "card_ended" }.count == 1, "\(label): the result card shown and ended once: \(names)")
             }
+        }
+        // #123 Codex review at 19236f0: a history read of a session long gone (no process: the client infers its exit)
+        // logs nothing -- the inferred exit is as old as the history it was inferred from
+        do {
+            let stored = SessionTests.raw("task-card").compactMap { (try? JSONSerialization.jsonObject(with: Data($0.utf8))) as? [String: Any] }
+                .filter { ($0["kind"] as? String) != "session.start" }
+            let upToAsk = Array(stored.prefix { ($0["kind"] as? String) != "resumed" })
+            let mock = SessionTests.MockTransport()
+            mock.replies = [SessionClient.Op.history: ["ok": true, "open": false, "last_seq": upToAsk.compactMap { $0["seq"] as? Int }.max() ?? 0, "lines": upToAsk]]
+            let t = ShellTests.Timers()
+            t.now = 1_900_000_000
+            let m = ShellModel(client: SessionClient(transport: mock), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                               lang: { .zhHans }, takeBackAfter: t.after, now: { t.now }, work: { $0() }, deliver: { $0() })
+            var got: [String] = []
+            m.uiRecord = { got.append($0.name) }
+            let ok = m.client.history("ses_t")
+            let sid = m.states.keys.first ?? ""
+            check(ok && m.states[sid]?.exited != nil, "the history read, its exit inferred: \(ok) \(sid)")
+            check(got.isEmpty, "an old session's history and its inferred exit: nothing logged: \(got)")
         }
         // a relaunch while a card is still open: not shown again (its show time is not reset); its live ending is
         do {

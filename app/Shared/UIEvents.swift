@@ -14,7 +14,10 @@
 // the caller's thread; a failed write is counted, never retried and never shown.
 //
 // The switch (on by default) is a file, `ui-events.off`, next to the logs: both processes read the same fact (the
-// helper has other defaults). Turning it off stops writing; Clear removes every log file.
+// helper has other defaults). Turning it off stops writing; Clear removes every log file, both processes'. Clear and
+// every write hold the same lock (flock on `ui-events.lock`), and Clear moves a generation on (`ui-events.gen`): an
+// event recorded before a Clear and written after it -- the other process's queue was behind -- is dropped, never
+// written into the cleared file (#123 Codex review at 19236f0).
 //
 // One line, one event: {"t": <ms since 1970>, "e": "<event>", <its fields>}. tools/ui_events_summary.py reads them.
 
@@ -121,6 +124,7 @@ enum UIEvent: Equatable {
 /// temporary directory.
 final class UIEventLog {
     static let mainFile = "ui-events.jsonl", helperFile = "ui-events-helper.jsonl", offFile = "ui-events.off"
+    static let lockFile = "ui-events.lock", genFile = "ui-events.gen"
     static let maxBytes = 2 * 1024 * 1024
 
     let dir: URL
@@ -143,8 +147,30 @@ final class UIEventLog {
     var failures: Int { queue.sync { failedWrites } }
 
     func record(_ e: UIEvent) {
-        let t = now()
-        queue.async { self.append(e, at: t) }
+        let t = now(), gen = generation()
+        queue.async { self.append(e, at: t, generation: gen) }
+    }
+
+    /// Tests: hold this log's queue (an event recorded now waits), and let it go.
+    func hold() { queue.suspend() }
+    func release() { queue.resume() }
+
+    /// The Clear generation on disk (0 before any Clear).
+    func generation() -> Int {
+        (try? String(contentsOf: dir.appendingPathComponent(Self.genFile), encoding: .utf8))
+            .flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) } ?? 0
+    }
+
+    /// Runs `f` holding the lock both processes write under (best effort: no lock file, no lock; the write that
+    /// follows fails the same way and is the one counted).
+    private func locked(_ f: () -> Void) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fd = open(dir.appendingPathComponent(Self.lockFile).path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else { f(); return }
+        defer { close(fd) }
+        flock(fd, LOCK_EX)
+        defer { flock(fd, LOCK_UN) }
+        f()
     }
 
     /// Waits for every line recorded so far to be written (tests; Clear).
@@ -162,17 +188,30 @@ final class UIEventLog {
         }
     }
 
-    /// Removes both logs of both processes (the switch stays as it is).
+    /// Removes both logs of both processes (the switch stays as it is), under the lock, moving the generation on:
+    /// what either process recorded before it is never written after it.
     func clear() {
         queue.sync {
-            for f in [Self.mainFile, Self.helperFile] {
-                for name in [f, f + ".1"] { try? FileManager.default.removeItem(at: dir.appendingPathComponent(name)) }
+            locked {
+                let next = generation() + 1
+                if (try? "\(next)\n".write(to: dir.appendingPathComponent(Self.genFile), atomically: true, encoding: .utf8)) == nil { failedWrites += 1 }
+                for f in [Self.mainFile, Self.helperFile] {
+                    for name in [f, f + ".1"] { try? FileManager.default.removeItem(at: dir.appendingPathComponent(name)) }
+                }
             }
         }
     }
 
-    private func append(_ e: UIEvent, at t: Int) {
+    private func append(_ e: UIEvent, at t: Int, generation gen: Int) {
         guard enabled else { return }
+        locked {
+            // (recorded before a Clear that came since: dropped)
+            guard generation() == gen else { return }
+            write(e, at: t)
+        }
+    }
+
+    private func write(_ e: UIEvent, at t: Int) {
         var o = e.fields
         o["t"] = t; o["e"] = e.name
         guard var line = try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]) else { failedWrites += 1; return }
