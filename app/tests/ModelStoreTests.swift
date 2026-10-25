@@ -16,6 +16,7 @@ enum ModelStoreTests {
         DecisionTests.group("keys.app"); appTests()
         DecisionTests.group("keys.concurrent"); concurrentTests()
         DecisionTests.group("keys.crash"); crashTests()
+        DecisionTests.group("keys.disk"); diskTests()
     }
 
     /// A clock the fakes stamp their writes with (each write a few seconds after the last).
@@ -54,6 +55,7 @@ enum ModelStoreTests {
             if files[u.path] != nil { trash.append(text) }
             files[u.path] = nil; return true
         }
+        func finishLeftovers(near u: URL) -> Bool { true }
     }
     static let file = URL(fileURLWithPath: "/fake/models.env")
 
@@ -270,6 +272,7 @@ enum ModelStoreTests {
             func modified(_ u: URL) -> Date? { l.lock(); defer { l.unlock() }; return m[u.path]?.1 }
             func remove(_ u: URL) -> Bool { l.lock(); m[u.path] = nil; l.unlock(); return true }
             func retire(_ u: URL, as text: String) -> Bool { remove(u) }
+            func finishLeftovers(near u: URL) -> Bool { true }
         }
         var lost = 0, ok = 0
         for _ in 0..<120 {
@@ -286,5 +289,40 @@ enum ModelStoreTests {
             }
         }
         check(ok > 100 && lost == 0, "a change made beside reads: never lost (\(lost) of \(ok))")
+    }
+
+    /// (#127 Codex at 70eec35) The real file system's retire, in a temp folder with a Trash of its own: nothing at
+    /// models.env is ever redacted; a crash right after the move off its name leaves the full text only until the next
+    /// read finishes it (redacted copy to the Trash, the full one unlinked).
+    static func diskTests() {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("keys-" + UUID().uuidString), bin = dir.appendingPathComponent("Trash")
+        try? fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        let f = dir.appendingPathComponent("models.env")
+        var d = ModelStore.Disk()
+        d.trash = { u in (try? fm.moveItem(at: u, to: bin.appendingPathComponent(u.lastPathComponent))) != nil }
+        func trashed() -> [String] { ((try? fm.contentsOfDirectory(atPath: bin.path)) ?? []).compactMap { try? String(contentsOf: bin.appendingPathComponent($0), encoding: .utf8) } }
+        func leftovers() -> [String] { ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasPrefix(".models.env.retiring-") } }
+        try? "DEEPSEEK_API_KEY=sk-full1234\nURL=x\n".write(to: f, atomically: true, encoding: .utf8)
+        check(d.retire(f, as: ModelStore.redact("DEEPSEEK_API_KEY=sk-full1234\nURL=x\n")) && !fm.fileExists(atPath: f.path) && leftovers().isEmpty,
+              "retired: gone, nothing left beside it")
+        check(trashed() == ["DEEPSEEK_API_KEY=…1234\nURL=x\n"] && !trashed().joined().contains("sk-full"), "the Trash holds the redacted copy only: \(trashed())")
+        // a crash right after the move off its name
+        try? "DEEPSEEK_API_KEY=sk-crash999\n".write(to: f, atomically: true, encoding: .utf8)
+        var crashing = d
+        crashing.afterMoveAway = { throw NSError(domain: "test", code: 1) }
+        check(!crashing.retire(f, as: "x") && !fm.fileExists(atPath: f.path) && leftovers().count == 1, "the crash: the full text left off its name")
+        // the next read finishes it
+        final class KC: ModelStore.Keychain {
+            var v: String? = "DEEPSEEK_API_KEY=sk-kc0000\n"
+            func read() -> ModelStore.Read { v.map { .value($0) } ?? .none }
+            func modified() -> Date? { Date() }
+            func write(_ t: String) -> Bool { v = t; return true }
+            func replace(_ t: String) -> Bool { write(t) }
+        }
+        _ = ModelStore.current(keychain: KC(), file: f, files: d)
+        check(leftovers().isEmpty && trashed().contains("DEEPSEEK_API_KEY=…h999\n") && !trashed().joined().contains("sk-crash"),
+              "the next read finished it: redacted to the Trash, the full text unlinked")
+        try? fm.removeItem(at: dir)
     }
 }

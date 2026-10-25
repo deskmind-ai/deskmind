@@ -145,6 +145,9 @@ struct RecordingOwner: Equatable {
     private(set) var tombstones: Set<String> = []
     private var lastToken = 0
 
+    /// Whether `token`'s start is still the one being set up (no stop, end or newer start since).
+    func isCurrent(token: Int) -> Bool { if case .starting(_, let t) = state { return t == token }; return false }
+
     /// The run being captured (`.some(nil)`: an op run's).
     var capturing: String?? { if case .recording(let r, _) = state { return .some(r) }; return nil }
 

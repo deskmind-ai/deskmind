@@ -103,6 +103,8 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
     /// lifecycle -- a run's end and the helper's quit stop it, whatever the app's messages did (#127 Codex at 24cbf17).
     private static var owner = RecordingOwner()
 
+    private static func withLock<T>(_ f: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return f() }
+
     /// Whether the active recording is the one for `run`'s task.
     static func records(_ run: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -127,7 +129,14 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         if let stale { finish(stale) }
         // set up outside the lock (it takes a moment); its token checked again under it after
         let folder = URL(fileURLWithPath: req["path"] as? String ?? "")
+        // (the folder this start makes is its own: an abandoned start takes it away, never one that was there)
+        let made = !FileManager.default.fileExists(atPath: folder.path)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let abandon = { (rec: ScreenRecorder?) -> [String: Any] in
+            rec?.endCapture()
+            if made { try? FileManager.default.removeItem(at: folder) }
+            return ["ok": false, "code": "cancelled", "error": "stopped while it started"]
+        }
         let rec = ScreenRecorder(folder: folder, bundles: Set(req["bundles"] as? [String] ?? []),
                                  includeMain: req["include_main"] as? Bool ?? false,
                                  wholeScreen: req["whole_screen"] as? Bool ?? false,
@@ -136,17 +145,17 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         rec.forRun = forRun
         rec.session = req["session_id"] as? String
         rec.preflight = Self.preflight(bundles: rec.bundles)
+        // (its token checked before anything is captured: a stop during the preflight leaves no frame -- #127 Codex)
+        lock.lock(); let still = owner.isCurrent(token: token); lock.unlock()
+        guard still else { _ = withLock { owner.apply(.setUp(token: token, ok: false)) }; return abandon(nil) }
         let error = rec.begin()
         lock.lock()
         let then = owner.apply(.setUp(token: token, ok: error == nil))
         if then == [.keep(token: token)] { active = rec }
         lock.unlock()
-        if let error { return ["ok": false, "error": error] }
-        guard then == [.keep(token: token)] else {
-            // (a stop, an end or a newer start came while it was set up: thrown away, nothing kept)
-            rec.endCapture()
-            return ["ok": false, "code": "cancelled", "error": "stopped while it started"]
-        }
+        if let error { if made { try? FileManager.default.removeItem(at: folder) }; return ["ok": false, "error": error] }
+        // (a stop, an end or a newer start came while it was set up: thrown away with what it wrote, nothing kept)
+        guard then == [.keep(token: token)] else { return abandon(rec) }
         return ["ok": true, "path": folder.path, "preflight": rec.preflight]
     }
 

@@ -81,6 +81,8 @@ enum ModelStore {
     /// One read of the settings, the move from models.env done on the way: the text the processes use (nil: unknown).
     static func current(keychain: Keychain, file: URL, files: Files = Disk()) -> String? {
         lock.lock(); defer { lock.unlock() }
+        // (a retire a crash cut short: its moved-off copy -- the full text -- finished first: #127 Codex at 70eec35)
+        _ = files.finishLeftovers(near: file)
         var fileText = files.read(file)
         // (a file whose secrets are redacted -- "…<last 4>", the store's own retired copy -- is never moved in: retired,
         // and read as no file)
@@ -167,32 +169,52 @@ enum ModelStore {
         func remove(_ u: URL) -> Bool
         /// The file replaced by `text` (its redacted settings), then put in the Trash. True: no longer at `u`.
         func retire(_ u: URL, as text: String) -> Bool
+        /// Finish what a crash left of a retire beside `u`. False: some full text is still on disk.
+        func finishLeftovers(near u: URL) -> Bool
     }
     struct Disk: Files {
+        /// The Trash (a test's own folder in tests: never the user's); true: moved there.
+        var trash: (URL) -> Bool = { u in (try? FileManager.default.trashItem(at: u, resultingItemURL: nil)) != nil }
+        /// Called right after models.env is moved off its name (tests: a crash there).
+        var afterMoveAway: () throws -> Void = {}
+
         func read(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
         func modified(_ u: URL) -> Date? { (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate }
         func remove(_ u: URL) -> Bool {
             guard FileManager.default.fileExists(atPath: u.path) else { return true }
             return (try? FileManager.default.removeItem(at: u)) != nil
         }
-        /// Rewritten as `text` (redacted: no full key leaves the keychain), then to the Trash; no Trash: renamed
-        /// models.env.replaced-<date> beside it. True: it is no longer at `u`.
         /// models.env moved off its name first (so nothing at that name is ever the redacted text: #127 Codex at
-        /// 29841c4), the redacted copy written to a file of its own and put in the Trash (no Trash: kept beside as
-        /// models.env.replaced-<date>), then the original unlinked.
+        /// 29841c4), then retired from there (finish). True only once the original is gone.
         func retire(_ u: URL, as text: String) -> Bool {
             let fm = FileManager.default
             guard fm.fileExists(atPath: u.path) else { return true }
-            let dir = u.deletingLastPathComponent(), id = UUID().uuidString.prefix(8)
-            let away = dir.appendingPathComponent(".\(u.lastPathComponent).retiring-\(id)")
+            let away = u.deletingLastPathComponent().appendingPathComponent(".\(u.lastPathComponent).retiring-\(UUID().uuidString.prefix(8))")
             guard (try? fm.moveItem(at: u, to: away)) != nil else { return false }
+            do { try afterMoveAway() } catch { return false }
+            return finish(away, as: text, original: u)
+        }
+        /// A moved-off copy (this retire's, or one a crash left: finishLeftovers): its redacted copy written to a file
+        /// of its own and put in the Trash (no Trash: kept beside, models.env.replaced-<date>), then it is unlinked --
+        /// checked: false while the full text is still on disk.
+        private func finish(_ away: URL, as text: String, original u: URL) -> Bool {
+            let fm = FileManager.default
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let copy = dir.appendingPathComponent(u.lastPathComponent + ".replaced-" + stamp)
-            if fm.createFile(atPath: copy.path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]) {
-                _ = try? fm.trashItem(at: copy, resultingItemURL: nil)
+            let copy = u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".replaced-" + stamp + "-" + UUID().uuidString.prefix(4))
+            if fm.createFile(atPath: copy.path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600]) { _ = trash(copy) }
+            return (try? fm.removeItem(at: away)) != nil
+        }
+        /// Moved-off copies a crash left beside `u` (.models.env.retiring-*): finished now. False: one still on disk.
+        func finishLeftovers(near u: URL) -> Bool {
+            let dir = u.deletingLastPathComponent(), prefix = ".\(u.lastPathComponent).retiring-"
+            let left = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []).filter { $0.hasPrefix(prefix) }
+            var ok = true
+            for name in left {
+                let away = dir.appendingPathComponent(name)
+                let text = read(away) ?? ""
+                ok = finish(away, as: ModelStore.redact(text), original: u) && ok
             }
-            try? fm.removeItem(at: away)
-            return true
+            return ok
         }
     }
 
