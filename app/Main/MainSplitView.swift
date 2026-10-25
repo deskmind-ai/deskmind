@@ -1,4 +1,4 @@
-// The 0.5 main window (M1 S3, behind `ui05.shell`): three columns — the conversations, the chat, and the right column
+// The main window: three columns — the conversations, the chat, and the right column
 // (a placeholder until M3: 小方 and the session's state). Its logic is ShellModel (Shared/Shell.swift); these are
 // views only.
 //
@@ -701,23 +701,19 @@ struct AgentPanel: View {
         return t.runId
     }
 
-    @AppStorage(ProcessTabs.key) private var traceOn = false
-
-    /// The column's blocks (RightColumn.model: only what the events said), each second while a task runs; with the
-    /// 过程 tab on (ui05.trace), 「现在」 and 「过程」 above it (ProcessTabs: switching sends nothing).
+    /// The column's two tabs, 「现在」 and 「过程」 (ProcessTabs: switching sends nothing): 现在's blocks (RightColumn.model:
+    /// only what the events said), each second while a task runs; 过程, the run as its folder recorded it.
     var body: some View {
         VStack(spacing: 8) {
-            if traceOn {
-                Picker("", selection: Binding(get: { shell.currentTabs.tab }, set: { shell.pickTab($0) })) {
-                    Text(L("Now", lang: lang)).tag(ProcessTabs.Tab.now)
-                    Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
-                }
-                .pickerStyle(.segmented).labelsHidden()
+            Picker("", selection: Binding(get: { shell.currentTabs.tab }, set: { shell.pickTab($0) })) {
+                Text(L("Now", lang: lang)).tag(ProcessTabs.Tab.now)
+                Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
             }
-            if shell.currentTabs.shown(traceOn: traceOn) == .process, let sid = shell.selected,
+            .pickerStyle(.segmented).labelsHidden()
+            if shell.currentTabs.tab == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
                 ProcessPane(sessionId: sid, runId: run).equatable().id(sid + "/" + run)
-            } else if shell.currentTabs.shown(traceOn: traceOn) == .process {
+            } else if shell.currentTabs.tab == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }

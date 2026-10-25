@@ -1,5 +1,5 @@
 // The 0.5 main window's logic (M1 S3), apart from its views (Main/MainSplitView.swift) so that it is tested without a
-// screen: the `ui05.shell` flag; the session list (rows, titles, status dots); what the composer does with Enter and
+// screen: the session list (rows, titles, status dots); what the composer does with Enter and
 // ⌘Enter; what each chat item says; and `ShellModel`, the glue between the views and the session client
 // (SessionClient: the helper's sessions, the reducer's states).
 //

@@ -1,4 +1,4 @@
-// The 0.5 main window's glue (M1 S3, Shared/Shell.swift), without a screen: the ui05.shell flag, the status dot's
+// The 0.5 main window's glue (M1 S3, Shared/Shell.swift), without a screen: the status dot's
 // priority, the composer's Enter / ⌘Enter / disabled, the queue bubbles' controls, the card answers' payloads, the
 // session list (titles, rename, delete), the new conversation's open-then-send, and the settings reaching the client.
 // Run from DecisionTests.main (build.sh).
@@ -2116,7 +2116,7 @@ enum ShellTests {
             let m = keyShell(h, center: center)
             for l in SessionTests.lines("chat") { m.client.feed(l) }
             m.syncSettings()                                     // (shown: nothing owed)
-            m.stopWatching()                                     // (the 0.5 window off: ui05.shell turned off)
+            m.stopWatching()                                     // (the window's model stops watching)
             h.key = "K=new"
             ModelSettingsSaved.post(center)
             check(h.ends() == ["ses_t"] && h.runsOn("ses_t") == nil, "a key saved in the old window: the live session asked for a new process: \(h.ends())")

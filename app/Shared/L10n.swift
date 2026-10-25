@@ -777,7 +777,6 @@ enum L10n {
         "Windows made": "开出的窗口",
         "Export Labels…": "导出标注…",
         "Shows this task's process in the right column": "在右栏显示这个任务的过程",
-        "Show the Process Tab (0.5 Preview)": "显示「过程」标签（0.5 预览）",
         "Clear Run Records": "清除运行记录",
     ]
 }

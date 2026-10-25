@@ -30,7 +30,7 @@ enum OnePathTests {
         check(main.count > 30 && helper.count > 20 && tests.count > 30, "the build's lines read: \(main.count) \(helper.count) \(tests.count)")
         // nothing of the old window, anywhere in a build
         let gone = ["ShellFlag", "HomeView", "GoalRunView", "RunModel", "GoalRun(", "GoalRuns", "GoalRequest", "RunHistory", "AskCard",
-                    "WaitingCard", "EyesDownloader", "GoalTicket", "GoalLifecycle", "IslandFeed.route", "detailsRecord"]
+                    "WaitingCard", "EyesDownloader", "GoalTicket", "GoalLifecycle", "IslandFeed.route", "detailsRecord", "ui05.trace", "traceOn"]
         for f in Set(main + helper + tests) where f != "tests/OnePathTests.swift" {
             let c = code(f)
             for n in gone where c.contains(n) { check(false, "\(f) still names \(n)") }

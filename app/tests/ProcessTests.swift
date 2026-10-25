@@ -315,7 +315,6 @@ enum ProcessTests {
         t.apply(.taskStarted("B")); t.apply(.taskDone("B")); check(t.run == "old", "a queued task starts and ends while reading 'old': not yanked")
         t.apply(.picked(.now, latest: "B")); t.apply(.picked(.process, latest: "B")); t.apply(.taskDone("C"))
         check(t.tab == .process && t.run == "old", "back on 过程: still 'old', being read")
-        check(T().shown(traceOn: false) == .now && t.shown(traceOn: false) == .now, "the switch off: 现在 only")
         // property: random sequences against an oracle written from the table
         var g = CardStoreTests.RNG(x: 5)
         for _ in 0..<500 {

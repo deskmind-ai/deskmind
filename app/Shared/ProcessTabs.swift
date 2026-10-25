@@ -11,7 +11,8 @@
 // | the user picks 现在                               | 现在; no switch to 过程 from now                                |
 // | the user picks 过程                               | 过程 on the run it would show (the latest, if none): kept     |
 // | the user clicks a task message in the chat     | 过程 for that run                                            |
-// | ui05.trace off                                 | no 过程 tab: always 现在 (ProcessTabs.shown)                   |
+//
+// (The 过程 tab ships in 0.5.0, always there: no switch -- A10's one window, no flags.)
 
 import Foundation
 
@@ -47,10 +48,4 @@ struct ProcessTabs: Equatable {
             tab = .process; run = r; stayNow = false
         }
     }
-
-    /// The tab drawn: 过程 only while the switch is on.
-    func shown(traceOn: Bool) -> Tab { traceOn ? tab : .now }
-
-    /// The switch for the 过程 tab (a developer switch until 0.5.0).
-    static let key = "ui05.trace"
 }

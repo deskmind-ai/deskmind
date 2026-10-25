@@ -505,7 +505,6 @@ struct DeskMindApp: App {
     @AppStorage(RunRecorder.includeMainKey) private var recordMainWindow = false
     @AppStorage(RunRecorder.wholeScreenKey) private var recordWholeScreen = false
     @AppStorage(RunRecorder.smoothKey) private var recordSmooth = false
-    @AppStorage(ProcessTabs.key) private var traceOn = false
     var body: some Scene {
         WindowGroup(L("DeskMind", lang: AppLanguage.resolve(language))) {
             LocalizedRoot {
@@ -527,8 +526,6 @@ struct DeskMindApp: App {
                 // 30 fps for footage where motion matters; the default 10 fps barely slows the run.
                 Toggle(L("Smooth Recordings (30 fps, Slows Tasks About 10%)", lang: AppLanguage.resolve(language)),
                        isOn: $recordSmooth)
-                // Developer: the right column's 「过程」 tab (M5), off by default
-                Toggle(L("Show the Process Tab (0.5 Preview)", lang: AppLanguage.resolve(language)), isOn: $traceOn)
                 // every ended task's run records (pictures, trace, model calls); the conversations and the labels stay
                 Button(L("Clear Run Records", lang: AppLanguage.resolve(language))) {
                     let shell = ShellModel.shared
