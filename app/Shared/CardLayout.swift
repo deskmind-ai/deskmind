@@ -144,7 +144,7 @@ enum CardKeys {
 
     /// What a key does to the pinned card (plan §1.5, with #111's rule kept: fable 10-25 -- only an explicit move puts
     /// the keys on a card, never time on screen). ⌘⌃⌥ and auto-repeats do nothing here; a field being typed in or a
-    /// composition owns every key (⌘Return is A9's).
+    /// composition owns every key -- Return in the chat field steers the task and voids an open card (decision 3, A9 with H5).
     ///
     /// | state \ key                  | 1–9                 | Tab / ⇧Tab      | Esc                 | Return              |
     /// |------------------------------|---------------------|-----------------|---------------------|---------------------|

@@ -42,7 +42,7 @@ enum CardKeysTests {
             let got = K.action(characters: key, commandLike: false, isRepeat: false, c)
             check(got == want, "\(name), \(key.debugDescription): \(want), got \(got)")
         }
-        // ⌘⌃⌥ and auto-repeats never act here (⌘Return is A9's)
+        // ⌘⌃⌥ and auto-repeats never act here (Return in the chat field steers and voids the card: A9, decision 3)
         for c in [out, inCard, held] {
             for key in ["3", tab, esc, ret] {
                 check(K.action(characters: key, commandLike: true, isRepeat: false, c) == .none, "⌘ + \(key.debugDescription): nothing")
