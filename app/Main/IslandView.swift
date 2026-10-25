@@ -223,16 +223,28 @@ enum MainWindow {
 
 /// The UI log's `activation` (Shared/UIEvents.swift): each time the app becomes active, the funnel's call behind it
 /// (Activation.bringForward, with its gesture), or none -- what it was is not guessed (#123 review at 20e66ab: the
-/// HID idle counter also counts the events a task posts). The reopens are put down as they come (reopenAsked).
+/// HID idle counter also counts the events a task posts). The reopens are put down as they come (reopenAsked), and with
+/// each activation the type of the event AppKit was handling then (a click on the window, ⌘Tab's key: the user's).
 enum ActivationRecorder {
     nonisolated(unsafe) private static var funnel: (by: UIEvent.Activation, at: Double)?
     nonisolated(unsafe) private static var token: NSObjectProtocol?
+
+    /// The event being handled as the app became active, by its type (its window: one of DeskMind's or not).
+    static func input(_ e: NSEvent?) -> UIEvent.Input {
+        guard let e else { return .none }
+        switch e.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: return e.window != nil ? .mouseDownInWindow : .mouseDown
+        case .keyDown: return .keyDown
+        case .appKitDefined: return .appKitDefined
+        default: return .other
+        }
+    }
 
     static func start() {
         guard token == nil else { return }
         Activation.onBringForward = { source in funnel = (source == .click ? .button : .reopen, Date().timeIntervalSince1970) }
         token = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-            UIEvents.record(.activation(by: UIEvents.activation(funnel: funnel, now: Date().timeIntervalSince1970)))
+            UIEvents.record(.activation(by: UIEvents.activation(funnel: funnel, now: Date().timeIntervalSince1970), input: input(NSApp.currentEvent)))
             funnel = nil
         }
     }

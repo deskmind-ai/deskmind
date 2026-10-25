@@ -13,8 +13,9 @@ window's state when it came; then activations by cause, pauses, and l10n misses.
 
 An answer is a card_sent: its pick is the last one before it (a pick taken back is no answer; one held and dropped --
 the card closed, cloud models went off -- has no card_sent). An activation is explained by DeskMind's own funnel (its
-`by`), or by a reopen the app was asked for or a live-card open the helper logged within a second of it; any other
-is "unexplained" (acceptance wants 0). Nothing is guessed from timing of the user's input.
+`by`), by the user's own event AppKit was handling then (a mouse-down, a key-down: `input`), or by a reopen the app
+was asked for or a live-card open the helper logged within a second of it; any other is "unexplained" (acceptance
+wants 0). Nothing is guessed from timing of the user's input.
 """
 
 import argparse
@@ -26,6 +27,8 @@ from collections import Counter, defaultdict
 
 FILES = ["ui-events.jsonl", "ui-events-helper.jsonl"]
 NEAR_MS = 1000
+# the event AppKit was handling as the app became active, when it is the user's own: a click, a key (⌘Tab)
+USER_INPUT = {"mouse_down_in_window", "mouse_down", "key_down"}
 
 
 def parse_since(s):
@@ -133,6 +136,8 @@ def summary(events):
         by = e.get("by", "none")
         if by != "none":
             activations[by] += 1
+        elif e.get("input") in USER_INPUT:
+            activations["user_" + e["input"]] += 1
         elif near(live_opens, e["t"]):
             activations["live_card"] += 1
         elif near(reopens, e["t"]):

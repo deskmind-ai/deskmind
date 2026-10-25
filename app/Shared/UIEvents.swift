@@ -47,6 +47,10 @@ enum UIEvent: Equatable {
     /// island, the float) or a reopen; `none`: the app became active with no call of the funnel. Facts, no guess: the
     /// summary puts an unattributed activation next to the reopens and the live card's opens around it.
     enum Activation: String { case button, reopen, none }
+    /// The event AppKit was handling when the app became active (NSApp.currentEvent), by its type: a mouse-down in a
+    /// window of DeskMind's, one elsewhere, a key-down, an AppKit-defined one, another, or none. A fact, read then.
+    enum Input: String { case mouseDownInWindow = "mouse_down_in_window", mouseDown = "mouse_down", keyDown = "key_down",
+                         appKitDefined = "appkit_defined", other, none }
     enum Undo: String { case undone, partial, unknown, expiredLate = "expired_late", expiredTime = "expired_time",
                         expiredNewTask = "expired_new_task", expiredHelperQuit = "expired_helper_quit", expiredOther = "expired_other" }
 
@@ -59,7 +63,7 @@ enum UIEvent: Equatable {
     case cardReask(run: ID?, ask: ID?, kind: CardKind)
     case undo(run: ID?, outcome: Undo)
     /// The app became active.
-    case activation(by: Activation)
+    case activation(by: Activation, input: Input)
     /// The app delegate was asked to reopen (the Dock icon, a notification, the live card -- or hands' `open -b`).
     case reopenAsked
     /// The helper's live card was clicked to open DeskMind (the helper's log).
@@ -102,8 +106,8 @@ enum UIEvent: Equatable {
             return with(ids(r, a), ["kind": k.rawValue, "why": why.rawValue])
         case .undo(let r, let o):
             return with(ids(r, nil), ["outcome": o.rawValue])
-        case .activation(let by):
-            return ["by": by.rawValue]
+        case .activation(let by, let input):
+            return ["by": by.rawValue, "input": input.rawValue]
         case .reopenAsked, .liveCardOpen:
             return [:]
         }

@@ -57,7 +57,7 @@ enum UIEventsTests {
         let body = String(src[start.upperBound..<end.lowerBound])
         let code = body.split(separator: "\n").map { $0.components(separatedBy: "//").first ?? "" }
         // every case's associated values: enums of this file, Int, Bool, ID — nothing else
-        let allowed: Set<String> = ["ID?", "ID", "CardKind", "Place", "Window", "Option", "Pick", "Ending", "Activation", "Undo", "Int", "Bool"]
+        let allowed: Set<String> = ["ID?", "ID", "CardKind", "Place", "Window", "Option", "Pick", "Ending", "Activation", "Input", "Undo", "Int", "Bool"]
         var cases = 0, bad: [String] = []
         for l in code where l.trimmingCharacters(in: .whitespaces).hasPrefix("case ") && l.contains("(") && !l.contains("enum ") {
             guard let open = l.firstIndex(of: "("), let close = l.lastIndex(of: ")") else { continue }
@@ -106,19 +106,19 @@ enum UIEventsTests {
     // MARK: cap, rotation, switch, Clear
 
     static func rotationTests() {
-        // one line: {"by":"button","e":"activation","t":1000} and a newline = 42 bytes; a cap of 100 holds two
-        let probe = tempDir(), p = UIEventLog(dir: probe, file: UIEventLog.mainFile, maxBytes: 100)
+        // one line: {"by":"button","e":"activation","input":"none","t":1000} and a newline = 57 bytes; a cap of 120 holds two
+        let probe = tempDir(), p = UIEventLog(dir: probe, file: UIEventLog.mainFile, maxBytes: 120)
         p.now = { 1000 }
-        p.record(.activation(by: .button)); p.flush()
+        p.record(.activation(by: .button, input: .none)); p.flush()
         let one = (try? Data(contentsOf: p.url).count) ?? 0
-        check(one == 42, "a line is 42 bytes: \(one)")
+        check(one == 57, "a line is 57 bytes: \(one)")
         // events written → lines in the file, lines in .1 (no .2 ever)
         let table: [(n: Int, main: Int, rotated: Int?)] = [(0, 0, nil), (1, 1, nil), (2, 2, nil), (3, 1, 2), (4, 2, 2), (5, 1, 2), (9, 1, 2)]
         for row in table {
-            let d = tempDir(), log = UIEventLog(dir: d, file: UIEventLog.mainFile, maxBytes: 100)
+            let d = tempDir(), log = UIEventLog(dir: d, file: UIEventLog.mainFile, maxBytes: 120)
             var t = 1000
             log.now = { t += 1; return t }
-            for _ in 0..<row.n { log.record(.activation(by: .button)) }
+            for _ in 0..<row.n { log.record(.activation(by: .button, input: .none)) }
             log.flush()
             let main = lines(log.url), rot = FileManager.default.fileExists(atPath: log.rotated.path) ? lines(log.rotated) : nil
             let files = (try? FileManager.default.contentsOfDirectory(atPath: d.path)) ?? []
@@ -127,7 +127,7 @@ enum UIEventsTests {
             // the newest lines are kept, in order
             if row.n > 0 { check(main.last?.contains("\"t\":\(1000 + row.n)") == true, "\(row.n) events: the last is the newest") }
             let sizes = [log.url, log.rotated].compactMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int }
-            check(sizes.allSatisfy { $0 <= 100 }, "\(row.n) events: no file over the cap: \(sizes)")
+            check(sizes.allSatisfy { $0 <= 120 }, "\(row.n) events: no file over the cap: \(sizes)")
             check(log.failures == 0, "\(row.n) events: no failed write")
         }
         // the switch: off writes nothing, on again writes; both processes read the same file
@@ -135,10 +135,10 @@ enum UIEventsTests {
         check(log.enabled && helper.enabled, "on by default")
         log.setEnabled(false)
         check(!log.enabled && !helper.enabled, "off: for the helper's log too")
-        log.record(.activation(by: .none)); helper.record(.activation(by: .none)); log.flush(); helper.flush()
+        log.record(.activation(by: .none, input: .none)); helper.record(.activation(by: .none, input: .none)); log.flush(); helper.flush()
         check(lines(log.url).isEmpty && lines(helper.url).isEmpty, "off: nothing written")
         log.setEnabled(true)
-        log.record(.activation(by: .none)); helper.record(.activation(by: .none)); log.flush(); helper.flush()
+        log.record(.activation(by: .none, input: .none)); helper.record(.activation(by: .none, input: .none)); log.flush(); helper.flush()
         check(lines(log.url).count == 1 && lines(helper.url).count == 1, "on again: written, each to its own file")
         // Clear: every log file, both processes', rotated ones too; the switch stays
         try? Data("x\n".utf8).write(to: log.rotated)
@@ -151,7 +151,7 @@ enum UIEventsTests {
         let blocked = tempDir().appendingPathComponent("not-a-dir")
         try? Data("x".utf8).write(to: blocked)
         let broken = UIEventLog(dir: blocked, file: UIEventLog.mainFile)
-        broken.record(.activation(by: .none)); broken.record(.activation(by: .none)); broken.flush()
+        broken.record(.activation(by: .none, input: .none)); broken.record(.activation(by: .none, input: .none)); broken.flush()
         check(broken.failures == 2, "failed writes counted: \(broken.failures)")
     }
 
@@ -323,6 +323,7 @@ enum UIEventsTests {
         }
         let recorder = source("Main/IslandView.swift")
         check(!recorder.contains("secondsSinceLastEventType(.hidSystemState"), "no guess from the input's idle time (a task's posted events count there too)")
+        check(recorder.contains("input: input(NSApp.currentEvent)"), "each activation with the event AppKit was handling then")
         check(recorder.contains("UIEvents.record(.reopenAsked)") && source("Helper/LiveCard.swift").contains("UIEvents.record(.liveCardOpen)"),
               "the reopen and the live card's open are put down by their owners")
         // the funnel tells the recorder before it activates
@@ -345,13 +346,13 @@ enum UIEventsTests {
         let r1 = UIEvent.ID("run_041c0f37"), r2 = UIEvent.ID("run_6f6acb41")
         let a1 = UIEvent.ID("ask_7852a538"), a2 = UIEvent.ID("ask_963b12dc"), a3 = UIEvent.ID("ask_ac15291e"), a4 = UIEvent.ID("ask_f71bfc1d")
         at(0, .reopenAsked)
-        at(40, .activation(by: .none))
+        at(40, .activation(by: .none, input: .none))
         at(1_200, .cardShown(run: r1, ask: a1, kind: .plan, place: .chat, window: .front, options: 2, details: true))
         at(4_100, .cardPick(run: r1, ask: a1, kind: .plan, option: .approve, by: .click, place: .chat, ms: 4_100))
         at(3_000, .cardSent(run: r1, ask: a1, kind: .plan, heldMs: 3_000))
         at(150, .cardEnded(run: r1, ask: a1, kind: .plan, why: .answered))
         at(9_000, .cardShown(run: r1, ask: a2, kind: .action, place: .chat, window: .behind, options: 3, details: true))
-        at(12_500, .activation(by: .button))
+        at(12_500, .activation(by: .button, input: .none))
         at(800, .cardPick(run: r1, ask: a2, kind: .action, option: .approve, by: .digit, place: .chat, ms: 13_300))
         at(1_100, .cardTakeBack(run: r1, ask: a2, kind: .action))
         at(2_000, .cardPick(run: r1, ask: a2, kind: .action, option: .skipStep, by: .digit, place: .chat, ms: 16_400))
@@ -361,13 +362,15 @@ enum UIEventsTests {
         at(6_000, .cardPick(run: r1, ask: nil, kind: .result, option: .undo, by: .click, place: .chat, ms: 6_000))
         at(0, .cardSent(run: r1, ask: nil, kind: .result, heldMs: 0))
         at(1_500, .undo(run: r1, outcome: .undone))
-        at(30_000, .activation(by: .none))
+        at(30_000, .activation(by: .none, input: .none))
+        at(8_000, .activation(by: .none, input: .keyDown))           // ⌘Tab
+        at(9_000, .activation(by: .none, input: .mouseDownInWindow)) // a click on the window
         at(2_000, .cardShown(run: r2, ask: a3, kind: .action, place: .chat, window: .minimized, options: 3, details: true))
         at(5_000, .cardPick(run: r2, ask: a3, kind: .action, option: .approve, by: .click, place: .chat, ms: 5_000))   // held, then dropped: no answer
         at(595_000, .cardEnded(run: r2, ask: a3, kind: .action, why: .expired))
-        at(45_000, .activation(by: .reopen))
+        at(45_000, .activation(by: .reopen, input: .none))
         at(3_000, .liveCardOpen)
-        at(120, .activation(by: .none))
+        at(120, .activation(by: .none, input: .none))
         at(1_000, .cardReask(run: r2, ask: a3, kind: .action))
         at(4_000, .cardShown(run: r2, ask: a4, kind: .ambiguity, place: .chat, window: .front, options: 4, details: false))
         at(7_000, .cardPick(run: r2, ask: a4, kind: .ambiguity, option: .choice, by: .click, place: .chat, ms: 7_000))
@@ -391,7 +394,7 @@ enum UIEventsTests {
         check(!made.isEmpty && made == stored, "the sample is what the writer writes now (\(made.count) bytes; stored \(stored.count))")
         for l in lines(fixture) {
             let o = (try? JSONSerialization.jsonObject(with: Data(l.utf8))) as? [String: Any] ?? [:]
-            let strings = o.filter { $0.value is String }.map(\.key).filter { !["e", "kind", "place", "window", "option", "by", "why", "outcome", "run_id", "ask_id"].contains($0) }
+            let strings = o.filter { $0.value is String }.map(\.key).filter { !["e", "kind", "place", "window", "option", "by", "why", "outcome", "run_id", "ask_id", "input"].contains($0) }
             check(o["t"] is Int && o["e"] is String && strings.isEmpty, "a line: time, name, known fields only: \(l)")
         }
     }
