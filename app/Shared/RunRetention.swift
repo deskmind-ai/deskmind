@@ -111,12 +111,35 @@ enum RunRetention {
 
     /// One pass: what the plan says goes, now. `everything`: 「清除运行记录」 (every ended, not live run). The count taken.
     @discardableResult
+    /// `live`: the caller's live facts, read again right before each run is taken (#126 Codex review at e419501: a
+    /// task that started during the scan lost its trace) -- with the computer lock's holder, read again then too. A run
+    /// is taken only when, at that moment, it is not live and nothing in its folder was written after the pass began
+    /// (a run that new cannot be over yet).
+    static func prune(support: URL = DeskMindIPC.supportDir, live: @escaping () -> Set<String>, now: Double = Date().timeIntervalSince1970,
+                      everything: Bool = false, began: Date = Date()) -> Int {
+        let liveNow = { live().union(lockHolder(support: support)) }
+        let all = runs(support: support, live: liveNow())
+        let go = everything ? all.filter(mayGo) : plan(all, now: now)
+        var n = 0
+        for r in go {
+            guard !liveNow().contains(r.id), !writtenSince(began, r.folder) else { continue }
+            take(r)
+            n += 1
+        }
+        return n
+    }
     static func prune(support: URL = DeskMindIPC.supportDir, live: Set<String>, now: Double = Date().timeIntervalSince1970,
                       everything: Bool = false) -> Int {
-        let all = runs(support: support, live: live.union(lockHolder(support: support)))
-        let go = everything ? all.filter(mayGo) : plan(all, now: now)
-        for r in go { take(r) }
-        return go.count
+        prune(support: support, live: { live }, now: now, everything: everything)
+    }
+
+    /// Something in the run's folder (it, its events, its trace) was made or written at or after `t`.
+    static func writtenSince(_ t: Date, _ folder: URL) -> Bool {
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .creationDateKey]
+        return [folder, folder.appendingPathComponent("events.jsonl"), folder.appendingPathComponent("trace.jsonl")].contains { u in
+            guard let v = try? u.resourceValues(forKeys: keys) else { return false }
+            return [v.contentModificationDate, v.creationDate].contains { ($0 ?? .distantPast) >= t }
+        }
     }
 
     /// The run that holds the computer now (sessions/computer.lock), whatever its process's state: a lingering run

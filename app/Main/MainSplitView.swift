@@ -107,8 +107,7 @@ extension ShellModel {
         m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
         // a task ended here: the run records' rule (M5: 30 days / 1 GB), off the main queue, the live runs kept
         m.onTaskEnded = { [weak m] in
-            let live = m?.liveRuns ?? []
-            DispatchQueue.global(qos: .utility).async { RunRetention.prune(live: live) }
+            DispatchQueue.global(qos: .utility).async { [weak m] in RunRetention.prune(live: { m?.liveRunsNow() ?? [] }) }
         }
         return m
     }()
@@ -697,7 +696,7 @@ struct AgentPanel: View {
             }
             if shell.currentTabs.shown(traceOn: traceOn) == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
-                ProcessPane(sessionId: sid, runId: run, trigger: ProcessPane.trigger(shell.states[sid]?.task(run))).equatable().id(sid + "/" + run)
+                ProcessPane(sessionId: sid, runId: run).equatable().id(sid + "/" + run)
             } else if shell.currentTabs.shown(traceOn: traceOn) == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {

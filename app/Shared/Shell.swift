@@ -1073,14 +1073,23 @@ final class ShellModel: ObservableObject {
         var t = tabs[id] ?? ProcessTabs()
         let before = t
         var ended = false
+        // each task's start and end once, from its own records' times seen live -- never a diff of two snapshots
+        // (#126 Codex review at e419501: a task that started and ended within one batched flush moved nothing)
         for task in new.tasks {
-            let was = old?.task(task.runId)
-            if was == nil, task.running, (task.startedAt ?? .infinity) >= liveSince { t.apply(.taskStarted(task.runId)) }
-            if was?.running == true, task.ended, (task.endedAt ?? .infinity) >= liveSince { t.apply(.taskDone(task.runId)); ended = true }
+            if !tabStarted.contains(task.runId), (task.startedAt ?? .infinity) >= liveSince, task.running || task.ended {
+                tabStarted.insert(task.runId)
+                t.apply(.taskStarted(task.runId))
+            }
+            if task.ended, !tabEnded.contains(task.runId) {
+                tabEnded.insert(task.runId)
+                if (task.endedAt ?? .infinity) >= liveSince { t.apply(.taskDone(task.runId)); ended = true }
+            }
         }
         if t != before { tabs[id] = t }
         if ended { onTaskEnded() }
     }
+    /// The runs whose start / end the tabs were told of (or that ended before this model began).
+    private var tabStarted: Set<String> = [], tabEnded: Set<String> = []
 
     /// The selected conversation's tabs.
     var currentTabs: ProcessTabs { selected.flatMap { tabs[$0] } ?? ProcessTabs() }
@@ -1098,6 +1107,11 @@ final class ShellModel: ObservableObject {
     /// lingers) -- never pruned (RunRetention).
     var liveRuns: Set<String> {
         Set(states.values.flatMap { $0.tasks.filter { $0.running || $0.resultCardState.isOpen }.map(\.runId) })
+    }
+    /// The same, read from any thread (a retention pass reads it again right before each run it takes): the client's
+    /// own newest states, under its lock.
+    func liveRunsNow() -> Set<String> {
+        Set(client.allStates().flatMap { $0.tasks.filter { $0.running || $0.resultCardState.isOpen }.map(\.runId) })
     }
 
     /// The card the user moved into (card mode), by card key.

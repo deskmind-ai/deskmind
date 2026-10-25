@@ -132,6 +132,18 @@ enum RunDir {
         return support.appendingPathComponent("sessions/\(session)/runs/\(run)")
     }
 
+    /// What the pane reads, as it is now: each file's size and last write (events, trace, model calls, the pictures'
+    /// folder, the marker, the labels). Any record appended changes it.
+    static func signature(session: String, run: String, support: URL = DeskMindIPC.supportDir) -> String {
+        guard let dir = folder(session: session, run: run, support: support) else { return "" }
+        let files = ["events.jsonl", "trace.jsonl", "model_calls.jsonl", "shots", RunRetention.marker].map { dir.appendingPathComponent($0) }
+            + [support.appendingPathComponent("annotations/\(run).jsonl")]     // (Annotations.file's place)
+        return files.map { u in
+            let v = try? u.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            return "\(v?.fileSize ?? -1):\(v?.contentModificationDate?.timeIntervalSince1970 ?? -1)"
+        }.joined(separator: "|")
+    }
+
     // MARK: reading
 
     /// The run folder's files, read once each (the only I/O here). A folder that is not there: none.

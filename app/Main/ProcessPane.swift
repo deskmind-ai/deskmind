@@ -7,11 +7,34 @@
 import AppKit
 import SwiftUI
 
-/// Reads a run's folder and its labels off the main queue, again whenever the task moves on.
+/// Reads a run's folder and its labels off the main queue, again whenever any of its records grows (RunDir.signature:
+/// every file the pane reads, checked each second off the main queue -- #126 Codex review at e419501: an undo's
+/// result_response, a judge, a model call never showed).
 final class ProcessLoader: ObservableObject {
     @Published private(set) var model: RunDir.Model = .none
     @Published private(set) var labels: [Annotations.Line] = []
     private var asked = 0
+    private var timer: Timer?
+    private var seen: String?
+
+    /// Read now, then again each time the run's files change, until `stop`.
+    func watch(session: String, run: String) {
+        stop()
+        seen = nil
+        let check = { [weak self] in
+            DispatchQueue.global(qos: .utility).async {
+                let sig = RunDir.signature(session: session, run: run)
+                DispatchQueue.main.async {
+                    guard let self, sig != self.seen else { return }
+                    self.seen = sig
+                    self.load(session: session, run: run)
+                }
+            }
+        }
+        check()
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in check() }
+    }
+    func stop() { timer?.invalidate(); timer = nil }
 
     func load(session: String, run: String) {
         asked += 1
@@ -58,8 +81,7 @@ final class ShotCache: ObservableObject {
 struct ProcessPane: View, Equatable {
     let sessionId: String
     let runId: String
-    let trigger: String
-    static func == (a: ProcessPane, b: ProcessPane) -> Bool { a.sessionId == b.sessionId && a.runId == b.runId && a.trigger == b.trigger }
+    static func == (a: ProcessPane, b: ProcessPane) -> Bool { a.sessionId == b.sessionId && a.runId == b.runId }
     @StateObject private var loader = ProcessLoader()
     @StateObject private var shots = ShotCache()
     @Environment(\.lang) private var lang
@@ -68,17 +90,14 @@ struct ProcessPane: View, Equatable {
     @State private var openJudges: Set<String> = []
     @State private var notes: [String: String] = [:]
 
-    /// What makes the folder worth reading again: the task's steps, its end, its pictures' arrival.
-    static func trigger(_ t: TaskState?) -> String {
-        "\(t?.steps.count ?? -1)|\(t?.ended == true)|\(t?.steps.filter { $0.shot != nil && !$0.shotPending }.count ?? 0)"
-    }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) { content }
                 .padding(.vertical, 4)
         }
-        .onChange(of: trigger, initial: true) { _, _ in loader.load(session: sessionId, run: runId) }
+        .onAppear { loader.watch(session: sessionId, run: runId) }
+        .onDisappear { loader.stop() }
         .sheet(isPresented: Binding(get: { big != nil }, set: { if !$0 { big = nil } })) { ShotViewer(pane: self) }
     }
 

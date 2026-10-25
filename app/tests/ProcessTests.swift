@@ -99,6 +99,21 @@ enum ProcessTests {
         check(RunDir.model(RunDir.Files(events: jsonl(events), trace: jsonl(trace), shots: ["st_1.png"], pruned: true)).state == .pruned,
               "the marker: pruned (运行记录已清理), whatever stray file came after it")
 
+        // (#126 Codex at e419501, 2) any record appended changes what the pane watches
+        do {
+            let support = temp()
+            let dir = support.appendingPathComponent("sessions/s1/runs/run_s")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? jsonl(Array(events.prefix(13))).write(to: dir.appendingPathComponent("events.jsonl"), atomically: true, encoding: .utf8)
+            let before = RunDir.signature(session: "s1", run: "run_s", support: support)
+            let h = try! FileHandle(forWritingTo: dir.appendingPathComponent("events.jsonl")); h.seekToEndOfFile()
+            h.write(Data((jsonl([events[13]])).utf8)); try? h.close()
+            let after = RunDir.signature(session: "s1", run: "run_s", support: support)
+            check(before != after, "an undo's result_response appended: the pane reads again")
+            try? "x\n".write(to: dir.appendingPathComponent("trace.jsonl"), atomically: true, encoding: .utf8)
+            check(RunDir.signature(session: "s1", run: "run_s", support: support) != after, "a trace line: again")
+            check(RunDir.signature(session: "../x", run: "run_s", support: support) == "", "an id that names no folder: nothing")
+        }
         // on disk: the one read
         let dir = temp().appendingPathComponent("run_1")
         try? FileManager.default.createDirectory(at: dir.appendingPathComponent("shots"), withIntermediateDirectories: true)
@@ -266,6 +281,16 @@ enum ProcessTests {
         mk(fresh, done: nil)
         check(R.prune(support: s3, live: [], now: Date().timeIntervalSince1970) == 0 && has(fresh, "trace.jsonl"), "unended and young: kept")
         check(R.prune(support: s3, live: ["fresh"], now: Date().timeIntervalSince1970 + 90 * day) == 0, "live (a fact): never")
+        // (#126 Codex at e419501, 1) a task that starts during the pass: the live facts read again right before each
+        // run is taken -- a lock that names it mid-scan keeps it; and nothing written after the pass began is taken
+        let s4 = temp(), late = s4.appendingPathComponent("sessions/s1/runs/run_late"), other = s4.appendingPathComponent("sessions/s1/runs/run_other")
+        mk(late, done: t0 - 40 * day); mk(other, done: t0 - 40 * day)
+        var reads = 0
+        let n4 = R.prune(support: s4, live: { reads += 1; return reads == 1 ? [] : ["run_late"] }, now: t0, everything: true)
+        check(n4 == 1 && has(late, "trace.jsonl") && !has(late, R.marker) && !has(other, "trace.jsonl"), "live by the time it is taken: kept (\(n4), reads \(reads))")
+        mk(other, done: t0 - 40 * day)
+        check(R.prune(support: s4, live: { [] }, now: t0, everything: true, began: Date(timeIntervalSinceNow: -3600)) == 0 && has(other, "trace.jsonl"),
+              "written after the pass began: never taken")
         // the age from task_done's own t, not the folder's date
         check(R.run(young, kind: .session, live: []).ended.map { abs($0 - (t0 - day)) < 1 } == true, "age: task_done's t")
     }
@@ -324,6 +349,27 @@ enum ProcessTests {
             check(r.m.currentTabs.tab == .now, "picked 现在")
             r.m.showProcess("r0")
             check(r.m.currentTabs.tab == .process && r.m.currentTabs.run == "r0", "a task message: its 过程")
+            // (#126 Codex at e419501, 3) a task that starts and ends within one batched flush: switched and pruned all the same
+            do {
+                let wire = CardStoreTests.Wire(), timers = ShellTests.Timers()
+                let client = SessionClient(transport: wire)
+                let sid = CardStoreTests.sid
+                for l: [String: Any] in [["kind": "session.message", "session_id": sid, "seq": 1, "msg_id": "u1", "role": "user", "text": "/cua x", "via": "cua"],
+                                         ["kind": "session.task", "session_id": sid, "seq": 2, "msg_id": "u1", "run_id": "r_fast", "raw": "x", "by": "slash"],
+                                         ["kind": "start", "session_id": sid, "run_id": "r_fast", "seq": 1, "raw": "x"],
+                                         ["kind": "task_done", "session_id": sid, "run_id": "r_fast", "seq": 2, "status": "succeeded", "reason": "", "summary": "", "result_card": NSNull()]] {
+                    client.feed(l)
+                }
+                let m = ShellModel(client: client, defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" }, lang: { .zhHans },
+                                   takeBackAfter: timers.after, now: { timers.now }, work: { $0() }, deliver: { $0() })
+                m.selected = sid
+                var pruned = 0
+                m.onTaskEnded = { pruned += 1 }
+                client.feed(["kind": "session.message", "session_id": sid, "seq": 3, "msg_id": "a1", "role": "assistant", "text": "好"])
+                check(m.currentTabs.tab == .process && m.currentTabs.run == "r_fast" && pruned == 1, "started and ended in one flush: 过程, one prune (\(m.currentTabs), \(pruned))")
+                client.feed(["kind": "session.message", "session_id": sid, "seq": 4, "msg_id": "a2", "role": "assistant", "text": "好"])
+                check(pruned == 1, "told once")
+            }
             let h = CardStoreTests.Rig.make(CardStoreTests.Wire(), ShellTests.Timers())
             var replayed = 0
             h.onTaskEnded = { replayed += 1 }

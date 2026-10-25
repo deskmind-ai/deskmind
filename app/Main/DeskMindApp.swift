@@ -604,8 +604,8 @@ struct DeskMindApp: App {
                 Toggle(L("Show the Process Tab (0.5 Preview)", lang: AppLanguage.resolve(language)), isOn: $traceOn)
                 // every ended task's run records (pictures, trace, model calls); the conversations and the labels stay
                 Button(L("Clear Run Records", lang: AppLanguage.resolve(language))) {
-                    let live = ShellModel.shared?.liveRuns ?? []
-                    DispatchQueue.global(qos: .userInitiated).async { RunRetention.prune(live: live, everything: true) }
+                    let shell = ShellModel.shared
+                    DispatchQueue.global(qos: .userInitiated).async { RunRetention.prune(live: { shell?.liveRunsNow() ?? [] }, everything: true) }
                 }
                 // What the interface did (cards, answers, activations), in a file on this Mac only: never uploaded.
                 Toggle(L("Record Interface Use on This Mac", lang: AppLanguage.resolve(language)),
