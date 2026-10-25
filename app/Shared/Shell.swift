@@ -484,6 +484,7 @@ final class ShellModel: ObservableObject {
         self.retryAfter = retryAfter
         self.takeBackAfter = takeBackAfter
         self.now = now
+        liveSince = now()
         self.work = work
         self.deliver = deliver
         client.onChange = { [weak self] id, _ in self?.changed(id) }
@@ -935,9 +936,12 @@ final class ShellModel: ObservableObject {
     /// When each card was first shown here, by card key: a pick's time from it, a held answer's from its pick.
     private var cardShownAt: [String: Double] = [:]
     private var cardPickedAt: [String: Double] = [:]
+    /// When this model began watching: a change made by a line written before it is history replayed (a relaunch, a
+    /// history fill), not something the user saw happen here (UIEvents.changes).
+    private var liveSince: Double = 0
 
     private func logChanges(from old: SessionState?, to new: SessionState) {
-        for (k, e) in UIEvents.cardChanges(from: old, to: new, window: uiWindow()) {
+        for (k, e) in UIEvents.cardChanges(from: old, to: new, window: uiWindow(), liveSince: liveSince) {
             if case .cardShown = e { cardShownAt[k] = now() }
             if case .cardEnded = e { cardShownAt[k] = nil; cardPickedAt[k] = nil }
             uiRecord(e)
@@ -958,11 +962,12 @@ final class ShellModel: ObservableObject {
         uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: .chat, ms: max(0, ms)))
     }
 
-    private func logSent(_ a: CardAnswer, key: String) {
+    /// The answer is being written: what the log will say once the helper took it (write's `sent`).
+    private func sentEvent(_ a: CardAnswer, key: String) -> UIEvent {
         let c = logCard(a)
         let held = cardPickedAt[key].map { Int(((now() - $0) * 1000).rounded()) } ?? 0
         cardPickedAt[key] = nil
-        uiRecord(.cardSent(run: c.run, ask: c.ask, kind: c.kind, heldMs: max(0, held)))
+        return .cardSent(run: c.run, ask: c.ask, kind: c.kind, heldMs: max(0, held))
     }
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
@@ -1169,7 +1174,7 @@ final class ShellModel: ObservableObject {
     private func act(_ action: CardStore.Action, in id: String) -> Bool {
         switch action {
         case .none: return false
-        case .send(let key, let a): write(a, key: key, in: id); logSent(a, key: key)
+        case .send(let key, let a): write(a, key: key, in: id)
         case .hold(let key, let token):
             takeBackAfter(CardStore.takeBack) { [weak self] in self?.due(key, token: token, in: id) }
         }
@@ -1184,7 +1189,6 @@ final class ShellModel: ObservableObject {
         if !cloudAllows() { cards.takeBack(key); return }
         guard let a = cards.due(key, token: token, offEpoch: client.offEpoch, in: client.state(id)) else { return }
         write(a, key: key, in: id)
-        logSent(a, key: key)
     }
 
     /// The req_ids CardStore awaits, mirrored for the feeding thread (which may not read CardStore): a refusal whose
@@ -1214,10 +1218,13 @@ final class ShellModel: ObservableObject {
         let req = newReqId()
         cards.issue(req, sessionId: id, key: key, answer: a)
         syncOwnReqs()
+        let sent = sentEvent(a, key: key)
         work { [weak self] in
             guard let self else { return }
             let r = self.client.answer(a, in: id, reqId: req)
+            // (the log's card_sent once the helper took the line; a write that did not go is no answer)
             if r != .sent { self.deliver { self.cards.notSent(key, a); self.cards.unissue(req); self.syncOwnReqs() } }
+            else { self.deliver { self.uiRecord(sent) } }
         }
     }
 

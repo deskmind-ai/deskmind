@@ -40,6 +40,10 @@ enum UIEventsTests {
             ("run_", false), ("run_abc", false), ("run_041C0F37", false), ("run_041c0f37x", false), ("task_041c0f37", false),
             ("周报.txt", false), ("hello world", false), ("run_ 041c", false), ("ask_7852a538\n", false), ("", false),
             ("run_0123456789abcdef0123456789abcdef0", false), ("Report.docx", false), ("ask__7852a538", false),
+            // #123 review at 20e66ab: what rides on an allowed Character (each spells or hides text)
+            ("run_041c0f37\u{301}", false), ("run_a\u{E0068}\u{E0069}\u{E007F}bcd", false), ("run_041c\u{200D}0f37", false),
+            ("run_041c0f37\u{FE0F}", false), ("run_041c0f37\u{E0100}", false), ("run_０４１ｃ0f37", false), ("ask_7852a538\u{0}", false),
+            ("rün_041c0f37", false), ("run_041c0f3７", false),
         ]
         for (s, ok) in table { check((UIEvent.ID(s) != nil) == ok, "id \(s.debugDescription): \(ok ? "kept" : "not an id")") }
     }
@@ -131,10 +135,10 @@ enum UIEventsTests {
         check(log.enabled && helper.enabled, "on by default")
         log.setEnabled(false)
         check(!log.enabled && !helper.enabled, "off: for the helper's log too")
-        log.record(.activation(by: .other)); helper.record(.activation(by: .other)); log.flush(); helper.flush()
+        log.record(.activation(by: .none)); helper.record(.activation(by: .none)); log.flush(); helper.flush()
         check(lines(log.url).isEmpty && lines(helper.url).isEmpty, "off: nothing written")
         log.setEnabled(true)
-        log.record(.activation(by: .other)); helper.record(.activation(by: .other)); log.flush(); helper.flush()
+        log.record(.activation(by: .none)); helper.record(.activation(by: .none)); log.flush(); helper.flush()
         check(lines(log.url).count == 1 && lines(helper.url).count == 1, "on again: written, each to its own file")
         // Clear: every log file, both processes', rotated ones too; the switch stays
         try? Data("x\n".utf8).write(to: log.rotated)
@@ -147,7 +151,7 @@ enum UIEventsTests {
         let blocked = tempDir().appendingPathComponent("not-a-dir")
         try? Data("x".utf8).write(to: blocked)
         let broken = UIEventLog(dir: blocked, file: UIEventLog.mainFile)
-        broken.record(.activation(by: .other)); broken.record(.activation(by: .other)); broken.flush()
+        broken.record(.activation(by: .none)); broken.record(.activation(by: .none)); broken.flush()
         check(broken.failures == 2, "failed writes counted: \(broken.failures)")
     }
 
@@ -225,6 +229,17 @@ enum UIEventsTests {
             r.answerNow("a1")
             check(take() == [.cardReask(run: nil, ask: nil, kind: .action)], "现在回答: reask")
         }
+        // the result card: shown, answered (好的) / undone / its time ran out
+        do {
+            let (r, take) = rig()
+            r.emit("task_done", ["status": "succeeded", "reason": "", "summary": "s", "undo_until": 2_000_000_000,
+                                 "result_card": ["kind": "result", "text": "做了：新建 a.txt", "blocking": false, "free_text": false,
+                                                 "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]]]])
+            check(take() == [.cardShown(run: nil, ask: nil, kind: .result, place: .chat, window: .behind, options: 2, details: false)], "the result card shown")
+            r.feed(["kind": "session.task_closed", "session_id": R.sid, "seq": 3, "run_id": R.rid, "why": "linger"])
+            check(take() == [.cardEnded(run: nil, ask: nil, kind: .result, why: .expired), .undo(run: nil, outcome: .expiredTime)],
+                  "its time ran out: ended (expired), the undo it offered expired")
+        }
         // the session's first state here (the app opened, its history replayed): an ended card is not put down again
         do {
             let r = R.Rig()
@@ -232,6 +247,35 @@ enum UIEventsTests {
             let e = UIEvents.changes(from: nil, to: r.state, window: .front)
             check(e == [.cardShown(run: nil, ask: nil, kind: .action, place: .chat, window: .front, options: 3, details: false)],
                   "a first state: the open card shown, the answered one not ended again: \(e)")
+        }
+        // #123 review at 20e66ab: history replayed is not put down again -- a relaunch with the stored log of a task that
+        // was undone (task-undo), whether its lines come in the first state or into a session known already. The same
+        // lines live (written after the model began watching): each transition once.
+        for (replayed, label) in [(true, "replayed"), (false, "live")] {
+            let t = ShellTests.Timers()
+            t.now = replayed ? 1_900_000_000 : 1_700_000_000      // (the fixture's lines are at 1_792_655_287)
+            let m = ShellModel(client: SessionClient(transport: R.Wire()), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                               lang: { .zhHans }, takeBackAfter: t.after, now: { t.now }, work: { $0() }, deliver: { $0() })
+            var got: [UIEvent] = []
+            m.uiRecord = { got.append($0) }
+            ShellTests.feed(m, "task-undo")
+            ShellTests.feed(m, "task-undo")      // (replayed twice, as a watch and a history read can)
+            let names = got.map(\.name)
+            if replayed {
+                check(got.isEmpty, "\(label): nothing logged from the stored log: \(names)")
+            } else {
+                let undos = got.filter { if case .undo = $0 { return true }; return false }
+                check(undos == [.undo(run: UIEvent.ID("run_9ace806b"), outcome: .undone)], "\(label): the undo once: \(undos)")
+                check(names.filter { $0 == "card_shown" }.count == 1 && names.filter { $0 == "card_ended" }.count == 1, "\(label): the result card shown and ended once: \(names)")
+            }
+        }
+        // a relaunch while a card is still open: not shown again (its show time is not reset); its live ending is
+        do {
+            let (r, take) = rig()
+            r.emit("ask", ["ask_id": "a1", "card": R.cardJSON("action"), "t": 999_000.0])   // before the model began
+            check(take().isEmpty, "a card asked before the app watched: not shown again")
+            r.resumed("a1")
+            check(take() == [.cardEnded(run: nil, ask: nil, kind: .action, why: .answered)], "its ending, live: logged")
         }
         // the real ids, when the run's are the harness's
         let s0 = SessionState()
@@ -260,6 +304,9 @@ enum UIEventsTests {
             (open, .closed("new_task"), .expiredNewTask), (open, .closed("session_exit"), .expiredHelperQuit),
             (open, .closed("session_end"), .expiredHelperQuit), (open, .closed("no_task"), .expiredOther),
             (noUndo, .closed("linger"), nil), (open, .answered, nil), (.none, open, nil), (open, .undoing, nil),
+            // first seen already undone, or from no undo: nothing (#123 review)
+            (.none, .undone(undone: 3, total: 3, refused: nil), nil), (.none, .undoUnknown(nil), nil), (.answered, .undoExpired, nil),
+            (noUndo, .undoExpired, nil), (.undoing, .closed("linger"), nil),
         ]
         for (a, b, want) in table { check(UIEvents.undo(from: a, to: b) == want, "\(a) → \(b): \(String(describing: want))") }
     }
@@ -267,16 +314,17 @@ enum UIEventsTests {
     // MARK: what an activation is put down to
 
     static func activationTests() {
-        let table: [((UIEvent.Activation, Double)?, Double, Double, UIEvent.Activation)] = [
-            ((.button, 100), 100.2, 50, .button), ((.reopen, 100), 100.9, 50, .reopen),
-            ((.button, 100), 102, 50, .other), ((.button, 100), 102, 0.3, .userInput),
-            (nil, 100, 0.1, .userInput), (nil, 100, 1.0, .userInput), (nil, 100, 1.5, .other), (nil, 100, .infinity, .other),
-            ((.button, 101), 100, 50, .other),   // a funnel call after the activation does not explain it
+        let table: [((UIEvent.Activation, Double)?, Double, UIEvent.Activation)] = [
+            ((.button, 100), 100.2, .button), ((.reopen, 100), 100.9, .reopen), ((.button, 100), 102, .none),
+            (nil, 100, .none), ((.button, 101), 100, .none),   // a funnel call after the activation does not explain it
         ]
-        for (funnel, now, input, want) in table {
-            check(UIEvents.activation(funnel: funnel.map { (by: $0.0, at: $0.1) }, now: now, userInputAgo: input) == want,
-                  "funnel \(String(describing: funnel)), now \(now), input \(input)s ago: \(want)")
+        for (funnel, now, want) in table {
+            check(UIEvents.activation(funnel: funnel.map { (by: $0.0, at: $0.1) }, now: now) == want, "funnel \(String(describing: funnel)), now \(now): \(want)")
         }
+        let recorder = source("Main/IslandView.swift")
+        check(!recorder.contains("secondsSinceLastEventType(.hidSystemState"), "no guess from the input's idle time (a task's posted events count there too)")
+        check(recorder.contains("UIEvents.record(.reopenAsked)") && source("Helper/LiveCard.swift").contains("UIEvents.record(.liveCardOpen)"),
+              "the reopen and the live card's open are put down by their owners")
         // the funnel tells the recorder before it activates
         let src = source("Shared/Activation.swift")
         if let r = src.range(of: "static func bringForward") {
@@ -296,7 +344,8 @@ enum UIEventsTests {
         func at(_ ms: Int, _ e: UIEvent) { t += ms; log.record(e) }
         let r1 = UIEvent.ID("run_041c0f37"), r2 = UIEvent.ID("run_6f6acb41")
         let a1 = UIEvent.ID("ask_7852a538"), a2 = UIEvent.ID("ask_963b12dc"), a3 = UIEvent.ID("ask_ac15291e"), a4 = UIEvent.ID("ask_f71bfc1d")
-        at(0, .activation(by: .reopen))
+        at(0, .reopenAsked)
+        at(40, .activation(by: .none))
         at(1_200, .cardShown(run: r1, ask: a1, kind: .plan, place: .chat, window: .front, options: 2, details: true))
         at(4_100, .cardPick(run: r1, ask: a1, kind: .plan, option: .approve, by: .click, place: .chat, ms: 4_100))
         at(3_000, .cardSent(run: r1, ask: a1, kind: .plan, heldMs: 3_000))
@@ -312,10 +361,13 @@ enum UIEventsTests {
         at(6_000, .cardPick(run: r1, ask: nil, kind: .result, option: .undo, by: .click, place: .chat, ms: 6_000))
         at(0, .cardSent(run: r1, ask: nil, kind: .result, heldMs: 0))
         at(1_500, .undo(run: r1, outcome: .undone))
-        at(30_000, .activation(by: .other))
+        at(30_000, .activation(by: .none))
         at(2_000, .cardShown(run: r2, ask: a3, kind: .action, place: .chat, window: .minimized, options: 3, details: true))
-        at(600_000, .cardEnded(run: r2, ask: a3, kind: .action, why: .expired))
-        at(45_000, .activation(by: .userInput))
+        at(5_000, .cardPick(run: r2, ask: a3, kind: .action, option: .approve, by: .click, place: .chat, ms: 5_000))   // held, then dropped: no answer
+        at(595_000, .cardEnded(run: r2, ask: a3, kind: .action, why: .expired))
+        at(45_000, .activation(by: .reopen))
+        at(3_000, .liveCardOpen)
+        at(120, .activation(by: .none))
         at(1_000, .cardReask(run: r2, ask: a3, kind: .action))
         at(4_000, .cardShown(run: r2, ask: a4, kind: .ambiguity, place: .chat, window: .front, options: 4, details: false))
         at(7_000, .cardPick(run: r2, ask: a4, kind: .ambiguity, option: .choice, by: .click, place: .chat, ms: 7_000))

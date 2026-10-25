@@ -10,6 +10,6 @@ Time to answer, by the main window when the card came
 | behind | 1 | 16.4s | 16.4s |
 | front | 3 | 6.0s | 7.0s |
 
-Activations: button 1, other 1, reopen 1, user_input 1; other (must be 0): 1
+Activations: button 1, live_card 1, reopen 1, reopen_asked 1, unexplained 1; unexplained (must be 0): 1
 Pauses: 0, 0.0s in all
 l10n misses: -

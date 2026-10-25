@@ -221,8 +221,9 @@ enum MainWindow {
     }
 }
 
-/// The UI log's `activation` (Shared/UIEvents.swift): each time the app becomes active, what brought it -- DeskMind's
-/// own funnel (Activation.bringForward, with its gesture), the user's own input to the system just before, or neither.
+/// The UI log's `activation` (Shared/UIEvents.swift): each time the app becomes active, the funnel's call behind it
+/// (Activation.bringForward, with its gesture), or none -- what it was is not guessed (#123 review at 20e66ab: the
+/// HID idle counter also counts the events a task posts). The reopens are put down as they come (reopenAsked).
 enum ActivationRecorder {
     nonisolated(unsafe) private static var funnel: (by: UIEvent.Activation, at: Double)?
     nonisolated(unsafe) private static var token: NSObjectProtocol?
@@ -231,10 +232,7 @@ enum ActivationRecorder {
         guard token == nil else { return }
         Activation.onBringForward = { source in funnel = (source == .click ? .button : .reopen, Date().timeIntervalSince1970) }
         token = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
-            // (the hardware's own events: a click or a key the user made, never one a task posted)
-            let input = min(CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .leftMouseDown),
-                            CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown))
-            UIEvents.record(.activation(by: UIEvents.activation(funnel: funnel, now: Date().timeIntervalSince1970, userInputAgo: input)))
+            UIEvents.record(.activation(by: UIEvents.activation(funnel: funnel, now: Date().timeIntervalSince1970)))
             funnel = nil
         }
     }
@@ -257,6 +255,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MainActor.assumeIsolated {
+            UIEvents.record(.reopenAsked)
             if flag { return true }
             // While a run is running and no card waits, a reopen is most likely hands giving the front back after a
             // foreground step (`open -b ai.deskmind.app`, DeskMind still the active app after ⌘M): restoring the

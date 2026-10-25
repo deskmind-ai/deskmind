@@ -24,11 +24,14 @@ enum UIEvent: Equatable {
     /// A run or ask id, as the harness makes them: the only text an event carries.
     struct ID: Equatable {
         let raw: String
-        /// `run_` or `ask_`, then 4 to 32 lowercase hex digits; anything else is not an id and is not kept.
+        /// `run_` or `ask_`, then 4 to 32 lowercase hex digits; anything else is not an id and is not kept. Checked
+        /// byte by byte (UTF-8): a check by Characters lets a combining mark, a tag character, a joiner or a variation
+        /// selector ride on an allowed one, and those can spell text (#123 review at 20e66ab).
         init?(_ s: String) {
-            let parts = s.split(separator: "_", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2, parts[0] == "run" || parts[0] == "ask", (4...32).contains(parts[1].count),
-                  parts[1].allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) else { return nil }
+            let b = Array(s.utf8)
+            guard (8...36).contains(b.count), b[3] == UInt8(ascii: "_"),
+                  Array(b[0..<3]) == Array("run".utf8) || Array(b[0..<3]) == Array("ask".utf8),
+                  b[4...].allSatisfy({ (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }) else { return nil }
             raw = s
         }
     }
@@ -40,10 +43,10 @@ enum UIEvent: Equatable {
     enum Option: String { case approve, choice, skipStep = "skip_step", delegate, cancel, undo, other }
     enum Pick: String { case click, digit, enter, space, typed }
     enum Ending: String { case answered, steer, stop, ended, replaced, expired }
-    /// What brought DeskMind to the front: one of its own buttons (the island, the float), a reopen (the Dock icon, a
-    /// notification, the live card), the user's own input to the system right before (⌘Tab, a click on the window, the
-    /// menu bar), or none of these (acceptance wants 0).
-    enum Activation: String { case button, reopen, userInput = "user_input", other }
+    /// What DeskMind's own funnel (Activation.bringForward) was asked to bring forward by: one of its buttons (the
+    /// island, the float) or a reopen; `none`: the app became active with no call of the funnel. Facts, no guess: the
+    /// summary puts an unattributed activation next to the reopens and the live card's opens around it.
+    enum Activation: String { case button, reopen, none }
     enum Undo: String { case undone, partial, unknown, expiredLate = "expired_late", expiredTime = "expired_time",
                         expiredNewTask = "expired_new_task", expiredHelperQuit = "expired_helper_quit", expiredOther = "expired_other" }
 
@@ -55,7 +58,12 @@ enum UIEvent: Equatable {
     case cardEnded(run: ID?, ask: ID?, kind: CardKind, why: Ending)
     case cardReask(run: ID?, ask: ID?, kind: CardKind)
     case undo(run: ID?, outcome: Undo)
+    /// The app became active.
     case activation(by: Activation)
+    /// The app delegate was asked to reopen (the Dock icon, a notification, the live card -- or hands' `open -b`).
+    case reopenAsked
+    /// The helper's live card was clicked to open DeskMind (the helper's log).
+    case liveCardOpen
 
     var name: String {
         switch self {
@@ -67,6 +75,8 @@ enum UIEvent: Equatable {
         case .cardReask: "card_reask"
         case .undo: "undo"
         case .activation: "activation"
+        case .reopenAsked: "reopen_asked"
+        case .liveCardOpen: "live_card_open"
         }
     }
 
@@ -94,6 +104,8 @@ enum UIEvent: Equatable {
             return with(ids(r, nil), ["outcome": o.rawValue])
         case .activation(let by):
             return ["by": by.rawValue]
+        case .reopenAsked, .liveCardOpen:
+            return [:]
         }
     }
 }
@@ -134,8 +146,9 @@ final class UIEventLog {
     func setEnabled(_ on: Bool) {
         queue.sync {
             let off = dir.appendingPathComponent(Self.offFile)
-            if on { try? FileManager.default.removeItem(at: off) }
-            else {
+            if on {
+                if FileManager.default.fileExists(atPath: off.path), (try? FileManager.default.removeItem(at: off)) == nil { failedWrites += 1 }
+            } else {
                 try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
                 if !FileManager.default.createFile(atPath: off.path, contents: Data()) { failedWrites += 1 }
             }
@@ -188,13 +201,11 @@ enum UIEvents {
     static func setEnabled(_ on: Bool) { log?.setEnabled(on) }
     static func clear() { log?.clear() }
 
-    /// What brought the app to the front, when it became active: DeskMind's own funnel (Activation.bringForward) said
-    /// within the last `window` seconds, else the user's own input to the system (a mouse-down or a key-down from the
-    /// hardware within `window`), else `other`.
+    /// The funnel's call behind an activation: one made in the `activationWindow` seconds before it, else none.
     static let activationWindow = 1.0
-    static func activation(funnel: (by: UIEvent.Activation, at: Double)?, now: Double, userInputAgo: Double) -> UIEvent.Activation {
+    static func activation(funnel: (by: UIEvent.Activation, at: Double)?, now: Double) -> UIEvent.Activation {
         if let f = funnel, now - f.at >= 0, now - f.at <= activationWindow { return f.by }
-        return userInputAgo <= activationWindow ? .userInput : .other
+        return .none
     }
 }
 

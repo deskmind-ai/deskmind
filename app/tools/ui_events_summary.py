@@ -8,8 +8,13 @@ events at or after it count. Without files it reads ui-events.jsonl and ui-event
 DIR, by default ~/Library/Application Support/DeskMind. It only reads; nothing leaves this Mac.
 
 Prints, per task: cards shown by kind and where they were answered, take-backs, expiries, re-asks and undo
-outcomes; then the time from a card shown to its pick (median and 90th percentile) by the main window's state when
-it came; then activations by cause (`other` must be 0), pauses, and l10n misses.
+outcomes; then the time from a card shown to the pick that was sent (median and 90th percentile) by the main
+window's state when it came; then activations by cause, pauses, and l10n misses.
+
+An answer is a card_sent: its pick is the last one before it (a pick taken back is no answer; one held and dropped --
+the card closed, cloud models went off -- has no card_sent). An activation is explained by DeskMind's own funnel (its
+`by`), or by a reopen the app was asked for or a live-card open the helper logged within a second of it; any other
+is "unexplained" (acceptance wants 0). Nothing is guessed from timing of the user's input.
 """
 
 import argparse
@@ -20,6 +25,7 @@ import sys
 from collections import Counter, defaultdict
 
 FILES = ["ui-events.jsonl", "ui-events-helper.jsonl"]
+NEAR_MS = 1000
 
 
 def parse_since(s):
@@ -74,7 +80,9 @@ def summary(events):
     tasks = defaultdict(lambda: {"shown": Counter(), "answered_in": Counter(), "take_backs": 0, "expired": 0,
                                  "reasks": 0, "undo": Counter()})
     window_of = {}  # (run, ask) -> the window when the card came
-    last_pick = {}  # (run, ask) -> its last pick (a pick taken back and picked again counts once, as it went)
+    last_pick = {}  # (run, ask) -> its pick held now (taken back: none)
+    answers = []    # (card, the pick that was sent)
+    activations_raw, reopens, live_opens = [], [], []
     activations = Counter()
     pauses, paused_ms = 0, 0
     l10n = Counter()
@@ -90,6 +98,11 @@ def summary(events):
             last_pick[card] = e
         elif name == "card_take_back":
             t["take_backs"] += 1
+            last_pick.pop(card, None)
+        elif name == "card_sent":
+            p = last_pick.pop(card, None)
+            if p is not None:
+                answers.append((card, p))
         elif name == "card_ended" and e.get("why") == "expired":
             t["expired"] += 1
         elif name == "card_reask":
@@ -97,7 +110,11 @@ def summary(events):
         elif name == "undo":
             t["undo"][e.get("outcome", "?")] += 1
         elif name == "activation":
-            activations[e.get("by", "?")] += 1
+            activations_raw.append(e)
+        elif name == "reopen_asked":
+            reopens.append(e["t"])
+        elif name == "live_card_open":
+            live_opens.append(e["t"])
         elif name == "paused":
             pauses += 1
             paused_ms += e.get("ms", 0)
@@ -105,9 +122,23 @@ def summary(events):
             l10n[e.get("key", "?")] += 1
 
     picks_by_window = defaultdict(list)
-    for card, e in last_pick.items():
+    for card, e in answers:
         tasks[card[0]]["answered_in"][e.get("place", "?")] += 1
         picks_by_window[window_of.get(card, "?")].append(e.get("ms", 0))
+
+    def near(times, t):
+        return any(abs(x - t) <= NEAR_MS for x in times)
+
+    for e in activations_raw:
+        by = e.get("by", "none")
+        if by != "none":
+            activations[by] += 1
+        elif near(live_opens, e["t"]):
+            activations["live_card"] += 1
+        elif near(reopens, e["t"]):
+            activations["reopen_asked"] += 1
+        else:
+            activations["unexplained"] += 1
 
     out.append("Tasks")
     out.append("| task | cards shown | answered in | take-backs | expired | re-asks | undo |")
@@ -124,7 +155,7 @@ def summary(events):
         v = picks_by_window[w]
         out.append(f"| {w} | {len(v)} | {ms(pct(v, 0.5))} | {ms(pct(v, 0.9))} |")
     out.append("")
-    out.append(f"Activations: {counts(activations)}; other (must be 0): {activations.get('other', 0)}")
+    out.append(f"Activations: {counts(activations)}; unexplained (must be 0): {activations.get('unexplained', 0)}")
     out.append(f"Pauses: {pauses}, {ms(paused_ms) if pauses else '0.0s'} in all")
     out.append(f"l10n misses: {counts(l10n)}")
     return "\n".join(out) + "\n"
