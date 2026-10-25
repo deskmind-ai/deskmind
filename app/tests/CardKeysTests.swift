@@ -396,6 +396,23 @@ enum CardKeysTests {
             let order = written(l.r).map(\.0).filter { $0 == "answer" || $0 == "steer" }
             check(order == ["answer", "steer"], "2b: the wire in the lane's order: \(order)")
         }
+        // 2c. (Codex at a79b086) a steer in the lane, a new card arrives and is answered: the lane holds the answer
+        // back; the steer refused, the card takes an answer again (never stuck 「已发送」)
+        do {
+            let l = LaneRig()
+            l.r.void("a1", "steer")
+            l.m.draft = "改成发给小李"; l.m.submit()
+            l.r.ask("a2", "plan")
+            l.r.click("a2", .cancel)          // (cancel: written at once -- into the lane, after the steer)
+            l.drain()
+            check(l.r.wire.answers("a2").isEmpty, "2c: the answer not written after the steer")
+            let cid = steerIds(l.r)[0]
+            refuse(l.r, cid)
+            let c = l.r.model("a2")!
+            check(c.buttons.contains { l.m.canSend($0) } && l.m.wordsEnabled(c, in: l.r.state), "2c: the steer over, the card answerable: \(String(describing: l.r.phase("a2")))")
+            l.r.click("a2", .approve); l.r.timers.advance(CardStore.takeBack + 1); l.drain()
+            check(l.r.wire.answers("a2").count == 1, "2c: and its answer goes")
+        }
         // 3. two steers: the first's refusal leaves the second on its way
         do {
             let r = R(); r.ask("a1", "plan")
@@ -427,12 +444,14 @@ enum CardKeysTests {
             var asks = 1, open: String? = "a1", msgSeq = 3
             var pending: [String: Set<String>] = [:]      // by card: steers written while it was open, not refused since
             var live: Set<String> = []                     // steers whose last attempt went and is not refused
+            var answered: Set<String> = []                 // cards an answer of ours was written for
             r.wire.onLine = { line in
                 switch line["type"] as? String {
                 case "steer":
                     if let cid = line["client_id"] as? String { live.insert(cid); if let o = open { pending[o, default: []].insert(cid) } }
                 case "answer":
                     answers += 1
+                    if let a = line["ask_id"] as? String { answered.insert(a) }
                     if let a = line["ask_id"] as? String, !(pending[a] ?? []).isEmpty { bad += 1; print("seed \(seed): answer for \(a) with \(pending[a]!) on its way") }
                 default: break
                 }
@@ -464,6 +483,11 @@ enum CardKeysTests {
                 }
                 if let o = open, !(pending[o] ?? []).isEmpty, let c = r.model(o), c.buttons.contains(where: { l.m.canSend($0) }) {
                     bad += 1; print("seed \(seed): \(o) takes a click with a steer on its way")
+                }
+                // every steer for the open card over, nothing of ours for it in the lane or written: it takes an answer
+                if let o = open, (pending[o] ?? []).isEmpty, l.q.isEmpty, !answered.contains(o), !l.m.client.state(CardStoreTests.sid).steerPending(runId: CardStoreTests.rid, askId: o),
+                   let c = r.model(o), !c.buttons.contains(where: { l.m.canSend($0) }) {
+                    bad += 1; print("seed \(seed): \(o) stuck: no steer on its way, nothing sent, takes no answer (\(String(describing: r.phase(o))))")
                 }
             }
             l.drain()

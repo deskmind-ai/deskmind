@@ -1421,9 +1421,10 @@ final class ShellModel: ObservableObject {
         lane { [weak self] in
             guard let self else { return }
             // the one decision, at the write: a steer for this card put in the lane before this answer, still on its
-            // way -- the answer is not written, the pick dropped
+            // way -- the answer is not written, and taken back as a write that did not go is (notSent): the card takes
+            // an answer again once the steer is over (#125 Codex re-review at a79b086: it stayed 「已发送」)
             if self.client.state(id).steerPending(runId: a.runId, askId: a.askId, before: seq) {
-                self.deliver { self.cards.takeBack(key); self.cards.unissue(req); self.syncOwnReqs() }
+                self.deliver { self.cards.notSent(key, a); self.cards.unissue(req); self.syncOwnReqs() }
                 return
             }
             let r = self.client.answer(a, in: id, reqId: req)
