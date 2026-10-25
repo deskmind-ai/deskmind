@@ -12,6 +12,7 @@ enum CardKeysTests {
     static func run() {
         DecisionTests.group("card-keys.table"); tableTests()
         DecisionTests.group("card-keys.model"); modelTests()
+        DecisionTests.group("card-keys.review124"); review124Tests()
     }
 
     typealias K = CardKeys
@@ -119,5 +120,51 @@ enum CardKeysTests {
             check(!key(r, "1", editing: true) && !key(r, ret, editing: true) && !key(r, tab, editing: true), "typing in the chat: no key is the card's")
             check(r.phase("a1") == .open && !r.m.keysActive(m), "the card still waits, not entered")
         }
+    }
+
+    /// #124 review at 64547f9: H2's fields never lose a card; the fold stays with the card and never moves it; a card
+    /// with two views for a moment keeps its keys; a card's layout facts go when it is no longer pinned.
+    static func review124Tests() {
+        typealias R = CardStoreTests.Rig
+        // lenient: a headline / beyond / detail of the wrong type is none, and the card is still there
+        let bad: [String: Any] = ["kind": "ambiguity", "text": "哪一份？", "blocking": true, "free_text": false, "headline": 5, "beyond": "x",
+                                  "options": [["kind": "reading", "text": "周报.txt", "detail": ["no"]], ["kind": "cancel", "text": "先别做了"]]]
+        let r = R(); r.ask("a1", card: bad)
+        if let m = r.model("a1") {
+            check(m.headline == nil && m.beyond.isEmpty && m.buttons.first?.detail == nil && m.buttons.count == 2,
+                  "wrong types: no headline, beyond or detail -- the card itself still shows: \(m.buttons.map(\.text))")
+        } else { check(false, "a card whose H2 fields have the wrong type is still a card") }
+        let good: [String: Any] = ["kind": "ambiguity", "text": "哪一份？", "blocking": true, "free_text": false, "headline": "「上周的报告」指的是哪一份？",
+                                   "beyond": ["备忘录「购物清单」"], "options": [["kind": "reading", "text": "周报.txt", "detail": "9 月 2 日改的"], ["kind": "cancel", "text": "先别做了"]]]
+        let g = R(); g.ask("a1", card: good)
+        if let m = g.model("a1") {
+            let l = CardLayout(m)
+            check(l.title == "「上周的报告」指的是哪一份？" && l.beyond == ["备忘录「购物清单」"] && l.folds && m.buttons.first?.detail == "9 月 2 日改的", "H2's fields read")
+        } else { check(false, "the H2 card") }
+        // an action card with a headline and no consent fields: its text is not folded away
+        let act: [String: Any] = ["kind": "action", "text": "在 Mail 里点「发送」", "blocking": true, "free_text": false, "headline": "要发出去吗？",
+                                  "options": [["kind": "approve", "text": "可以"], ["kind": "cancel", "text": "先别做了"]]]
+        let a = R(); a.ask("a1", card: act)
+        if let m = a.model("a1") { check(!CardLayout(m).folds, "an action card with no fields: its text stays shown") }
+        // the fold: kept by the shell, and opening it never moves the card (its height counts folded)
+        let f = R(); f.ask("a1")
+        guard let m = f.model("a1") else { check(false, "the card"); return }
+        f.m.pinRoom(columnHeight: 1000); f.m.cardLaidOut(m, height: 300)
+        check(f.m.cardFits(m) && !f.m.detailsOpen(m), "fits, folded")
+        f.m.setDetails(m, open: true)
+        f.m.cardLaidOut(m, height: 900)                     // open: taller than the room
+        check(f.m.detailsOpen(m) && f.m.cardFits(m) && f.m.cardPinnedWhole(m), "opened: still pinned, still open (its folded height counts)")
+        f.m.setDetails(m, open: false); f.m.cardLaidOut(m, height: 300)
+        check(!f.m.detailsOpen(m) && f.m.cardFits(m), "folded again")
+        // two views for a moment (pinned → in place): appear before disappear keeps the keys
+        f.m.cardShown(m); f.timers.advance(CardKeys.cardOnScreen + 0.1); f.m.enterCardMode(m)
+        f.m.cardShown(m); f.m.cardHidden(m)
+        check(f.m.keysActive(m), "the new view came before the old one went: card mode stays")
+        f.m.cardHidden(m)
+        check(!f.m.keysActive(m), "the last view went: card mode ends")
+        // the card answered: its layout facts go
+        f.m.setDetails(m, open: true)
+        f.resumed("a1")
+        check(f.m.cardHeights.isEmpty && f.m.openDetails.isEmpty, "answered: its height and fold forgotten")
     }
 }

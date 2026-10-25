@@ -101,7 +101,8 @@ struct CardLayout: Equatable {
                     changesYours: s.class == "modify_user", sendsOut: s.class == "external" || s.sites.contains { ($0.sends ?? "").isEmpty == false })
         }
         foreground = card.plan?.foreground?.apps ?? []
-        folds = card.headline != nil && (!card.text.isEmpty || !plan.isEmpty)
+        // (an action card with no consent fields: its text is the only account of what it does -- never folded; #124 review)
+        folds = card.headline != nil && (!card.text.isEmpty || !plan.isEmpty) && !(card.kind == .action && card.consent == nil)
         consent = card.consent.map { c in
             Consent(action: c.actionText.isEmpty ? c.action : c.actionText, object: c.objectLabel.isEmpty ? c.object : c.objectLabel,
                     site: c.site, outgoing: c.outgoing.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value) })

@@ -562,6 +562,7 @@ enum L10n {
         "Go to the card": "跳到卡片",
         "Scrolls the chat to the card": "把聊天滚到这张卡片",
         "Press Tab to move into the card.": "按 Tab 进入卡片。",
+        "Leave the text field, then press Tab to move into the card.": "先离开输入框，再按 Tab 进入卡片。",
         "All changes were undone (%d)": "改动都撤回了（%d 处）",
         "No API key for the model": "模型没有 API 密钥",
         "The model's service rejected the API key": "模型服务不接受这个 API 密钥",

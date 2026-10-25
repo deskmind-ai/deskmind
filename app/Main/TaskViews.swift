@@ -61,7 +61,7 @@ struct TaskRow: View {
             if !task.running {
                 let summary = ShellText.summary(task, lang: lang)
                 if !summary.isEmpty { Text(summary).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
-                if let a = task.answer, !a.isEmpty, a != summary { Text(a).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
+                if ShellText.fullyUndone(task) == nil, let a = task.answer, !a.isEmpty, a != summary { Text(a).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
                 ResultSection(shell: shell, task: task, session: session)
             }
         }

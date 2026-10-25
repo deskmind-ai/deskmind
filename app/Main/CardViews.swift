@@ -29,7 +29,10 @@ struct CardView: View {
     let session: SessionState
     @Environment(\.lang) private var lang
     @State private var words = ""
-    @State private var detailsOpen = false
+    /// 「细节」 open or not: the shell's, by card key (it survives the card moving between the pinned place and the chat).
+    private var detailsOpen: Binding<Bool> {
+        Binding(get: { shell.detailsOpen(card) }, set: { shell.setDetails(card, open: $0) })
+    }
 
     private var layout: CardLayout { CardLayout(card) }
     private var wordsEnabled: Bool { shell.wordsEnabled(card, in: session) }
@@ -54,7 +57,7 @@ struct CardView: View {
             if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
             if let c = layout.consent { ConsentFields(consent: c) }
             if layout.folds {
-                DisclosureGroup(isExpanded: $detailsOpen) {
+                DisclosureGroup(isExpanded: detailsOpen) {
                     VStack(alignment: .leading, spacing: 8) {
                         if !layout.text.isEmpty {
                             Text(layout.text).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled)
@@ -204,6 +207,50 @@ struct CardView: View {
         let ends: Set<Character> = ["。", "！", "？", ".", "!", "?", "\n"]
         guard let i = text.firstIndex(where: { ends.contains($0) }) else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
         return String(text[..<i]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// A window's open card where it pins it (A2): whole when it fits the pinned place (ShellModel.cardPinnedWhole), else
+/// one line -- its title and 「跳到卡片」 -- while TaskRow draws it whole in place in the window's scroll. Both windows (the
+/// chat, a goal's screen) pin their card through this and say their room (ShellModel.pinRoom), and TaskRow reads the
+/// same predicate: one answerable copy per window (#124 review at 64547f9).
+struct PinnedCard: View {
+    @ObservedObject var shell: ShellModel
+    let card: CardModel
+    let phase: CardPhase
+    let askedAt: Double?
+    let session: SessionState
+    /// 「跳到卡片」: scroll the window to the card's place (TaskRow.cardAnchor).
+    let jump: (String) -> Void
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        if shell.cardPinnedWhole(card) {
+            CardView(shell: shell, card: card, phase: phase, askedAt: askedAt, session: session)
+                .id(ShellModel.cardKey(card))
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
+        } else {
+            HStack(spacing: 8) {
+                Text(L("Waiting for you", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                Text(CardLayout(card).title).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
+                Spacer()
+                Button(L("Go to the card", lang: lang)) { jump(TaskRow.cardAnchor(card)) }
+                    .buttonStyle(InkButtonStyle(prominent: false))
+                    .accessibilityHint(L("Scrolls the chat to the card", lang: lang))
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Brand.card))
+        }
+    }
+}
+
+/// The room a window gives its pinned card, said to the shell as the window's height changes (ShellModel.pinRoom).
+struct PinRoomReporter: View {
+    @ObservedObject var shell: ShellModel
+    var body: some View {
+        GeometryReader { g in
+            Color.clear.onChange(of: g.size.height, initial: true) { _, h in shell.pinRoom(columnHeight: h) }
+        }
     }
 }
 

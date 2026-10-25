@@ -17,8 +17,11 @@
 // Held → sent is CardStore's timer, not this: it fires when the take-back runs out wherever the card is, the float hidden
 // or the window minimised included (nothing here can answer it then, and nothing needs to).
 //
-// The main window's state counts once it has held for `FrontmostDebounce.settle` (250 ms): a flicker while windows
-// change order moves nothing. A card that arrives is placed at once by the state that counts then (the settle is for
+// The main window's state counts once it has held for `FrontmostDebounce.settle` (250 ms) -- for the float appearing
+// only: a flicker while windows change order does not bring it up. Whether the chat takes an answer is the window's
+// state now (`frontNow`): the window in front, the chat answers and the float does not, at once; just left the front,
+// the chat is still shown and answers nothing until the float has settled in (#124 review at 64547f9: never two places
+// at once, and none the user cannot use). A card that arrives is placed at once by the state that counts then (the settle is for
 // flips, never for a card's first placement). One blocking card waits at a time (M2): there is no second card here.
 
 import Foundation
@@ -59,11 +62,12 @@ struct CardPlacement: Equatable {
     /// A notification not answered in this long is shown once more (plan §1.4).
     static let remindAfter: Double = 20
 
-    /// `phase`: the card's (CardStore.phase); `fitsFloat`: CardModel.answerableInFloat, and its words fit the float's
+    /// `phase`: the card's (CardStore.phase); `window`: the settled state; `frontNow`: the window is in front now
+    /// (unsettled); `fitsFloat`: CardModel.answerableInFloat, and its words fit the float's
     /// width unclipped (a layout fact the float's view gives); `float`: whether the float is on a screen the user sees;
     /// `notified`: the card's notifications so far and the seconds since the last (nil: none) -- times are inputs, so
     /// the reminder is decided without a timer here.
-    static func place(_ phase: CardPhase, fitsFloat: Bool, window: MainWindowState, float: Float,
+    static func place(_ phase: CardPhase, fitsFloat: Bool, window: MainWindowState, frontNow: Bool, float: Float,
                       notified: (count: Int, since: Double)? = nil) -> CardPlacement {
         let floatVisible = float == .visible
         let waiting = phase.ending == nil
@@ -79,8 +83,12 @@ struct CardPlacement: Equatable {
         case .expired(_, let now): acts = now == .offered
         default: acts = false
         }
-        if window == .front {
+        if frontNow {
             return CardPlacement(shown: .chat, takesAnswer: acts, island: .none, notification: .withdrawn)
+        }
+        if window == .front {
+            // (left the front, not settled yet: the chat stays shown, answering nothing; the float comes after the settle)
+            return CardPlacement(shown: .chat, takesAnswer: false, island: .none, notification: .withdrawn)
         }
         let island: Island = expiredOffer ? .expired : .needsYou
         guard floatVisible else {

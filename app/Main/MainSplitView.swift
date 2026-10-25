@@ -241,10 +241,8 @@ struct ChatColumn: View {
     @State private var jumpTo: String?
 
     var body: some View {
-        GeometryReader { g in
-            column(height: g.size.height)
-                .onChange(of: g.size.height, initial: true) { _, h in shell.pinRoom(columnHeight: h) }
-        }
+        GeometryReader { g in column(height: g.size.height) }
+            .background(PinRoomReporter(shell: shell))
             .background(Brand.paper)
             // 1–9 pick the pinned card's options (only while this window is the key one and no field is typed in)
             .background(CardKeyMonitor(shell.cardKeyHandlers))
@@ -279,7 +277,8 @@ struct ChatColumn: View {
                     }
                     .padding(.horizontal, 22).padding(.vertical, 16)
                 }
-                .onChange(of: s?.lastSeq) { _, _ in withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } }
+                // (not while a card too tall to pin waits in place in the chat: the chat would pull away from it)
+                .onChange(of: s?.lastSeq) { _, _ in if !inlineCard(s) { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } } }
                 .onChange(of: s?.streamingMessage?.text.count) { _, _ in proxy.scrollTo("bottom") }
                 .onChange(of: shell.selected) { _, _ in proxy.scrollTo("bottom") }
                 .onChange(of: jumpTo) { _, id in
@@ -344,22 +343,7 @@ struct ChatColumn: View {
         VStack(alignment: .leading, spacing: 8) {
             if let p = shell.pinned(s) {
                 let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-                if shell.cardPinnedWhole(m) {
-                    CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s)
-                        .id(ShellModel.cardKey(m))
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                } else {
-                    HStack(spacing: 8) {
-                        Text(L("Waiting for you", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
-                        Text(CardLayout(m).title).font(.system(size: 12)).foregroundStyle(Brand.ink).lineLimit(1)
-                        Spacer()
-                        Button(L("Go to the card", lang: lang)) { jumpTo = TaskRow.cardAnchor(m) }
-                            .buttonStyle(InkButtonStyle(prominent: false))
-                            .accessibilityHint(L("Scrolls the chat to the card", lang: lang))
-                    }
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Brand.card))
-                }
+                PinnedCard(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s) { jumpTo = $0 }
             }
             if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, queueCap)) }
         }
@@ -367,13 +351,21 @@ struct ChatColumn: View {
         .animation(.easeOut(duration: 0.2), value: shell.pinned(s)?.card.askId)
     }
 
+    /// The open card is drawn whole in place in the chat (too tall to pin).
+    private func inlineCard(_ s: SessionState?) -> Bool {
+        guard let s, let p = shell.pinned(s) else { return false }
+        return !shell.cardPinnedWhole(CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId))
+    }
+
     /// A new card is said aloud, without moving the focus (handoff §3.10).
     private func announce(_ s: SessionState?, _ id: String?) {
         guard let id, id != announced, let s, let p = shell.pinned(s) else { return }
         announced = id
         let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-        // (and how to reach it by keys: Tab moves into the card, its options' keys work then -- fable 10-25)
-        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, phase: p.phase, lang: lang) + " " + L("Press Tab to move into the card.", lang: lang)).post()
+        // (and how to reach it by keys: Tab moves into the card, its options' keys work then -- fable 10-25; from a field
+        // being typed in, Tab is the field's first)
+        let how = shell.editingText ? L("Leave the text field, then press Tab to move into the card.", lang: lang) : L("Press Tab to move into the card.", lang: lang)
+        AccessibilityNotification.Announcement(CardView.voiceOverLabel(m, phase: p.phase, lang: lang) + " " + how).post()
     }
 }
 

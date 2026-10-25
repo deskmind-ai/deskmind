@@ -446,6 +446,9 @@ final class ShellModel: ObservableObject {
     /// on a card that does not fit: its content may be off screen; the mouse reaches its button only past the content).
     @Published private(set) var cardHeights: [String: Double] = [:]
     @Published private(set) var pinRoom: Double = 0
+    /// Cards whose 「细节」 is open, by card key: kept here, not in the view, so that a card moving between the pinned
+    /// place and the chat keeps it (#124 review). Its height counts folded (cardLaidOut), so opening it never moves it.
+    @Published private(set) var openDetails: Set<String> = []
 
     let client: SessionClient
     private let names: SessionNames
@@ -674,6 +677,9 @@ final class ShellModel: ObservableObject {
         // marks)
         if let sel = selected, ids.contains(sel), let s = states[sel], s.lastSeq > s.seenSeq || s.goneUpTo > s.seenGone,
            SessionStatus.problemShown(s) { client.markSeen(sel) }
+        // a card no longer pinned anywhere: its height and its fold go (they were the layout's, not the card's) -- on
+        // the UI queue, where CardStore is read
+        onUIQueue { [weak self] in self?.dropLayoutFacts() }
         rebuild()
     }
 
@@ -945,8 +951,10 @@ final class ShellModel: ObservableObject {
     // no input-method composition. keyDown parses the event (a digit, no ⌘⌃⌥, not repeated) and then acts exactly when
     // keyWorks says so. Every input of those gates is published, so the labels follow it.
 
-    /// Cards whose view is on screen (CardView's appear / disappear), by card key.
-    private var visible: Set<String> = []
+    /// Cards whose view is on screen (CardView's appear / disappear), by card key, counted: one card can have two views
+    /// for a moment -- moving between the pinned place and the chat, the new one appears before the old one goes
+    /// (#124 review) -- and it is off screen only when the last one went.
+    private var visible: [String: Int] = [:]
     /// Since when each visible card has been on screen in the key window of the active app (set when it appears there,
     /// or when the window becomes key / the app active / the window is restored with it on screen; cleared when it
     /// leaves): the 1 s counts from then.
@@ -964,7 +972,7 @@ final class ShellModel: ObservableObject {
 
     func cardShown(_ card: CardModel) {
         let k = Self.cardKey(card)
-        visible.insert(k)
+        visible[k, default: 0] += 1
         if windowKey && shownAt[k] == nil { shownAt[k] = now() }
     }
     /// The card left the screen (its view went: the window closed, another session shown, the card answered): its card
@@ -976,7 +984,9 @@ final class ShellModel: ObservableObject {
     /// session's (windowLeft, leaveCardMode).
     func cardHidden(_ card: CardModel) {
         let k = Self.cardKey(card)
-        visible.remove(k)
+        let n = (visible[k] ?? 0) - 1
+        visible[k] = n > 0 ? n : nil
+        guard n <= 0 else { return }       // (another view of it is still on screen: its time and card mode stay)
         shownAt[k] = nil
         if keyCard == k { keyCard = nil }
     }
@@ -998,7 +1008,7 @@ final class ShellModel: ObservableObject {
     func windowReturned() {
         if !windowKey { windowKey = true }
         let t = now()
-        for k in visible where shownAt[k] == nil { shownAt[k] = t }
+        for k in visible.keys where shownAt[k] == nil { shownAt[k] = t }
     }
     /// Where the typing is in the main window (the monitor, on each key-down and window update).
     func focusChanged(editing: Bool, composing c: Bool) {
@@ -1124,10 +1134,27 @@ final class ShellModel: ObservableObject {
     static func cardKey(runId: String, askId: String?) -> String { CardStore.key(runId: runId, askId: askId) }
     static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
 
-    /// The card's height as laid out (its view's geometry), and the pinned place's room (the chat column's).
+    /// The layout facts of cards no longer pinned anywhere (nor an open result card) go. UI queue.
+    private func dropLayoutFacts() {
+        let pinnedKeys = Set(states.values.compactMap { cards.pinned($0) }.map { Self.cardKey(runId: $0.runId, askId: $0.card.askId) })
+        let results = Set(states.values.flatMap { $0.tasks }.filter { $0.resultCardState.isOpen }.map(\.runId))
+        let keep = { (k: String) in pinnedKeys.contains(k) || results.contains(k) }
+        if cardHeights.keys.contains(where: { !keep($0) }) { cardHeights = cardHeights.filter { keep($0.key) } }
+        if openDetails.contains(where: { !keep($0) }) { openDetails = openDetails.filter(keep) }
+    }
+
+    /// The card's height as laid out (its view's geometry), folded: one measured with 「细节」 open is not taken (the
+    /// fold is no reason to move the card, and moving it would close nothing but confuse), and the pinned place's room
+    /// (the window's that pins the card: the chat column, or a goal's screen).
     func cardLaidOut(_ card: CardModel, height: Double) {
         let key = Self.cardKey(card)
+        guard !openDetails.contains(key), height > 0 else { return }
         if cardHeights[key] != height { cardHeights[key] = height }
+    }
+    func detailsOpen(_ card: CardModel) -> Bool { openDetails.contains(Self.cardKey(card)) }
+    func setDetails(_ card: CardModel, open: Bool) {
+        let key = Self.cardKey(card)
+        if open { openDetails.insert(key) } else { openDetails.remove(key) }
     }
     func pinRoom(columnHeight: Double) {
         let r = CardBody.pinRoom(columnHeight: columnHeight)
@@ -1137,9 +1164,11 @@ final class ShellModel: ObservableObject {
     /// it is drawn pinned to be measured, and its approve-type keys wait.
     func cardFits(_ card: CardModel) -> Bool { cardFits(Self.cardKey(card)) }
     func cardFits(_ key: String) -> Bool { cardHeights[key].map { CardBody.fits(height: $0, room: pinRoom) } ?? false }
-    /// Where the pinned card is drawn: pinned while it fits or is not laid out yet; else in place in the chat, with one
-    /// line pinned (its title and 「跳到卡片」).
-    func cardPinnedWhole(_ card: CardModel) -> Bool { cardHeights[Self.cardKey(card)] == nil || cardFits(card) }
+    /// Where the pinned card is drawn: pinned while it fits, is not laid out yet, or its window has not said its room
+    /// (never two copies: the in-place one only when this says no -- #124 review at 64547f9); else in place in the
+    /// window's scroll, with one line pinned (its title and 「跳到卡片」). Both windows draw it through PinnedCard and
+    /// TaskRow, which read this one predicate.
+    func cardPinnedWhole(_ card: CardModel) -> Bool { pinRoom <= 0 || cardHeights[Self.cardKey(card)] == nil || cardFits(card) }
 
     /// Whether this button takes a click now: its card can be answered (canSend).
     func buttonEnabled(_ b: CardModel.Button, card: CardModel, in s: SessionState) -> Bool { canSend(b) }

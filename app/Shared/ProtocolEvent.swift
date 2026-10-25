@@ -95,8 +95,9 @@ typealias LList<T: Codable & Equatable> = Lenient<EmptyList<T>>
 struct CardOption: Codable, Equatable {
     @LStr var kind: String = ""
     @LStr var text: String = ""
-    /// A second line under a pick (H2: what tells this reading from the others); nil from a harness without it.
-    var detail: String? = nil
+    /// A second line under a pick (H2: what tells this reading from the others); empty from a harness without it.
+    /// Lenient like every card field: a wrong type is no detail, never a lost card (#124 review).
+    @LStr var detail: String = ""
 }
 
 /// A plan card in fields (`ask.card.plan`): per step its purpose, class, the objects it touches and the sites it opens.
@@ -156,9 +157,11 @@ struct CardEvent: Codable, Equatable {
     var plan: PlanFacts?
     var consent: ConsentFacts?
     /// H2 (from the same facts the consent signs, in the request's language): one sentence on what goes beyond the
-    /// request, and those objects and sites, one per line. nil from a harness without them: the card shows `text` whole.
-    var headline: String? = nil
-    var beyond: [String]? = nil
+    /// request, and those objects and sites, one per line. Empty from a harness without them: the card shows `text`
+    /// whole. Lenient (#124 review at 64547f9: a strict field of the wrong type dropped the whole card, and the task
+    /// waited on a card nobody could see).
+    @LStr var headline: String = ""
+    @LList<String> var beyond: [String] = []
     enum CodingKeys: String, CodingKey { case kind, text, options, freeText = "free_text", blocking, plan, consent, headline, beyond }
 }
 

@@ -108,14 +108,14 @@ struct CardModel: Equatable {
         // an option with no words cannot be shown, so it gets no button (its index stays the card's own)
         buttons = card.options.enumerated().compactMap { i, o in
             o.text.isEmpty ? nil : Button(runId: runId, askId: askId, index: i, kind: o.kind, text: o.text, role: Self.role(o.kind), style: Self.style(o.kind),
-                                          detail: o.detail.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 })
+                                          detail: o.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : o.detail)
         }
         allowsFreeText = askId != nil && card.freeText
         blocking = card.blocking
         plan = card.plan
         consent = card.consent
-        headline = card.headline.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
-        beyond = (card.beyond ?? []).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        headline = card.headline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : card.headline
+        beyond = card.beyond.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     static func role(_ kind: String) -> Role {
