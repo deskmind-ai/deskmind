@@ -73,7 +73,7 @@ enum HelperE2E {
         Thread.sleep(forTimeInterval: seconds)
         let stopped = ScreenRecorder.stop()
         check((stopped["path"] as? String)?.hasSuffix("delivery.mp4") == true, "\(name): stop hands over the delivery copy")
-        return folder
+        return (started["path"] as? String).map { URL(fileURLWithPath: $0) } ?? folder      // (the folder the start claimed)
     }
 
     static func recording() {
@@ -103,8 +103,9 @@ enum HelperE2E {
         check(none["ok"] as? Bool == true && none["path"] is NSNull, "stop with nothing recording: no path")
 
         // A recording nobody stopped is finished when the next starts, and both folders end whole.
-        let first = out.appendingPathComponent("stale")
-        _ = ScreenRecorder.start(["path": first.path, "bundles": [String](), "whole_screen": true, "goal": "stale"])
+        let asked = out.appendingPathComponent("stale")
+        let staleStart = ScreenRecorder.start(["path": asked.path, "bundles": [String](), "whole_screen": true, "goal": "stale"])
+        let first = (staleStart["path"] as? String).map { URL(fileURLWithPath: $0) } ?? asked
         Thread.sleep(forTimeInterval: 1.5)
         let second = record("after-stale", smooth: false, seconds: 1.5)
         var waited = 0.0

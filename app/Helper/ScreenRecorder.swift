@@ -128,13 +128,15 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         lock.unlock()
         if let stale { finish(stale) }
         // set up outside the lock (it takes a moment); its token checked again under it after
-        let folder = URL(fileURLWithPath: req["path"] as? String ?? "")
-        // (the folder this start makes is its own: an abandoned start takes it away, never one that was there)
-        let made = !FileManager.default.fileExists(atPath: folder.path)
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // (a folder of this start's own -- claimed, never shared with another start of the same second: an abandoned
+        // start takes away only it)
+        guard let folder = RecordingFolder.claim(URL(fileURLWithPath: req["path"] as? String ?? ""), tag: forRun ?? "t\(token)") else {
+            _ = withLock { owner.apply(.setUp(token: token, ok: false)) }
+            return ["ok": false, "error": "no folder for the recording"]
+        }
         let abandon = { (rec: ScreenRecorder?) -> [String: Any] in
             rec?.endCapture()
-            if made { try? FileManager.default.removeItem(at: folder) }
+            try? FileManager.default.removeItem(at: folder)
             return ["ok": false, "code": "cancelled", "error": "stopped while it started"]
         }
         let rec = ScreenRecorder(folder: folder, bundles: Set(req["bundles"] as? [String] ?? []),
@@ -153,7 +155,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         let then = owner.apply(.setUp(token: token, ok: error == nil))
         if then == [.keep(token: token)] { active = rec }
         lock.unlock()
-        if let error { if made { try? FileManager.default.removeItem(at: folder) }; return ["ok": false, "error": error] }
+        if let error { try? FileManager.default.removeItem(at: folder); return ["ok": false, "error": error] }
         // (a stop, an end or a newer start came while it was set up: thrown away with what it wrote, nothing kept)
         guard then == [.keep(token: token)] else { return abandon(rec) }
         return ["ok": true, "path": folder.path, "preflight": rec.preflight]

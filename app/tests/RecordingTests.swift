@@ -14,6 +14,7 @@ enum RecordingTests {
         DecisionTests.group("recording.shell"); shellTests()
         DecisionTests.group("recording.static"); staticTests()
         DecisionTests.group("recording.gate"); gateTests()
+        DecisionTests.group("recording.folders"); folderTests()
     }
 
     static func tableTests() {
@@ -212,5 +213,21 @@ enum RecordingTests {
         let rec = (try? String(contentsOf: dir.appendingPathComponent("Main/Recording.swift"), encoding: .utf8)) ?? ""
         let app = rec.components(separatedBy: "final class AppTaskRecorder").last ?? ""
         check(app.contains("RunRecorder.shared.begin(") && rec.contains(".nonactivatingPanel"), "the recorder through the helper; the decision panel takes no focus")
+    }
+
+    /// (#127 Codex at 8d9b4f7) Two starts in the same second with the same instruction: two folders, each its own;
+    /// abandoning one never touches the other's.
+    static func folderTests() {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("rec-" + UUID().uuidString)
+        let base = root.appendingPathComponent("2026-10-26 10.00.00 写周报")
+        let a = RecordingFolder.claim(base, tag: "run_a"), b = RecordingFolder.claim(base, tag: "run_b"), c = RecordingFolder.claim(base, tag: "run_a")
+        check(a != nil && b != nil && c != nil && Set([a!, b!, c!].map(\.path)).count == 3, "three starts, three folders: \([a, b, c].map { $0?.lastPathComponent ?? "-" })")
+        fm.createFile(atPath: b!.appendingPathComponent("master.mov").path, contents: Data([1]))
+        try? fm.removeItem(at: a!)                                       // (A abandoned: its own folder only)
+        check(fm.fileExists(atPath: b!.appendingPathComponent("master.mov").path), "abandoning one never touches the other's movie")
+        let screen = (try? String(contentsOf: URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("Helper/ScreenRecorder.swift"), encoding: .utf8)) ?? ""
+        check(screen.contains("RecordingFolder.claim(") && !screen.contains("let made ="), "the helper claims each start's folder")
+        try? fm.removeItem(at: root)
     }
 }

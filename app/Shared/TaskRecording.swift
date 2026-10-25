@@ -192,3 +192,20 @@ enum RecordStart {
         !acting || (forRun != nil && forRun == holderRun)
     }
 }
+
+/// A recording's folder, its own (#127 Codex at 8d9b4f7: names are to the second and the instruction's start, so two
+/// starts in the same second shared one, and one's clean-up took the other's movie). Claimed with a create that fails
+/// when the folder is there: the name asked for, else with `tag` (the run, a token), else with a counter.
+enum RecordingFolder {
+    static func claim(_ base: URL, tag: String) -> URL? {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: base.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let name = base.lastPathComponent, parent = base.deletingLastPathComponent()
+        let names = [name, "\(name) \(tag)"] + (2...50).map { "\(name) \(tag) \($0)" }
+        for n in names {
+            let u = parent.appendingPathComponent(n, isDirectory: true)
+            if (try? fm.createDirectory(at: u, withIntermediateDirectories: false)) != nil { return u }
+        }
+        return nil
+    }
+}
