@@ -692,6 +692,14 @@ enum ShellTests {
                 check(ok, "the composer's focus: one @FocusState, one binding, set only from takeFocus")
                 c = c.replacingOccurrences(of: "@FocusState private var focused: Bool", with: "").replacingOccurrences(of: ".focused($focused)", with: "")
             }
+            // and the card's: which option has the focus, observed to scroll it into view -- never assigned
+            if n == "Main/CardViews.swift" {
+                check(c.components(separatedBy: "@FocusState private var focusedOption: Int?").count == 2
+                      && c.components(separatedBy: ".focused($focusedOption, equals: c.index)").count == 2
+                      && c.range(of: #"focusedOption\s*=[^=]"#, options: .regularExpression) == nil,
+                      "the card's focus: observed only, never set")
+                c = c.replacingOccurrences(of: "@FocusState private var focusedOption: Int?", with: "").replacingOccurrences(of: ".focused($focusedOption, equals: c.index)", with: "")
+            }
             let found = movers.filter { c.contains($0) }
             check(found.isEmpty, "\(n) moves no focus and brings nothing forward (a card's field is focused only by the user's click): \(found)")
         }

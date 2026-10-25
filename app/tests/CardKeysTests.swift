@@ -147,26 +147,75 @@ enum CardKeysTests {
                                   "options": [["kind": "approve", "text": "可以"], ["kind": "cancel", "text": "先别做了"]]]
         let a = R(); a.ask("a1", card: act)
         if let m = a.model("a1") { check(!CardLayout(m).folds, "an action card with no fields: its text stays shown") }
-        // the fold: kept by the shell, and opening it never moves the card (its height counts folded)
+        // #124 Codex review at 80c339e: the card's height as it is -- opened past the room, it moves to the chat, open,
+        // its keys off (its controls may be off screen); folded again, pinned again; the fold and the typed words go
+        // with it (the shell's, by card key)
         let f = R(); f.ask("a1")
         guard let m = f.model("a1") else { check(false, "the card"); return }
-        f.m.pinRoom(columnHeight: 1000); f.m.cardLaidOut(m, height: 300)
-        check(f.m.cardFits(m) && !f.m.detailsOpen(m), "fits, folded")
+        f.m.pinRoom(columnHeight: 600); f.m.cardLaidOut(m, height: 136)
+        f.m.cardShown(m); f.timers.advance(CardKeys.cardOnScreen + 0.1); f.m.enterCardMode(m)
+        let skip = CardLayout(m).controls.first { $0.button.role == .skipStep }!
+        check(f.m.cardFits(m) && f.m.cardPinnedWhole(m) && f.m.keyWorks(m, skip), "136 pt in a 600 pt window: pinned, its keys on")
+        f.m.setCardDraft(m, "改成下午三点")
         f.m.setDetails(m, open: true)
-        f.m.cardLaidOut(m, height: 900)                     // open: taller than the room
-        check(f.m.detailsOpen(m) && f.m.cardFits(m) && f.m.cardPinnedWhole(m), "opened: still pinned, still open (its folded height counts)")
-        f.m.setDetails(m, open: false); f.m.cardLaidOut(m, height: 300)
-        check(!f.m.detailsOpen(m) && f.m.cardFits(m), "folded again")
+        f.m.cardLaidOut(m, height: 815)                     // opened: past the room (300)
+        check(f.m.detailsOpen(m) && !f.m.cardFits(m) && !f.m.cardPinnedWhole(m), "opened to 815 pt: in place in the chat, still open")
+        check(!f.m.keyWorks(m, skip), "and no key works on it (its controls may be off screen)")
+        check(f.m.cardDraft(m) == "改成下午三点", "the typed words went with it")
+        f.m.setDetails(m, open: false); f.m.cardLaidOut(m, height: 136)
+        check(!f.m.detailsOpen(m) && f.m.cardPinnedWhole(m) && f.m.cardDraft(m) == "改成下午三点", "folded again: pinned again, the words still there")
         // two views for a moment (pinned → in place): appear before disappear keeps the keys
         f.m.cardShown(m); f.timers.advance(CardKeys.cardOnScreen + 0.1); f.m.enterCardMode(m)
         f.m.cardShown(m); f.m.cardHidden(m)
         check(f.m.keysActive(m), "the new view came before the old one went: card mode stays")
-        f.m.cardHidden(m)
+        f.m.cardHidden(m); f.m.cardHidden(m)     // (the view shown above, and this one)
         check(!f.m.keysActive(m), "the last view went: card mode ends")
-        // the card answered: its layout facts go
+        // lead 10-25: a tall card in the chat answered by keys alone -- Tab moves into it, Space on the focused option
+        // (AppKit presses the button: its action, ShellModel.click) picks it, digits do nothing
+        do {
+            let t = R(); t.ask("a1", "ambiguity")
+            guard let tm = t.model("a1") else { check(false, "the tall card"); return }
+            t.m.pinRoom(columnHeight: 600); t.m.cardLaidOut(tm, height: 900); t.m.cardShown(tm); t.timers.advance(2)
+            check(!t.m.cardPinnedWhole(tm), "tall: in place in the chat")
+            _ = t.m.keyDown(characters: Self.tab, commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false)
+            check(t.m.keysActive(tm), "Tab: into the card")
+            check(!t.m.keyDown(characters: "1", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false) && t.phase("a1") == .open,
+                  "a digit: nothing (it acts from a distance)")
+            let reading = tm.buttons.first { $0.role == .choice }!
+            check(t.m.buttonEnabled(reading, card: tm, in: t.state) && t.m.click(reading) && t.phase("a1")?.pending != nil,
+                  "Space on the focused option: picked (held for its take-back)")
+            _ = t.m.keyDown(characters: Self.esc, commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false)
+            check(t.phase("a1") == .open, "Esc: taken back")
+            t.m.requestScroll(to: ShellModel.optionAnchor(tm, reading.index))
+            check(t.m.scrollRequest?.id == "option/\(ShellModel.cardKey(tm))/\(reading.index)", "the focused option asks to be scrolled into view")
+        }
+        // the card answered: its layout facts and its words go
         f.m.setDetails(m, open: true)
         f.resumed("a1")
-        check(f.m.cardHeights.isEmpty && f.m.openDetails.isEmpty, "answered: its height and fold forgotten")
+        check(f.m.cardHeights.isEmpty && f.m.openDetails.isEmpty && f.m.cardDrafts.isEmpty, "answered: its height, fold and words forgotten")
+        // #124 Codex review at 80c339e: what an approval would do is always on screen when it takes a click -- with a
+        // headline, the text is shown under it unless the card folds it (and it folds only where its fields or its
+        // beyond lines say what goes out)
+        let shapes: [(String, [String: Any], Bool)] = [
+            ("action, headline, no fields", ["kind": "action", "text": "在 Mail 里点「发送」", "headline": "要发出去吗？", "blocking": true, "free_text": false,
+                                            "options": [["kind": "approve", "text": "可以"], ["kind": "cancel", "text": "先别做了"]]], true),
+            ("action, no headline", ["kind": "action", "text": "在 Mail 里点「发送」", "blocking": true, "free_text": false,
+                                     "options": [["kind": "approve", "text": "可以"]]], true),
+            ("ambiguity, headline", ["kind": "ambiguity", "text": "两份报告都像", "headline": "哪一份？", "blocking": true, "free_text": false,
+                                     "options": [["kind": "reading", "text": "a"], ["kind": "delegate", "text": "由你决定"]]], false),
+        ]
+        for (name, json, textAlwaysShown) in shapes {
+            let r = R(); r.ask("a1", card: json)
+            guard let cm = r.model("a1") else { check(false, name); continue }
+            let l = CardLayout(cm)
+            let visible = l.title == cm.text || l.shownText == cm.text
+            check(visible || (l.folds && !textAlwaysShown), "\(name): the text on screen (title \(l.title == cm.text), shown \(l.shownText != nil), folds \(l.folds))")
+            if textAlwaysShown { check(visible, "\(name): never only in a fold") }
+        }
+        // the view draws what the layout says is shown (the text under the title)
+        let view = (try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift"), encoding: .utf8)) ?? ""
+        check(view.contains("if let t = layout.shownText {") && view.contains("private var words: Binding<String> { Binding(get: { shell.cardDraft(card) }")
+              && !view.contains("@State private var words"), "CardView draws shownText; its words are the shell's")
     }
 
     /// The focus funnel (lead 10-25): only the user's Esc out of a card, in the key window, asks the composer for the

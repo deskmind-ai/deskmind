@@ -171,9 +171,8 @@ enum CardLayoutTests {
     // MARK: - every option at once (A2, invariant 3)
 
     /// The card never scrolls inside: each option takes a click the moment the card shows, whatever its height. A card
-    /// too tall for the pinned place stays in place in the chat; there an approve-type option (approve, "you decide", a
-    /// kind this app does not know) takes no key -- its content may be off screen -- while the mouse reaches it only past
-    /// the content. The way out, a skip and a pick keep their keys (the safe direction).
+    /// too tall for the pinned place stays in place in the chat; there no digit picks -- its controls may be off screen
+    /// (#124 Codex review at 80c339e) -- while Tab, Space and Esc, which act on what has the focus, still do (CardKeysTests).
     static func wholeCardTests() {
         for (name, json) in samples() {
             let card = model(json)
@@ -197,7 +196,8 @@ enum CardLayoutTests {
                     guard let qm = q.model("a1") else { continue }
                     q.m.pinRoom(columnHeight: 1000); q.m.cardLaidOut(qm, height: tall ? 900 : 200)
                     q.m.cardShown(qm); q.timers.advance(CardKeys.cardOnScreen + 0.1); q.m.enterCardMode(qm)
-                    let works = !(tall && approveType)
+                    let works = !tall
+                    _ = approveType
                     let ctl = CardLayout(qm).controls.first { $0.index == c.index }!
                     check(q.m.keyWorks(qm, ctl) == works, "\(name), \(tall ? "tall" : "fits"): key \(k) on \(c.button.kind) \(works ? "works" : "does nothing")")
                     _ = q.m.keyDown(characters: "\(k)", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false)

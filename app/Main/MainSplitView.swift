@@ -283,6 +283,8 @@ struct ChatColumn: View {
                 .onChange(of: jumpTo) { _, id in
                     if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }; jumpTo = nil }
                 }
+                // (an option of a card in place here took the keyboard focus: into view)
+                .onChange(of: shell.scrollRequest?.n) { _, _ in if let id = shell.scrollRequest?.id { proxy.scrollTo(id) } }
             }
             .frame(minHeight: 0, maxHeight: .infinity)
             .layoutPriority(0)

@@ -328,6 +328,7 @@ struct GoalRunView: View {
         .onChange(of: jumpTo) { _, id in
             if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }; jumpTo = nil }
         }
+        .onChange(of: shell.scrollRequest?.n) { _, _ in if let id = shell.scrollRequest?.id { proxy.scrollTo(id) } }
         }
         // (the shown task's own card only, while its session is the selected one: GoalShown) -- pinned whole when it
         // fits this screen's room, else one line and the card in place above (TaskRow), as the chat does (A2)
