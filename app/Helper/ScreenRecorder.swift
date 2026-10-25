@@ -93,10 +93,15 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
         self.wholeScreen = wholeScreen; self.mode = RecordingCapture.mode(smooth: smooth); self.goal = goal
     }
 
-    /// The chat task this recording is for (record_start's `for_run`; nil: an op run's): only its steps add apps. Set
-    /// once, before the recording is the active one; read through `records(_:)`, under the lock (#127 Codex: a static
-    /// written on the request thread and read on the session's was a data race).
+    /// The chat task this recording is for (record_start's `for_run`; nil: an op run's): only its steps add apps, and
+    /// its end ends the recording. Set before the recording is the active one, read under the lock.
     private(set) var forRun: String?
+    /// Its conversation (record_start's `session_id`): where the movie's path is written once it is made.
+    private(set) var session: String?
+
+    /// What the recording does next (Shared/TaskRecording.swift's RecordingOwner), under `lock`: the helper owns the
+    /// lifecycle -- a run's end and the helper's quit stop it, whatever the app's messages did (#127 Codex at 24cbf17).
+    private static var owner = RecordingOwner()
 
     /// Whether the active recording is the one for `run`'s task.
     static func records(_ run: String) -> Bool {
@@ -105,22 +110,16 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
     }
 
     static func start(_ req: [String: Any]) -> [String: Any] {
-        // A recording nobody stopped (the app quit mid-run): finished now, its files written for the run it filmed,
-        // and this one starts. Refused instead, every later run went unrecorded while that one grew for half an hour.
-        lock.lock()
-        let stale = active
-        active = nil
-        lock.unlock()
-        if let stale {
-            stale.end()
-            let run = Runner.lastRunDir
-            DispatchQueue.global(qos: .utility).async {
-                guard FileManager.default.fileExists(atPath: stale.master.path) else { return }
-                stale.writeSidecars(delivered: stale.exportDelivery(), run: run)
-            }
-        }
-        lock.lock(); defer { lock.unlock() }
         guard CGPreflightScreenCaptureAccess() else { return ["ok": false, "error": "no_screen_recording"] }
+        let forRun = req["for_run"] as? String
+        lock.lock()
+        // (one before, never stopped -- its run's end lost, the app quit mid-run: its movie made now, in the background)
+        let ends = owner.apply(.start(run: forRun))
+        let stale = ends.contains { if case .end = $0 { return true }; return false } ? active : nil
+        if stale != nil { active = nil }
+        lock.unlock()
+        if let stale { finish(stale) }
+        lock.lock(); defer { lock.unlock() }
         let folder = URL(fileURLWithPath: req["path"] as? String ?? "")
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let rec = ScreenRecorder(folder: folder, bundles: Set(req["bundles"] as? [String] ?? []),
@@ -128,28 +127,67 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCRecordingOutputDelegat
                                  wholeScreen: req["whole_screen"] as? Bool ?? false,
                                  smooth: req["smooth"] as? Bool ?? false, goal: req["goal"] as? String ?? "")
         rec.requestedDisplay = (req["display"] as? NSNumber).map { CGDirectDisplayID($0.uint32Value) }
-        rec.forRun = req["for_run"] as? String
+        rec.forRun = forRun
+        rec.session = req["session_id"] as? String
         rec.preflight = Self.preflight(bundles: rec.bundles)
-        if let error = rec.begin() { return ["ok": false, "error": error] }
+        if let error = rec.begin() { _ = owner.apply(.cancel(run: forRun)); return ["ok": false, "error": error] }
         active = rec
         return ["ok": true, "path": folder.path, "preflight": rec.preflight]
     }
 
-    /// Stop, finish the movie, make the delivery copy and the step and meta files. The movie to show: the delivery
-    /// copy, or the master if it could not be made.
-    static func stop() -> [String: Any] {
+    /// The app's cancel (record_stop {for_run}): the capture ends at once and this answers at once; the movie is made
+    /// in the background (its path beside the run). Nothing recording, or another run's: answered all the same.
+    /// `wait` (tests, an op run's caller that wants the path): the movie made first, its path in the answer.
+    static func stop(forRun: String? = nil, wait: Bool = true) -> [String: Any] {
         lock.lock()
-        let rec = active
-        active = nil
+        let ends = owner.apply(.cancel(run: forRun))
+        let rec = ends.isEmpty ? nil : active
+        if rec != nil { active = nil }
         lock.unlock()
         guard let rec else { return ["ok": true, "path": NSNull()] }
-        rec.end()
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: rec.master.path) else { return ["ok": true, "path": NSNull()] }
-        let exported = rec.exportDelivery()
-        rec.writeSidecars(delivered: exported, run: Runner.lastRunDir)
-        return ["ok": true, "path": (exported ? rec.delivery : rec.master).path, "folder": rec.folder.path]
+        if !wait { finish(rec); return ["ok": true, "stopping": true] }
+        return rec.finishNow()
     }
+
+    /// `run`'s task ended (SessionHost: its task_done, task_end, closed, its process gone): its recording stops.
+    static func runEnded(_ run: String) {
+        lock.lock()
+        let ends = owner.apply(.runEnded(run: run))
+        let rec = ends.isEmpty ? nil : active
+        if rec != nil { active = nil }
+        lock.unlock()
+        if let rec { finish(rec) }
+    }
+
+    /// The helper quits: the capture ends (the master movie stays; its delivery copy is not made).
+    static func quit() {
+        lock.lock()
+        _ = owner.apply(.quit)
+        let rec = active; active = nil
+        lock.unlock()
+        rec?.endCapture()
+    }
+
+    /// Ended and made in the background: a start for the next task is free meanwhile.
+    private static func finish(_ rec: ScreenRecorder) {
+        DispatchQueue.global(qos: .utility).async { _ = rec.finishNow() }
+    }
+
+    /// End the capture, make the delivery copy and the step and meta files, and -- a chat task's -- write the movie's
+    /// path beside its run (recording.json: how the app learns it).
+    private func finishNow() -> [String: Any] {
+        end()
+        guard FileManager.default.fileExists(atPath: master.path) else { return ["ok": true, "path": NSNull()] }
+        let exported = exportDelivery()
+        let runFolder = forRun.flatMap { r in session.flatMap { RunDir.folder(session: $0, run: r, support: SessionHost.setup.dir) } }
+        writeSidecars(delivered: exported, run: runFolder ?? Runner.lastRunDir)
+        let movie = (exported ? delivery : master).path
+        if let runFolder, let d = try? JSONSerialization.data(withJSONObject: ["path": movie, "folder": folder.path]) {
+            try? d.write(to: runFolder.appendingPathComponent(RecordingOwner.savedFile), options: .atomic)
+        }
+        return ["ok": true, "path": movie, "folder": folder.path]
+    }
+    private func endCapture() { end() }
 
     // MARK: what is recorded
 

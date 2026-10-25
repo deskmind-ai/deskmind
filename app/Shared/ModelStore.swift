@@ -131,7 +131,21 @@ enum ModelStore {
     /// older file, one a change replaced: what the user put there never just vanishes).
     private static func drop(_ file: URL, _ text: String, holding: String?, files: Files) -> Bool {
         if let h = holding, same(text, h) { return files.remove(file) }
-        return files.retire(file)
+        return files.retire(file, as: redact(text))
+    }
+
+    /// What is retired: every secret's value (`secret(_:)`) as "…<last 4>", the rest as written -- the user can still
+    /// compare the settings, and no full key is ever written anywhere but the keychain (#127 Codex at 24cbf17).
+    static func redact(_ text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false).map { raw -> String in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard !line.hasPrefix("#"), let eq = line.firstIndex(of: "=") else { return String(raw) }
+            let k = String(line[..<eq]).trimmingCharacters(in: .whitespaces)
+            guard secret(k) else { return String(raw) }
+            var v = String(line[line.index(after: eq)...]).trimmingCharacters(in: .whitespaces)
+            if v.hasPrefix("\"") && v.hasSuffix("\"") && v.count >= 2 { v = String(v.dropFirst().dropLast()) }
+            return "\(k)=…\(v.suffix(4))"
+        }.joined(separator: "\n")
     }
 
     /// The file system as these moves see it (a test's own, with failures). `remove`: unlinked; `retire`: to the
@@ -140,7 +154,8 @@ enum ModelStore {
         func read(_ u: URL) -> String?
         func modified(_ u: URL) -> Date?
         func remove(_ u: URL) -> Bool
-        func retire(_ u: URL) -> Bool
+        /// The file replaced by `text` (its redacted settings), then put in the Trash. True: no longer at `u`.
+        func retire(_ u: URL, as text: String) -> Bool
     }
     struct Disk: Files {
         func read(_ u: URL) -> String? { try? String(contentsOf: u, encoding: .utf8) }
@@ -149,11 +164,12 @@ enum ModelStore {
             guard FileManager.default.fileExists(atPath: u.path) else { return true }
             return (try? FileManager.default.removeItem(at: u)) != nil
         }
-        /// To the Trash (what the user put there never just vanishes: a restored backup, a hand edit); no Trash: renamed
+        /// Rewritten as `text` (redacted: no full key leaves the keychain), then to the Trash; no Trash: renamed
         /// models.env.replaced-<date> beside it. True: it is no longer at `u`.
-        func retire(_ u: URL) -> Bool {
+        func retire(_ u: URL, as text: String) -> Bool {
             let fm = FileManager.default
             guard fm.fileExists(atPath: u.path) else { return true }
+            guard (try? Data(text.utf8).write(to: u, options: .atomic)) != nil else { return false }
             if (try? fm.trashItem(at: u, resultingItemURL: nil)) != nil { return true }
             let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
             return (try? fm.moveItem(at: u, to: u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".replaced-" + stamp))) != nil

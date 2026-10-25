@@ -12,11 +12,6 @@ import SwiftUI
 @MainActor
 final class RunRecorder {
     static let shared = RunRecorder()
-    private(set) var fileURL: URL?
-
-    var isRecording: Bool { fileURL != nil }
-    /// Recording, or a start or a stop not confirmed (the app's quit sends record_stop for any of them).
-    var busy: Bool { gate.busy }
 
     /// The View menu's two recording settings: DeskMind's own window in the recording (off: the island and panels
     /// only), and the whole screen instead of the task's apps (off: other apps are left out).
@@ -33,62 +28,59 @@ final class RunRecorder {
         return dir.appendingPathComponent(MovieName.folder(goal: goal, date: Date()), isDirectory: true)
     }
 
-    /// The start / stop across the helper's slow answers (RecorderGate: a stop while the start is on its way is owed;
-    /// a start whose answer was lost keeps the stop owed until the helper confirms).
-    private var gate = RecorderGate()
-    private var owedDone: ((URL?) -> Void)?
+    /// The run the helper was asked to record, until its task is over or the app cancels it (the app's quit tells the
+    /// helper to stop it).
+    private(set) var run: String?
+    var busy: Bool { run != nil }
 
-    /// Start recording the task's apps (`bundles`; the session's steps add theirs). `forRun`: the task it is for (the
-    /// helper takes it while that task holds the computer). `started(true)` once recording; false if it could not
-    /// start (no Screen Recording for the helper, the helper away, a stop came first) -- the task goes ahead either way.
-    func begin(goal: String, bundles: [String], forRun: String? = nil, started: @escaping (Bool) -> Void) {
-        guard gate.apply(.begin) == [.start] else { started(gate.state == .recording); return }
+    /// Ask the helper to record `run`'s task (of `session`): the apps it works in (its steps add them), into
+    /// Movies › DeskMind. The helper owns it from here (RecordingOwner): it stops when that run ends. `started(false)`:
+    /// it said no (no Screen Recording); no answer at all is taken as recording -- the run's end stops it anyway.
+    func begin(goal: String, run: String, session: String, started: @escaping (Bool) -> Void) {
+        self.run = run
         let url = Self.folderURL(goal: goal)
-        var body: [String: Any] = ["op": "record_start", "path": url.path, "bundles": bundles, "goal": goal,
+        let body: [String: Any] = ["op": "record_start", "path": url.path, "bundles": [String](), "goal": goal,
+                                   "for_run": run, "session_id": session,
                                    "include_main": UserDefaults.standard.bool(forKey: Self.includeMainKey),
                                    "whole_screen": UserDefaults.standard.bool(forKey: Self.wholeScreenKey),
                                    "smooth": UserDefaults.standard.bool(forKey: Self.smoothKey)]
-        if let forRun { body["for_run"] = forRun }
         DispatchQueue.global().async {
             let reply = DeskMindIPC.request(body, timeout: 25)
-            // ok, refused (the helper said no), or unknown (no answer: it may be recording -- the stop stays owed)
-            let answer: RecorderGate.Answer = reply == nil ? .unknown : reply?["ok"] as? Bool == true ? .ok : .refused
+            let refused = reply != nil && reply?["ok"] as? Bool != true
             DispatchQueue.main.async {
-                let sends = self.gate.apply(.answered(answer))
-                if sends == [.stop] {
-                    // (a stop came while the start was on its way: stopped at once, its movie to whoever stopped)
-                    let done = self.owedDone; self.owedDone = nil
-                    self.sendStop(done ?? { _ in })
-                } else if self.gate.state == .recording {
-                    self.fileURL = url
-                } else if let done = self.owedDone {
-                    self.owedDone = nil; done(nil)
-                }
-                // (unknown: taken as recording -- the task's end still stops it)
-                started(self.gate.state == .recording)
+                if refused, self.run == run { self.run = nil }
+                started(!refused)
             }
         }
     }
 
-    /// Stop and finish the recording; `done` gets the movie to show (nil if nothing was recorded). A start still on its
-    /// way: owed -- stopped as soon as it answers. A stop not yet confirmed: asked again. The helper makes the delivery
-    /// copy and the step file first, which takes a while for a long run.
-    func stop(done: @escaping (URL?) -> Void) {
-        let wasStarting = { if case .starting = gate.state { return true }; return false }()
-        let sends = gate.apply(.stop)
-        if sends == [.stop] { fileURL = nil; sendStop(done); return }    // (handed over: never taken for the next run's)
-        if wasStarting { owedDone = done; return }
-        done(nil)
+    /// Ask the helper to stop recording `run`: asked again, waiting longer each time, until it answers (it stops at
+    /// once and answers at once; asking when nothing records is harmless).
+    func cancel(_ run: String) {
+        if self.run == run { self.run = nil }
+        DispatchQueue.global().async {
+            var wait = 1.0
+            for _ in 0..<8 {
+                if DeskMindIPC.request(["op": "record_stop", "for_run": run], timeout: 5) != nil { return }
+                Thread.sleep(forTimeInterval: wait); wait = min(wait * 2, 30)
+            }
+        }
     }
 
-    /// record_stop; its answer (any answer: the helper says what it stopped, or that nothing recorded) confirms it.
-    private func sendStop(_ done: @escaping (URL?) -> Void) {
-        DispatchQueue.global().async {
-            let reply = DeskMindIPC.request(["op": "record_stop"], timeout: 900)
-            let url = (reply?["path"] as? String).map { URL(fileURLWithPath: $0) }
-            DispatchQueue.main.async {
-                _ = self.gate.apply(.stopAnswered(confirmed: reply != nil))
-                done(url)
+    /// The task is over (the helper stopped its recording): the movie, once the helper has made it, from the run's
+    /// folder (recording.json) -- looked for every few seconds, for as long as a long movie takes.
+    func awaitMovie(run: String, session: String, saved: @escaping (URL) -> Void) {
+        if self.run == run { self.run = nil }
+        guard let folder = RunDir.folder(session: session, run: run) else { return }
+        let file = folder.appendingPathComponent(RecordingOwner.savedFile)
+        DispatchQueue.global(qos: .utility).async {
+            for _ in 0..<(3 * 3600 / 3) {
+                if let d = try? Data(contentsOf: file), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                   let path = o["path"] as? String {
+                    DispatchQueue.main.async { saved(URL(fileURLWithPath: path)) }
+                    return
+                }
+                Thread.sleep(forTimeInterval: 3)
             }
         }
     }
@@ -97,18 +89,20 @@ final class RunRecorder {
 /// A chat task's recording (Shared/TaskRecording.swift): RunRecorder through the helper, with the decision panel
 /// on screen while it records (non-activating, as it always was: it is what a demo shows).
 final class AppTaskRecorder: TaskRecorder {
-    func start(goal: String, run: String, started: @escaping (Bool) -> Void) {
+    func start(goal: String, run: String, session: String, started: @escaping (Bool) -> Void) {
         MainActor.assumeIsolated {
             DecisionPanel.shared.show()
-            RunRecorder.shared.begin(goal: goal, bundles: [], forRun: run) { ok in
+            RunRecorder.shared.begin(goal: goal, run: run, session: session) { ok in
                 if !ok { DecisionPanel.shared.hide() }
                 started(ok)
             }
         }
     }
-    func stop(done: @escaping (URL?) -> Void) {
+    func cancel(run: String) { MainActor.assumeIsolated { RunRecorder.shared.cancel(run) } }
+    func ended(run: String, session: String, saved: @escaping (URL) -> Void) {
         MainActor.assumeIsolated {
-            RunRecorder.shared.stop { url in DecisionPanel.shared.hide(after: 2); done(url) }
+            DecisionPanel.shared.hide(after: 2)
+            RunRecorder.shared.awaitMovie(run: run, session: session, saved: saved)
         }
     }
     func step(_ n: Int, _ words: String) { MainActor.assumeIsolated { DecisionPanel.shared.update(n: n, words: words) } }

@@ -24,58 +24,87 @@ enum RecordingTests {
         check(r.apply(.taskStarted(session: "s", run: "r2")) == [.start(session: "s", run: "r2")], "the next task starts: recorded")
         check(r.apply(.taskStarted(session: "t", run: "r3")).isEmpty, "another conversation's task meanwhile: not (one at a time, its switch off)")
         check(r.apply(.taskEnded(run: "r3")).isEmpty, "its end: nothing")
-        check(r.apply(.taskEnded(run: "r2")) == [.stop(run: "r2")], "the recorded task ends: stopped")
+        check(r.apply(.taskEnded(run: "r2")) == [.ended(session: "s", run: "r2")], "the recorded task ends: the helper stopped it; the movie awaited")
         check(r.apply(.taskEnded(run: "r2")).isEmpty, "told again: once")
         _ = r.apply(.taskStarted(session: "s", run: "r4"))
-        check(r.apply(.toggled(session: "s", on: false)) == [.stop(run: "r4")], "switched off while recording: stopped")
+        check(r.apply(.toggled(session: "s", on: false)) == [.cancel(run: "r4")], "switched off while recording: cancelled")
         _ = r.apply(.toggled(session: "s", on: true)); _ = r.apply(.taskStarted(session: "s", run: "r5"))
-        check(r.apply(.appQuit) == [.stop(run: "r5")], "the app quits while recording: stopped")
+        check(r.apply(.appQuit) == [.cancel(run: "r5")], "the app quits while recording: cancelled")
         _ = r.apply(.taskStarted(session: "s", run: "r6"))
         _ = r.apply(.startFailed(run: "r6"))
-        check(r.apply(.taskEnded(run: "r6")).isEmpty && r.recordingRun == nil, "a start that failed: nothing to stop")
+        check(r.apply(.taskEnded(run: "r6")).isEmpty && r.recordingRun == nil, "the helper said no: nothing after")
         var d = T(); d.defaultOn = true
         check(d.apply(.taskStarted(session: "old", run: "x")).isEmpty, "(#127 delta) the last choice never turns an existing conversation on")
     }
 
-    /// Random lifecycles -- tasks starting and ending every way, steers (nothing for the recording), switches,
-    /// failed starts, a quit: every start is followed by exactly one stop of that run before the next start; nothing
-    /// starts with its conversation's switch off.
+    /// (#127 Codex at 24cbf17) The helper owns the recording (RecordingOwner, the model Helper/ScreenRecorder.swift
+    /// follows): random lifecycles with the app's messages lost (a start, a cancel -- the app asks a cancel again until
+    /// it is answered), runs ending every way, the helper quitting, movies made in the background. Whenever no run wants
+    /// recording, the capture has stopped within that event; consecutive tasks each get their own movie.
     static func sequenceTests() {
-        typealias T = TaskRecording
+        typealias O = RecordingOwner
         var g = CardStoreTests.RNG(x: 21)
-        for seed in 0..<500 {
-            var r = T(), open: String? = nil, active: String? = nil
-            var switches: [String: Bool] = [:]
-            var bad = ""
-            for step in 0..<30 {
-                let s = ["s1", "s2"][g.next(2)], run = "r\(step)"
-                var acts: [T.Action] = []
-                switch g.next(6) {
-                case 0: switches[s] = g.next(2) == 0; acts = r.apply(.toggled(session: s, on: switches[s]!))
-                case 1, 2: if open == nil { open = run; acts = r.apply(.taskStarted(session: s, run: run)); if case .start? = acts.first, !(switches[s] ?? false) { bad = "started with the switch off" } }
-                case 3: if let o = open { open = nil; acts = r.apply(.taskEnded(run: o)) }      // done, ended, closed, crashed: one end
-                case 4: if let a = active, g.next(4) == 0 { acts = r.apply(.startFailed(run: a)); active = nil }
-                default: acts = []                                                              // a steer: nothing
-                }
-                for a in acts {
-                    switch a {
-                    case .start(_, let run): if active != nil { bad = "two at once" }; active = run
-                    case .stop(let run): if active != run { bad = "a stop of \(run), recording \(active ?? "-")" }; active = nil
+        for seed in 0..<800 {
+            var o = O()
+            var running: Set<String> = []        // tasks running (a run ends only once it started)
+            var wanted: String? = nil            // the run the app wants recorded (switch on, its task running)
+            var cancelOwed: Set<String> = []     // cancels the app keeps asking until the helper answers
+            var captured: [String] = [], movies: [String] = []
+            func run(_ e: O.Event) {
+                for d in o.apply(e) {
+                    switch d {
+                    case .capture(let r): if let r { captured.append(r) }
+                    case .end(let r): if let r { movies.append(r) }      // (made in the background: one per capture)
                     }
                 }
-                if !bad.isEmpty { check(false, "seed \(seed) step \(step): \(bad)"); return }
             }
-            // the app quits: whatever is recorded stops
-            let last = r.apply(.appQuit)
-            if let a = active, last != [.stop(run: a)] { check(false, "seed \(seed): the quit did not stop \(a)"); return }
+            for step in 0..<30 {
+                let r = "r\(step)"
+                switch g.next(6) {
+                case 0:   // a task starts with the switch on: the app asks -- the ask may be lost
+                    if running.isEmpty { running.insert(r); wanted = r; if g.next(4) != 0 { run(.start(run: r)) } }
+                case 1:   // a task ends, any way: the helper sees it itself
+                    if let t = running.first { running.remove(t); if wanted == t { wanted = nil }; run(.runEnded(run: t)) }
+                case 2:   // the switch off mid-task: a cancel, maybe lost -- owed until answered
+                    if let w = wanted { wanted = nil; if g.next(3) != 0 { run(.cancel(run: w)) } else { cancelOwed.insert(w) } }
+                case 3:   // the app asks an owed cancel again
+                    if let c = cancelOwed.first, g.next(2) == 0 { run(.cancel(run: c)); cancelOwed.remove(c) }
+                case 4:   // the helper quits (and comes back): its tasks gone with it
+                    if g.next(5) == 0 { run(.quit); running = []; wanted = nil; cancelOwed = [] }
+                default: break
+                }
+                // nothing is captured that no run wants -- but a run whose cancel the app is still asking, still running
+                if case .some(let c?) = o.capturing {
+                    if !(c == wanted || (cancelOwed.contains(c) && running.contains(c))) {
+                        check(false, "seed \(seed) step \(step): captures \(c) with no run wanting it"); return
+                    }
+                }
+            }
+            for c in cancelOwed { run(.cancel(run: c)) }
+            for t in running { run(.runEnded(run: t)) }
+            if o.capturing != nil { check(false, "seed \(seed): still capturing after every run ended"); return }
+            // every capture made its own movie, once
+            if captured != movies { check(false, "seed \(seed): captures \(captured) vs movies \(movies)"); return }
         }
+        // the rows
+        var o = O()
+        check(o.apply(.start(run: "a")) == [.capture(run: "a")], "a start: captured")
+        check(o.apply(.start(run: "b")) == [.end(run: "a"), .capture(run: "b")], "the next task's start, the last never stopped: its movie, then this")
+        check(o.apply(.runEnded(run: "a")).isEmpty && o.capturing == "b", "an old run's end: not this one's")
+        check(o.apply(.cancel(run: "x")).isEmpty && o.capturing == "b", "a cancel for another run: nothing")
+        check(o.apply(.runEnded(run: "b")) == [.end(run: "b")] && o.capturing == nil, "its run ends: stopped by the helper")
+        check(o.apply(.cancel(run: "b")).isEmpty, "the app's cancel after: harmless")
+        _ = o.apply(.start(run: "c"))
+        check(o.apply(.quit) == [.end(run: "c")], "the helper quits: stopped")
     }
 
     final class FakeRecorder: TaskRecorder {
         var log: [String] = []
         var ok = true
-        func start(goal: String, run: String, started: @escaping (Bool) -> Void) { log.append("start:\(goal)"); started(ok) }
-        func stop(done: @escaping (URL?) -> Void) { log.append("stop"); done(URL(fileURLWithPath: "/tmp/movie.mov")) }
+        var saved: [String: (URL) -> Void] = [:]
+        func start(goal: String, run: String, session: String, started: @escaping (Bool) -> Void) { log.append("start:\(goal)"); started(ok) }
+        func cancel(run: String) { log.append("cancel:\(run)") }
+        func ended(run: String, session: String, saved s: @escaping (URL) -> Void) { log.append("ended:\(run)"); saved[run] = s }
         func step(_ n: Int, _ words: String) { log.append("step:\(n)") }
     }
 
@@ -101,20 +130,22 @@ enum RecordingTests {
         task("r2", seq: 3, raw: "发邮件")
         m.client.feed(["kind": "step", "session_id": sid, "run_id": "r2", "seq": 2, "step_id": "st1", "text": "click", "human": "点「发送」"])
         check(rec.log == ["start:发邮件", "step:1"], "its next task: recorded, its step on the panel: \(rec.log)")
-        // the executor killed: the session ends the task (task_end) -- stopped, the movie on its row
+        // the executor killed: the session ends the task (task_end) -- the helper stopped it; the movie awaited, then shown
         m.client.feed(["kind": "session.task_end", "session_id": sid, "seq": 4, "run_id": "r2", "status": "failed"])
-        check(rec.log.last == "stop" && rec.log.filter { $0 == "stop" }.count == 1 && m.movies["r2"] == "/tmp/movie.mov", "its end: stopped once, 「已录制」: \(rec.log)")
-        // (#127 delta, 3) another conversation that never touched the switch: not recorded though the last choice is on
+        check(rec.log.last == "ended:r2" && !rec.log.contains { $0.hasPrefix("cancel") }, "its end: nothing sent, the movie awaited: \(rec.log)")
+        rec.saved["r2"]?(URL(fileURLWithPath: "/tmp/movie.mov"))
+        check(m.movies["r2"] == "/tmp/movie.mov", "the movie made: 「已录制」")
+        // switched off mid-task: cancelled
+        task("r3", seq: 5, raw: "再来")
+        m.setRecording(false)
+        check(rec.log.contains("cancel:r3"), "switched off mid-task: cancelled")
+        // (#127 delta, 3) another conversation that never touched the switch: not recorded though the last choice was on
+        m.setRecording(true)
         let other = "ses_other"
         m.client.feed(["kind": "session.message", "session_id": other, "seq": 1, "msg_id": "o1", "role": "user", "text": "/cua b", "via": "cua"])
         m.client.feed(["kind": "session.task", "session_id": other, "seq": 2, "msg_id": "o1", "run_id": "ro", "raw": "别的", "by": "slash"])
         m.client.feed(["kind": "start", "session_id": other, "run_id": "ro", "seq": 1, "raw": "别的"])
         check(!rec.log.contains("start:别的"), "an untouched conversation: not recorded")
-        m.client.feed(["kind": "task_done", "session_id": other, "run_id": "ro", "seq": 2, "status": "succeeded", "reason": "", "summary": "", "result_card": NSNull()])
-        rec.ok = false
-        task("r3", seq: 5, raw: "再来")
-        m.client.feed(["kind": "task_done", "session_id": sid, "run_id": "r3", "seq": 2, "status": "stopped", "reason": "", "summary": "", "result_card": NSNull()])
-        check(rec.log.filter { $0 == "stop" }.count == 1, "a start that failed: no stop after it: \(rec.log)")
         // (#127 Codex) a new conversation (none selected yet): the switch is kept and carried to its session
         let d = ShellModel(client: SessionClient(transport: CardStoreTests.Wire()), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
                            lang: { .zhHans }, takeBackAfter: timers.after, now: { timers.now }, work: { $0() }, deliver: { $0() })
@@ -122,62 +153,9 @@ enum RecordingTests {
         check(d.selected == nil && d.recordsNext && d.recording.defaultOn, "a draft conversation: the switch on, kept")
     }
 
-    /// (#127 delta, 1; Codex at bde8298) The recorder's gate over the helper's slow and lost answers: a stop while the
-    /// start is on its way is owed; a lost answer keeps it owed; the helper never records once the app no longer wants
-    /// it, after the stops are answered. Random interleavings, each helper answer (and its loss) a move of its own.
+    /// The helper's side, as written: it follows RecordingOwner, stops a run's recording at the run's end and at its
+    /// quit, answers a cancel at once; the record-start rule.
     static func gateTests() {
-        typealias G = RecorderGate
-        var g = CardStoreTests.RNG(x: 8)
-        for seed in 0..<800 {
-            var gate = G(), helperRecording = false, startInFlight = false, stopsInFlight = 0, wants = false
-            func send(_ ss: [G.Send]) {
-                for s in ss {
-                    switch s {
-                    case .start: if startInFlight { check(false, "seed \(seed): two starts") }; startInFlight = true
-                    case .stop: stopsInFlight += 1
-                    }
-                }
-            }
-            for _ in 0..<24 {
-                switch g.next(5) {
-                case 0: wants = true; send(gate.apply(.begin))
-                case 1: wants = false; send(gate.apply(.stop))
-                case 2:
-                    guard startInFlight else { continue }
-                    startInFlight = false
-                    // the helper starts (or says no); the app hears ok, refused, or nothing (the answer lost)
-                    let ran = g.next(3) != 0
-                    if ran { helperRecording = true }
-                    let answer: G.Answer = g.next(3) == 0 ? .unknown : (ran ? .ok : .refused)
-                    send(gate.apply(.answered(answer)))
-                case 3:
-                    guard stopsInFlight > 0 else { continue }
-                    stopsInFlight -= 1
-                    helperRecording = false        // (record_stop: whatever records stops)
-                    send(gate.apply(.stopAnswered(confirmed: g.next(4) != 0)))
-                default:
-                    // the app quits: record_stop while busy
-                    if gate.busy && g.next(6) == 0 { helperRecording = false; startInFlight = false; stopsInFlight = 0; wants = false; gate = G() }
-                }
-            }
-            // the app no longer wants it, every answer in: the helper is not recording -- or the app still says busy
-            // (its quit sends record_stop)
-            if !wants && !startInFlight && stopsInFlight == 0 && helperRecording && !gate.busy {
-                check(false, "seed \(seed): the helper records unseen (\(gate.state))"); return
-            }
-        }
-        // the rows: ended / switched off before the answer; an answer lost
-        var a = G()
-        check(a.apply(.begin) == [.start] && a.apply(.stop).isEmpty && a.state == .starting(stopOwed: true), "stopped while starting: owed")
-        check(a.apply(.answered(.ok)) == [.stop] && a.state == .stopping, "the late success: stopped at once")
-        check(a.apply(.stopAnswered(confirmed: true)).isEmpty && a.state == .idle && !a.busy, "confirmed: idle")
-        var b = G(); _ = b.apply(.begin); _ = b.apply(.stop)
-        check(b.apply(.answered(.refused)).isEmpty && b.state == .idle, "the late refusal: nothing to stop")
-        var c = G(); _ = c.apply(.begin); _ = c.apply(.stop)
-        check(c.apply(.answered(.unknown)) == [.stop], "(Codex) the answer lost after a stop: the stop sent all the same")
-        check(c.apply(.stopAnswered(confirmed: false)).isEmpty && c.busy && c.apply(.stop) == [.stop], "the stop's answer lost: still busy, asked again")
-        var d = G(); _ = d.apply(.begin)
-        check(d.apply(.answered(.unknown)).isEmpty && d.state == .recording && d.apply(.stop) == [.stop], "the start's answer lost: taken as recording, stopped at the end")
         // the helper takes a start for the task that holds the computer, none for another
         check(RecordStart.allowed(acting: false, holderRun: nil, forRun: nil), "nothing acting: yes")
         check(RecordStart.allowed(acting: true, holderRun: "r1", forRun: "r1"), "(#127 delta, 2) the task holding the computer: its own recording, yes")
@@ -190,8 +168,14 @@ enum RecordingTests {
               "record_start decides by the rule")
         check(host.contains("if ScreenRecorder.records(run) { recordApp(ev) }"), "(#127 delta, 6) only the recorded task's steps add apps")
         let screen = (try? String(contentsOf: dir.appendingPathComponent("Helper/ScreenRecorder.swift"), encoding: .utf8)) ?? ""
-        check(!screen.contains("nonisolated(unsafe) static var forRun") && screen.contains("rec.forRun = req[\"for_run\"]")
+        check(!screen.contains("nonisolated(unsafe) static var forRun") && screen.contains("rec.forRun = forRun")
               && screen.contains("return active?.forRun == run"), "(#127 Codex) the task the recording is for: the recording's own, read under its lock")
+        check(host.contains("ScreenRecorder.runEnded(run)") && helper.contains("ScreenRecorder.quit()")
+              && helper.contains("ScreenRecorder.stop(forRun: req[\"for_run\"] as? String, wait: false)"),
+              "(#127 Codex at 24cbf17) the helper stops a recording at its run's end and its own quit; a cancel answers at once")
+        check(screen.contains("owner.apply(.start(run: forRun))") && screen.contains("owner.apply(.runEnded(run: run))")
+              && screen.contains("owner.apply(.cancel(run: forRun))") && screen.contains("RecordingOwner.savedFile"),
+              "the recorder follows RecordingOwner; the movie's path beside the run")
     }
 
     /// Only this path asks the helper to record: record_start in RunRecorder alone, RunRecorder.begin from

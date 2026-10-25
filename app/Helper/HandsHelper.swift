@@ -176,7 +176,8 @@ func handle(_ req: [String: Any]) -> [String: Any] {
         }
         return ScreenRecorder.start(req)
     case "record_stop":
-        return ScreenRecorder.stop()
+        // the app's cancel: stopped at once, answered at once; the movie made in the background (beside its run)
+        return ScreenRecorder.stop(forRun: req["for_run"] as? String, wait: false)
     case "takeover":
         // The user lets the task use the mouse and the front for a while (0 ends it early).
         Runner.takeOver(seconds: req["seconds"] as? Double ?? 0)
@@ -388,7 +389,7 @@ struct HandsHelper {
         Thread.detachNewThread { serve() }
         Runner.warmUp()
         BrainServer.ensure()
-        atexit { BrainServer.stop(); EyesServer.stop() }
+        atexit { BrainServer.stop(); EyesServer.stop(); ScreenRecorder.quit() }      // (a recording never outlives the helper)
         // A replaced or terminated helper must take its model servers with it: left running, the next helper would
         // adopt a server still loaded with the old models. exit runs the atexit above (Lifecycle).
         Lifecycle.exitOnSIGTERM()

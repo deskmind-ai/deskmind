@@ -6,15 +6,17 @@
 // Pure: what happened, to what the recorder is told (Main: RunRecorder through the helper's record_start /
 // record_stop, with the decision panel).
 //
-// | what happened                         | recording now | the recorder                                 |
+// | what happened                         | recording now | the app                                      |
 // |---------------------------------------|---------------|----------------------------------------------|
-// | a task starts, its switch on, none on | that run      | start                                        |
+// | a task starts, its switch on, none on | that run      | asks the helper to record it                 |
 // | a task starts, its switch off         | --            | nothing                                      |
 // | the recorded run steered              | the same      | nothing (one task, one movie)                |
-// | the recorded run ends (any way)       | none          | stop                                         |
-// | its switch turned off while recording | none          | stop                                         |
-// | the start failed                      | none          | nothing more                                 |
-// | the app quits while recording         | none          | stop                                         |
+// | the recorded run ends (any way)       | none          | nothing to send: the helper stopped it (its  |
+// |                                       |               |   RecordingOwner); waits for the movie       |
+// | its switch turned off while recording | none          | cancels (asked again until answered)         |
+// | the helper said no                    | none          | nothing more                                 |
+// | the app quits while recording         | none          | cancels (the helper stops it at the run's    |
+// |                                       |               |   end anyway)                                |
 
 import Foundation
 
@@ -26,7 +28,9 @@ struct TaskRecording: Equatable {
         case startFailed(run: String)
         case appQuit
     }
-    enum Action: Equatable { case start(session: String, run: String), stop(run: String) }
+    /// start: ask the helper; cancel: ask it to stop (retried until it answers); ended: the task is over -- the helper
+    /// stopped the recording itself, the app hides its panel and waits for the movie.
+    enum Action: Equatable { case start(session: String, run: String), cancel(run: String), ended(session: String, run: String) }
 
     /// The switch, by conversation (absent: off -- a conversation is seeded with the last choice only when it is new:
     /// ShellModel; #127 delta: the default flipped every untouched conversation on).
@@ -47,23 +51,23 @@ struct TaskRecording: Equatable {
         switch e {
         case .toggled(let s, let v):
             on[s] = v
-            if !v, let r = recording, r.session == s { recording = nil; return [.stop(run: r.run)] }
+            if !v, let r = recording, r.session == s { recording = nil; return [.cancel(run: r.run)] }
             return []
         case .taskStarted(let s, let run):
             guard recording == nil, isOn(s) else { return [] }
             recording = (s, run)
             return [.start(session: s, run: run)]
         case .taskEnded(let run):
-            guard recording?.run == run else { return [] }
+            guard let r = recording, r.run == run else { return [] }
             recording = nil
-            return [.stop(run: run)]
+            return [.ended(session: r.session, run: run)]
         case .startFailed(let run):
             if recording?.run == run { recording = nil }
             return []
         case .appQuit:
             guard let r = recording else { return [] }
             recording = nil
-            return [.stop(run: r.run)]
+            return [.cancel(run: r.run)]
         }
     }
 
@@ -75,55 +79,61 @@ struct TaskRecording: Equatable {
     static let moviesKey = "record.movies"
 }
 
-/// The recorder as the window's model drives it (Main: RunRecorder and the decision panel; a test: its own).
+/// The recorder as the window's model drives it (Main: the helper's record ops and the decision panel; a test: its
+/// own). The helper owns the recording (RecordingOwner): the app asks, and learns the movie from the run's folder.
 protocol TaskRecorder: AnyObject {
-    /// Start recording for `goal`; `started(false)`: it could not (no permission, the helper away).
-    func start(goal: String, run: String, started: @escaping (Bool) -> Void)
-    /// Stop; `done`: the movie (nil: none).
-    func stop(done: @escaping (URL?) -> Void)
+    /// Ask the helper to record `run` (of `session`) for `goal`; `started(false)`: it said no (no permission).
+    func start(goal: String, run: String, session: String, started: @escaping (Bool) -> Void)
+    /// Ask the helper to stop recording `run` -- asked again until it answers (it stops by itself at the run's end).
+    func cancel(run: String)
+    /// The task is over: the helper stopped its recording; `saved` gets the movie once it is made.
+    func ended(run: String, session: String, saved: @escaping (URL) -> Void)
     /// A step of the recorded task, for the decision panel: its number and words.
     func step(_ n: Int, _ words: String)
 }
 
-/// The recorder's own state across the helper's slow answers (#127 delta and Codex: record_start waits up to 25 s, and
-/// its answer may never come). A stop while the start is on its way is owed. A start's answer is one of three: ok,
-/// refused (the helper said no: nothing records), unknown (timed out, lost: it may be recording). Unknown keeps the
-/// obligation: the helper is told to stop (record_stop, harmless when nothing records) as soon as the recording is not
-/// wanted, and again -- at the next stop, at the quit -- until it confirms. Pure: what happened, to what is sent.
+/// The helper's own recording (#127 Codex at 24cbf17: the app's bookkeeping of start / stop messages failed three
+/// ways; the helper owns the lifecycle): one capture at a time, bound to the run it is for. It stops by itself when
+/// that run ends (SessionHost sees the run's task_done, task_end, closed, its process gone) and when the helper quits,
+/// so no lost message of the app's can leave it running; the app's cancel (record_stop) stops it too. Stopping ends the
+/// capture at once and answers at once; the movie is made in the background and its path written beside the run
+/// (`recording.json`), which is how the app learns it. A new start while a movie is still being made is fine: the
+/// capture is free. Pure: what happened, to what the helper does (Helper/ScreenRecorder.swift follows it).
 ///
-/// | state         | begin        | start: ok          | refused | unknown            | stop               | stop's answer  |
-/// |---------------|--------------|--------------------|---------|--------------------|--------------------|----------------|
-/// | idle          | starting;    | --                 | --      | --                 | nothing            | --             |
-/// |               |   send start |                    |         |                    |                    |                |
-/// | starting      | nothing      | recording (owed:   | idle    | recording (owed:   | starting, owed     | --             |
-/// |               |              |   stopping; stop)  |         |   stopping; stop)  |                    |                |
-/// | recording     | nothing      | --                 | --      | --                 | stopping; stop     | --             |
-/// | stopping      | nothing      | --                 | --      | --                 | send stop again    | confirmed:     |
-/// |               |              |                    |         |                    |                    |   idle; else   |
-/// |               |              |                    |         |                    |                    |   stopping     |
-struct RecorderGate: Equatable {
-    enum State: Equatable { case idle, starting(stopOwed: Bool), recording, stopping }
-    enum Answer: Equatable { case ok, refused, unknown }
-    enum Event: Equatable { case begin, answered(Answer), stop, stopAnswered(confirmed: Bool) }
-    enum Send: Equatable { case start, stop }
-    private(set) var state: State = .idle
+/// | what happened                     | capture                 | the helper                                   |
+/// |-----------------------------------|-------------------------|----------------------------------------------|
+/// | start for run r                   | r (one before: ended)   | end the one before (its movie made), capture |
+/// | r's task ended (any way)          | none if it was r's      | end the capture, make r's movie              |
+/// | cancel (for r, or any)            | none if it matches      | end the capture, make its movie              |
+/// | the helper quits                  | none                    | end the capture                              |
+struct RecordingOwner: Equatable {
+    /// Written beside the run when its movie is made: {"path": …}.
+    static let savedFile = "recording.json"
+    enum Event: Equatable { case start(run: String?), runEnded(run: String), cancel(run: String?), quit }
+    enum Do: Equatable { case capture(run: String?), end(run: String?) }
+    /// The run being captured (`.some(nil)`: an op run's, bound to none).
+    private(set) var capturing: String??
 
-    /// Something may be recording, or a start or a stop is still to be confirmed: the app's quit sends record_stop.
-    var busy: Bool { state != .idle }
-
-    mutating func apply(_ e: Event) -> [Send] {
-        switch (state, e) {
-        case (.idle, .begin): state = .starting(stopOwed: false); return [.start]
-        case (.starting(let owed), .answered(let a)):
-            if a == .refused { state = .idle; return [] }
-            if owed { state = .stopping; return [.stop] }
-            state = .recording
-            return []
-        case (.starting, .stop): state = .starting(stopOwed: true); return []
-        case (.recording, .stop): state = .stopping; return [.stop]
-        case (.stopping, .stop): return [.stop]
-        case (.stopping, .stopAnswered(let confirmed)): if confirmed { state = .idle }; return []
-        default: return []
+    mutating func apply(_ e: Event) -> [Do] {
+        switch e {
+        case .start(let run):
+            var out: [Do] = []
+            if let c = capturing { out.append(.end(run: c)) }
+            capturing = .some(run)
+            out.append(.capture(run: run))
+            return out
+        case .runEnded(let run):
+            guard capturing == .some(run) else { return [] }
+            capturing = nil
+            return [.end(run: run)]
+        case .cancel(let run):
+            guard let c = capturing, run == nil || c == run else { return [] }
+            capturing = nil
+            return [.end(run: c)]
+        case .quit:
+            guard let c = capturing else { return [] }
+            capturing = nil
+            return [.end(run: c)]
         }
     }
 }

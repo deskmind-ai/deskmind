@@ -101,7 +101,10 @@ enum SessionHost {
         static let standard = UI(note: { run, ev in
             LiveWatch.note(run: run, ev)
             if ScreenRecorder.records(run) { recordApp(ev) }       // (only the recorded task's steps: #127 delta)
-        }, ended: { run in LiveWatch.ended(run) })
+        }, ended: { run in
+            LiveWatch.ended(run)
+            ScreenRecorder.runEnded(run)        // (the recording of this run stops with it: the helper owns it)
+        })
 
         /// A step's window's app into the recording, if one is going (the main app's 「录制这个任务」): the step's
         /// `object` (window:<bundle>#<n>), as the protocol says it.

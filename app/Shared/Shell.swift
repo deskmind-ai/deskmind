@@ -1060,6 +1060,12 @@ final class ShellModel: ObservableObject {
     @Published private(set) var movies: [String: String] = [:]
     private var stepsNoted: [String: Int] = [:]
 
+    /// The run's movie, made by the helper (its recording.json): its row says 「已录制」.
+    private func saved(_ run: String, _ url: URL) {
+        movies[run] = url.path
+        defaults.set(movies, forKey: TaskRecording.moviesKey)
+    }
+
     /// The selected conversation's switch (no conversation yet: the one a new conversation starts with).
     var recordsNext: Bool { selected.map { recording.isOn($0) } ?? recording.defaultOn }
     func setRecording(_ on: Bool) {
@@ -1081,19 +1087,19 @@ final class ShellModel: ObservableObject {
     private func record(_ actions: [TaskRecording.Action], in id: String, state: SessionState? = nil) {
         for a in actions {
             switch a {
-            case .start(_, let run):
+            case .start(let session, let run):
                 let goal = (state ?? states[id])?.task(run)?.raw ?? ""
-                recorder?.start(goal: goal, run: run) { [weak self] ok in
+                recorder?.start(goal: goal, run: run, session: session) { [weak self] ok in
                     guard let self, !ok else { return }
                     _ = self.recording.apply(.startFailed(run: run))
                 }
-            case .stop(let run):
+            case .cancel(let run):
                 stepsNoted[run] = nil
-                recorder?.stop { [weak self] url in
-                    guard let self, let url else { return }
-                    self.movies[run] = url.path
-                    self.defaults.set(self.movies, forKey: TaskRecording.moviesKey)
-                }
+                recorder?.cancel(run: run)
+                recorder?.ended(run: run, session: id) { [weak self] url in self?.saved(run, url) }
+            case .ended(let session, let run):
+                stepsNoted[run] = nil
+                recorder?.ended(run: run, session: session) { [weak self] url in self?.saved(run, url) }
             }
         }
     }
