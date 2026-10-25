@@ -41,13 +41,16 @@ enum RunRetention {
     /// pruned run with stray records is taken whatever its age (its records are not kept).
     static func plan(_ runs: [Run], now: Double, maxAge: TimeInterval = maxAge, maxBytes: Int64 = maxBytes) -> [Run] {
         let may = runs.filter(mayGo).sorted { ($0.ended!, $0.id) < ($1.ended!, $1.id) }
-        var take: [Run] = []
-        var total = runs.reduce(Int64(0)) { $0 + $1.bytes }
-        for r in may where r.pruned || now - r.ended! > maxAge || total > maxBytes {
+        // the pruned ones' strays first (taken whatever), then the oldest of the rest while one is too old or the
+        // total of what stays is over
+        var take = may.filter(\.pruned)
+        var total = runs.reduce(Int64(0)) { $0 + $1.bytes } - take.reduce(Int64(0)) { $0 + $1.bytes }
+        for r in may where !r.pruned {
+            guard now - r.ended! > maxAge || total > maxBytes else { break }
             take.append(r)
             total -= r.bytes
         }
-        return take
+        return take.sorted { ($0.ended!, $0.id) < ($1.ended!, $1.id) }
     }
 
     /// Whether `r` may be taken at all: ended, not live, and something of it left to take (a pruned session run with
