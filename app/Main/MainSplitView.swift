@@ -105,6 +105,10 @@ extension ShellModel {
         transport.isStopped = { [weak m] in m?.stopped ?? true }
         m.client.liveView = false      // (the window draws the float itself: the helper starts no live card for its tasks)
         m.uiWindow = { MainActor.assumeIsolated { MainWindow.uiState() } }   // (read where flush runs: the main queue)
+        // a task ended here: the run records' rule (M5: 30 days / 1 GB), off the main queue, the live runs kept
+        m.onTaskEnded = { [weak m] in
+            DispatchQueue.global(qos: .utility).async { [weak m] in RunRetention.prune(live: { m?.liveRunsNow() ?? [] }) }
+        }
         return m
     }()
 }
@@ -677,11 +681,30 @@ struct AgentPanel: View {
         return t.runId
     }
 
-    /// The column's blocks (RightColumn.model: only what the events said), each second while a task runs.
+    @AppStorage(ProcessTabs.key) private var traceOn = false
+
+    /// The column's blocks (RightColumn.model: only what the events said), each second while a task runs; with the
+    /// 过程 tab on (ui05.trace), 「现在」 and 「过程」 above it (ProcessTabs: switching sends nothing).
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }
-            .onChange(of: watched, initial: true) { _, run in dock.watch(run) }
-            .onDisappear { dock.watch(nil) }
+        VStack(spacing: 8) {
+            if traceOn {
+                Picker("", selection: Binding(get: { shell.currentTabs.tab }, set: { shell.pickTab($0) })) {
+                    Text(L("Now", lang: lang)).tag(ProcessTabs.Tab.now)
+                    Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+            }
+            if shell.currentTabs.shown(traceOn: traceOn) == .process, let sid = shell.selected,
+               let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
+                ProcessPane(sessionId: sid, runId: run).equatable().id(sid + "/" + run)
+            } else if shell.currentTabs.shown(traceOn: traceOn) == .process {
+                Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }
+            }
+        }
+        .onChange(of: watched, initial: true) { _, run in dock.watch(run) }
+        .onDisappear { dock.watch(nil) }
     }
 
     private var column: RightColumn {
