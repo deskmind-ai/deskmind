@@ -968,6 +968,13 @@ final class ShellModel: ObservableObject {
     private var shownAt: [String: Double] = [:]
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
+    /// An option of a card in place in the chat took the keyboard focus (the user's Tab): the window scrolls it into
+    /// view (its ScrollViewReader takes this). Never set by a card arriving.
+    @Published private(set) var scrollRequest: (id: String, n: Int)?
+    private var scrolls = 0
+    func requestScroll(to id: String) { scrolls += 1; scrollRequest = (id, scrolls) }
+    /// Where the window scrolls to show an option of a card in place there (the option's view id).
+    static func optionAnchor(_ card: CardModel, _ index: Int) -> String { "option/\(cardKey(card))/\(index)" }
     /// The main window is the key window of the active app (CardKeyMonitor's notifications; true until told otherwise).
     @Published private(set) var windowKey = true
     /// A field in the main window is being edited / an input method composes there (CardKeyMonitor: on every key-down
@@ -1054,8 +1061,9 @@ final class ShellModel: ObservableObject {
         guard control.key != nil, !editingText, !composing, keysActive(card), let id = selected else { return false }
         let b = control.button
         guard b.runId == card.runId, b.askId == card.askId, b.askId != nil, selected == id else { return false }
-        // (a key only on a card that fits whole: every control of it is on screen -- #124 Codex review at 80c339e; a
-        // card in place in the chat is the mouse's)
+        // (a digit acts from a distance: only on a card that fits whole, every control of it on screen -- #124 Codex
+        // review at 80c339e. On a card in place in the chat the focus-based keys still work -- Tab / ⇧Tab into it,
+        // Space / Return on the focused control, Esc -- and the focused option is scrolled into view: lead 10-25)
         if !cardFits(card) { return false }
         return canSend(b)
     }

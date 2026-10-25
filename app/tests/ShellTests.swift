@@ -681,6 +681,16 @@ enum ShellTests {
         let movers = ["@FocusState", ".focused(", "defaultFocus", "makeFirstResponder", "becomeFirstResponder", "prefersDefaultFocus", "focusScope", "FocusedValue",
                       "NSApp.activate", ".activate(", "makeKeyAndOrderFront", "orderFrontRegardless", "orderFront(", "makeKey()", "stepAside", "unhide("]
         for (n, code) in files {
+            var code = code
+            // the one focus allowed in the card (lead 10-25): which option has the focus, observed to scroll it into view
+            // -- never assigned (the user's Tab moves it)
+            if n == "Main/CardViews.swift" {
+                check(code.components(separatedBy: "@FocusState private var focusedOption: Int?").count == 2
+                      && code.components(separatedBy: ".focused($focusedOption, equals: c.index)").count == 2
+                      && code.range(of: #"focusedOption\s*=[^=]"#, options: .regularExpression) == nil,
+                      "the card's focus: observed only, never set")
+                code = code.replacingOccurrences(of: "@FocusState private var focusedOption: Int?", with: "").replacingOccurrences(of: ".focused($focusedOption, equals: c.index)", with: "")
+            }
             let found = movers.filter { code.contains($0) }
             check(found.isEmpty, "\(n) moves no focus and brings nothing forward (a card's field is focused only by the user's click): \(found)")
         }

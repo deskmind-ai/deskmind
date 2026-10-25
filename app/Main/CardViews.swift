@@ -30,6 +30,11 @@ struct CardView: View {
     @Environment(\.lang) private var lang
     /// The words typed in its own field: the shell's, by card key (they survive the card moving: #124 Codex review).
     private var words: Binding<String> { Binding(get: { shell.cardDraft(card) }, set: { shell.setCardDraft(card, $0) }) }
+    /// Which option has the keyboard focus -- observed, never set (the user's Tab moves it): on a card in place in the
+    /// chat, the focused option is scrolled into view (ShellModel.requestScroll), so a keyboard or VoiceOver user can
+    /// answer a card too tall to pin (lead 10-25).
+    @FocusState private var focusedOption: Int?
+
     /// 「细节」 open or not: the shell's, by card key (it survives the card moving between the pinned place and the chat).
     private var detailsOpen: Binding<Bool> {
         Binding(get: { shell.detailsOpen(card) }, set: { shell.setDetails(card, open: $0) })
@@ -108,6 +113,9 @@ struct CardView: View {
         // (its height as laid out: whether it fits the pinned place -- ShellModel.cardFits)
         .background(GeometryReader { g in Color.clear.preference(key: CardHeight.self, value: g.size.height) })
         .onPreferenceChange(CardHeight.self) { h in shell.cardLaidOut(card, height: h) }
+        .onChange(of: focusedOption) { _, i in
+            if let i, !shell.cardPinnedWhole(card) { shell.requestScroll(to: ShellModel.optionAnchor(card, i)) }
+        }
         // (a click anywhere on it is a move into it: card mode, its keys on — CardKeys; when it came on screen)
         .simultaneousGesture(TapGesture().onEnded { shell.enterCardMode(card) })
         .onAppear { shell.cardShown(card) }
@@ -148,6 +156,8 @@ struct CardView: View {
         }
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)    // (InkButtonStyle does not dim: the card's own)
+        .focused($focusedOption, equals: c.index)
+        .id(ShellModel.optionAnchor(card, c.index))
         .accessibilityLabel(b.detail.map { L("%@, %@", b.text, $0, lang: lang) } ?? b.text)
         .accessibilityHint(CardLayout.hint(c, keys: shell.keyWorks(card, c), lang: lang))
     }

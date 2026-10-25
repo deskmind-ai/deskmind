@@ -171,8 +171,8 @@ enum CardLayoutTests {
     // MARK: - every option at once (A2, invariant 3)
 
     /// The card never scrolls inside: each option takes a click the moment the card shows, whatever its height. A card
-    /// too tall for the pinned place stays in place in the chat; there no option takes a key -- its controls may be off
-    /// screen (#124 Codex review at 80c339e) -- and the mouse reaches each only past the content.
+    /// too tall for the pinned place stays in place in the chat; there no digit picks -- its controls may be off screen
+    /// (#124 Codex review at 80c339e) -- while Tab, Space and Esc, which act on what has the focus, still do (CardKeysTests).
     static func wholeCardTests() {
         for (name, json) in samples() {
             let card = model(json)

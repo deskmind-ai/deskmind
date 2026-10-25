@@ -169,6 +169,25 @@ enum CardKeysTests {
         check(f.m.keysActive(m), "the new view came before the old one went: card mode stays")
         f.m.cardHidden(m); f.m.cardHidden(m)     // (the view shown above, and this one)
         check(!f.m.keysActive(m), "the last view went: card mode ends")
+        // lead 10-25: a tall card in the chat answered by keys alone -- Tab moves into it, Space on the focused option
+        // (AppKit presses the button: its action, ShellModel.click) picks it, digits do nothing
+        do {
+            let t = R(); t.ask("a1", "ambiguity")
+            guard let tm = t.model("a1") else { check(false, "the tall card"); return }
+            t.m.pinRoom(columnHeight: 600); t.m.cardLaidOut(tm, height: 900); t.m.cardShown(tm); t.timers.advance(2)
+            check(!t.m.cardPinnedWhole(tm), "tall: in place in the chat")
+            _ = t.m.keyDown(characters: Self.tab, commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false)
+            check(t.m.keysActive(tm), "Tab: into the card")
+            check(!t.m.keyDown(characters: "1", commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false) && t.phase("a1") == .open,
+                  "a digit: nothing (it acts from a distance)")
+            let reading = tm.buttons.first { $0.role == .choice }!
+            check(t.m.buttonEnabled(reading, card: tm, in: t.state) && t.m.click(reading) && t.phase("a1")?.pending != nil,
+                  "Space on the focused option: picked (held for its take-back)")
+            _ = t.m.keyDown(characters: Self.esc, commandLike: false, mainWindowIsKey: true, editingText: false, isRepeat: false)
+            check(t.phase("a1") == .open, "Esc: taken back")
+            t.m.requestScroll(to: ShellModel.optionAnchor(tm, reading.index))
+            check(t.m.scrollRequest?.id == "option/\(ShellModel.cardKey(tm))/\(reading.index)", "the focused option asks to be scrolled into view")
+        }
         // the card answered: its layout facts and its words go
         f.m.setDetails(m, open: true)
         f.resumed("a1")
