@@ -14,6 +14,10 @@ struct GoalRunView: View {
     var onEdit: (GoalRequest) -> Void = { _ in }
     /// Start another run (confirmed): "Run again", or the next instruction typed below the result.
     var onRun: (GoalRequest) -> Void = { _ in }
+    /// Its request was started (GoalRuns accepted it; the old engine: at once) / refused (another goal is not over):
+    /// the home draft is cleared, or kept (HomeDraft).
+    var onStarted: (UUID) -> Void = { _ in }
+    var onRefused: (UUID) -> Void = { _ in }
 
     @EnvironmentObject var model: HelperModel
     @EnvironmentObject var eyes: EyesDownloader
@@ -280,10 +284,12 @@ struct GoalRunView: View {
                 GoalRun(goal: r.goal, folder: r.folder, record: r.record, shell: shell, effects: .app(lang: lang, services: AppGoalServices.shared, surface: RunOverlaySurface.shared,
                                                                                          after: { seconds, f in DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: f) }))
             }
+            if goalBox.run != nil { onStarted(r.id) } else { onRefused(r.id) }
             return
         }
         run.goalRequest = r
         run.start(request: r.body)
+        onStarted(r.id)
     }
 
     /// What this screen shows: one value from its route (GoalShown) — the task, its own pinned card, the folder, the

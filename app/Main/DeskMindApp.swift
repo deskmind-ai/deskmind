@@ -480,9 +480,9 @@ struct RootView: View {
     @EnvironmentObject var model: HelperModel
     @EnvironmentObject var downloader: ModelDownloader
     @State private var screen: Screen = .home
-    // The prompt and its folder live here, not in HomeView: a run's "Edit" brings them back as they were.
-    @State private var goal = ""
-    @State private var folder: String?
+    // The prompt and its folder live here, not in HomeView: a run's "Edit" brings them back as they were. A goal started
+    // from home clears them once it is accepted (HomeDraft: Shared/HomeDraft.swift).
+    @State private var draft = HomeDraft()
 
     private func go(_ s: Screen) { withAnimation(.easeInOut(duration: 0.25)) { screen = s } }
 
@@ -490,11 +490,14 @@ struct RootView: View {
         ZStack {
             switch screen {
             case .home:
-                HomeView(goal: $goal, folder: $folder,
-                         onRun: { go(.run($0)) }, onOpen: { go(.record($0)) }, onExamples: { go(.examples) })
+                HomeView(goal: $draft.goal, folder: $draft.folder,
+                         onRun: { r in draft = HomeDraft.next(draft, .homeStart(r.id)); go(.run(r)) },
+                         onOpen: { go(.record($0)) }, onExamples: { go(.examples) })
                     .transition(.move(edge: .leading).combined(with: .opacity))
             case .run(let r):
-                GoalRunView(request: r, onBack: { go(.home) }, onEdit: edit, onRun: { go(.run($0)) })
+                GoalRunView(request: r, onBack: { go(.home) }, onEdit: edit, onRun: { go(.run($0)) },
+                            onStarted: { draft = HomeDraft.next(draft, .started($0)) },
+                            onRefused: { draft = HomeDraft.next(draft, .refused($0)) })
                     .id(r.id)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             case .record(let r):
@@ -538,7 +541,7 @@ struct RootView: View {
     }
 
     private func edit(_ r: GoalRequest) {
-        goal = r.goal; folder = r.folder
+        draft = HomeDraft.next(draft, .edit(goal: r.goal, folder: r.folder))
         go(.home)
     }
 }

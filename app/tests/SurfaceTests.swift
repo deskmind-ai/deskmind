@@ -35,6 +35,7 @@ enum SurfaceTests {
         DecisionTests.group("surface.goalClosableTests"); goalClosableTests()
         DecisionTests.group("surface.goalStopTests"); goalStopTests()
         DecisionTests.group("surface.goalCardKeysTests"); goalCardKeysTests()
+        DecisionTests.group("surface.homeDraftTests"); homeDraftTests()
     }
 
     typealias L = GoalLifecycle
@@ -768,6 +769,39 @@ enum SurfaceTests {
     }
 
 
+
+    /// rc.16: a goal started from home left its words and folder in the prompt; Back, one click on Start, the same goal
+    /// ran again. HomeDraft's table (Shared/HomeDraft.swift), row by row.
+    static func homeDraftTests() {
+        typealias D = HomeDraft
+        let a = UUID(), b = UUID()
+        let typed = D(goal: "新建三个文本文件 a.txt…", folder: "/tmp/dl")
+        func row(_ d: D, _ e: D.Event, _ want: D, _ what: String) {
+            let n = D.next(d, e)
+            check(n == want, "home draft: \(what): \(n)")
+        }
+        row(D(), .typed("x"), D(goal: "x"), "typed")
+        row(D(goal: "x"), .folder("/tmp/dl"), D(goal: "x", folder: "/tmp/dl"), "a folder chip")
+        row(typed, .homeStart(a), D(goal: typed.goal, folder: typed.folder, pending: a), "Start from home: not cleared yet")
+        row(D(goal: typed.goal, folder: typed.folder, pending: a), .started(a), D(), "accepted: cleared")
+        row(D(goal: typed.goal, folder: typed.folder, pending: a), .refused(a), typed, "refused (another goal not over): kept")
+        row(D(goal: typed.goal, folder: typed.folder, pending: a), .confirmCancelled, typed, "confirm cancelled: kept")
+        row(D(goal: typed.goal, folder: typed.folder, pending: a), .started(b), D(goal: typed.goal, folder: typed.folder, pending: a),
+            "another request started (Run again, Next task…): untouched")
+        row(typed, .started(a), typed, "started with nothing pending (its view came back): untouched")
+        row(D(), .back, D(), "Back: unchanged")
+        row(D(), .edit(goal: "g", folder: "/f"), D(goal: "g", folder: "/f"), "Edit: its goal and folder")
+        row(D(goal: "x", folder: "/f", pending: a), .reuse(goal: "r", folder: nil), D(goal: "r", folder: "/f"), "a recent run's words: its goal")
+        row(D(goal: "x", folder: "/f"), .reuse(goal: "e", folder: .some(nil)), D(goal: "e"), "an example: its goal and folder")
+        // the rc.16 path: Start from home, the goal accepted, later Back — the prompt is empty: no one-click rerun
+        var d = typed
+        for e: D.Event in [.homeStart(a), .started(a), .back] { d = D.next(d, e) }
+        check(d.goal.isEmpty && d.folder == nil, "home start then Back: the prompt empty (\(d))")
+        // refused, then Back: the words kept to start again
+        d = typed
+        for e: D.Event in [.homeStart(a), .refused(a), .back] { d = D.next(d, e) }
+        check(d.goal == typed.goal && d.folder == typed.folder, "refused then Back: kept")
+    }
 }
 
 extension GoalRunScreen {
