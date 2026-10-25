@@ -484,8 +484,10 @@ final class ShellModel: ObservableObject {
         self.retryAfter = retryAfter
         self.takeBackAfter = takeBackAfter
         self.now = now
+        liveSince = now()
         self.work = work
         self.deliver = deliver
+        client.clock = now        // (an exit the client infers for a session alive this run is stamped by this clock)
         client.onChange = { [weak self] id, _ in self?.changed(id) }
         // each refusal of an answer as it comes: one of ours goes to the UI queue to be matched; any other is dropped here
         client.onAnswerRefusal = { [weak self] id, e in self?.answerRefused(id, e) }
@@ -629,6 +631,7 @@ final class ShellModel: ObservableObject {
         pendingLock.unlock()
         for id in ids where !deleted.contains(id) {
             let s = client.state(id)
+            logChanges(from: states[id], to: s)
             states[id] = s
             // a card that is no longer open: what the app held for it goes (a held answer is never sent then) — on the
             // UI queue only (flush runs there in the app; a test that delivers inline from a client thread hands it over)
@@ -866,7 +869,7 @@ final class ShellModel: ObservableObject {
     /// True when it picked or sent something (a key that did nothing then passes on: ShellModel.keyDown). A click on
     /// an option — by the mouse or VoiceOver's press, the same action — is a click on its card: a move into it.
     @discardableResult
-    func click(_ button: CardModel.Button) -> Bool {
+    func click(_ button: CardModel.Button, by: UIEvent.Pick = .click) -> Bool {
         guard let id = selected else { return false }
         if let ask = button.askId, let p = pinnedTakingPicks(), p.askId == ask, p.runId == button.runId { enterCardMode(p) }
         // the one predicate (canSend): what it says is what happens
@@ -875,8 +878,12 @@ final class ShellModel: ObservableObject {
             return false
         }
         let a = CardModel.answer(button)
-        if a.askId == nil { return act(cards.respond(a, sessionId: id, in: client.state(id)), in: id) }
-        return pick(a, immediate: button.role == .cancel, in: id)
+        if a.askId == nil {
+            let action = cards.respond(a, sessionId: id, in: client.state(id))
+            if action != .none { logPick(a, role: button.role, by: by) }
+            return act(action, in: id)
+        }
+        return pick(a, role: button.role, by: by, immediate: button.role == .cancel, in: id)
     }
 
     /// The user's own words on a card that takes them (its own field): on a card with an approve-type option, only once
@@ -885,7 +892,7 @@ final class ShellModel: ObservableObject {
     func answer(_ card: CardModel, text: String) {
         guard let id = selected, !Self.wordsWaitForBody(card) || bodySeen.contains(Self.cardKey(card)),
               let a = card.answer(text: text), cloudAllows() else { return }
-        pick(a, immediate: false, in: id)
+        pick(a, role: .other, by: .typed, immediate: false, in: id)
     }
 
     // MARK: card keys (1–9): card mode
@@ -921,6 +928,49 @@ final class ShellModel: ObservableObject {
     /// or when the window becomes key / the app active / the window is restored with it on screen; cleared when it
     /// leaves): the 1 s counts from then.
     private var shownAt: [String: Double] = [:]
+
+    // MARK: the UI event log (Shared/UIEvents.swift)
+
+    /// Where the log's events go (tests take them), and the main window's state as the app sees it now.
+    var uiRecord: (UIEvent) -> Void = UIEvents.record
+    var uiWindow: () -> UIEvent.Window = { .front }
+    /// When each card was first shown here, by card key: a pick's time from it, a held answer's from its pick.
+    private var cardShownAt: [String: Double] = [:]
+    private var cardPickedAt: [String: Double] = [:]
+    /// When this model began watching: a change made by a line written before it is history replayed (a relaunch, a
+    /// history fill), not something the user saw happen here (UIEvents.changes).
+    private var liveSince: Double = 0
+
+    private func logChanges(from old: SessionState?, to new: SessionState) {
+        for (k, e) in UIEvents.cardChanges(from: old, to: new, window: uiWindow(), liveSince: liveSince) {
+            if case .cardShown = e { cardShownAt[k] = now() }
+            if case .cardEnded = e { cardShownAt[k] = nil; cardPickedAt[k] = nil }
+            uiRecord(e)
+        }
+    }
+
+    /// The card an answer is for, as the log names it.
+    private func logCard(_ a: CardAnswer) -> (run: UIEvent.ID?, ask: UIEvent.ID?, kind: UIEvent.CardKind) {
+        let t = selected.flatMap { states[$0] }?.task(a.runId)
+        let kind: String = a.askId.map { id in t?.cards.first { $0.askId == id }?.card.kind ?? "" } ?? "result"
+        return (UIEvent.ID(a.runId), a.askId.flatMap(UIEvent.ID.init), UIEvent.CardKind(kind))
+    }
+
+    private func logPick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick) {
+        let c = logCard(a), key = CardStore.key(a)
+        // (not known for a card shown before this model began watching: left out, never 0)
+        let ms = cardShownAt[key].map { max(0, Int(((now() - $0) * 1000).rounded())) }
+        cardPickedAt[key] = now()
+        uiRecord(.cardPick(run: c.run, ask: c.ask, kind: c.kind, option: UIEvent.Option(role), by: by, place: .chat, ms: ms))
+    }
+
+    /// The answer is being written: what the log will say once the helper took it (write's `sent`).
+    private func sentEvent(_ a: CardAnswer, key: String) -> UIEvent {
+        let c = logCard(a)
+        let held = cardPickedAt[key].map { Int(((now() - $0) * 1000).rounded()) } ?? 0
+        cardPickedAt[key] = nil
+        return .cardSent(run: c.run, ask: c.ask, kind: c.kind, heldMs: max(0, held))
+    }
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
     /// The main window is the key window of the active app (CardKeyMonitor's notifications; true until told otherwise).
@@ -1037,7 +1087,7 @@ final class ShellModel: ObservableObject {
         guard let n = CardKeys.digit(characters: characters, commandLike: commandLike, isRepeat: isRepeat),
               let p = pinnedTakingPicks(), let ctl = CardLayout(p).control(forKey: n), keyWorks(p, ctl), let id = selected else { return false }
         // (keyWorks said yes: act, with no gate of its own)
-        return pick(CardModel.answer(ctl.button), immediate: ctl.button.role == .cancel, in: id)
+        return pick(CardModel.answer(ctl.button), role: ctl.button.role, by: .digit, immediate: ctl.button.role == .cancel, in: id)
     }
 
     /// Key `n` (1–9, CardKeys) on the pinned card: its n-th control as shown (CardLayout), picked as a click is — held for
@@ -1048,17 +1098,26 @@ final class ShellModel: ObservableObject {
         guard let id = selected, let s = states[id], let p = pinned(s), p.phase.takesPick else { return false }
         let card = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
         guard let c = CardLayout(card).control(forKey: n) else { return false }
-        return click(c.button)
+        return click(c.button, by: .digit)
     }
 
     /// 「撤回」 within the take-back: the held answer is dropped, never sent; the card waits again.
-    func takeBack(_ card: CardModel) { cards.takeBack(Self.cardKey(card)) }
+    func takeBack(_ card: CardModel) {
+        let key = Self.cardKey(card)
+        guard let p = cards.picks[key] else { return }
+        cards.takeBack(key)
+        cardPickedAt[key] = nil
+        let c = logCard(p.answer)
+        uiRecord(.cardTakeBack(run: c.run, ask: c.ask, kind: c.kind))
+    }
 
     /// 「现在回答」 on an expired card: the task looks again and asks a new card (reask). Sent once.
     func answerNow(_ runId: String, askId: String) {
         guard let id = selected, cloudAllows(),
               cards.answerNow(runId, askId: askId, sessionId: id, in: client.state(id)) else { return }
         let key = CardStore.key(runId: runId, askId: askId)
+        let kind = states[id]?.task(runId)?.cards.first { $0.askId == askId }?.card.kind ?? ""
+        uiRecord(.cardReask(run: UIEvent.ID(runId), ask: UIEvent.ID(askId), kind: UIEvent.CardKind(kind)))
         work { [weak self] in
             guard let self else { return }
             if self.client.send(.reask(runId: runId), to: id) != .sent { self.deliver { self.cards.reaskNotSent(key) } }
@@ -1107,8 +1166,10 @@ final class ShellModel: ObservableObject {
     /// A pick on its card (CardStore.pick, against the newest state the client has): held, then — its take-back run
     /// out — written once; or written now.
     @discardableResult
-    private func pick(_ a: CardAnswer, immediate: Bool, in id: String) -> Bool {
-        act(cards.pick(a, sessionId: id, immediate: immediate, now: now(), offEpoch: client.offEpoch, in: client.state(id)), in: id)
+    private func pick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, immediate: Bool, in id: String) -> Bool {
+        let action = cards.pick(a, sessionId: id, immediate: immediate, now: now(), offEpoch: client.offEpoch, in: client.state(id))
+        if action != .none { logPick(a, role: role, by: by) }   // (before a send at once, which logs its own)
+        return act(action, in: id)
     }
 
     @discardableResult
@@ -1159,10 +1220,13 @@ final class ShellModel: ObservableObject {
         let req = newReqId()
         cards.issue(req, sessionId: id, key: key, answer: a)
         syncOwnReqs()
+        let sent = sentEvent(a, key: key)
         work { [weak self] in
             guard let self else { return }
             let r = self.client.answer(a, in: id, reqId: req)
+            // (the log's card_sent once the helper took the line; a write that did not go is no answer)
             if r != .sent { self.deliver { self.cards.notSent(key, a); self.cards.unissue(req); self.syncOwnReqs() } }
+            else { self.deliver { self.uiRecord(sent) } }
         }
     }
 

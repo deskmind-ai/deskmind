@@ -326,6 +326,8 @@ struct HandsHelper {
     static func main() {
         // cloud models turned off (models.off): a harness op run going stops by its normal stop path
         SessionHost.onModelsOff = { HarnessRun.stopForModelsOff() }
+        // The helper's own UI event log (Shared/UIEvents.swift), next to the main app's.
+        UIEvents.log = UIEventLog(dir: DeskMindIPC.supportDir, file: UIEventLog.helperFile)
         if let i = CommandLine.arguments.firstIndex(of: "--probe-ax-to"), i + 1 < CommandLine.arguments.count {
             // Diagnostic: an instance started by LaunchServices reports what TCC grants *it*.
             try? "\(AXIsProcessTrusted() ? 1 : 0) \(CGPreflightScreenCaptureAccess() ? 1 : 0)"

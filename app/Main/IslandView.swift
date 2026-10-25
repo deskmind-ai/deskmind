@@ -201,6 +201,16 @@ enum MainWindow {
         CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown) < seconds
     }
 
+    /// The window's state for the UI log (UIEvent.Window): in front (the app active, the window key), behind,
+    /// minimised, hidden (the app is), or closed (none, or not on screen).
+    static func uiState() -> UIEvent.Window {
+        guard let w = window else { return .closed }
+        if NSApp.isHidden { return .hidden }
+        if w.isMiniaturized { return .minimized }
+        if !w.isVisible { return .closed }
+        return NSApp.isActive && w.isKeyWindow ? .front : .behind
+    }
+
     /// Restored if minimised, in front, as the key window: only for something the user did (the island's buttons, a
     /// reopen). False when there is no window.
     @discardableResult
@@ -208,6 +218,35 @@ enum MainWindow {
         guard let w = window else { return false }
         Activation.bringForward(gesture, window: w)
         return true
+    }
+}
+
+/// The UI log's `activation` (Shared/UIEvents.swift): each time the app becomes active, the funnel's call behind it
+/// (Activation.bringForward, with its gesture), or none -- what it was is not guessed (#123 review at 20e66ab: the
+/// HID idle counter also counts the events a task posts). The reopens are put down as they come (reopenAsked), and with
+/// each activation the type of the event AppKit was handling then (a click on the window, ⌘Tab's key: the user's).
+enum ActivationRecorder {
+    nonisolated(unsafe) private static var funnel: (by: UIEvent.Activation, at: Double)?
+    nonisolated(unsafe) private static var token: NSObjectProtocol?
+
+    /// The event being handled as the app became active, by its type (its window: one of DeskMind's or not).
+    static func input(_ e: NSEvent?) -> UIEvent.Input {
+        guard let e else { return .none }
+        switch e.type {
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown: return e.window != nil ? .mouseDownInWindow : .mouseDown
+        case .keyDown: return .keyDown
+        case .appKitDefined: return .appKitDefined
+        default: return .other
+        }
+    }
+
+    static func start() {
+        guard token == nil else { return }
+        Activation.onBringForward = { source in funnel = (source == .click ? .button : .reopen, Date().timeIntervalSince1970) }
+        token = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            UIEvents.record(.activation(by: UIEvents.activation(funnel: funnel, now: Date().timeIntervalSince1970), input: input(NSApp.currentEvent)))
+            funnel = nil
+        }
     }
 }
 
@@ -228,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MainActor.assumeIsolated {
+            UIEvents.record(.reopenAsked)
             if flag { return true }
             // While a run is running and no card waits, a reopen is most likely hands giving the front back after a
             // foreground step (`open -b ai.deskmind.app`, DeskMind still the active app after ⌘M): restoring the

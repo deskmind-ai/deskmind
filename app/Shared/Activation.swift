@@ -48,8 +48,13 @@ enum Activation {
 
     // MARK: the funnel
 
+    /// Told of each bringForward before it activates, with what the gesture was (the UI log's `activation`: the main
+    /// app's ActivationRecorder). Main thread.
+    nonisolated(unsafe) static var onBringForward: ((UserGesture.Source) -> Void)?
+
     /// DeskMind's window, restored if minimised, in front as the key window.
     static func bringForward(_ gesture: UserGesture, window: NSWindow) {
+        onBringForward?(gesture.source)
         NSApp.activate()
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)

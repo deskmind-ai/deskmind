@@ -294,7 +294,7 @@ final class LiveCard: NSObject {
                 .deletingLastPathComponent()
             let url = main.pathExtension == "app" ? main
                 : NSWorkspace.shared.urlForApplication(withBundleIdentifier: "ai.deskmind.app")
-            if let url { Activation.openApp(gesture, at: url) }
+            if let url { UIEvents.record(.liveCardOpen); Activation.openApp(gesture, at: url) }
         } else if read({ $0.collapsed }) {
             toggleCollapsed()
         }
