@@ -470,84 +470,15 @@ struct DevTools: View {
     }
 }
 
-/// The window's content: the 0.5 main window when `ui05.shell` is on, else the window as it was (RootView).
+/// The window's content: the main window (conversations, chat, the agent's column) -- the one window (A10).
 struct AppRoot: View {
-    @AppStorage(ShellFlag.key) private var shellOn = false
-
-    var body: some View {
-        Group {
-            if shellOn { MainSplitView(shell: ShellModel.live) } else { RootView() }
-        }
-        .onChange(of: shellOn) { was, now in if was && !now { ShellModel.live.stopWatching() } }
-    }
-}
-
-/// Home, a run of the user's own instruction (new, or a past one from the recent list), or the examples screen.
-struct RootView: View {
-    enum Screen { case home, run(GoalRequest), record(RunRecord), examples }
-    @EnvironmentObject var model: HelperModel
     @EnvironmentObject var downloader: ModelDownloader
-    @State private var screen: Screen = .home
-    // The prompt and its folder live here, not in HomeView: a run's "Edit" brings them back as they were.
-    @State private var goal = ""
-    @State private var folder: String?
-
-    private func go(_ s: Screen) { withAnimation(.easeInOut(duration: 0.25)) { screen = s } }
 
     var body: some View {
-        ZStack {
-            switch screen {
-            case .home:
-                HomeView(goal: $goal, folder: $folder,
-                         onRun: { go(.run($0)) }, onOpen: { go(.record($0)) }, onExamples: { go(.examples) })
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-            case .run(let r):
-                GoalRunView(request: r, onBack: { go(.home) }, onEdit: edit, onRun: { go(.run($0)) })
-                    .id(r.id)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            case .record(let r):
-                GoalRunView(request: nil, record: r, onBack: { go(.home) }, onEdit: edit, onRun: { go(.run($0)) })
-                    .id(r.id)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            case .examples:
-                RunView { go(.home) }
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+        MainSplitView(shell: ShellModel.live)
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                downloader.stashForQuit()
             }
-        }
-        .background(Brand.paper)
-        // the island's Show Details on a session task: its GoalRunView, from its record
-        .onReceive(NotificationCenter.default.publisher(for: RunOverlay.showRecord)) { n in
-            route(details: n.object as? UUID)
-        }
-        // a window that opens (again) while a goal is not over: straight to that goal (its cards, its Stop)
-        .onAppear {
-            MainWindow.applyClosable()      // (a window that came anew: as the run and the goal hold it)
-            route(details: nil, animated: false)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            downloader.stashForQuit()
-        }
-    }
-
-    /// Show Details and a window that opens again: IslandFeed.route — the active goal first, else the record.
-    private func route(details: UUID?, animated: Bool = true) {
-        var showingGoal: UUID? = nil, showingRecord: UUID? = nil
-        if case .run(let r) = screen { showingGoal = r.id }
-        if case .record(let r) = screen { showingRecord = r.id }
-        switch IslandFeed.route(active: GoalRuns.app.active, details: details, showingGoal: showingGoal, showingRecord: showingRecord) {
-        case .goal(let id)?:
-            guard let r = GoalRequests.byId[id] else { return }
-            if animated { go(.run(r)) } else { screen = .run(r) }
-        case .record(let id)?:
-            guard let r = RunHistory.shared.records.first(where: { $0.id == id }) else { return }
-            go(.record(r))
-        case nil: break
-        }
-    }
-
-    private func edit(_ r: GoalRequest) {
-        goal = r.goal; folder = r.folder
-        go(.home)
     }
 }
 

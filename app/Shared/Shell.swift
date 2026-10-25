@@ -833,39 +833,19 @@ final class ShellModel: ObservableObject {
         }
     }
 
-    /// A computer task of its own, from the home screen's GoalRunView (harness engine): a new session, opened, then
-    /// `cua` with the goal and its folder as the scope — the same session task the chat runs, so it shows with the
-    /// chat's task row, cards and result card (A3's one state, the same canSend / respond path). The new session
-    /// becomes the selected one once it is open. What came of it goes to `report`, on the UI queue, each once: the
-    /// cloud switch's refusal, else the open (its session id, or failed), then the send (sent, refused, unavailable)
-    /// — GoalRun's lifecycle (Shared/GoalRun.swift) is driven by these, never by the selected session.
-    /// `clientId`: its cua's (the goal matches a refusal by it); `ticket`: the goal still wants it — over, the cua is
-    /// never sent, and a cua that went while it became over is followed by a stop.
-    func startTask(_ goal: String, scope: String?, clientId: String? = nil, ticket: GoalTicket? = nil,
-                   report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
-        newConversation()
-        let control = SessionControl.cua(goal, scope: scope)
-        guard cloudAllows() else { report(.cloudRefused); return }
-        openThenSend(control, text: goal, clientId: clientId, ticket: ticket, report: report)
-    }
-
     /// The new conversation's first message: the session is opened (with the settings now), then the words sent. The
     /// words stay in the composer until the session is open (it takes no typing meanwhile: `opening`); not opened, they
     /// are still there; opened, they are the session's (sent, or an unsent bubble of it).
-    private func openThenSend(_ control: SessionControl, text: String, clientId: String? = nil, ticket: GoalTicket? = nil,
-                              report: @escaping (GoalLifecycle.Event) -> Void = { _ in }) {
-        guard !opening else { report(.openFailed); return }
+    private func openThenSend(_ control: SessionControl, text: String) {
+        guard !opening else { return }
         opening = true
         work { [weak self] in
             guard let self else { return }
-            // (a goal over before its open went: nothing is opened for it)
-            if ticket?.over == true { self.deliver { self.opening = false; report(.openFailed) }; return }
             // (with the settings stored when it goes: SessionClient.desired())
             guard let id = self.client.open() else {
                 self.deliver {
                     self.opening = false
                     self.notice = L("Couldn't start a conversation. Is DeskMind's helper running?", lang: self.lang())
-                    report(.openFailed)
                 }
                 return
             }
@@ -875,20 +855,9 @@ final class ShellModel: ObservableObject {
                 self.states[id] = self.client.state(id)
                 if self.selected == nil { self.selected = id }
                 self.rebuild()
-                report(.opened(sid: id))
             }
-            // a goal over meanwhile (its bound ran out while the open waited): its cua is never sent
-            if ticket?.over == true { return }
-            let r = self.client.send(control, to: id, clientId: clientId)
-            // (over while the send went: the goal's guard stops the task it starts, by its run — never a run-less
-            // stop here, which the session would take for whatever task runs)
-            self.deliver {
-                switch r {
-                case .sent: report(.sent)
-                case .refused(let code): self.notSent(r, text: text, in: id); report(.refused(code))
-                case .unavailable: self.notSent(r, text: text, in: id); report(.unavailable)
-                }
-            }
+            let r = self.client.send(control, to: id)
+            if r != .sent { self.deliver { self.notSent(r, text: text, in: id) } }
         }
     }
 
@@ -898,18 +867,7 @@ final class ShellModel: ObservableObject {
         if r == .unavailable { notice = L("DeskMind's helper didn't answer. Your message is kept below; send it again.", lang: lang()) }
     }
 
-    /// `stop {client_id}` (harness#72) to one session: the task the cua with that client id started, or — none yet —
-    /// the cua cancelled. `sent`: the helper took the line (true) or did not answer (false); the session's answer is
-    /// session.stop_ack, on its stream. The send reopens an exited session (it answers from its history).
-    func stopCua(sessionId id: String, clientId: String, sent: @escaping (Bool) -> Void) {
-        work { [weak self] in
-            guard let self else { return }
-            let r = self.client.send(.stopCua(clientId: clientId), to: id)
-            self.deliver { sent(r == .sent) }
-        }
-    }
-
-    /// Stop one task of one session by its run (GoalRun). Never run-less: the session would stop whatever task runs.
+    /// Stop one task of one session by its run (the float's Stop). Never run-less: the session would stop whatever task runs.
     func stop(sessionId id: String, runId: String) {
         cards.stopping(runId)
         work { [weak self] in _ = self?.client.send(.stop(runId: runId), to: id) }

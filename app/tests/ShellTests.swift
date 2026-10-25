@@ -1840,17 +1840,14 @@ enum ShellTests {
         check(c.state("ses_t").outbox.last?.refused == "no_model", "reopened, then no_model: shown as no_model (\(String(describing: c.state("ses_t").outbox.last?.refused)))")
     }
 
-    /// Re-review of b0ff614 (old window): the engine setter asserts through the ordered sync; the app asserts when the
-    /// helper's status disagrees; a refused run (no_model) is said as it is.
+    /// Re-review of b0ff614: the engine setter asserts through the ordered sync; the app asserts when the helper's
+    /// status disagrees. (The old window's run screen, which said a no_model refusal, went with A10.)
     static func oldWindowRunTests() {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let sheet = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
         check(sheet.contains("ModelsOffSync.shared.push()"), "the engine setter pushes through the app's one sync")
         let app = (try? String(contentsOf: dir.appendingPathComponent("Main/DeskMindApp.swift"), encoding: .utf8)) ?? ""
         check(app.contains("reply?[\"models_off\"]") && app.contains("ModelsOffSync.shared.push()"), "the helper's status disagreeing: pushed again")
-        let run = (try? String(contentsOf: dir.appendingPathComponent("Main/RunView.swift"), encoding: .utf8)) ?? ""
-        check(run.contains("[\"brain_not_ready\", \"no_model\"].contains"), "a run refused no_model: said as it is")
-        check(L("The cloud model is off. Turn it on in the model settings to run this task.", lang: .zhHans).contains("云端模型关着"), "translated")
     }
 
     /// External review of 473fdac (P1): the app starts with cloud off while the helper runs a session whose task runs.

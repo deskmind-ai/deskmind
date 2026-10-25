@@ -37,14 +37,10 @@ enum Activation {
     /// The app delegate's reopen: the Dock icon, a notification, the live card's open (applicationShouldHandleReopen).
     static func reopen(_ sender: NSApplication) -> UserGesture { UserGesture(.reopen) }
 
-    /// A reopen with no window on screen restores the window — the Dock icon, the live card, a notification: the
-    /// user's — except while an old-engine run, or a 0.5 window's session task, runs with no card waiting: hands may
-    /// give the front back there with `open -b`, a reopen too. A goal from the home screen never holds it (hands#69
-    /// gives the front back by activating the running app, no reopen; Codex review at b767ca7: the hold kept the
-    /// user's own Dock click from restoring the window).
-    static func reopenRestores(oldRunWithoutCard: Bool, shellTaskWithoutCard: Bool, goalActive: Bool) -> Bool {
-        !oldRunWithoutCard && !shellTaskWithoutCard
-    }
+    /// A reopen with no window on screen restores the window — the Dock icon, a notification: the user's — except
+    /// while a session's task runs with no card waiting: hands may give the front back there with `open -b`, a
+    /// reopen too.
+    static func reopenRestores(shellTaskWithoutCard: Bool) -> Bool { !shellTaskWithoutCard }
 
     // MARK: the funnel
 

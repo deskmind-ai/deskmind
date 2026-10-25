@@ -225,7 +225,6 @@ enum DecisionTests {
         ShellTests.run()
         CardStoreTests.run()
         CardLayoutTests.run()
-        SurfaceTests.run()
         IslandFeedTests.run()
         L10nTests.run()
         CardPlacementTests.run()

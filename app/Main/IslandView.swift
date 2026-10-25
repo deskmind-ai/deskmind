@@ -273,11 +273,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // foreground step (`open -b ai.deskmind.app`, DeskMind still the active app after ⌘M): restoring the
             // window then would put it over the app being driven, after every step. Nothing is done; the island is
             // the way in. With a card waiting, hands is blocked on the user and takes no steps: it is the user.
-            // The same in the 0.5 window: a session's task running, no card waiting (handoff §3.1). A goal from the
-            // home screen never holds it: its Dock click / live card restore the window (Activation.reopenRestores).
-            guard Activation.reopenRestores(oldRunWithoutCard: RunModel.shared?.phase == .running && RunModel.shared?.ask == nil,
-                                            shellTaskWithoutCard: ShellFlag.isOn() && ShellModel.shared?.taskRunningWithoutCard == true,
-                                            goalActive: GoalRuns.app.active != nil) else { return false }
+            // (handoff §3.1: a session's task running, no card waiting -- Activation.reopenRestores)
+            guard Activation.reopenRestores(shellTaskWithoutCard: ShellModel.shared?.taskRunningWithoutCard == true) else { return false }
             if MainWindow.comeBack(Activation.reopen(sender)) { return false }
             return true
         }

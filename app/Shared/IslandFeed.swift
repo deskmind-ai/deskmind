@@ -61,40 +61,6 @@ enum IslandFeed {
         return f
     }
 
-    /// The frame for a GoalRun: running or ended by the goal's lifecycle — the one state GoalRunScreen reads too —
-    /// its task (its own, never the selected session's) for the detail; nil before its task came. A goal that ended
-    /// while its task does not say so yet (its process gone: interrupted) is ended here too.
-    static func frame(_ g: GoalRun, record: UUID?, lang: ResolvedLang) -> IslandFrame? {
-        let screen = GoalRunScreen(g.state, lang: lang)
-        var f: IslandFrame
-        if case .ended(_, _, let status) = g.state {
-            let t = g.task?.task
-            let line = t.map { $0.ended ? ShellText.task($0, lang: lang) : ShellText.ending(status, lang: lang) } ?? ShellText.ending(status, lang: lang)
-            f = IslandFrame(phase: .ended(passed: status == "succeeded", stopped: status == "cancelled" || status == "stopped"),
-                            step: t?.steps.count ?? 0, line: line, asking: false, cardId: nil, cardApproval: false, cardText: "")
-        } else {
-            guard screen.running, let (s, t) = g.task else { return nil }
-            f = frame(t, pinned: g.shell.pinned(s).map { (card: $0.card, phase: $0.phase) }, lang: lang)
-            // (running by the goal's state, whatever the task says: its end comes as the goal's)
-            if case .ended = f.phase {
-                f = IslandFrame(phase: .running, step: t.steps.count, line: f.line, asking: false, cardId: nil, cardApproval: false, cardText: "")
-            }
-        }
-        f.detailsRecord = record
-        return f
-    }
-
-    /// Where the window goes, asked by the island's "Show Details" (`details`: the kept record it links to) or by a
-    /// window that opens again (`details` nil) — one function: while a goal is active, always to that goal (its
-    /// cards, its Stop: never pulled off it to an older record — delta review at 3e59da9); else to the record; nil
-    /// when the window shows it already.
-    enum Route: Equatable { case goal(UUID), record(UUID) }
-    static func route(active: UUID?, details: UUID?, showingGoal: UUID?, showingRecord: UUID?) -> Route? {
-        if let active { return active == showingGoal ? nil : .goal(active) }
-        guard let details, details != showingRecord else { return nil }
-        return .record(details)
-    }
-
     /// The notification a new frame calls for: a card that newly waits (by its id), when DeskMind is not the active
     /// app or the user typed elsewhere a moment ago; nil otherwise. (The end's notification is RunOverlay.finish's.)
     static func cardNotification(from old: IslandFrame?, to new: IslandFrame, appActive: Bool, userTyping: Bool, lang: ResolvedLang) -> (title: String, body: String)? {
