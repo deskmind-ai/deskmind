@@ -42,8 +42,11 @@ struct MainSplitView: View {
         }
         .frame(minWidth: 980, idealWidth: 1180, minHeight: 600, idealHeight: 760)
         .background(Brand.paper)
+        // Light in both appearances: the palette is one light palette (ShellPalette), and in Dark Mode the system's
+        // fields and lists would draw light text on its paper and cards.
+        .preferredColorScheme(.light)
         .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
-            CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
+            CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang).preferredColorScheme(.light)
         }
         .onAppear {
             ShellModel.shared = shell
