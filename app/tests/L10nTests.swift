@@ -276,27 +276,41 @@ enum L10nTests {
     // MARK: contrast, in both appearances
 
     static func contrastTests() {
-        for (fg, bg) in ShellPalette.textOn {
-            let r = ShellPalette.contrast(fg, bg)
-            check(r >= 4.5, String(format: "text #%06X on #%06X: %.2f:1 (at least 4.5)", fg, bg, r))
+        // every text colour on every background it is drawn on, in each appearance (owner 10-25: dark mode's groundwork)
+        for a in ShellPalette.Appearance.allCases {
+            for (fg, bg) in ShellPalette.textOn(a) {
+                let r = ShellPalette.contrast(fg, bg)
+                check(r >= 4.5, String(format: "\(a): text #%06X on #%06X: %.2f:1 (at least 4.5)", fg, bg, r))
+            }
         }
-        check(ShellPalette.secondary == 0x5E675F && ShellPalette.orangeText == 0xA3402A, "secondary #5E675F, orange text #A3402A (handoff §3.10)")
-        // the tinted backgrounds, as drawn
-        check(ShellPalette.panel == 0xFBF9F4 && ShellPalette.panelSelected == 0xE9EAE3 && ShellPalette.banner == 0xF0E1D8 && ShellPalette.problem == 0xF1E6DD,
-              String(format: "the solid tints: panel #%06X, selected #%06X, banner #%06X, problem #%06X",
-                     ShellPalette.panel, ShellPalette.panelSelected, ShellPalette.banner, ShellPalette.problem))
+        check(ShellPalette.secondary.light == 0x5E675F && ShellPalette.orangeText.light == 0xA3402A, "secondary #5E675F, orange text #A3402A (handoff §3.10)")
+        // the tinted backgrounds, as drawn, worked out per appearance
+        check(ShellPalette.panel.light == 0xFBF9F4 && ShellPalette.panelSelected.light == 0xE9EAE3 && ShellPalette.banner.light == 0xF0E1D8 && ShellPalette.problem.light == 0xF1E6DD,
+              String(format: "the solid tints (light): panel #%06X, selected #%06X, banner #%06X, problem #%06X",
+                     ShellPalette.panel.light, ShellPalette.panelSelected.light, ShellPalette.banner.light, ShellPalette.problem.light))
+        check(ShellPalette.panel.dark == ShellPalette.blend(ShellPalette.card.dark, 0.6, over: ShellPalette.paper.dark), "the dark panel: the dark card over the dark paper")
         check(ShellPalette.blend(0xFFFFFF, 0.5, over: 0x000000) == 0x808080 && ShellPalette.blend(0x123456, 1, over: 0xABCDEF) == 0x123456, "(blend)")
-        // why solid: the old translucent panel over the sidebar's Dark Mode material put secondary text
-        // under 2.5:1
-        let darkMaterial: UInt32 = 0x1E1E1E
-        check(ShellPalette.contrast(ShellPalette.secondary, ShellPalette.blend(ShellPalette.card, 0.6, over: darkMaterial)) < 4.5,
+        // why solid: the old translucent panel over the sidebar's Dark Mode material put secondary text under 2.5:1
+        check(ShellPalette.contrast(ShellPalette.secondary.light, ShellPalette.blend(ShellPalette.card.light, 0.6, over: 0x1E1E1E)) < 4.5,
               "(a translucent panel over Dark Mode's material fails: why the tints are solid)")
         let brand = source("Main/Brand.swift")
-        check(brand.contains("static let dot = Color(hex: 0xC95536)") && brand.contains("static let mist = Color(hex: 0xB2BBAF)"), "the palette's orange and mist are Brand's")
+        check(brand.contains("static let dot = Color(ShellPalette.dot)") && brand.contains("static let mist = Color(ShellPalette.mist)") && brand.contains("init(_ tone: ShellPalette.Tone)")
+              && brand.contains(".darkAqua"), "Brand's colours are the tokens, resolved by appearance")
         let split = code("Main/MainSplitView.swift")
-        for c in ["panel", "panelSelected", "banner", "problem"] {
-            check(split.contains("static let \(c) = Color(hex: ShellPalette.\(c))"), "the window's \(c) is the palette's")
+        for c in ["panel", "panelSelected", "banner", "problem", "secondary", "orangeText", "error"] {
+            check(split.contains("static let \(c) = Color(ShellPalette.\(c))"), "the window's \(c) is the palette's token")
         }
+        // nothing hard-coded: no colour made anywhere in the 0.5 window and its sheets but from a token (Brand.swift
+        // makes them); Color.clear is no colour
+        let literal = #"(?<![A-Za-z])Color\((hex|red|white|\.sRGB|nsColor)|NSColor\(|NSColor\.[a-z]|(?<![A-Za-z])Color\.(white|black|gray|red|green|blue|orange|yellow|pink|purple|accentColor|primary|secondary)\b|foregroundStyle\(\.(white|black|gray|red|green|blue|orange|yellow|primary|secondary)\b|\.(foregroundColor|tint)\(\.[a-z]+\)"#
+        var named: [String] = []
+        for f in ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift", "Main/CloudModel.swift", "Main/FrontmostMonitor.swift"] {
+            for (i, l) in code(f).components(separatedBy: "\n").enumerated() where l.range(of: literal, options: .regularExpression) != nil {
+                named.append("\(f):\(i + 1)")
+            }
+        }
+        check(named.isEmpty, "no colour named outside the tokens in the 0.5 window and its sheets: \(named)")
+        check(!split.contains("preferredColorScheme"), "the window follows the system's appearance (no pin: owner 10-25)")
         // no translucent fill behind text in the window's views: what is checked is what is on screen
         let views = ShellTests.windowViewFiles().filter { ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift"].contains($0.name) }
         var tinted: [String] = []

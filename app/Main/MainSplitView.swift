@@ -13,12 +13,13 @@ import SwiftUI
 
 /// The handoff's text colours (§3.10): secondary text and orange text at 4.5:1 or better on paper.
 enum ShellColor {
-    static let secondary = Color(hex: ShellPalette.secondary)
-    static let orangeText = Color(hex: ShellPalette.orangeText)
-    static let panel = Color(hex: ShellPalette.panel)
-    static let panelSelected = Color(hex: ShellPalette.panelSelected)
-    static let banner = Color(hex: ShellPalette.banner)
-    static let problem = Color(hex: ShellPalette.problem)
+    static let secondary = Color(ShellPalette.secondary)
+    static let orangeText = Color(ShellPalette.orangeText)
+    static let panel = Color(ShellPalette.panel)
+    static let panelSelected = Color(ShellPalette.panelSelected)
+    static let banner = Color(ShellPalette.banner)
+    static let problem = Color(ShellPalette.problem)
+    static let error = Color(ShellPalette.error)
 }
 
 struct MainSplitView: View {

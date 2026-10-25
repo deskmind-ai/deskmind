@@ -1,16 +1,18 @@
-// DeskMind VI 1.0 in code: paper, ink, the orange dot, sage for secondary text, and 小方 for state.
+// DeskMind VI 1.0 in code: paper, ink, the orange dot, sage for secondary text, and 小方 for state. The colours are
+// Shared/ShellPalette.swift's tokens, each resolved by the appearance it is drawn in (light or dark): this file is the
+// one place a colour is made (`Color(_ tone:)`; L10nTests checks the 0.5 window and its sheets name none of their own).
 
 import AppKit
 import SwiftUI
 
 enum Brand {
-    static let ink = Color(hex: 0x262B28)
-    static let paper = Color(hex: 0xF4F1EA)
-    static let card = Color(hex: 0xFFFEFA)
-    static let dot = Color(hex: 0xC95536)
-    static let sage = Color(hex: 0x69736A)
-    static let mist = Color(hex: 0xB2BBAF)
-    static let line = Color(hex: 0xD5D3C9)
+    static let ink = Color(ShellPalette.ink)
+    static let paper = Color(ShellPalette.paper)
+    static let card = Color(ShellPalette.card)
+    static let dot = Color(ShellPalette.dot)
+    static let sage = Color(ShellPalette.sage)
+    static let mist = Color(ShellPalette.mist)
+    static let line = Color(ShellPalette.line)
 
     static func image(_ name: String) -> NSImage {
         if let url = Bundle.main.url(forResource: name, withExtension: "png"), let img = NSImage(contentsOf: url) {
@@ -24,9 +26,15 @@ enum Brand {
 }
 
 extension Color {
-    init(hex: UInt32) {
-        self.init(.sRGB, red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255,
-                  blue: Double(hex & 0xFF) / 255, opacity: 1)
+    /// A token as a colour: its light value in a light appearance, its dark one in a dark appearance (resolved where it
+    /// is drawn, so a window, a sheet and a panel each follow their own).
+    init(_ tone: ShellPalette.Tone) {
+        self.init(nsColor: NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.darkAqua, .aqua, .vibrantDark, .vibrantLight]).map { $0 == .darkAqua || $0 == .vibrantDark } ?? false
+            let v = tone.value(dark ? .dark : .light)
+            return NSColor(srgbRed: CGFloat((v >> 16) & 0xFF) / 255, green: CGFloat((v >> 8) & 0xFF) / 255,
+                           blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+        })
     }
 }
 
