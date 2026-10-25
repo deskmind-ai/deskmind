@@ -799,24 +799,15 @@ final class ShellModel: ObservableObject {
         // (from here the words are the session's or an unsent bubble of it — SessionClient.send — never the composer's
         // again: a draft typed meanwhile is never overwritten)
         draft = ""
-        // a steer while a card is open (A9): in one step, the held pick goes (its timer finds nothing to send), the steer
-        // is marked on its way (the card takes nothing), then it is written
-        var steerKey: String?, clientId: String?
-        if case .steer = control, let s = states[id], let p = cards.pinned(s), p.card.outcome == .open {
-            let key = Self.cardKey(runId: p.runId, askId: p.card.askId)
-            cards.stopping(p.runId)
-            let cid = client.newClientId()
-            steering[key] = (id, cid)
-            steerKey = key; clientId = cid
-        }
+        // a steer while a card is open (A9): marked on its way first (steerGoes), then written
+        var clientId: String?
+        if case .steer(_, let run) = control { clientId = steerGoes(run, in: id) }
         work { [weak self] in
             guard let self else { return }
             let r = self.client.send(control, to: id, clientId: clientId)
-            if r != .sent {
-                self.deliver {
-                    if let k = steerKey { self.steering[k] = nil }
-                    self.notSent(r, text: text, in: id)
-                }
+            self.deliver {
+                if let c = clientId { self.steerWritten(c, sent: r == .sent, in: id) }
+                if r != .sent { self.notSent(r, text: text, in: id) }
             }
         }
     }
@@ -1036,11 +1027,17 @@ final class ShellModel: ObservableObject {
     }
     /// The card the user moved into (card mode), by card key.
     @Published private(set) var keyCard: String?
-    /// A steer of ours on its way while a card is open (A9), by card key: its client id. The card's options take nothing
-    /// meanwhile (canSend). Its end, on every path: the send did not go, the session took the line, the session refused
-    /// it (card_open from a harness before H5: the words shown not delivered, never sent again), or the card ended -- the
-    /// card's own ending only ever the run's word.
-    @Published private(set) var steering: [String: (session: String, clientId: String)] = [:]
+    /// The steers of ours on their way while a card is open (A9), by card key: their client ids, each armed once its
+    /// line went (before that, an old refusal on a resent steer's bubble is not its end). While any is there the card
+    /// takes nothing and no answer for it is written (answerMayGo). One leaves only by its own end -- its send did not
+    /// go, or the session refused it (card_open from a harness before H5: the words shown not delivered) -- and all of
+    /// them when the card is no longer open (its ending only ever the run's word, ask_void why steer).
+    @Published private(set) var steers: [String: PendingSteers] = [:]
+    struct PendingSteers: Equatable {
+        var session: String
+        /// client id -> its line went (armed)
+        var ids: [String: Bool] = [:]
+    }
     /// The one way the window moves the keyboard focus (lead 10-25): the user's own Esc out of a card in card mode, in
     /// the key window, asks once for the composer (Composer takes it). Nothing else makes a request -- never a card
     /// arriving, ending or voided -- and a request is taken once (`takeFocus`: a re-render does not focus again) and
@@ -1235,7 +1232,7 @@ final class ShellModel: ObservableObject {
 
     /// 「现在回答」 on an expired card: the task looks again and asks a new card (reask). Sent once.
     func answerNow(_ runId: String, askId: String, session: String? = nil) {
-        guard let id = session ?? selected, cloudAllows(),
+        guard let id = session ?? selected, answerMayGo(CardStore.key(runId: runId, askId: askId)), cloudAllows(),
               cards.answerNow(runId, askId: askId, sessionId: id, in: client.state(id)) else { return }
         let key = CardStore.key(runId: runId, askId: askId)
         let kind = states[id]?.task(runId)?.cards.first { $0.askId == askId }?.card.kind ?? ""
@@ -1249,7 +1246,7 @@ final class ShellModel: ObservableObject {
     /// A card whose own words wait for its whole body: one with an approve-type option (#107 re-review).
     /// Whether the card's own field (and its Send) takes words now: as `answer` sends them (the field is drawn after
     /// the card's content: reaching it is reading past it).
-    func wordsEnabled(_ card: CardModel, in s: SessionState) -> Bool { answerable(card, in: s) }
+    func wordsEnabled(_ card: CardModel, in s: SessionState) -> Bool { answerable(card, in: s) && answerMayGo(Self.cardKey(card)) }
 
     static func cardKey(runId: String, askId: String?) -> String { CardStore.key(runId: runId, askId: askId) }
     static func cardKey(_ card: CardModel) -> String { cardKey(runId: card.runId, askId: card.askId) }
@@ -1259,12 +1256,40 @@ final class ShellModel: ObservableObject {
     /// open, it stays marked: the card's options must not take a click between the session storing the steer and its
     /// ask_void (#125 delta check at 4945311). UI queue.
     private func settleSteers(_ id: String, _ s: SessionState) {
-        for (key, st) in steering where st.session == id {
-            let refused = s.outbox.contains { $0.id == st.clientId && $0.refused != nil }
+        for (key, st) in steers where st.session == id {
             let open = cards.pinned(s).map { Self.cardKey(runId: $0.runId, askId: $0.card.askId) == key && $0.card.outcome == .open } ?? false
-            if refused || !open { steering[key] = nil }
+            guard open else { steers[key] = nil; continue }
+            let left = st.ids.filter { cid, armed in !(armed && s.outbox.contains { $0.id == cid && $0.refused != nil }) }
+            if left.isEmpty { steers[key] = nil } else if left != st.ids { steers[key]?.ids = left }
         }
     }
+
+    /// A steer for `run` (the task it names) is about to be written in session `id`: when that task's card is open, in
+    /// one step its held pick goes (its timer finds nothing to send) and the steer joins the card's pending ones. Its
+    /// client id: a new one, or `resending`'s. UI queue.
+    private func steerGoes(_ run: String?, in id: String, resending: String? = nil) -> String? {
+        guard let s = states[id], let p = cards.pinned(s), p.card.outcome == .open, run == nil || run == p.runId else { return resending }
+        let key = Self.cardKey(runId: p.runId, askId: p.card.askId)
+        cards.stopping(p.runId)
+        let cid = resending ?? client.newClientId()
+        steers[key, default: PendingSteers(session: id)].ids[cid] = false
+        return cid
+    }
+
+    /// The steer's send came back: it went (armed: its refusal from here on is its end), or it did not (its end). Only
+    /// that client id. UI queue.
+    private func steerWritten(_ cid: String, sent: Bool, in id: String) {
+        for (key, st) in steers where st.session == id && st.ids[cid] != nil {
+            if sent { steers[key]?.ids[cid] = true } else { steers[key]?.ids[cid] = nil }
+            if steers[key]?.ids.isEmpty == true { steers[key] = nil }
+        }
+        settleSteers(id, client.state(id))
+    }
+
+    /// THE gate for every answer line written for a card (the first send, a held pick's time out, 「现在发送」, typed
+    /// words, the float, 「现在回答」 -- all reach write / pick / answerNow through here): none while a steer for the card is
+    /// on its way (#125 Codex re-review at d08465d).
+    func answerMayGo(_ key: String) -> Bool { steers[key] == nil }
 
     /// The layout facts of cards no longer pinned anywhere (nor an open result card) go. UI queue.
     private func dropLayoutFacts() {
@@ -1316,7 +1341,7 @@ final class ShellModel: ObservableObject {
     /// that does not fit -- keyWorks.)
     func canSend(_ b: CardModel.Button, session: String? = nil) -> Bool {
         guard let id = session ?? selected else { return false }
-        if steering[Self.cardKey(runId: b.runId, askId: b.askId)] != nil { return false }     // (a steer on its way: A9)
+        if !answerMayGo(Self.cardKey(runId: b.runId, askId: b.askId)) { return false }     // (a steer on its way: A9)
         let s = client.state(id)
         if !b.role.reachesNoModel && !cloudOn() { return false }
         let a = CardModel.answer(b)
@@ -1329,6 +1354,7 @@ final class ShellModel: ObservableObject {
     /// out — written once; or written now.
     @discardableResult
     private func pick(_ a: CardAnswer, role: CardModel.Role, by: UIEvent.Pick, immediate: Bool, in id: String) -> Bool {
+        guard answerMayGo(CardStore.key(runId: a.runId, askId: a.askId)) else { return false }
         let action = cards.pick(a, sessionId: id, immediate: immediate, now: now(), offEpoch: client.offEpoch, in: client.state(id))
         if action != .none { logPick(a, role: role, by: by) }   // (before a send at once, which logs its own)
         return act(action, in: id)
@@ -1379,6 +1405,7 @@ final class ShellModel: ObservableObject {
     /// Writes an answer with a fresh req_id, recorded in CardStore first (here, on the UI queue); a failed write takes
     /// both back on the UI queue.
     private func write(_ a: CardAnswer, key: String, in id: String) {
+        guard answerMayGo(key) else { cards.takeBack(key); return }     // (a held pick that slipped through: dropped)
         let req = newReqId()
         cards.issue(req, sessionId: id, key: key, answer: a)
         syncOwnReqs()
@@ -1412,7 +1439,16 @@ final class ShellModel: ObservableObject {
     /// Send again: only while the composer takes words (a card waits: it is answered on the card first — M1 decision 1).
     func resend(_ outgoing: String) {
         guard let id = selected, composer.enabled, cloudAllows() else { return }
-        work { [weak self] in _ = self?.client.resend(outgoing, in: id) }
+        // a steer sent again while its task's card is open: on its way again, as a first send (steerGoes)
+        var steer: String?
+        if let o = client.state(id).unsent.first(where: { $0.id == outgoing }), case .steer(_, let run)? = o.original {
+            steer = steerGoes(run, in: id, resending: outgoing)
+        }
+        work { [weak self] in
+            guard let self else { return }
+            let r = self.client.resend(outgoing, in: id)
+            if let steer { self.deliver { self.steerWritten(steer, sent: r == .sent, in: id) } }
+        }
     }
 
     func dropUnsent(_ outgoing: String) {

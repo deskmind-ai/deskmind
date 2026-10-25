@@ -15,6 +15,7 @@ enum CardKeysTests {
         DecisionTests.group("card-keys.review124"); review124Tests()
         DecisionTests.group("card-keys.focus"); focusTests()
         DecisionTests.group("card-keys.steer"); steerTests()
+        DecisionTests.group("card-keys.steer-gate"); steerGateRepros(); steerInterleavings()
     }
 
     typealias K = CardKeys
@@ -272,27 +273,167 @@ enum CardKeysTests {
         check(r.phase("a1") == .open, "Return: the held pick dropped")
         r.timers.advance(CardStore.takeBack + 1)
         check(r.wire.answers("a1").isEmpty, "and never sent")
-        check(r.m.steering.values.contains { $0.clientId == "c_steer" } && !r.m.canSend(approve), "the steer on its way: the card takes nothing")
+        check(r.m.steers.values.contains { $0.ids["c_steer"] != nil } && !r.m.canSend(approve), "the steer on its way: the card takes nothing")
         check(r.wire.count("steer") == 1, "the steer written: \(r.wire.count("steer"))")
         // a harness before H5 refuses it: the card takes picks again, the words not delivered (and not sent again)
         r.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "card_open", "control": "steer", "client_id": "c_steer", "text": "x"])
-        check(r.m.steering.isEmpty && r.m.canSend(approve), "refused card_open: the card takes picks again")
+        check(r.m.steers.isEmpty && r.m.canSend(approve), "refused card_open: the card takes picks again")
         check(r.m.client.state(CardStoreTests.sid).unsent.contains { $0.id == "c_steer" && $0.refused == "card_open" } && r.wire.count("steer") == 1,
               "the words shown not delivered, not sent again")
         // again; this time the session takes it and voids the card (H5): the card ends by the run's word
         r.m.client.newClientId = { "c_steer2" }
         r.m.draft = "还是发给老王"
         r.m.submit()
-        check(!r.m.steering.isEmpty, "on its way")
+        check(!r.m.steers.isEmpty, "on its way")
         // the session took it (stored), its ask_void not here yet: still marked, the card takes nothing
         r.feed(["kind": "session.message", "session_id": CardStoreTests.sid, "seq": 3, "msg_id": "u_s", "role": "user", "text": "还是发给老王", "client_id": "c_steer2"])
-        check(!r.m.steering.isEmpty && !r.m.canSend(approve), "taken, the card still open: still marked, no click")
+        check(!r.m.steers.isEmpty && !r.m.canSend(approve), "taken, the card still open: still marked, no click")
         r.void("a1", "steer")
-        check(r.m.steering.isEmpty && r.phase("a1") == .voided("steer"), "ask_void why steer: the card ended, the mark gone")
+        check(r.m.steers.isEmpty && r.phase("a1") == .voided("steer"), "ask_void why steer: the card ended, the mark gone")
         // an empty Return does nothing
         let q = R(); q.ask("a1")
         q.m.draft = "   "
         q.m.submit()
-        check(q.wire.count("steer") == 0 && q.m.steering.isEmpty && q.phase("a1") == .open, "an empty Return: nothing")
+        check(q.wire.count("steer") == 0 && q.m.steers.isEmpty && q.phase("a1") == .open, "an empty Return: nothing")
+    }
+
+    // MARK: #125 Codex re-review at d08465d: one gate for every answer written while a steer is on its way
+
+    static func refuse(_ r: CardStoreTests.Rig, _ cid: String) {
+        r.feed(["kind": "session.error", "session_id": CardStoreTests.sid, "code": "card_open", "control": "steer", "client_id": cid, "text": "x"])
+    }
+    /// The wire in order: (type, ask_id).
+    static func written(_ r: CardStoreTests.Rig) -> [(String, String?)] { r.wire.lines.map { ($0.line["type"] as? String ?? "", $0.line["ask_id"] as? String) } }
+
+    static func steerGateRepros() {
+        typealias R = CardStoreTests.Rig
+        // 1. a steer refused, a pick held, the steer sent again: the held pick's time out writes nothing (was: answer
+        // after the resent steer)
+        do {
+            let r = R(); r.ask("a1", "plan")
+            r.m.client.newClientId = { "c1" }
+            r.m.draft = "改成发给小李"; r.m.submit()
+            refuse(r, "c1")
+            r.click("a1", .approve)
+            check(r.phase("a1")?.pending != nil, "1: the pick held once the refused steer let go")
+            r.m.resend("c1")
+            check(r.wire.count("steer") == 2 && !r.m.steers.isEmpty, "1: sent again, on its way again")
+            r.timers.advance(CardStore.takeBack + 1)
+            check(r.wire.answers("a1").isEmpty, "1: the held approve never written after the resent steer: \(written(r))")
+            refuse(r, "c1")
+            check(r.m.steers.isEmpty, "1: refused again: let go")
+        }
+        // 1b. the same with the send off the UI queue (as in the app): until the resent line went, the bubble's old
+        // refusal is not the resent steer's end
+        do {
+            let r = R(); r.ask("a1", "plan")
+            var q: [() -> Void] = []
+            let m = ShellModel(client: SessionClient(transport: r.wire), defaults: ShellTests.scratchDefaults(), config: { "openai:local|fake" },
+                               lang: { .zhHans }, takeBackAfter: r.timers.after, now: { r.timers.now }, work: { q.append($0) }, deliver: { $0() })
+            m.selected = CardStoreTests.sid
+            r.m = m
+            for l in r.fed { m.client.feed(l) }
+            func drain() { while !q.isEmpty { q.removeFirst()() } }
+            m.client.newClientId = { "c1" }
+            m.draft = "改成发给小李"; m.submit(); drain()
+            refuse(r, "c1")
+            check(m.steers.isEmpty, "1b: refused: let go")
+            m.resend("c1")
+            // something else arrives before the resent line goes: the old refusal is still on the bubble
+            r.feed(["kind": "session.message", "session_id": CardStoreTests.sid, "seq": 9, "msg_id": "m9", "role": "assistant", "text": "好"])
+            check(!m.steers.isEmpty, "1b: the resent steer still on its way before its line went")
+            r.click("a1", .approve); r.timers.advance(CardStore.takeBack + 1); drain()
+            check(r.wire.answers("a1").isEmpty && r.wire.count("steer") == 2, "1b: no answer around the resent steer: \(written(r))")
+        }
+        // 2. typed words while a steer is on its way: the field takes none, and the words go nowhere
+        do {
+            let r = R(); r.ask("a1", "plan")
+            r.m.client.newClientId = { "c1" }
+            r.m.draft = "改成发给小李"; r.m.submit()
+            let c = r.model("a1")!
+            check(!r.m.wordsEnabled(c, in: r.state), "2: the card's field takes no words")
+            r.words("a1", "就这样")
+            r.timers.advance(CardStore.takeBack + 1)
+            check(r.wire.answers("a1").isEmpty, "2: typed words never written: \(written(r))")
+        }
+        // 3. two steers: the first's refusal leaves the second on its way
+        do {
+            let r = R(); r.ask("a1", "plan")
+            var n = 0
+            r.m.client.newClientId = { n += 1; return "c\(n)" }
+            r.m.draft = "改成发给小李"; r.m.submit()
+            r.m.draft = "还是发给老王"; r.m.submit()
+            check(r.m.steers.values.first?.ids.count == 2, "3: both on their way")
+            refuse(r, "c1")
+            let approve = r.model("a1")!.buttons.first { $0.role == .approve }!
+            check(!r.m.canSend(approve), "3: the second still on its way: the card takes nothing")
+            r.click("a1", .approve); r.timers.advance(CardStore.takeBack + 1)
+            check(r.wire.answers("a1").isEmpty, "3: nothing written")
+            refuse(r, "c2")
+            check(r.m.steers.isEmpty && r.m.canSend(approve), "3: both refused: the card takes picks again")
+        }
+    }
+
+    /// Random orders of steer / resend / refusal / take / pick / words / cancel / float click / time / ask_void / a new
+    /// card. Oracle (from the wire and the session's own words, never from the model): no answer line for a card while
+    /// a steer written for it (while it was open) is neither refused nor ended by the card's end; and the card's
+    /// options take nothing then.
+    static func steerInterleavings() {
+        typealias R = CardStoreTests.Rig
+        var bad = 0
+        for seed in 0..<300 {
+            var g = CardStoreTests.RNG(x: UInt64(seed) &* 2654435761 &+ 11)
+            let r = R()
+            var asks = 1, open: String? = "a1", msgSeq = 3
+            r.ask("a1", "plan")
+            var n = 0
+            r.m.client.newClientId = { n += 1; return "s\(n)" }
+            // ground truth: steers written while a card was open, by card, not yet refused (cleared by its end)
+            var pending: [String: Set<String>] = [:]
+            var written: Set<String> = []        // steers whose line went
+            var refusedIds: Set<String> = []
+            r.wire.onLine = { l in
+                switch l["type"] as? String {
+                case "steer":
+                    if let cid = l["client_id"] as? String {
+                        written.insert(cid)
+                        if let o = open { pending[o, default: []].insert(cid) }
+                    }
+                case "answer":
+                    if let a = l["ask_id"] as? String, !(pending[a] ?? []).isEmpty { bad += 1; print("seed \(seed): answer for \(a) with \(pending[a]!) on its way") }
+                default: break
+                }
+            }
+            for _ in 0..<40 {
+                switch g.next(11) {
+                case 0, 1: r.m.draft = "改一下 \(g.next(100))"; r.m.submit()
+                case 2:
+                    let unsent = r.m.client.state(CardStoreTests.sid).unsent.filter { if case .steer? = $0.original { return true }; return false }
+                    if !unsent.isEmpty { r.m.resend(unsent[g.next(unsent.count)].id) }
+                case 3:
+                    let can = written.subtracting(refusedIds).sorted()
+                    if !can.isEmpty { let c = can[g.next(can.count)]; refusedIds.insert(c); for k in pending.keys { pending[k]?.remove(c) }; refuse(r, c) }
+                case 4:
+                    let can = written.subtracting(refusedIds).sorted()
+                    if !can.isEmpty {
+                        let c = can[g.next(can.count)]; msgSeq += 1
+                        r.feed(["kind": "session.message", "session_id": CardStoreTests.sid, "seq": msgSeq, "msg_id": "u\(msgSeq)", "role": "user", "text": "改", "client_id": c])
+                    }
+                case 5: if let o = open { r.click(o, .approve) }
+                case 6: if let o = open { r.words(o, "就这样") }
+                case 7: if let o = open { r.click(o, .cancel) }
+                case 8: if let o = open, let c = r.model(o), let b = c.buttons.first(where: { $0.role == .approve }) { r.m.click(b, session: CardStoreTests.sid) }
+                case 9: r.timers.advance(Double(g.next(4)) + 0.5)
+                default:
+                    if let o = open { r.void(o, "steer"); pending[o] = nil; open = nil }
+                    else { asks += 1; open = "a\(asks)"; r.ask(open!, "plan") }
+                }
+                // the card's options agree with the oracle
+                if let o = open, !(pending[o] ?? []).isEmpty, let c = r.model(o), r.phase(o) == .open || r.phase(o)?.pending != nil {
+                    if c.buttons.contains(where: { r.m.canSend($0) }) { bad += 1; print("seed \(seed): \(o) takes a click with a steer on its way") }
+                }
+            }
+        }
+        check(bad == 0, "no answer written, no option taking a click, while a steer for the card is on its way: \(bad)")
     }
 }
