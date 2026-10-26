@@ -103,7 +103,10 @@ struct CardLayout: Equatable {
         var selected: [Outgoing] = []
         var text: [Outgoing] = []
         var other: [Outgoing] = []
-        var count: Int { (lead == nil ? 0 : 1) + fields.count + selected.count + text.count + other.count }
+        var count: Int {
+            let lines: Int = fields.count + selected.count + text.count + other.count
+            return lines + (lead == nil ? 0 : 1)
+        }
         /// The lead line's own label (none when it is only its kind's name).
         var leadLabel: String? { lead.flatMap { $0.label.isEmpty || $0.label == $0.kind ? nil : $0.label } }
     }
@@ -151,14 +154,24 @@ struct CardLayout: Equatable {
         guard let c = consent else { return [title] + beyond }
         // (the action, drawn or said by the title -- Consent.actionRow; the block as ConsentFields lays it out: the lead
         // line's value and its label, the other lines' labels and values, the picks and the window's text by value)
-        let b = c.block
-        var w = [title] + beyond + [c.action, c.object, c.site ?? ""] + c.selected
-        w += [b.leadLabel ?? "", b.lead?.value ?? ""] + (b.fields + b.other).flatMap { [$0.label, $0.value] } + b.selected.map(\.shown) + b.text.map(\.value)
+        // (one part at a time, each typed: a single long + chain is past a slower compiler's type-check limit -- #131 CI)
+        let b: Block = c.block
+        var w: [String] = [title]
+        w.append(contentsOf: beyond)
+        w.append(contentsOf: [c.action, c.object, c.site ?? ""])
+        w.append(contentsOf: c.selected)
+        w.append(contentsOf: [b.leadLabel ?? "", b.lead?.value ?? ""])
+        for o: Outgoing in b.fields + b.other { w.append(o.label); w.append(o.value) }
+        w.append(contentsOf: b.selected.map { (o: Outgoing) -> String in o.shown })
+        w.append(contentsOf: b.text.map { (o: Outgoing) -> String in o.value })
         if let e = c.effect {
-            let key = e == .sends ? "This sends something out" : "This changes your things"
-            w += [L(key, lang: .en), L(key, lang: .zhHans)]
+            let key: String = e == .sends ? "This sends something out" : "This changes your things"
+            w.append(L(key, lang: .en)); w.append(L(key, lang: .zhHans))
         }
-        w += c.uncertain.flatMap { [$0.text] + $0.outgoing.flatMap { [$0.label, $0.value] } }
+        for u: Uncertain in c.uncertain {
+            w.append(u.text)
+            for o: Outgoing in u.outgoing { w.append(o.label); w.append(o.value) }
+        }
         if let m = c.modelSays { w.append(m) }
         return w.filter { !$0.isEmpty }
     }

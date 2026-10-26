@@ -313,11 +313,22 @@ enum CardLayoutTests {
         guard let c = l.consent else { return [l.title] }
         // (as ConsentFields lays the block out: the action only when the title does not say it; the lead line's value,
         // its label beside the heading; the other lines' labels and values; the window's other text and picks by value)
-        let b = c.block
-        var w = [l.title] + l.beyond + (c.actionRow ? [c.action] : []) + [c.object, c.site ?? ""] + c.selected
-        w += [b.leadLabel ?? "", b.lead?.value ?? ""] + (b.fields + b.other).flatMap { [$0.label, $0.value] } + b.selected.map(\.shown) + b.text.map(\.value)
+        // (part by part, typed: the long + chain is past the CI compiler's type-check limit, as CardLayout.drawn's was)
+        let b: CardLayout.Block = c.block
+        var w: [String] = [l.title]
+        w.append(contentsOf: l.beyond)
+        if c.actionRow { w.append(c.action) }
+        w.append(contentsOf: [c.object, c.site ?? ""])
+        w.append(contentsOf: c.selected)
+        w.append(contentsOf: [b.leadLabel ?? "", b.lead?.value ?? ""])
+        for o: CardLayout.Outgoing in b.fields + b.other { w.append(o.label); w.append(o.value) }
+        w.append(contentsOf: b.selected.map { (o: CardLayout.Outgoing) -> String in o.shown })
+        w.append(contentsOf: b.text.map { (o: CardLayout.Outgoing) -> String in o.value })
         if let e = c.effect { w.append(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
-        w += c.uncertain.flatMap { [$0.text] + $0.outgoing.flatMap { [$0.label, $0.value] } }
+        for u: CardLayout.Uncertain in c.uncertain {
+            w.append(u.text)
+            for o: CardLayout.Outgoing in u.outgoing { w.append(o.label); w.append(o.value) }
+        }
         if c.uncertainMore > 0 { w.append(L("%d more steps with an unknown result", c.uncertainMore, lang: lang)) }
         if let m = c.modelSays { w.append(L("What the model says (not checked): %@", m, lang: lang)) }
         return w
