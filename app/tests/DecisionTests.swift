@@ -399,7 +399,7 @@ enum DecisionTests {
         // run waiting for an answer before its first picture said "Starting" in the picture's place; #122 review at
         // d10d6b1: a paused run whose window was out of sight must still say it is paused.
         let headers: [(LV.Status, Int, en: String, zh: String)] = [
-            (.starting, 0, "Starting", "启动中"), (.working, 0, "Working", "工作中"), (.working, 3, "Step 3", "第 3 步"),
+            (.starting, 0, "Starting", "启动中"), (.working, 0, "Working", "执行中"), (.working, 3, "Step 3", "第 3 步"),
             (.waitingForUser, 3, "Needs you", "需要你"), (.paused, 3, "Paused", "已暂停"),
             (.done, 3, "Done", "完成了"), (.failed, 3, "Didn't finish", "没做完"), (.stopped, 3, "Stopped", "已停下"),
         ]

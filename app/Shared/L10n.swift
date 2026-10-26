@@ -351,7 +351,7 @@ enum L10n {
         "Smaller": "缩小",
         "Collapse": "收起",
         "Stop the task": "停止任务",
-        "Working": "工作中",
+        "Working": "执行中",
         "Needs you": "需要你",
         "Paused": "已暂停",
         "Window not visible": "窗口不可见",
