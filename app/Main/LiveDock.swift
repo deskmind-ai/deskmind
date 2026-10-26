@@ -91,7 +91,112 @@ final class LiveDock: ObservableObject {
     }
 }
 
-/// The picture, the agent's cursor on it, or why there is none.
+/// The live view in its ink frame (P1Main, CardStates): a title bar -- the orange dot, the app and the window's state,
+/// 「放大」 and 「弹出成浮窗」 -- the picture with the agent's cursor and a dashed box round what the step acts on (its
+/// target's rect_norm; 「准备点：…」 on the picture while an action card naming its target waits), and the step in a line under it (its human words).
+struct LiveFrame: View {
+    let picture: LiveDock.Picture?
+    let state: LiveFeed.State?
+    let app: String?
+    let waiting: Bool
+    /// The element the open card says it is about to act on (its own consent.target), shown over the picture.
+    let about: String?
+    let step: String?
+    let stepWindow: Int?
+    let target: StepTarget?
+    /// The rect the dashed box marks (LiveFeed.boxRect): nil, no box.
+    let boxRect: [Double]?
+    @Binding var zoomed: Bool
+    let popOut: () -> Void
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Circle().fill(Brand.dot).frame(width: 7, height: 7).accessibilityHidden(true)
+                Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.frameText).lineLimit(1)
+                Spacer(minLength: 4)
+                barIcon(zoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                            zoomed ? L("Make the live view smaller", lang: lang) : L("Enlarge the live view", lang: lang)) { zoomed.toggle() }
+                barIcon("rectangle.on.rectangle", L("Pop out as a float", lang: lang), popOut)
+            }
+            .padding(.leading, 12).padding(.trailing, 6).frame(height: 34)
+            ZStack {
+                Rectangle().fill(Brand.card)
+                if let p = picture {
+                    GeometryReader { g in
+                        let size = LiveDockView.fit(p.image.size, in: g.size)
+                        ZStack(alignment: .topLeading) {
+                            Image(nsImage: p.image).resizable().frame(width: size.width, height: size.height)
+                            if let b = LiveFeed.box(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: boxRect, picture: size, visible: p.visible) {
+                                RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.dot, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                                    .frame(width: b.width + 8, height: b.height + 8).offset(x: b.minX - 4, y: b.minY - 4)
+                                    .accessibilityHidden(true)
+                            }
+                            if let c = LiveFeed.cursor(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target?.rectNorm, picture: size, visible: p.visible) {
+                                Circle().fill(Brand.dot).frame(width: 12, height: 12)
+                                    .overlay(Circle().strokeBorder(Brand.card, lineWidth: 2))
+                                    .offset(x: c.x - 6, y: c.y - 6).accessibilityHidden(true)
+                            }
+                        }
+                        .frame(width: g.size.width, height: g.size.height)
+                    }
+                    .overlay(alignment: .topLeading) {
+                        // (the card's own words for what it is about to act on: not placed on the step's box)
+                        if let about {
+                            Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Brand.card)
+                                .padding(.horizontal, 8).frame(height: 20)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(ShellColor.orangeText))
+                                .padding(8)
+                        }
+                    }
+                    .accessibilityLabel(L("Live view of the task's window", lang: lang))
+                } else {
+                    Text(LiveDockView.note(state, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                        .multilineTextAlignment(.center).padding(14)
+                }
+            }
+            .frame(height: zoomed ? 380 : 214)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 6)
+            Text(step ?? " ").font(.system(size: 13)).foregroundStyle(ShellColor.frameQuiet).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).frame(height: 34)
+                .accessibilityLabel(step.map { L("Current step: %@", $0, lang: lang) } ?? "")
+        }
+        .background(RoundedRectangle(cornerRadius: 14).fill(ShellColor.frame))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .shadow(color: Brand.ink.opacity(0.18), radius: 14, y: 10)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// 「<应用> · <窗口的状态>」: whose window, and whether it is live, waits for you or has no picture.
+    private var title: String {
+        let what: String
+        if waiting { what = L("Waiting for you", lang: lang) }
+        else {
+            switch state {
+            case .streaming: what = L("Live", lang: lang)
+            case .noPermission, .noPicture: what = L("No picture", lang: lang)
+            case .ended: what = L("Ended", lang: lang)
+            case nil: what = L("Connecting…", lang: lang)
+            }
+        }
+        return app.map { L("%@ · %@", $0, what, lang: lang) } ?? what
+    }
+
+    private func barIcon(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.frameQuiet)
+                .frame(width: 28, height: 28).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+    }
+}
+
+/// The picture, the agent's cursor on it, or why there is none (the float's; the window's is LiveFrame).
 struct LiveDockView: View {
     @ObservedObject var dock: LiveDock
     /// The last step's window and target (rect_norm), for the cursor.

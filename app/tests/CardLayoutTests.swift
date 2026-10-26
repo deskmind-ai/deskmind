@@ -24,6 +24,9 @@ enum CardLayoutTests {
         DecisionTests.group("layout.sendTables"); sendTables()
         DecisionTests.group("layout.wholeCardTests"); wholeCardTests()
         DecisionTests.group("layout.factsTests"); factsTests()
+        DecisionTests.group("layout.consentKeysTests"); consentKeysTests()
+        DecisionTests.group("layout.consentScopeTests"); consentScopeTests()
+        DecisionTests.group("layout.consentTextTests"); consentTextTests()
         DecisionTests.group("layout.keyGateTests"); keyGateTests()
         DecisionTests.group("layout.cardModeTests"); cardModeTests()
         DecisionTests.group("layout.cardModeEndsTests"); cardModeEndsTests()
@@ -236,13 +239,172 @@ enum CardLayoutTests {
               "two steps: the external one sends out, its site and what goes; an object with no label shows its ref; the front app")
         let action = CardLayout(model(samples().first { $0.name == "action: consent" }!.card))
         check(action.consent == CardLayout.Consent(action: "在 Mail 里点「发送」", object: "Mail「周报」", site: "mail.example.com",
-                                                   outgoing: [.init(label: "收件人", value: "wang@example.com"), .init(label: "主题", value: "周报"), .init(label: "正文", value: "本周…")]),
+                                                   outgoing: [.init(label: "收件人", value: "wang@example.com"), .init(label: "主题", value: "周报"), .init(label: "正文", value: "本周…")],
+                                                   effect: .sends, scope: .site("mail.example.com")),
               "the action card: the action, its object, the site, every line of what goes out: \(String(describing: action.consent))")
         check(CardLayout(model(samples().first { $0.name == "ambiguity" }!.card)).consent == nil, "no consent on a choice card")
         // VoiceOver's card label: its state, its kind, its first sentence, its number of options (handoff §3.10)
         let hint = CardLayout.hint(action.controls[0], keys: true, lang: .zhHans)
         check(hint == "同意，任务接着做。按 1" && CardLayout.hint(action.controls[0], lang: .zhHans) == "同意，任务接着做",
               "an approve's hint says what it does, and its key only while keys act: \(hint)")
+    }
+
+    // MARK: - every consent field is shown, or the whole text stays reachable (#129 Codex review)
+
+    /// Every key ActionCardFacts can carry (harness src/protocol/cards.ts at ebc8f92), each with a value as the harness
+    /// sends it and the words of it the user must be able to read: the test's own list, not the app's.
+    static let consentKeys: [(key: String, value: Any, words: [String])] = [
+        ("action", "click", []),                                   // machine form: its words are action_text's
+        ("action_text", "点「发送」", ["点「发送」"]),
+        ("target", "发送", ["发送"]),
+        ("object", "window:mail#3", []),                           // machine form: its words are object_label's
+        ("object_label", "Mail「周报」", ["Mail「周报」"]),
+        ("consequence", "external", ["这会把内容发出去"]),
+        ("outgoing", [["kind": "field", "label": "收件人", "value": "wang@example.com"]], ["收件人", "wang@example.com"]),
+        ("site", "mail.example.com", ["mail.example.com"]),
+        ("uncertain", [["consequence": "external", "object": "window:mail#2", "text": "在 Mail 里点「发送」",
+                        "outgoing": [["kind": "typed", "label": "正文", "value": "第一封"]]]], ["在 Mail 里点「发送」", "正文", "第一封"]),
+        ("uncertain_total", 3, ["另有 2 条结果不确定的步骤"]),        // with the one listed above
+        ("model_says_unchecked", "上一封可能没发出去", ["上一封可能没发出去"]),
+        ("selected", ["「周报」那封"], ["「周报」那封"]),
+    ]
+
+    /// What the card shows of its consent, in words: its title, what goes beyond, and the block's every line
+    /// (ConsentFields draws exactly these).
+    static func shownWords(_ l: CardLayout, lang: ResolvedLang = .zhHans) -> [String] {
+        guard let c = l.consent else { return [l.title] }
+        var w = [l.title] + l.beyond + [c.action, c.object, c.site ?? ""] + c.outgoing.flatMap { [$0.label, $0.value] } + c.selected
+        if let e = c.effect { w.append(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
+        w += c.uncertain.flatMap { [$0.text] + $0.outgoing.flatMap { [$0.label, $0.value] } }
+        if c.uncertainMore > 0 { w.append(L("%d more steps with an unknown result", c.uncertainMore, lang: lang)) }
+        if let m = c.modelSays { w.append(L("What the model says (not checked): %@", m, lang: lang)) }
+        return w
+    }
+
+    static func consentCard(_ consent: [String: Any], headline: String = "要点「发送」吗？") -> CardModel {
+        model(["kind": "action", "text": "这会把内容发出去：点「发送」", "headline": headline, "free_text": false, "blocking": true, "consent": consent,
+               "options": [opt("approve", "可以"), opt("skip_step", "这一步不要"), opt("cancel", "先别做了")]])
+    }
+
+    static func consentKeysTests() {
+        // the list is the protocol's whole: the app decodes every key of it (and no other)
+        check(Set(consentKeys.map(\.key)) == Set(ConsentFacts.CodingKeys.allCases.map(\.rawValue)),
+              "the app decodes exactly the keys cards.ts lists: \(ConsentFacts.CodingKeys.allCases.map(\.rawValue))")
+        let base: [String: Any] = ["action": "click", "action_text": "点「发送」", "object": "window:mail#3", "object_label": "Mail「周报」",
+                                   "consequence": "external", "outgoing": [], "site": NSNull()]
+        // each key alone beside the base, then all of them at once: its words are on the card, or 「细节」 is
+        var all = base
+        for k in consentKeys {
+            var c = base; c[k.key] = k.value; all[k.key] = k.value
+            if k.key == "uncertain_total" { c["uncertain"] = consentKeys.first { $0.key == "uncertain" }!.value }
+            let l = CardLayout(consentCard(c))
+            let shown = shownWords(l).joined(separator: "\n")
+            check(l.hasDetails || k.words.allSatisfy { shown.contains($0) }, "\(k.key): its words \(k.words) are shown, or 「细节」 is: \(shown)")
+            check(!l.hasDetails, "\(k.key): a field the block shows needs no 「细节」")
+        }
+        let whole = CardLayout(consentCard(all)), shown = shownWords(whole).joined(separator: "\n")
+        check(!whole.hasDetails && consentKeys.allSatisfy { $0.words.allSatisfy { shown.contains($0) } }, "every key at once: every word shown: \(shown)")
+        // what the block cannot show keeps the whole text reachable
+        for (what, c) in [("a key the app does not know", base.merging(["zzz_new_fact": "以后的字段"]) { $1 }),
+                          ("a list under a key it does not know", base.merging(["zzz_more": ["一项"]]) { $1 }),
+                          ("a class it does not know", base.merging(["consequence": "zzz_class"]) { $1 }),
+                          ("an element its action does not name", base.merging(["target": "另一个按钮"]) { $1 })] as [(String, [String: Any])] {
+            let l = CardLayout(consentCard(c))
+            check(l.hasDetails && l.consent?.unshown.isEmpty == false, "\(what): 「细节」 stays: \(String(describing: l.consent?.unshown))")
+        }
+        for (what, c) in [("an unknown key with no value", base.merging(["zzz_new_fact": NSNull()]) { $1 }),
+                          ("an unknown key, empty", base.merging(["zzz_new_fact": ""]) { $1 })] as [(String, [String: Any])] {
+            check(!CardLayout(consentCard(c)).hasDetails, "\(what): nothing unshown, no 「细节」")
+        }
+        // a field of the wrong type is no field, never a lost consent (#124)
+        let bad = CardLayout(consentCard(base.merging(["uncertain": "zzz", "uncertain_total": "x", "selected": 7, "model_says_unchecked": ["a"]]) { $1 }))
+        check(bad.consent?.action == "点「发送」" && bad.consent?.uncertain == [] && bad.consent?.uncertainMore == 0 && !bad.hasDetails,
+              "wrong types: the consent stays, the bad fields are empty")
+        // a card with no consent folds its text as before
+        check(CardLayout(model(["kind": "plan", "text": "一步", "headline": "要这样做吗？", "free_text": false, "blocking": true,
+                                "options": [opt("approve", "可以")]])).hasDetails, "a plan card with a headline still has 「细节」")
+    }
+
+    /// 「细节」 stays unless every piece of the card's text is drawn whole (#129 Codex review: a long set_value).
+    static func consentTextTests() {
+        func card(_ text: String, headline: String, _ c: [String: Any]) -> CardModel {
+            model(["kind": "action", "text": text, "headline": headline, "free_text": false, "blocking": true, "consent": c,
+                   "options": [opt("approve", "可以"), opt("skip_step", "这一步不要"), opt("cancel", "先别做了")]])
+        }
+        let facts: [String: Any] = ["action": "set_value", "target": "正文", "object": "window:textedit#4", "object_label": "TextEdit 窗口「笔记」",
+                                    "consequence": "modify_user", "outgoing": [], "site": NSNull()]
+        // (the harness's shapes, b0d928c: action_text is stepText, its value cut at 40 by cardText -- 「…（共 n 字）」;
+        // the card's text keeps it whole)
+        let long = "周一上午十点在三楼会议室开项目例会，请各位提前准备好上周的进展、遇到的问题和本周计划，会后把纪要发到群里，谢谢大家配合"
+        let cut = String(long.prefix(40)) + "…（共 \(long.count) 字）"
+        let longCard = card("这会改动你的东西：把「正文」设为「\(long)」", headline: "把「正文」设为「\(cut)」",
+                            facts.merging(["action_text": "把「正文」设为「\(cut)」"]) { $1 })
+        let l = CardLayout(longCard)
+        check(long.count > 40 && l.hasDetails && l.text.contains(long), "a long set_value: 「细节」 stays, and it holds the whole replacement")
+        check(l.wholeText == l.text, "a long set_value: the float shows the text whole")
+        let short = CardLayout(card("这会改动你的东西：把「正文」设为「好」", headline: "把「正文」设为「好」",
+                                    facts.merging(["action_text": "把「正文」设为「好」"]) { $1 }))
+        check(!short.hasDetails && short.wholeText == nil, "a short one, every part drawn: no 「细节」")
+        // (quote styles and spaces evened out; a clause drawn nowhere keeps it; a cut even where the rest is drawn)
+        check(!CardLayout(card("这会改动你的东西：把 “正文”  设为 “好”", headline: "把「正文」设为「好」",
+                               facts.merging(["action_text": "把「正文」 设为「好」"]) { $1 })).hasDetails, "quotes and spaces: the same words")
+        check(CardLayout(card("这会改动你的东西：把「正文」设为「好」，然后保存", headline: "把「正文」设为「好」",
+                              facts.merging(["action_text": "把「正文」设为「好」"]) { $1 })).hasDetails, "a clause drawn nowhere: 「细节」")
+        check(CardLayout(card("这会改动你的东西：把「正文」设为「好」", headline: "把「正文」设为「好」",
+                              facts.merging(["action_text": "把「正文」设为「好」", "model_says_unchecked": "好…（共 9 字）"]) { $1 })).hasDetails,
+              "a field cut short: 「细节」")
+        // property: for random cards, every word of the text is drawn, or 「细节」 is there
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        func next(_ n: Int) -> Int { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Int((seed >> 33) % UInt64(n)) }
+        let pool = ["点「发送」", "周报", "wang@example.com", "正文", "好的", "TextEdit 窗口「笔记」", "mail.example.com", "第一封", "“引号”", "长长的一段话"]
+        let seps = ["，", "：", "\n", "。", " "]
+        var hidden = 0
+        for i in 0..<400 {
+            var given: [String] = []     // (the fields' words: the text is mostly made of them, now and then of others)
+            func pick() -> String { let w = pool[next(pool.count)]; given.append(w); return w }
+            var c = facts
+            c["action_text"] = pick(); c["object_label"] = next(2) == 0 ? pick() : ""
+            if next(2) == 0 { c["outgoing"] = [["kind": "field", "label": pick(), "value": pick()]] }
+            if next(3) == 0 { c["selected"] = [pick()] }
+            if next(4) == 0 { c["model_says_unchecked"] = pick() }
+            if next(5) == 0 { c["site"] = pick() }
+            let words = (0..<(1 + next(4))).map { _ in next(5) == 0 ? pool[next(pool.count)] : given[next(given.count)] }
+            let text = words.enumerated().map { $0.offset == 0 ? $0.element : seps[next(seps.count)] + $0.element }.joined()
+            let l = CardLayout(card(text, headline: c["action_text"] as! String, c))
+            let shown = shownWords(l).map(CardLayout.normalised).joined(separator: "\n")
+            if !l.hasDetails { hidden += 1 }
+            check(l.hasDetails || words.allSatisfy { shown.contains(CardLayout.normalised($0)) },
+                  "random card \(i): every word of 「\(text)」 drawn, or 「细节」: \(shown)")
+        }
+        check(hidden > 20, "the property is not empty: \(hidden) of 400 random cards hide 「细节」")
+    }
+
+    static func consentScopeTests() {
+        let base: [String: Any] = ["action": "click", "action_text": "点「发送」", "object": "window:mail#3", "object_label": "Mail「周报」",
+                                   "consequence": "external", "outgoing": []]
+        let once = "只对这一次有效。", onceTarget = "只对这一次「发送」有效。", site = "同意后，这个任务里再打开「mail.example.com」不再问你。"
+        let unc: [[String: Any]] = [["consequence": "external", "object": "window:mail#2", "text": "点「发送」", "outgoing": []]]
+        // (what the card carries, its scope, the hint's first sentence or nil: no claim about the scope)
+        let table: [(String, [String: Any], CardLayout.Scope, String?)] = [
+            ("no site, no target", [:], .once(target: nil), once),
+            ("no site, a target", ["target": "发送"], .once(target: "发送"), onceTarget),
+            ("an empty site", ["site": "", "target": "发送"], .once(target: "发送"), onceTarget),
+            ("a site, no uncertain step: the site for the task", ["site": "mail.example.com", "target": "发送"], .site("mail.example.com"), site),
+            ("a site while a step is uncertain: this once", ["site": "mail.example.com", "uncertain": unc, "uncertain_total": 1], .once(target: nil), once),
+            ("a site, uncertain counted only", ["site": "mail.example.com", "uncertain_total": 2], .once(target: nil), once),
+            ("a field it does not know: unknown", ["site": "mail.example.com", "zzz_scope": "run"], .unknown, nil),
+        ]
+        for (what, extra, scope, first) in table {
+            let card = consentCard(base.merging(extra) { $1 })
+            let got = CardLayout(card).consent?.scope
+            let hint = CardLayout.consentHint(card, lang: .zhHans) ?? ""
+            check(got == scope, "\(what): scope \(String(describing: got))")
+            if let first { check(hint.hasPrefix(first), "\(what): the hint starts 「\(first)」: \(hint)") }
+            else { check(!hint.contains("只对这一次") && !hint.contains("不再问你") && hint.hasPrefix("这一步不要："), "\(what): no scope claimed: \(hint)") }
+            if case .site = scope { check(!hint.contains("只对这一次"), "\(what): never 「只对这一次」") }
+        }
+        check(CardLayout.consentHint(consentCard(base.merging(["site": "mail.example.com"]) { $1 }), lang: .en)?.hasPrefix("Once you agree, this task opens 「mail.example.com」 again without asking you.") == true,
+              "the site line in English")
     }
 
     // MARK: - the keys

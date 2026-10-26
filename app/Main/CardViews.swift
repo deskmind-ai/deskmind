@@ -45,39 +45,36 @@ struct CardView: View {
 
     var body: some View {
         let layout = self.layout
+        let asking = card.blocking && !card.isResult && phase == .open
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                if card.blocking && !card.isResult {
-                    Text(phase == .open ? L("Waiting for you", lang: lang) : ShellText.cardState(phase, lang: lang))
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(phase.ending == nil ? ShellColor.orangeText : ShellColor.secondary)
-                }
-                Text(ShellText.cardKind(card.kind.name, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-            }
-            .fixedSize(horizontal: false, vertical: true)
-            Text(layout.title).font(.system(size: 13, weight: layout.folds ? .semibold : .regular)).foregroundStyle(Brand.ink)
+            header
+            Text(layout.title).font(.system(size: asking ? 17 : 14, weight: .bold)).lineSpacing(2).foregroundStyle(Brand.ink)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let t = layout.shownText {
-                Text(t).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                Text(t).font(.system(size: 13)).lineSpacing(2).foregroundStyle(Brand.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
-                Text(line).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+                Text(line).font(.system(size: 13)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
             }
             if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
             if let c = layout.consent { ConsentFields(consent: c) }
-            if layout.folds {
+            // (an action card is its headline and its fields: the board has no 「细节」 on it -- protocol.md: the
+            // consent is the text split, no more and no less -- unless a field came that the block does not show:
+            // then the whole text stays reachable, #129 Codex review)
+            if layout.hasDetails {
                 DisclosureGroup(isExpanded: detailsOpen) {
                     VStack(alignment: .leading, spacing: 8) {
                         if !layout.text.isEmpty {
-                            Text(layout.text).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled)
+                            Text(layout.text).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         if !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
                     }
                     .padding(.top, 4)
                 } label: {
-                    Text(L("Card details", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                    Text(L("Card details", lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 }
             }
             if !layout.list.isEmpty && phase.ending == nil {
@@ -85,11 +82,15 @@ struct CardView: View {
                     ForEach(layout.list, id: \.index) { c in control(c) }
                 }
             }
-            if phase.ending == nil {
-                HStack(spacing: 8) {
+            if phase.ending == nil && !layout.buttons.isEmpty {
+                // (side by side, the primary wider: 1.3 : 1 : 1)
+                WeightedRow(weights: layout.buttons.map { $0.prominent ? 1.3 : 1 }) {
                     ForEach(layout.buttons, id: \.index) { c in control(c) }
                 }
                 .fixedSize(horizontal: false, vertical: true)
+            }
+            if phase.ending == nil, layout.consent != nil, let hint = CardLayout.consentHint(card, lang: lang) {
+                Text(hint).font(.system(size: 12)).lineSpacing(2).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let held = phase.pending, case .pending(_, let until) = phase { takeBackRow(held, until: until) }
             if case .expired(_, let now) = phase { expiredRow(now) }
@@ -104,10 +105,10 @@ struct CardView: View {
                 }
             }
         }
-        .padding(12)
+        .padding(.horizontal, 16).padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(card.blocking && (phase.ending == nil || phase.isExpiredOffer) ? Brand.dot : Brand.line, lineWidth: 1.2))
+        .background(RoundedRectangle(cornerRadius: 16).fill(Brand.card))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(Brand.line, lineWidth: 1))
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Self.voiceOverLabel(card, phase: phase, lang: lang))
         // (its height as laid out: whether it fits the pinned place -- ShellModel.cardFits)
@@ -122,6 +123,34 @@ struct CardView: View {
         .onDisappear { shell.cardHidden(card) }
     }
 
+    /// The card's top line (P1Waiting): while it waits, the orange dot and 「等你 · <种类>」 with 「等了 m:ss」 on the right;
+    /// after, its state in grey; a card that does not block, its kind.
+    @ViewBuilder private var header: some View {
+        HStack(spacing: 8) {
+            if card.blocking && !card.isResult {
+                if phase == .open {
+                    Circle().fill(Brand.dot).frame(width: 8, height: 8)
+                        .overlay(Circle().stroke(Brand.dot.opacity(0.3), lineWidth: 3)).accessibilityHidden(true)
+                    Text(L("Waiting for you · %@", ShellText.cardKind(card.kind.name, lang: lang), lang: lang))
+                        .font(.system(size: 13, weight: .bold)).foregroundStyle(ShellColor.orangeText)
+                } else {
+                    Text(L("%@ · %@", ShellText.cardState(phase, lang: lang), ShellText.cardKind(card.kind.name, lang: lang), lang: lang))
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+                }
+            } else {
+                Text(ShellText.cardKind(card.kind.name, lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+            }
+            Spacer(minLength: 4)
+            if phase == .open, card.blocking, let askedAt {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    let w = max(0, Int(shell.now() - askedAt))
+                    Text(L("Waited %d:%02d", w / 60, w % 60, lang: lang)).font(.system(size: 12).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
     /// One option's control: a row of the list (a pick), or a button; with its key (1–9) shown.
     @ViewBuilder private func control(_ c: CardLayout.Control) -> some View {
         let b = c.button
@@ -131,19 +160,22 @@ struct CardView: View {
             switch c.slot {
             case .list:
                 Button(action: action) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
                         if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(b.text).fixedSize(horizontal: false, vertical: true)
+                            Text(b.text).font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
                             if let d = b.detail {
-                                Text(d).font(.system(size: 11)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text(d).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Brand.card))
+                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color(ShellPalette.buttonLine), lineWidth: 1))
+                    .contentShape(RoundedRectangle(cornerRadius: 10))
                 }
-                .buttonStyle(.plain).padding(.horizontal, 10).padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 8).strokeBorder(Brand.line))
+                .buttonStyle(.plain)
             case .button:
                 Button(action: action) {
                     HStack(spacing: 6) {
@@ -151,7 +183,7 @@ struct CardView: View {
                         Text(b.text)
                     }
                 }
-                .buttonStyle(InkButtonStyle(prominent: c.prominent))
+                .buttonStyle(InkButtonStyle(prominent: c.prominent, fill: true))
             }
         }
         .disabled(!enabled)
@@ -165,18 +197,33 @@ struct CardView: View {
     /// The answer held for its take-back: what was picked, the seconds left, and 「撤回」 (the words come back to the
     /// field). Picking another option starts over; 「先别做了」 and Stop are not held.
     @ViewBuilder private func takeBackRow(_ held: CardAnswer, until: Double) -> some View {
-        HStack(spacing: 8) {
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                let left = max(0, Int((until - shell.now()).rounded(.up)))
-                Text(L("Picked: %@ · sends in %d s", Self.picked(held, card: card), left, lang: lang))
-                    .font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+        TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+            let left = max(0, until - shell.now())
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark").font(.system(size: 12, weight: .bold)).foregroundStyle(Brand.paper)
+                        .frame(width: 26, height: 26).background(Circle().fill(Brand.ink)).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(L("Picked: %@", Self.picked(held, card: card), lang: lang)).font(.system(size: 15, weight: .semibold)).foregroundStyle(Brand.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(L("Goes on in %d s", Int(left.rounded(.up)), lang: lang)).font(.system(size: 12).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+                    }
+                    Spacer(minLength: 4)
+                    Button(L("Take back", lang: lang)) {
+                        if case .text(_, _, let w) = held { words.wrappedValue = w }
+                        shell.takeBack(card)
+                    }
+                    .buttonStyle(InkButtonStyle(prominent: false, small: true))
+                    .accessibilityHint(L("Your pick is not sent; the card waits again", lang: lang))
+                }
+                // (the time left to take it back, as a bar: display only -- CardStore holds the answer)
+                GeometryReader { g in
+                    Capsule().fill(ShellColor.softLine)
+                        .overlay(alignment: .leading) { Capsule().fill(Brand.dot).frame(width: g.size.width * min(1, left / CardStore.takeBack)) }
+                }
+                .frame(height: 3)
+                .accessibilityHidden(true)
             }
-            Button(L("Take back", lang: lang)) {
-                if case .text(_, _, let w) = held { words.wrappedValue = w }
-                shell.takeBack(card)
-            }
-            .buttonStyle(InkButtonStyle(prominent: false))
-            .accessibilityHint(L("Your pick is not sent; the card waits again", lang: lang))
         }
         .fixedSize(horizontal: false, vertical: true)
     }
@@ -242,6 +289,8 @@ struct PinnedCard: View {
     var body: some View {
         if shell.cardPinnedWhole(card) {
             CardView(shell: shell, card: card, phase: phase, askedAt: askedAt, session: session)
+                // (P1Waiting: the pinned card that waits for you, and only it, in a 2 pt orange ring)
+                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(phase == .open && card.blocking ? Brand.dot : Color.clear, lineWidth: 2))
                 .id(ShellModel.cardKey(card))
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
         } else {
@@ -289,14 +338,18 @@ struct PlanSteps: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(rows, id: \.n) { r in
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("\(r.n).").font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
-                        Text(r.purpose).font(.system(size: 12, weight: .semibold)).foregroundStyle(Brand.ink)
+                        Text("\(r.n).").font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.ink)
+                        Text(r.purpose).font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.ink)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if r.changesYours { tag("pencil", L("Changes your things", lang: lang)) }
-                    if r.sendsOut { tag("paperplane", L("Sends something out", lang: lang)) }
+                    if r.changesYours || r.sendsOut {
+                        HStack(spacing: 6) {
+                            if r.changesYours { tag(L("Changes your things", lang: lang), out: false) }
+                            if r.sendsOut { tag(L("Sends something out", lang: lang), out: true) }
+                        }
+                    }
                     if !r.objects.isEmpty { line(L("Touches: %@", r.objects.joined(separator: "、"), lang: lang)) }
                     ForEach(Array(r.sites.enumerated()), id: \.offset) { _, site in
                         line(site.sends.map { L("Site: %@ · sends: %@", site.host, $0, lang: lang) } ?? L("Site: %@", site.host, lang: lang))
@@ -307,35 +360,78 @@ struct PlanSteps: View {
             if !foreground.isEmpty { line(L("Comes to the front: %@", foreground.joined(separator: "、"), lang: lang)) }
         }
     }
-    private func tag(_ icon: String, _ text: String) -> some View {
-        Label(text, systemImage: icon).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
+    /// P1Main's tags: 「改你的东西」 in an ink outline, 「往外发」 on the orange tint (words, never colour alone).
+    private func tag(_ text: String, out: Bool) -> some View {
+        Text(text).font(.system(size: 11, weight: .semibold)).foregroundStyle(out ? ShellColor.orangeText : Brand.ink)
+            .padding(.horizontal, 7).frame(height: 20)
+            .background(Capsule().fill(out ? ShellColor.waitRow : Color.clear))
+            .overlay(Capsule().strokeBorder(out ? Color.clear : Brand.ink, lineWidth: 1))
     }
     private func line(_ text: String) -> some View {
-        Text(text).font(.system(size: 11)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
+        Text(text).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }
 
-/// An action card's fields (card.consent): the action, what it acts on, the site, and every line of what goes out.
+/// An action card's fields (card.consent), on the paper in a block (P1Waiting 「要发出去的」): the action, what it acts
+/// on, the site, and every line of what goes out.
 struct ConsentFields: View {
     let consent: CardLayout.Consent
     @Environment(\.lang) private var lang
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             if !consent.action.isEmpty { row(L("Action", lang: lang), consent.action) }
             if !consent.object.isEmpty { row(L("On", lang: lang), consent.object) }
             if let site = consent.site, !site.isEmpty { row(L("Site", lang: lang), site) }
+            ForEach(Array(consent.selected.enumerated()), id: \.offset) { _, v in row(L("Selected", lang: lang), v) }
             if !consent.outgoing.isEmpty {
-                Label(L("What goes out", lang: lang), systemImage: "paperplane").font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
-                ForEach(Array(consent.outgoing.enumerated()), id: \.offset) { _, o in row(o.label, o.value) }
+                Text(L("What goes out", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary).padding(.top, 2)
+                ForEach(Array(consent.outgoing.enumerated()), id: \.offset) { _, o in row(o.label, o.value, strong: true) }
             }
+            if let e = consent.effect { quiet(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
+            if !consent.uncertain.isEmpty || consent.uncertainMore > 0 { UncertainSteps(consent: consent) }
+            if let m = consent.modelSays { quiet(L("What the model says (not checked): %@", m, lang: lang)) }
         }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Brand.paper))
     }
-    private func row(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-            Text(value).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    private func quiet(_ s: String) -> some View {
+        Text(s).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    }
+    private func row(_ label: String, _ value: String, strong: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label).font(.system(size: 13)).foregroundStyle(ShellColor.secondary)
+            Text(value).font(.system(size: strong ? 15 : 13, weight: strong ? .bold : .regular)).foregroundStyle(Brand.ink)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// 「之前不确定是否已发出的」: each earlier step whose result is unknown, in its own words, with what it sent -- so a yes
+/// to this send is given knowing which earlier one may already have gone out -- and how many more there are.
+struct UncertainSteps: View {
+    let consent: CardLayout.Consent
+    @Environment(\.lang) private var lang
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(L("Earlier steps that may already have gone out", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+            ForEach(Array(consent.uncertain.enumerated()), id: \.offset) { _, u in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(u.text).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(u.outgoing.enumerated()), id: \.offset) { _, o in
+                        Text(L("%@: %@", o.label, o.value, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                            .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            if consent.uncertainMore > 0 {
+                Text(L("%d more steps with an unknown result", consent.uncertainMore, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+            }
+        }
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

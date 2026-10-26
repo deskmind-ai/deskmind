@@ -42,7 +42,7 @@ struct FirstRunView: View {
                 if flow.step != .language { Button(L("Back", lang: lang)) { flow.apply(.back) } }
                 if flow.canLater && !ready { Button(L("Later", lang: lang)) { move(.later) } }
                 Button(flow.step == .examples ? L("Finish", lang: lang) : L("Next step", lang: lang)) { move(.next) }
-                    .buttonStyle(InkButtonStyle(prominent: true)).keyboardShortcut(.defaultAction)
+                    .buttonStyle(InkButtonStyle(prominent: true, small: true)).keyboardShortcut(.defaultAction)
             }
         }
         .padding(24).frame(width: 520, height: 400)
@@ -114,7 +114,7 @@ struct FirstRunView: View {
                 Button { shell.draft = L(e, lang: lang); finish() } label: {
                     Text(L(e, lang: lang)).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(InkButtonStyle(prominent: false))
+                .buttonStyle(InkButtonStyle(prominent: false, small: true))
             }
         case .done:
             EmptyView()
@@ -152,7 +152,7 @@ struct SetupRow: View {
                         .font(.system(size: 12)).foregroundStyle(Brand.ink)
                     // (unreadable keys: the key step too, where a save replaces them)
                     Button(L("Finish setup", lang: lang)) { open(u == .permissions ? .permissions : .key) }
-                        .buttonStyle(InkButtonStyle(prominent: false))
+                        .buttonStyle(InkButtonStyle(prominent: false, small: true))
                 }
             }
         }

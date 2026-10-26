@@ -274,7 +274,7 @@ struct FloatView: View {
                     Button(float.userCollapsed ? L("Larger", lang: lang) : L("Collapse", lang: lang)) { float.userCollapsed.toggle() }
                         .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
                     Button(L("Stop", lang: lang)) { shell.stop(sessionId: n.sessionId, runId: n.task.runId) }
-                        .buttonStyle(InkButtonStyle(prominent: false))
+                        .buttonStyle(InkButtonStyle(prominent: false, small: true))
                 }
                 if !float.userCollapsed {
                     let last = n.task.steps.last
@@ -320,10 +320,14 @@ struct FloatCard: View {
                 }
             case .floatCard:
                 whole(layout)
-                if let held = phase.pending {
+                if let held = phase.pending, case .pending(_, let until) = phase {
                     HStack {
-                        Text(L("Picked: %@", CardView.picked(held, card: card), lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
-                        Button(L("Take back", lang: lang)) { if FloatController.shared.answersNow() { shell.takeBack(card) } }.buttonStyle(InkButtonStyle(prominent: false))
+                        // (the seconds left to take it back, as the chat's card shows them: display only)
+                        TimelineView(.periodic(from: .now, by: 1)) { _ in
+                            Text(L("Picked: %@ · goes on in %d s", CardView.picked(held, card: card), max(0, Int((until - shell.now()).rounded(.up))), lang: lang))
+                                .font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
+                        }
+                        Button(L("Take back", lang: lang)) { if FloatController.shared.answersNow() { shell.takeBack(card) } }.buttonStyle(InkButtonStyle(prominent: false, small: true))
                     }
                 }
                 options(layout)
@@ -365,7 +369,8 @@ struct FloatCard: View {
     /// beyond lines and the consent fields say it).
     @ViewBuilder private func whole(_ layout: CardLayout) -> some View {
         title(layout)
-        if let t = layout.shownText { Text(t).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true) }
+        // (an action card whose words do not say all of its text: the text whole -- the float has no 「细节」)
+        if let t = layout.wholeText { Text(t).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true) }
         if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
         ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
             Text(line).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
