@@ -1145,7 +1145,8 @@ enum SessionStatus: Equatable {
         if let p = problem(s) { return p }
         // 4. thinking: a reply is streaming
         if s.streamingMessage != nil { return .thinking }
-        // 5. done: the newest thing in the chat is a task that ended or an assistant message
+        // 5. done: the newest thing in the chat is a task that ended -- a reply is chat, never a done (the list's check
+        // is a finished task's only: U4 §2.2; P1Main)
         for item in s.timeline.reversed() {
             switch item {
             case .task(let id):
@@ -1156,9 +1157,8 @@ enum SessionStatus: Equatable {
                 if st == "cancelled" || st == "stopped" { return .done(at: t.doneAt ?? s.lastEventAt, stopped: true) }
                 return .idle
             case .message(let id):
-                guard let m = s.message(id) else { continue }
-                // done only with the final message: a reply cut off by the process's end is not a finished one
-                return m.role == "assistant" && !m.interrupted ? .done(at: m.t, stopped: m.stopped) : .idle
+                guard s.message(id) != nil else { continue }
+                return .idle
             case .error:
                 return .idle
             }

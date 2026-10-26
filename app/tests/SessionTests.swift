@@ -135,7 +135,7 @@ enum SessionTests {
         check(s.messages.allSatisfy { !$0.streaming && !$0.gap }, "all final")
         check(s.messages.last?.stopped == true && s.messages[1].model == "test|scripted" && s.messages[1].replyTo == s.messages[0].id, "message fields")
         check(s.lastSeq == 6 && s.sessionId == "ses_t", "lastSeq \(s.lastSeq)")
-        check(s.status == .done(at: s.messages.last?.t, stopped: true), "a stopped reply last: done, stopped: \(s.status)")
+        check(s.status == .idle, "a stopped reply last: chat, idle -- a reply is never a done (U4 §2.2): \(s.status)")
         check(s.timeline.count == 6, "timeline: six messages")
         // the attach at the end replayed seq 1…6 (and, from harness#57, the queue, empty): nothing changed
         let replayStart = all.lastIndex { $0.line.seq == 1 }!
@@ -192,7 +192,7 @@ enum SessionTests {
         check(s.timeline.map { if case .task = $0 { return "task" }; if case .message(let id) = $0 { return s.message(id)!.role }; return "error" }
               == ["user", "task", "assistant"], "timeline: \(s.timeline)")
         check(s.tasks[0].end?.status == "succeeded" && s.tasks[0].end?.undo == "none" && s.tasks[0].by == "model" && s.tasks[0].goal == "把笔记正文改成「新的」", "task_end and the task's origin")
-        check(s.status == .done(at: s.messages.last?.t, stopped: false), "the model's last word: done")
+        check(s.status == .idle, "the model's last word: chat, idle -- the check is a finished task's only (U4 §2.2)")
         check(s.tasks[0].lastSeq == 21, "the run's last seq: \(s.tasks[0].lastSeq)")
     }
 
@@ -288,7 +288,7 @@ enum SessionTests {
         check(s.status == .error("unconfirmed"), "still, after the model spoke, until seen: \(s.status)")
         var seen = s
         seen.markSeen()
-        check(seen.status == .done(at: s.messages.last?.t, stopped: false), "seen: done: \(seen.status)")
+        check(seen.status == .idle, "seen: idle (a reply last): \(seen.status)")
     }
 
     static func lockedTests() {
@@ -1125,7 +1125,7 @@ enum SessionTests {
         check(half.message("m")?.interrupted == true && half.message("m")?.streaming == false && half.message("m")?.text == "从前", "3: the half reply is kept, marked interrupted")
         if case .done = half.status { check(false, "3: a cut-off reply is not done: \(half.status)") }
         let fin = SessionReducer.reduce(half, se(2, #""kind":"session.message","msg_id":"m","role":"assistant","text":"从前有座山""#))
-        check(fin.message("m")?.interrupted == false && fin.status == .done(at: nil, stopped: false), "its final message (if one comes) makes it done")
+        check(fin.message("m")?.interrupted == false && fin.status == .idle, "its final message (if one comes): no longer cut off, idle (a reply is chat)")
         // 4: the queue goes to unsent, never pending
         let q = se(nil, #""kind":"session.queue","items":[{"id":"q1","text":"一"},{"id":"q2","text":"二"}]"#)
         let gone = SessionReducer.reduce(SessionState(), [user, q, exit])
@@ -1395,7 +1395,7 @@ enum SessionTests {
         SessionReducer.apply(&q, se(4, #""kind":"session.message","msg_id":"u9","role":"user","text":"在吗""#))
         SessionReducer.apply(&q, se(5, #""kind":"session.message","msg_id":"m9","role":"assistant","text":"在","reply_to":"u9""#))
         SessionReducer.apply(&q, exit(5))
-        check(q.status == .done(at: nil, stopped: false), "a later chat, then an idle process end: done, no old problem back: \(q.status)")
+        check(q.status == .idle, "a later chat, then an idle process end: idle, no old problem back: \(q.status)")
         // a stored model error after it is newer
         var e = SessionReducer.reduce(SessionState(), [taskR1, ex(1, #""kind":"start","raw":"x""#), exit(1)])
         SessionReducer.apply(&e, se(2, #""kind":"session.error","code":"no_key","text":"k","reply_to":"u""#))
@@ -1428,7 +1428,7 @@ enum SessionTests {
             se(2, #""kind":"session.message","msg_id":"u2","role":"user","text":"b""#), se(nil, #""kind":"session.delta","msg_id":"m2","text":"好","offset":0"#),
             se(3, #""kind":"session.message","msg_id":"m2","role":"assistant","text":"好""#)])
         check(st.timeline == [.message("u1"), .message("m1"), .message("u2"), .message("m2")], "2: the cut-off reply where it began: \(st.timeline)")
-        check(st.status == .done(at: nil, stopped: false), "2: the next reply done: \(st.status)")
+        check(st.status == .idle, "2: the next reply: idle, the old problem not back: \(st.status)")
         // 3. not_open on a card's answer or a steer: the card went with the process; nothing opened, nothing sent
         let mock = MockTransport()
         mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "s"], SessionClient.Op.send: ["ok": true]]

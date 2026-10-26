@@ -52,9 +52,15 @@ struct MainSplitView: View {
             } else {
                 MainColumns(shell: shell, openSettings: openSettings, unmet: unmet, openSetup: { setupAt = $0 }, cloud: cloud, mac: mac)
                     .frame(minWidth: MainColumns.minWidth, minHeight: 600)
+                    // (up to the window's top edge, under the hidden title bar, as P1Main and the offscreen render draw
+                    // it: the sidebar's 40 on top clears the window's buttons; the real window had the columns 28 lower
+                    // -- U4 §3)
+                    .ignoresSafeArea(.container, edges: .top)
             }
         }
         .frame(idealWidth: 1440, idealHeight: 900)
+        // (the frame SwiftUI restored, fitted once to the least size of what is shown: U4 §2.1)
+        .background(WindowFitter(min: setupAt == nil ? CGSize(width: MainColumns.minWidth, height: 600) : CGSize(width: 1080, height: 780)))
         .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
             CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
         }
@@ -116,6 +122,39 @@ struct MainSplitView: View {
         if let c = CloudModelSettings.engineConfig, !c.isEmpty { return SessionClient.normalizeConfig(c) }
         let p = CloudModelSettings.provider
         return SessionClient.normalizeConfig(CloudModelSettings.config(for: p, model: KeyStatus.shared.now.settings["CUSTOM_MODEL"] ?? ""))
+    }
+}
+
+/// The window's frame as restored at launch, fitted once (U4 §2.1): an earlier version saved it under several keys,
+/// some smaller than the three columns, and SwiftUI restores whichever it takes as it is -- the least size holds only
+/// for the user's own drag. When the window appears, after that restore, WindowFit grows a frame too small and keeps
+/// it on its screen; the saved keys themselves are left alone. Done once a launch: later the window's own least size
+/// holds.
+struct WindowFitter: NSViewRepresentable {
+    let min: CGSize
+    func makeNSView(context: Context) -> Probe { Probe(min: min) }
+    func updateNSView(_ v: Probe, context: Context) { v.min = min }
+
+    final class Probe: NSView {
+        var min: CGSize
+        @MainActor static var fitted = false
+        init(min: CGSize) { self.min = min; super.init(frame: .zero) }
+        required init?(coder: NSCoder) { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil, !Self.fitted else { return }
+            Self.fitted = true
+            // (the next turn of the main loop: the restored frame is the window's by then)
+            DispatchQueue.main.async { [weak self] in self?.fit() }
+        }
+        private func fit() {
+            guard let w = window else { return }
+            w.contentMinSize = min
+            let least = w.frameRect(forContentRect: NSRect(origin: .zero, size: min)).size
+            let screen = (w.screen ?? NSScreen.main)?.visibleFrame ?? w.frame
+            let f = WindowFit.fit(restored: w.frame, min: least, screen: screen)
+            if f != w.frame { w.setFrame(f, display: true) }
+        }
     }
 }
 
@@ -277,27 +316,37 @@ struct SessionList: View {
                 .font(.system(size: 14, weight: .semibold)).foregroundStyle(Brand.ink)
                 .padding(.horizontal, 12).frame(height: 40)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(shell.selected == nil ? Brand.ink : Brand.line, lineWidth: 1))
+                // (never the ink edge: the new conversation shown is its row in the list -- U4 §2.2, P1Flow)
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Brand.line, lineWidth: 1))
                 .contentShape(RoundedRectangle(cornerRadius: 12))
             }
             .buttonStyle(.plain)
             .help(L("New conversation (⌘N)", lang: lang))
             .accessibilityHint(L("Starts a new conversation", lang: lang))
-            .accessibilityAddTraits(shell.selected == nil ? .isSelected : [])
+            .accessibilityIdentifier("sidebar.new")
             Text(L("Conversations", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
                 .padding(.horizontal, 6).padding(.top, 6)
                 .accessibilityAddTraits(.isHeader)
             ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(shell.rows) { row in
-                        Button { shell.select(row.id) } label: { SessionRowView(row: row, selected: shell.selected == row.id) }
-                            .buttonStyle(.plain)
-                            .accessibilityAddTraits(shell.selected == row.id ? .isSelected : [])
-                            .contextMenu {
-                                Button(L("Rename…", lang: lang)) { newName = shell.name(row.id) ?? row.title; renaming = row.id }
-                                Button(L("Delete…", lang: lang), role: .destructive) { deleting = row.id }
-                                    .disabled(!shell.canDelete(row.id))
+                // (the time words move on: 「刚才」 becomes 「1 分钟前」 with no event)
+                TimelineView(.periodic(from: .now, by: 30)) { _ in
+                    let now = shell.now()
+                    LazyVStack(spacing: 4) {
+                        ForEach(shell.listRows) { row in
+                            let on = row.fresh || shell.selected == row.id
+                            Button { if row.fresh { shell.newConversation() } else { shell.select(row.id) } } label: {
+                                SessionRowView(row: row, selected: on, now: now)
                             }
+                            .buttonStyle(.plain)
+                            .accessibilityAddTraits(on ? .isSelected : [])
+                            .contextMenu {
+                                if !row.fresh {
+                                    Button(L("Rename…", lang: lang)) { newName = shell.name(row.id) ?? row.title; renaming = row.id }
+                                    Button(L("Delete…", lang: lang), role: .destructive) { deleting = row.id }
+                                        .disabled(!shell.canDelete(row.id))
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -337,8 +386,9 @@ struct SessionList: View {
     private var footer: some View {
         HStack(spacing: 8) {
             Circle().fill(cloud.on && cloud.ready ? ShellColor.ok : Brand.mist).frame(width: 7, height: 7).accessibilityHidden(true)
-            Text(!cloud.on ? L("Cloud models are off", lang: lang)
-                 : cloud.ready ? L("Cloud model · %@", cloud.provider, lang: lang) : L("Cloud model · %@ · no key", cloud.provider, lang: lang))
+            // (P1Main: the service only; with no key, that instead -- the service and 「未填密钥」 did not fit the 256)
+            Text(!cloud.on ? L("Cloud model · off", lang: lang)
+                 : cloud.ready ? L("Cloud model · %@", cloud.provider, lang: lang) : L("Cloud model · no key", lang: lang))
                 .font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(1)
             Spacer(minLength: 4)
             Button(action: openSettings) {
@@ -359,6 +409,8 @@ struct SessionList: View {
 struct SessionRowView: View {
     let row: ShellRow
     var selected = false
+    /// For its time words (ShellText.rowLine).
+    var now: Double = Date().timeIntervalSince1970
     @Environment(\.lang) private var lang
 
     private var waits: Bool {
@@ -366,7 +418,7 @@ struct SessionRowView: View {
     }
 
     var body: some View {
-        let status = ShellText.status(row.status, lang: lang)
+        let status = ShellText.rowLine(row, now: now, lang: lang)
         HStack(spacing: 10) {
             StatusDot(status: row.status, label: status).frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
@@ -467,7 +519,7 @@ struct ChatColumn: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        if let s { timeline(s) } else { EmptyChat(opening: shell.opening, unmet: unmet, openSetup: openSetup) }
+                        if let s { timeline(s) } else { EmptyChat(opening: shell.opening, unmet: unmet, openSetup: openSetup, pick: { shell.fillExample($0) }) }
                         Color.clear.frame(height: 1).id("bottom")
                     }
                     .padding(.horizontal, 40).padding(.top, 18).padding(.bottom, 12)
@@ -648,22 +700,81 @@ struct Banner: View {
     }
 }
 
+/// The new conversation's chat (P3States 「空状态」): at the top on the left, 小方 whole beside 「想让它做什么？」, then
+/// three examples -- a click puts one in the composer (never sends it); what the first run left unmet under them.
 struct EmptyChat: View {
     let opening: Bool
     var unmet: [FirstRun.Unmet] = []
     var openSetup: (FirstRun.Step) -> Void = { _ in }
+    var pick: (String) -> Void = { _ in }
     @Environment(\.lang) private var lang
+
+    /// The examples' keys (L10n: zh and en).
+    static let examples = ["Reply to Xu Nuo: I'll take a look first", "Sort the invoices in Downloads by month", "/cua Open Display in System Settings"]
+
     var body: some View {
-        VStack(spacing: 10) {
-            XiaoFace(eyes: .look, size: 56)
-            Text(opening ? L("Starting the conversation…", lang: lang) : L("What can I do for you?", lang: lang))
-                .font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
-            Text(L("Chat, or start a computer task with /cua followed by what to do.", lang: lang))
-                .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 16) {
+                Image(nsImage: Brand.image("idle")).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                    .frame(height: 71).accessibilityHidden(true)
+                Text(opening ? L("Starting the conversation…", lang: lang) : L("What should it do?", lang: lang))
+                    .font(.system(size: 24, weight: .bold)).foregroundStyle(Brand.ink)
+            }
+            if !opening {
+                WrapRow(spacing: 8) {
+                    ForEach(Self.examples, id: \.self) { key in
+                        let words = L(key, lang: lang)
+                        Button { pick(words) } label: {
+                            Text(words).font(.system(size: 13)).foregroundStyle(Brand.ink).lineLimit(1).fixedSize()
+                                .padding(.horizontal, 14).frame(height: 34)
+                                .background(RoundedRectangle(cornerRadius: 17).fill(Brand.card))
+                                .overlay(RoundedRectangle(cornerRadius: 17).strokeBorder(Brand.line, lineWidth: 1))
+                                .contentShape(RoundedRectangle(cornerRadius: 17))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint(L("Puts it in the message field", lang: lang))
+                    }
+                }
+            }
             // (what the first run left unmet: its step again -- A12)
             if !unmet.isEmpty { SetupRow(unmet: unmet, open: openSetup).padding(.top, 8) }
         }
-        .frame(maxWidth: .infinity).padding(.top, 80)
+        .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
+    }
+}
+
+/// Its children left to right, on to the next line when the width runs out (the examples).
+struct WrapRow: Layout {
+    var spacing: CGFloat = 8
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = lines(proposal.width ?? .infinity, subviews)
+        let w = rows.map { $0.width }.max() ?? 0
+        let h = rows.map { $0.height }.reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
+        return CGSize(width: w, height: h)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in lines(bounds.width, subviews) {
+            var x = bounds.minX
+            for i in row.items {
+                let size = subviews[i].sizeThatFits(.unspecified)
+                subviews[i].place(at: CGPoint(x: x, y: y), proposal: .unspecified)
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+    private func lines(_ width: CGFloat, _ subviews: Subviews) -> [(items: [Int], width: CGFloat, height: CGFloat)] {
+        var out: [(items: [Int], width: CGFloat, height: CGFloat)] = []
+        var cur: (items: [Int], width: CGFloat, height: CGFloat) = ([], 0, 0)
+        for i in subviews.indices {
+            let size = subviews[i].sizeThatFits(.unspecified)
+            let next = cur.items.isEmpty ? size.width : cur.width + spacing + size.width
+            if !cur.items.isEmpty && next > width { out.append(cur); cur = ([i], size.width, size.height) }
+            else { cur.items.append(i); cur.width = next; cur.height = max(cur.height, size.height) }
+        }
+        if !cur.items.isEmpty { out.append(cur) }
+        return out
     }
 }
 
@@ -861,67 +972,43 @@ struct Composer: View {
     /// The focus funnel's one consumer (ShellModel.focusRequest: the user's Esc out of a card).
     @FocusState private var focused: Bool
 
-    /// P1Main: the field (15 px) on the card colour in a 1.5 pt ink outline, radius 18; under it, while a task runs, an
-    /// orange dot and 「任务进行中」, then Stop, 「录制这个任务」 and the round send button.
+    /// P1Main: the field (15 px) on the card colour in a 1.5 pt ink outline, radius 18. At rest one row, 54 high, the
+    /// record and send buttons at its right end (P3States); two rows -- the field, then under it the state, Stop, record
+    /// and send -- while a task runs or a reply comes (they have Stop), or the draft has more than one line. The field
+    /// stays the same view in both (the typing keeps its place).
     var body: some View {
         let mode = shell.composer
+        let twoRows = mode.taskRunning || mode.replying || shell.draft.contains("\n")
         VStack(alignment: .leading, spacing: 4) {
-            TextField(placeholder(mode), text: Binding(get: { shell.draft }, set: { shell.draft = $0 }), axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 15))
-                .lineLimit(1...8)
-                .disabled(!mode.enabled || shell.opening)
-                .focused($focused)
-                .onChange(of: shell.focusRequest) { _, n in if shell.takeFocus(n) { focused = true } }
-                // Return: the field's own submit, which waits for an input method to commit what is being composed
-                // (pinyin's Return confirms the letters, never sends). ⌘Return sends now; ⇧Return / ⌥Return: a new line.
-                .onSubmit { shell.submit() }
-                .onKeyPress(.return, phases: .down) { press in
-                    if press.modifiers.contains(.command) { shell.submit(sendNow: mode.taskRunning); return .handled }
-                    if press.modifiers.contains(.shift) { shell.draft += "\n"; return .handled }
-                    return .ignored
-                }
-                .accessibilityLabel(L("Message", lang: lang))
-                .accessibilityHint(mode.taskRunning ? L("Return sends it to the task now", lang: lang)
-                                                    : L("Return sends; start with /cua to run a computer task", lang: lang))
-                .padding(.horizontal, 16).padding(.top, 12)
-            HStack(spacing: 12) {
-                if mode.taskRunning {
-                    HStack(spacing: 6) {
-                        Circle().fill(Brand.dot).frame(width: 6, height: 6).accessibilityHidden(true)
-                        Text(L("Task running", lang: lang))
-                    }
-                    .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
-                }
-                Spacer()
-                if mode.canStop {
-                    Button(L("Stop", lang: lang)) { shell.stop() }
-                        .buttonStyle(InkButtonStyle(prominent: false, small: true))
-                        .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
-                }
-                // 「录制这个任务」: this conversation's next computer task recorded (TaskRecording), off unless turned on
-                Toggle(isOn: Binding(get: { shell.recordsNext }, set: { shell.setRecording($0) })) {
-                    Image(systemName: shell.recordsNext ? "record.circle.fill" : "record.circle").font(.system(size: 17))
-                        .frame(width: 34, height: 34).contentShape(Rectangle())
-                }
-                .toggleStyle(.button).buttonStyle(.plain)
-                .foregroundStyle(shell.recordsNext ? ShellColor.orangeText : ShellColor.secondary)
-                .help(L("Record this task", lang: lang))
-                .accessibilityLabel(L("Record this task", lang: lang))
-                if !mode.replying {
-                    let off = mode.control(shell.draft, sendNow: false) == nil || shell.opening
-                    Button { shell.submit() } label: {
-                        Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Brand.paper)
-                            .frame(width: 36, height: 36).background(Circle().fill(Brand.ink)).contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(off)
-                    .opacity(off ? 0.35 : 1)
-                    .help(L("Send", lang: lang))
-                    .accessibilityLabel(L("Send", lang: lang))
+            HStack(alignment: .center, spacing: 8) {
+                field(mode)
+                if !twoRows {
+                    recordButton
+                    sendButton(mode)
                 }
             }
-            .padding(.leading, 16).padding(.trailing, 10).padding(.bottom, 8)
+            .padding(.leading, twoRows ? 16 : 14).padding(.trailing, twoRows ? 16 : 10)
+            .padding(.top, twoRows ? 12 : 9).padding(.bottom, twoRows ? 0 : 9)
+            if twoRows {
+                HStack(spacing: 12) {
+                    if mode.taskRunning {
+                        HStack(spacing: 6) {
+                            Circle().fill(Brand.dot).frame(width: 6, height: 6).accessibilityHidden(true)
+                            Text(L("Task running", lang: lang))
+                        }
+                        .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                    }
+                    Spacer()
+                    if mode.canStop {
+                        Button(L("Stop", lang: lang)) { shell.stop() }
+                            .buttonStyle(InkButtonStyle(prominent: false, small: true))
+                            .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
+                    }
+                    recordButton
+                    if !mode.replying { sendButton(mode) }
+                }
+                .padding(.leading, 16).padding(.trailing, 10).padding(.bottom, 8)
+            }
         }
         .background(RoundedRectangle(cornerRadius: 18).fill(Brand.card))
         .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.ink, lineWidth: 1.5))
@@ -930,11 +1017,68 @@ struct Composer: View {
         .opacity(mode.enabled ? 1 : 0.7)
     }
 
+    private func field(_ mode: ComposerMode) -> some View {
+        // (the placeholder drawn here on one line, cut short at the least width: the field's own would wrap, and the one
+        // row would be two -- U4 §2.3)
+        TextField("", text: Binding(get: { shell.draft }, set: { shell.draft = $0 }), axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(.system(size: 15))
+            .background(alignment: .leading) {
+                if shell.draft.isEmpty {
+                    Text(placeholder(mode)).font(.system(size: 15)).foregroundStyle(ShellColor.secondary).lineLimit(1)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
+            }
+            .lineLimit(1...8)
+            .disabled(!mode.enabled || shell.opening)
+            .focused($focused)
+            // (the ink outline is the focus look: no system ring on top of it -- U4 §2.3)
+            .focusEffectDisabled()
+            .onChange(of: shell.focusRequest) { _, n in if shell.takeFocus(n) { focused = true } }
+            // Return: the field's own submit, which waits for an input method to commit what is being composed
+            // (pinyin's Return confirms the letters, never sends). ⌘Return sends now; ⇧Return / ⌥Return: a new line.
+            .onSubmit { shell.submit() }
+            .onKeyPress(.return, phases: .down) { press in
+                if press.modifiers.contains(.command) { shell.submit(sendNow: mode.taskRunning); return .handled }
+                if press.modifiers.contains(.shift) { shell.draft += "\n"; return .handled }
+                return .ignored
+            }
+            .accessibilityLabel(L("Message", lang: lang))
+            .accessibilityHint(mode.taskRunning ? L("Return sends it to the task now", lang: lang)
+                                                : L("Return sends; start with /cua to run a computer task", lang: lang))
+            .frame(minHeight: 36)
+    }
+
+    /// 「录制这个任务」: this conversation's next computer task recorded (TaskRecording), off unless turned on.
+    private var recordButton: some View {
+        Toggle(isOn: Binding(get: { shell.recordsNext }, set: { shell.setRecording($0) })) {
+            Image(systemName: shell.recordsNext ? "record.circle.fill" : "record.circle").font(.system(size: 17))
+                .frame(width: 34, height: 34).contentShape(Rectangle())
+        }
+        .toggleStyle(.button).buttonStyle(.plain)
+        .foregroundStyle(shell.recordsNext ? ShellColor.orangeText : ShellColor.secondary)
+        .help(L("Record this task", lang: lang))
+        .accessibilityLabel(L("Record this task", lang: lang))
+    }
+
+    /// The round send button: ink always (P3States) -- with nothing to send, a press does nothing (ShellModel.submit);
+    /// off only while the conversation opens.
+    private func sendButton(_ mode: ComposerMode) -> some View {
+        Button { shell.submit() } label: {
+            Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Brand.paper)
+                .frame(width: 36, height: 36).background(Circle().fill(Brand.ink)).contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(shell.opening)
+        .help(L("Send", lang: lang))
+        .accessibilityLabel(L("Send", lang: lang))
+    }
+
     private func placeholder(_ m: ComposerMode) -> String {
         if !m.enabled { return L("Answer the card above to go on", lang: lang) }
         if m.taskRunning { return L("Add something: Return sends it to the task now", lang: lang) }
         if m.replying { return L("Wait for the reply, or stop it", lang: lang) }
-        return L("Message DeskMind, or /cua and a task for the computer", lang: lang)
+        return L("Say what to do, or /cua and it works the computer", lang: lang)
     }
 }
 
@@ -968,6 +1112,7 @@ struct AgentPanel: View {
                 Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
             }
             .pickerStyle(.segmented).labelsHidden()
+            .accessibilityIdentifier("panel.tabs")
             .padding(.horizontal, 18).padding(.top, 16)
             if shell.currentTabs.tab == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
@@ -977,7 +1122,10 @@ struct AgentPanel: View {
             } else if shell.currentTabs.tab == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    let c = column
+                    if c.idle && shell.current?.runningTask == nil { idleContent(c) } else { content(c) }
+                }
             }
         }
         .background(Brand.paper)
@@ -1027,23 +1175,14 @@ struct AgentPanel: View {
                 } else if shell.current?.runningTask != nil {
                     placeholder(L("The live view is in the float", lang: lang))
                 } else {
-                    placeholder(L("The live view of the task's window and its steps will show here.", lang: lang))
+                    placeholder(L("When it works the computer, the live view, the steps and the changes show here.", lang: lang))
                 }
                 if let who = c.computerUsedBy {
                     Button(L("The computer is being used by 「%@」", who, lang: lang)) { if let id = c.computerUsedById { shell.select(id) } }
                         .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                         .accessibilityHint(L("Shows that conversation", lang: lang))
                 }
-                section(L("This Mac", lang: lang)) {
-                    macRow(L("Permissions", lang: lang),
-                           mac.missing.map { $0.isEmpty ? L("All granted", lang: lang) : L("Missing: %@", $0.joined(separator: L(", ", lang: lang)), lang: lang) }
-                               ?? L("Checking…", lang: lang),
-                           ok: mac.missing?.isEmpty)
-                    macRow(L("Screen", lang: lang),
-                           c.screenLocked ? L("The screen was locked, so the task stopped", lang: lang) : L("Not locked", lang: lang), ok: !c.screenLocked)
-                    macRow(L("In use", lang: lang),
-                           c.youAreUsingIt ? L("You're using it: the task waits for you to stop", lang: lang) : L("No conflict", lang: lang), ok: !c.youAreUsingIt)
-                }
+                macSection(c)
                 if !c.plan.isEmpty {
                     section(L("Current steps", lang: lang), link: shell.current?.tasks.last.map { t in (L("All records ›", lang: lang), { shell.showProcess(t.runId) }) }) {
                         ForEach(c.plan, id: \.n) { r in
@@ -1076,6 +1215,73 @@ struct AgentPanel: View {
             .padding(.horizontal, 18).padding(.bottom, 16)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    /// No computer task in this conversation yet (P3States 「还没有任务」, U4 §2.4): 小方 with its dot in mist and
+    /// 「空闲」; a dashed box down to 这台 Mac, saying what will show there; 这台 Mac in one line while all is well
+    /// (its three rows when something is not, or not known yet).
+    private func idleContent(_ c: RightColumn) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                XiaoFace(eyes: .look, size: 28, dot: .mist)
+                Text(L("Idle", lang: lang)).font(.system(size: 14, weight: .bold)).foregroundStyle(Brand.ink)
+                    .accessibilityLabel(L("Status: %@", L("Idle", lang: lang), lang: lang))
+                Spacer(minLength: 4)
+            }
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Brand.mist, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                .overlay(
+                    VStack(spacing: 6) {
+                        Text(L("No computer task in this conversation yet", lang: lang)).font(.system(size: 14, weight: .semibold)).foregroundStyle(Brand.ink)
+                        Text(L("When it works the computer, the live view, the steps and the changes show here.", lang: lang))
+                            .font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineSpacing(12 * 0.55)
+                    }
+                    .multilineTextAlignment(.center).padding(.horizontal, 20)
+                    .accessibilityElement(children: .combine)
+                )
+                .frame(minHeight: 120, maxHeight: .infinity)
+            if let who = c.computerUsedBy {
+                Button(L("The computer is being used by 「%@」", who, lang: lang)) { if let id = c.computerUsedById { shell.select(id) } }
+                    .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+                    .accessibilityHint(L("Shows that conversation", lang: lang))
+            }
+            if mac.missing?.isEmpty == true && !c.screenLocked && !c.youAreUsingIt {
+                HStack(spacing: 8) {
+                    Circle().fill(ShellColor.ok).frame(width: 7, height: 7).accessibilityHidden(true)
+                    Text(L("This Mac", lang: lang)).fontWeight(.bold).foregroundStyle(Brand.ink)
+                    Text(L("Permissions OK · screen not locked", lang: lang)).foregroundStyle(Color(ShellPalette.macLine)).lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .font(.system(size: 13))
+                .padding(.horizontal, 12).padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(ShellColor.softLine))
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(L("%@: %@", L("This Mac", lang: lang), L("Permissions OK · screen not locked", lang: lang), lang: lang))
+                .accessibilityIdentifier("panel.mac")
+            } else {
+                macSection(c)
+            }
+        }
+        .padding(.horizontal, 18).padding(.bottom, 16)
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    /// 「这台 Mac」 in its three rows: the permissions, the screen, whether you are using it.
+    private func macSection(_ c: RightColumn) -> some View {
+        section(L("This Mac", lang: lang)) {
+            macRow(L("Permissions", lang: lang),
+                   mac.missing.map { $0.isEmpty ? L("All granted", lang: lang) : L("Missing: %@", $0.joined(separator: L(", ", lang: lang)), lang: lang) }
+                       ?? L("Checking…", lang: lang),
+                   ok: mac.missing?.isEmpty)
+            macRow(L("Screen", lang: lang),
+                   c.screenLocked ? L("The screen was locked, so the task stopped", lang: lang) : L("Not locked", lang: lang), ok: !c.screenLocked)
+            macRow(L("In use", lang: lang),
+                   c.youAreUsingIt ? L("You're using it: the task waits for you to stop", lang: lang) : L("No conflict", lang: lang), ok: !c.youAreUsingIt)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("panel.mac")
     }
 
     /// 「准备点：<target>」: the button the open action card itself names (its consent: a click, on its target), while

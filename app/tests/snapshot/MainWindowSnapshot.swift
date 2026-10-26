@@ -16,9 +16,12 @@ enum MainWindowSnapshot {
     static let sid = "ses_mail", rid = "run_mail"
     static let t0 = 1_792_900_000.0
 
-    /// A transport with no helper behind it: every write taken, no stream.
+    /// A transport with no helper behind it: every write taken, no stream; `sessions.list` answers `sessions`.
     final class Wire: SessionTransport {
-        func request(_ body: [String: Any]) -> [String: Any]? { ["ok": true] }
+        var sessions: [[String: Any]] = []
+        func request(_ body: [String: Any]) -> [String: Any]? {
+            body["op"] as? String == SessionClient.Op.list ? ["ok": true, "sessions": sessions] : ["ok": true]
+        }
         func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
     }
 
@@ -44,6 +47,9 @@ enum MainWindowSnapshot {
         let now: Double
         var selected: String? = sid
         var process = false
+        /// The helper's list (`sessions list`), the rows' only source when no lines are fed (the window as it opens).
+        var summaries: [[String: Any]] = []
+        var size = NSSize(width: 1440, height: 900)
     }
 
     static func main() {
@@ -58,7 +64,11 @@ enum MainWindowSnapshot {
 
         let others = otherSessions()
         let scenes = [
-            Scene(name: "idle", lines: others + running(), now: t0 + 38, selected: nil),
+            // (U4 §2.6: the window as it opens -- no conversation at all; the list from the helper's summaries alone, as the
+            // real window has it before one is opened; the same at the least size)
+            Scene(name: "idle-fresh", lines: [], now: t0 + 38, selected: nil),
+            Scene(name: "idle", lines: [], now: t0 + 38, selected: nil, summaries: summaries()),
+            Scene(name: "idle-min", lines: [], now: t0 + 38, selected: nil, summaries: summaries(), size: NSSize(width: 1098, height: 600)),
             Scene(name: "running", lines: others + running(), now: t0 + 38),
             Scene(name: "waiting", lines: others + running() + waiting(), now: t0 + 58),
             Scene(name: "waiting-uncertain", lines: others + running() + waiting(uncertain: true), now: t0 + 58),
@@ -223,6 +233,15 @@ enum MainWindowSnapshot {
         return l
     }
 
+    /// The helper's list as `sessions list` gives it (no messages fed): a task this morning, chats from yesterday and
+    /// last week.
+    static func summaries() -> [[String: Any]] {
+        [["session_id": sid, "title": "回复许诺说我看一下再说", "updated_at": t0 + 30 - 600],
+         ["session_id": "ses_folder", "title": "整理下载文件夹", "updated_at": t0 - 3600 * 5],
+         ["session_id": "ses_week", "title": "汇总这周的周报数据", "updated_at": t0 - 3600 * 30],
+         ["session_id": "ses_trip", "title": "查一下下周去杭州的高铁", "updated_at": t0 - 3600 * 24 * 9]]
+    }
+
     static func otherSessions() -> [[String: Any]] {
         [
             ["kind": "session.message", "session_id": "ses_folder", "seq": 1, "t": t0 - 3600, "msg_id": "m_f1", "role": "user", "text": "整理下载文件夹"],
@@ -352,12 +371,15 @@ enum MainWindowSnapshot {
 
     @MainActor static func render(_ scene: Scene, dark: Bool, to file: URL) {
         let defaults = MemoryDefaults()
-        let shell = ShellModel(client: SessionClient(transport: Wire()), defaults: defaults, config: { "openai:local|fake" },
+        let wire = Wire()
+        wire.sessions = scene.summaries
+        let shell = ShellModel(client: SessionClient(transport: wire), defaults: defaults, config: { "openai:local|fake" },
                                lang: { .zhHans }, now: { scene.now }, work: { $0() }, deliver: { $0() })
+        if !scene.summaries.isEmpty { shell.refreshList() }
         for l in scene.lines { shell.client.feed(l) }
         if let s = scene.selected { shell.select(s) }
         if scene.process { shell.pickTab(.process) }
-        let size = NSSize(width: 1440, height: 900)
+        let size = scene.size
         let root = MainColumns(shell: shell, openSettings: {}, cloud: SidebarCloud(on: true, ready: true, provider: "DeepSeek"),
                                mac: MacFacts(missing: []), still: scene.selected == nil ? nil : still())
             .environment(\.lang, .zhHans)

@@ -6,6 +6,20 @@ import Combine
 import ServiceManagement
 import SwiftUI
 
+/// The real-window check (tests/e2e/real_window.sh, U4 §3): its own build of this app, under another bundle id (its own
+/// defaults), started with a temp support folder in this variable, draws the window alone -- no helper registered,
+/// installed, started or stopped (a real one running, the user's, is never touched: to this build it would only look
+/// silent). The shipped app's bundle id never takes it.
+enum WindowOnlyE2E {
+    static let variable = "DESKMIND_E2E_WINDOW_ONLY_SUPPORT"
+    static let on: Bool = {
+        guard let dir = ProcessInfo.processInfo.environment[variable], !dir.isEmpty,
+              let id = Bundle.main.bundleIdentifier, id != "ai.deskmind.app" else { return false }
+        DeskMindIPC.supportOverride = URL(fileURLWithPath: dir, isDirectory: true)
+        return true
+    }()
+}
+
 @MainActor
 final class HelperModel: ObservableObject {
     @Published var connected = false
@@ -21,6 +35,8 @@ final class HelperModel: ObservableObject {
     private var service: SMAppService { SMAppService.agent(plistName: DeskMindIPC.agentPlist) }
 
     init() {
+        // (the real-window check's build: the window only, no helper at all)
+        if WindowOnlyE2E.on { HelperModel.shared = self; return }
         // The helper must be started by LaunchServices to be its own TCC client: as an SMAppService agent tied to
         // this app, macOS counted its permissions against DeskMind, and the switch the user turned on for
         // "DeskMind Hands" did nothing (AXIsProcessTrusted stayed false). The old agent, if any, is removed.
@@ -490,6 +506,8 @@ struct DeskMindApp: App {
     @AppStorage(AppLanguage.key) private var language = AppLanguage.system.rawValue
 
     init() {
+        // (the real-window check's build: its temp support folder, before anything reads the folder)
+        _ = WindowOnlyE2E.on
         // Before the helper model logs anything or sends its first request.
         ResolvedLang.current = AppLanguage.current()
         // The UI event log, this Mac only (Shared/UIEvents.swift); the switch is read from its file.
@@ -511,6 +529,9 @@ struct DeskMindApp: App {
                 AppRoot().environmentObject(model).environmentObject(downloader)
             }
         }
+        // (a new window's size, P1Main: the content's ideal size is not one -- a fresh launch opened at the least
+        // size, 1098 × 632 in the real window; U4 §3)
+        .defaultSize(width: 1440, height: 900)
         .windowResizability(.contentSize)
         .windowStyle(.hiddenTitleBar)
         .commands {

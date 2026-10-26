@@ -72,7 +72,7 @@ struct ComposerMode: Equatable {
 
 enum ShellText {
     /// The session's state for the list's subtitle, the right column and VoiceOver (handoff §1.5).
-    static func status(_ st: SessionStatus, lang: ResolvedLang) -> String {
+    static func status(_ st: SessionStatus, lang: ResolvedLang, now: Double = Date().timeIntervalSince1970) -> String {
         switch st {
         case .waitingForYou(let kind): return L("Waiting for you: %@", cardKind(kind, lang: lang), lang: lang)
         case .cardExpired(let kind): return L("Expired, waiting for you: %@", cardKind(kind, lang: lang), lang: lang)
@@ -88,13 +88,40 @@ enum ShellText {
         case .done(let at, let stopped):
             if stopped { return L("Stopped", lang: lang) }
             guard let at else { return L("Done", lang: lang) }
-            return L("Done · %@", time(at), lang: lang)
+            return L("Done · %@", when(at, now: now, lang: lang), lang: lang)
         case .idle: return L("Idle", lang: lang)
         }
     }
 
+    /// A conversation's line under its title in the list (U4 §2.2): a new one not started yet, 「刚开始」; one that is
+    /// only chat (idle), when it was last written to; a finished task, 「完成 · <when>」; else its state.
+    static func rowLine(_ r: ShellRow, now: Double, lang: ResolvedLang) -> String {
+        if r.fresh { return L("Just started", lang: lang) }
+        if case .idle = r.status, let t = r.updatedAt { return when(t, now: now, lang: lang) }
+        return status(r.status, lang: lang, now: now)
+    }
+
+    /// A clock time (a card's tail: when it closed, in the chat beside it).
     static func time(_ t: Double) -> String {
         DateFormatter.localizedString(from: Date(timeIntervalSince1970: t), dateStyle: .none, timeStyle: .short)
+    }
+
+    /// When, in a word (U4 §2.2; the Home board's 「最近」): under a minute 「刚才」; under an hour 「n 分钟前」; the
+    /// same day its time; the day before 「昨天」; this year its month and day; else with its year -- by `calendar`
+    /// (the user's; a test's own).
+    static func when(_ t: Double, now: Double, lang: ResolvedLang, calendar: Calendar = .current) -> String {
+        let d = now - t
+        if d < 60 { return L("Just now", lang: lang) }
+        if d < 3600 { return L("%d min ago", Int(d / 60), lang: lang) }
+        let date = Date(timeIntervalSince1970: t), today = Date(timeIntervalSince1970: now)
+        let f = DateFormatter()
+        f.calendar = calendar; f.timeZone = calendar.timeZone
+        f.locale = Locale(identifier: lang == .zhHans ? "zh_CN" : "en_US")
+        if calendar.isDate(date, inSameDayAs: today) { f.dateFormat = "HH:mm"; return f.string(from: date) }
+        if let y = calendar.date(byAdding: .day, value: -1, to: today), calendar.isDate(date, inSameDayAs: y) { return L("Yesterday", lang: lang) }
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: today)
+        f.setLocalizedDateFormatFromTemplate(sameYear ? "MMMd" : "yMMMd")
+        return f.string(from: date)
     }
 
     /// A card's kind in words (the card's own text is the harness's, already in the request's language).
@@ -412,6 +439,14 @@ struct ShellRow: Equatable, Identifiable {
     var updatedAt: Double?
     /// A task of it runs (delete waits for it to end).
     var taskRunning: Bool
+    /// The new conversation, not started yet (⌘N, 「新对话」): its own row, at the top, while it is shown (U4 §2.2).
+    var fresh = false
+
+    /// The new conversation's row: 「新对话」, 「刚开始」, a mist dot.
+    static func fresh(title: String) -> ShellRow {
+        ShellRow(id: freshId, title: title, status: .idle, updatedAt: nil, taskRunning: false, fresh: true)
+    }
+    static let freshId = ""
 }
 
 enum ShellList {
@@ -472,7 +507,7 @@ final class ShellModel: ObservableObject {
     /// The selection: a session, or the new conversation not opened yet (nil: its first message opens it).
     @Published var selected: String? {
         // (another session shown: the card mode of this one's card ends — a new move into it when it is back)
-        didSet { if oldValue != selected { leaveCardMode() } }
+        didSet { if oldValue != selected { leaveCardMode() }; if selected != nil { freshAsked = false } }
     }
     @Published private(set) var rows: [ShellRow] = []
     @Published private(set) var states: [String: SessionState] = [:]
@@ -790,6 +825,22 @@ final class ShellModel: ObservableObject {
     func newConversation() {
         selected = nil
         notice = nil
+        freshAsked = true
+        askComposerFocus()          // (the user's own ⌘N or click: the new conversation's typing is in the composer -- P3States)
+    }
+
+    /// The user asked for a new conversation (⌘N, the button): its row shows at the top while it is the one shown, and
+    /// goes once another is selected -- its first message selects the session it opened (U4 §2.2).
+    @Published private(set) var freshAsked = false
+    /// The rows the list draws: the new conversation's first while it is shown, then the sessions.
+    var listRows: [ShellRow] {
+        freshAsked && selected == nil ? [ShellRow.fresh(title: L("New conversation", lang: lang()))] + rows : rows
+    }
+
+    /// An example of the empty chat (P3States): its words into the composer, the typing there -- never sent.
+    func fillExample(_ words: String) {
+        draft = words
+        askComposerFocus()
     }
 
     /// The user opened a session: its error dot clears. Reading it needs no process (#107 review): what is stored after
@@ -1228,6 +1279,11 @@ final class ShellModel: ObservableObject {
         guard let id = selected else { return }
         if poppedOut.contains(id) { poppedOut.remove(id) } else { poppedOut.insert(id) }
     }
+    /// The one way to ask for the composer's focus, in the key window only: from the user's own acts -- Esc out of a
+    /// card, ⌘N or 「新对话」, an example picked (U4: P3States, 「焦点在输入框」).
+    private func askComposerFocus() {
+        if windowKey { focusRequest += 1 }
+    }
     private var focusTaken = 0
     func takeFocus(_ n: Int) -> Bool {
         guard n > focusTaken, windowKey else { return false }
@@ -1367,7 +1423,7 @@ final class ShellModel: ObservableObject {
         case .leaveCard:
             if keyCard != nil {
                 keyCard = nil
-                if windowKey { focusRequest += 1 }     // (the focus funnel: back to the composer)
+                askComposerFocus()     // (the focus funnel: back to the composer)
             }
             return false
         case .takeBack:

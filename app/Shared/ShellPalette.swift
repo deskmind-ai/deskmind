@@ -35,6 +35,8 @@ enum ShellPalette {
     static let softLine = Tone(light: 0xE2DFD6, dark: 0x323834)     // a section card's edge (the right column), a fold's rule
     static let buttonLine = Tone(light: 0xC9C6BB, dark: 0x4A524B)   // a secondary button's edge
     static let ok = Tone(light: 0x3F6B41, dark: 0x7FB283)           // all is well (a dot, a check): graphics only
+    /// 「这台 Mac」's one line while all is well (P3States #3A413B; the ink in dark).
+    static let macLine = Tone(light: 0x3A413B, dark: 0xE7E9E4)
     /// The sidebar: a step darker than the paper (P1Main #EAE6DC).
     static let sidebar = Tone(light: 0xEAE6DC, dark: 0x151816)
     /// The user's bubble (#E6E3DA).
@@ -87,6 +89,7 @@ enum ShellPalette {
         (card, orangeText),                 // the sidebar's 「等你」 pill
         (frameText, frame), (frameQuiet, frame),
         (error, card), (error, paper),
+        (macLine, card),                    // 「这台 Mac」's one line (U4)
         (paper, ink),                       // the prominent button: paper text on an ink capsule
         (islandText, islandFill), (islandMuted, islandFill), (onInkOrange, islandFill),
         (onInk, inkSurface), (onInkMuted, inkSurface), (onInkOrange, inkSurface), (onInkLink, inkSurface), (onInkPromise, inkSurface),

@@ -82,11 +82,16 @@ struct RightColumn: Equatable {
     /// The changes as rows (the table above), and the line under them.
     var changeRows: [ChangeRow] = []
     var sentLine: SentLine? = nil
+    /// The conversation has had no computer task (P3States 「还没有任务」).
+    var noTask = false
+    /// Idle with no task ever (U4 §2.4): 小方's dot in mist, the dashed box filling the column, 这台 Mac in one line
+    /// while all of it is well.
+    var idle: Bool { noTask && status == .idle }
 
     static func == (a: RightColumn, b: RightColumn) -> Bool {
         a.status == b.status && a.progress?.step == b.progress?.step && a.progress?.seconds == b.progress?.seconds
             && a.youAreUsingIt == b.youAreUsingIt && a.screenLocked == b.screenLocked && a.plan == b.plan && a.changes == b.changes
-            && a.computerUsedBy == b.computerUsedBy && a.changeRows == b.changeRows && a.sentLine == b.sentLine
+            && a.computerUsedBy == b.computerUsedBy && a.changeRows == b.changeRows && a.sentLine == b.sentLine && a.noTask == b.noTask
     }
 
     /// The column for `s` (the shown session; nil: none), its latest task's, at `now` (seconds since 1970);
@@ -100,8 +105,10 @@ struct RightColumn: Equatable {
     private static func modelOf(_ s: SessionState?, otherRunning: String?, now: Double) -> RightColumn {
         let status = s?.status ?? .idle
         guard let s, let t = s.tasks.last else {
-            return RightColumn(status: status, progress: nil, youAreUsingIt: false, screenLocked: false, plan: [], changes: ChangeList(),
-                               computerUsedBy: otherRunning)
+            var c = RightColumn(status: status, progress: nil, youAreUsingIt: false, screenLocked: false, plan: [], changes: ChangeList(),
+                                computerUsedBy: otherRunning)
+            c.noTask = true
+            return c
         }
         let progress: (Int, Int)? = t.running ? (t.steps.count, max(0, Int(now - (t.startedAt ?? now)))) : nil
         // the latest plan's steps only: a step taken before it was the old plan's
