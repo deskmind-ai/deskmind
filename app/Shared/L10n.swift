@@ -191,7 +191,7 @@ enum L10n {
         "Starting the Python runtime…": "正在启动 Python 运行时…",
         "Pick a task and click “Start”": "选一个任务，点「开始」",
         "Details": "详细信息",
-        "Back": "返回",
+        "Back": "上一步",          // (the first run's previous step: its only use, P1Setup)
         "Stop": "停止",
         "Start": "开始",
         "Run again": "再跑一次",
