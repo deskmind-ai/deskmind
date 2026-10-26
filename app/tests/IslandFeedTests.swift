@@ -13,6 +13,7 @@ enum IslandFeedTests {
     static func run() {
         DecisionTests.group("island.tableTests"); tableTests()
         DecisionTests.group("island.notifyTests"); notifyTests()
+        DecisionTests.group("island.barTests"); barTests()
     }
 
     static let action = #""card":{"kind":"action","text":"要点「发送」吗？","options":[{"kind":"approve","text":"可以"},{"kind":"cancel","text":"先别做了"}],"free_text":false,"blocking":true}"#
@@ -57,6 +58,35 @@ enum IslandFeedTests {
               "the card waits: its id; answered: none")
     }
 
+    /// The bar (U2): each state its kind and words.
+    static func barTests() {
+        let step = #""kind":"step","text":"click","step_id":"s1","human":"点「发送」""#
+        func bar(_ body: [String], phase: CardPhase? = nil, app: String? = nil, floatShows: Bool = false) -> IslandFrame {
+            let (s, t) = task(body)
+            let pinned: (card: CardState, phase: CardPhase)? = (s.openCard?.card ?? t.expiredCard).map { c in (c, phase ?? CardStore().phase(c, of: t)) }
+            return IslandFeed.frame(t, pinned: pinned, app: app, floatShows: floatShows, lang: .zhHans)
+        }
+        let z = { (k: String) in L10n.zh[k] ?? "?" + k }
+        let ask = #""kind":"ask","ask_id":"a1","# + action
+        let rows: [(String, IslandFrame, IslandFrame.Kind, String, String)] = [
+            ("preparing", bar([]), .preparing, z("Getting ready"), ""),
+            ("working, the app known", bar([step], app: "Safari"), .working, "Safari", ""),
+            ("working, no app: the task", bar([step]), .working, "x", ""),
+            ("a card, the float shows it: its kind", bar([ask], floatShows: true), .needsYou, z("Needs you"), z("confirm before acting")),
+            ("a card, no float: its title", bar([ask]), .needsYou, z("Needs you"), "要点「发送」吗？"),
+            ("held (take-back): still needs you", bar([ask], phase: .pending(.option(runId: "r1", askId: "a1", option: 0), until: 0)), .needsYou, z("Needs you"), "要点「发送」吗？"),
+            ("expired, still answerable", bar([ask, #""kind":"ask_void","ask_id":"a1","why":"timeout""#]), .needsYou, z("Needs you"), "要点「发送」吗？"),
+            ("paused", bar([step, #""kind":"waiting""#]), .paused, z("You're on the Mac, paused"), z("Resumes when you stop")),
+            ("done", bar([step, #""kind":"task_done","status":"succeeded","reason":"","summary":"s""#]), .done, z("Done"), "1 步 · 0 秒"),
+            ("failed", bar([#""kind":"task_done","status":"failed","reason":"","summary":"s""#]), .failed, z("Didn't finish"), z("See why")),
+            ("stopped", bar([step, #""kind":"task_done","status":"stopped","reason":"","summary":"s""#]), .stopped, z("Stopped"), "1 步"),
+            ("cancelled: stopped", bar([#""kind":"task_done","status":"cancelled","reason":"","summary":"s""#]), .stopped, z("Stopped"), "0 步"),
+        ]
+        for (name, f, kind, left, right) in rows {
+            check(f.kind == kind && f.left == left && f.right == right, "bar, \(name): \(f.kind) «\(f.left)» «\(f.right)» (want \(kind) «\(left)» «\(right)»)")
+        }
+    }
+
     static func notifyTests() {
         let asked = frame([#""kind":"ask","ask_id":"a1","# + action]), again = asked
         let working = frame([])
@@ -81,6 +111,7 @@ enum IslandFeedTests {
         func requestNotifications() {}
         func show(title: String, line: String, onStop: @escaping () -> Void) { calls.append("show") }
         func update(step: Int, line: String) { calls.append("update") }
+        func apply(_ frame: IslandFrame) {}
         func setAsking(_ on: Bool) { calls.append("asking:\(on)") }
         func finish(passed: Bool, stopped: Bool, summary: String) { calls.append("finish:\(passed):\(summary)") }
         func notify(title: String, body: String) { calls.append("notify") }

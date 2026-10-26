@@ -30,6 +30,25 @@ enum FirstRunTests {
         check(F.unmet(F.Facts(accessibility: true, screen: false, keySet: false)) == [.permissions, .key], "a permission and the key missing: both rows")
         check(F.unmet(F.Facts(accessibility: true, screen: true, keySet: false)) == [.key], "only the key")
         check(F.unmet(F.Facts(accessibility: true, screen: true, keySet: false), keysReadable: false) == [.keyUnreadable], "(#127 delta) unreadable keys: said as that, never 'no key'")
+        // the key step's one button (U2): off with nothing typed and none set; a failed save or check stays, 稍后 still
+        // there; a check that works moves on by itself
+        var k = F(step: .key)
+        check(!k.canContinue(typed: false) && k.canContinue(typed: true), "nothing typed, none set: 继续 off; typed: on")
+        k.apply(.saved(ok: false)); check(k.step == .key && k.facts.saveOK == false && k.canLater, "a save that failed: stays, 稍后 there")
+        k.apply(.saved(ok: true)); k.apply(.checked(ok: false)); check(k.step == .key && k.canLater, "saved, the check failed: stays, 稍后 there")
+        k.apply(.checked(ok: true)); check(k.step == .examples, "the check works: on to the examples")
+        var p = F(step: .permissions); check(!p.canContinue(typed: false), "permissions not granted: 继续 off (稍后)")
+        p.facts.accessibility = true; p.facts.screen = true; check(p.canContinue(typed: false), "both granted: on")
+        var c = F(step: .language); c.apply(.checked(ok: true)); check(c.step == .language, "a check elsewhere moves nothing")
+        let ks: [(F.KeyState, F.KeyState, String)] = [
+            (F.keyState(known: true, readable: true, last4: nil, busy: false, checkOK: nil, why: nil, model: nil), .empty, "none"),
+            (F.keyState(known: true, readable: true, last4: "abcd", busy: false, checkOK: nil, why: nil, model: nil), .set(last4: "abcd"), "set"),
+            (F.keyState(known: true, readable: true, last4: "abcd", busy: true, checkOK: nil, why: nil, model: nil), .checking, "being tried"),
+            (F.keyState(known: true, readable: true, last4: "abcd", busy: false, checkOK: true, why: nil, model: "m"), .ok(model: "m"), "works"),
+            (F.keyState(known: true, readable: true, last4: "abcd", busy: false, checkOK: false, why: "401", model: nil), .bad(why: "401"), "doesn't, why"),
+            (F.keyState(known: true, readable: false, last4: "abcd", busy: true, checkOK: true, why: nil, model: nil), .unreadable, "unreadable over all"),
+        ]
+        for (got, want, name) in ks { check(got == want, "key state, \(name): \(got)") }
         check(F.examples.count == 3 && F.examples.allSatisfy { L($0, lang: .zhHans) != $0 }, "three examples, each in Chinese too")
     }
 
@@ -42,7 +61,7 @@ enum FirstRunTests {
             var f = F()
             for _ in 0..<g.next(12) {
                 f.facts.accessibility = g.next(2) == 0; f.facts.screen = g.next(2) == 0; f.facts.keySet = g.next(2) == 0
-                f.apply([.next, .later, .back, .checked(ok: g.next(2) == 0), .back][g.next(5)])
+                f.apply([.next, .later, .back, .checked(ok: g.next(2) == 0), .saved(ok: g.next(2) == 0), .back][g.next(6)])
             }
             for useLater in [false, true] {
                 var h = f, moves = 0
@@ -67,9 +86,11 @@ enum FirstRunTests {
             }
         }
         let ops = view.components(separatedBy: "\"op\": \"").dropFirst().compactMap { $0.split(separator: "\"").first.map(String.init) }
-        check(Set(ops).isSubset(of: ["model_check"]), "its own requests: model_check only (permissions through the grant panel, keys through the model sheet): \(ops)")
-        check(view.contains("model.grant(g)") && view.contains("CloudModelSheet(inShell: true)"), "the permissions and the key through their own paths")
-        check(view.contains("done: model.granted(g)"), "「已授权」 only from the helper's status")
+        check(Set(ops).isSubset(of: ["model_check"]), "its own requests: model_check only (permissions through the grant panel, keys through keys.set): \(ops)")
+        // (U2: the key typed in place, saved as the model sheet saves it -- keys.set's merge, `replace` only over keys
+        // the helper can't read: A11's "the key in effect is the last one set")
+        check(view.contains("grant: { model.grant($0) }") && view.contains("CloudModelSettings.set(pairs, replace: replace)"), "the permissions and the key through their own paths")
+        check(view.contains("granted: { model.granted($0) }") && view.contains("if granted(g)"), "「已授权」 only from the helper's status")
         check(view.contains("shell.draft = L(e, lang: lang)") && !view.contains("submit"), "an example fills the composer, never sends")
     }
 }

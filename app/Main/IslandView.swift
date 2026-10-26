@@ -1,170 +1,110 @@
-// The run's status in the notch, on a Mac that has one: a black shape merged with the notch, the "island". Collapsed
-// it is the notch with a wing either side -- the status dot and the step on the left, Stop on the right; it drops
-// open on hover, while a step waits for the screen, and for a few seconds when the run ends, with the step's line,
-// the stage a starting run is in and the buttons. Ended, it keeps ✓ or ! and a word beside the notch, and "Show
-// Details" opens the window on the result. On a screen without a notch the capsule under the menu bar stays
-// (OverlayView).
+// The task's bar at the notch (the Island board), on a Mac that has one: a black strip merged with the notch, as tall
+// as it, 380 wide (460 while it needs you); on a screen without a notch the same bar as a capsule under the menu bar.
+// Left, a dot -- or 小方 looking up, while a card waits -- and what is going on; right, the step and its time, what it
+// waits for, or how it ended (IslandFeed.frame: the words are the feed's, this only draws them). The whole bar is one
+// click: the user's way to the task (RunOverlay.tapped). Hovered while the task runs, its right side gives way to Stop.
 //
 // And the main window (MainWindow): a run leaves it where the user put it, neither sending it aside nor bringing it
-// forward; everything the run shows is here, and "Show Details" or the Dock bring the window forward.
+// forward; a click on the bar, a notification or the Dock bring the window forward.
 
 import AppKit
 import SwiftUI
 
 struct IslandView: View {
     @ObservedObject var model: OverlayModel
-    /// The notch, in this view's own coordinates (points from the top-left of the panel).
-    let notch: CGRect
+    /// The bar's height: the notch's (or the capsule's, with none).
+    let height: CGFloat
+    let notched: Bool
     let onStop: () -> Void
-    var onDetails: (UserGesture) -> Void = { _ in }
-    var onDismiss: () -> Void = {}
+    let onTap: (UserGesture) -> Void
+    /// The clock the step's time is counted on (the offscreen render gives its own).
+    var now: () -> Double = { Date().timeIntervalSince1970 }
     @State private var hover = false
-    /// Opened by a click, for when hover does not reach a panel of an app that is not in front.
-    @State private var pinned = false
+    @State private var breathe = false
     @Environment(\.lang) private var lang
+    @Environment(\.accessibilityReduceMotion) private var reduce
 
-    private var open: Bool {
-        hover || pinned || model.waiting || model.takenOver || (model.phase == .running && model.asking)
-            || (model.phase != .running && model.resultOpen)
-    }
-    private var collapsedWidth: CGFloat { notch.width + 2 * Island.wing }
+    private var kind: IslandFrame.Kind { model.frame?.kind ?? .preparing }
+    private var running: Bool { model.phase == .running }
 
     var body: some View {
-        VStack(spacing: 0) {
-            VStack(spacing: 0) {
-                wings.frame(height: notch.height)
-                if open { details.transition(.opacity) }
-            }
-            .frame(width: open ? max(Island.expanded.width, collapsedWidth) : collapsedWidth,
-                   height: open ? Island.expanded.height : notch.height, alignment: .top)
-            .background(UnevenRoundedRectangle(bottomLeadingRadius: open ? 22 : 12, bottomTrailingRadius: open ? 22 : 12,
-                                               style: .continuous).fill(Color(ShellPalette.islandFill)))
-            .contentShape(Rectangle())
-            .onHover { h in withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { hover = h } }
-            .onTapGesture { withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) { pinned.toggle() } }
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: open)
-        .onChange(of: model.title) { _, _ in pinned = false }   // the panel is kept between runs
-        .onChange(of: model.ending) { _, _ in pinned = false }  // a result collapses on its own after a moment
-    }
-
-    /// Either side of the notch: the dot and the step, and Stop (or how it ended).
-    private var wings: some View {
-        HStack(spacing: 0) {
-            HStack(spacing: 6) {
-                if let ending = model.ending {
-                    Image(systemName: ending == .done ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .font(.system(size: 12)).foregroundStyle(ending == .done ? Color(ShellPalette.islandText) : Color(ShellPalette.islandMuted))
-                    Text(L(Island.endWord(ending), lang: lang))
-                        .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(Color(ShellPalette.islandText))
-                        .lineLimit(1)
-                } else {
-                    Circle().fill(dotColor).frame(width: 7, height: 7)
-                    // Before the first step, the stage and its seconds: a start takes 20-30 s, and "Starting" alone
-                    // for all of it read as stuck.
-                    TimelineView(.periodic(from: .now, by: 1)) { _ in
-                        Text(wingText).font(.system(size: 11, weight: .semibold, design: .rounded))
-                            .foregroundStyle(Color(ShellPalette.islandText)).lineLimit(1).minimumScaleFactor(0.8)
+        let wide = kind == .needsYou
+        Button(action: Activation.onClick { g in onTap(g) }) {
+            HStack(spacing: 8) {
+                lead
+                Text(model.frame?.left ?? "").font(.system(size: 13, weight: kind == .needsYou || !running ? .semibold : .regular))
+                    .foregroundStyle(kind == .needsYou ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.islandText)).lineLimit(1)
+                Spacer(minLength: 84)
+                ZStack(alignment: .trailing) {
+                    right.opacity(hover && running ? 0 : 1)
+                    if running {
+                        Button(action: onStop) {
+                            Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.islandText))
+                                .frame(width: 20, height: 20).background(Circle().fill(Color(ShellPalette.islandText).opacity(0.18)))
+                        }
+                        .buttonStyle(.plain)
+                        .opacity(hover ? 1 : 0)
+                        .help(L("Stop this task (or press ⌘. in the DeskMind window)", lang: lang))
+                        .accessibilityLabel(L("Stop", lang: lang))     // (in the tree whether shown or not)
                     }
                 }
+                .animation(reduce ? nil : .easeOut(duration: 0.15), value: hover)
             }
-            .frame(width: Island.wing - 12, alignment: .leading).padding(.leading, 12)
-            Spacer(minLength: notch.width)
-            Group {
-                if model.phase == .running {
-                    Button(action: onStop) {
-                        Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.islandText))
-                            .frame(width: 20, height: 20).background(Circle().fill(Color(ShellPalette.islandText).opacity(0.18)))
-                    }
-                    .buttonStyle(.plain)
-                    .help(L("Stop this task (or press ⌘. in the DeskMind window)", lang: lang))
-                    .accessibilityLabel(L("Stop", lang: lang))
-                } else {
-                    Button(action: onDismiss) {
-                        Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.islandText))
-                            .frame(width: 20, height: 20).background(Circle().fill(Color(ShellPalette.islandText).opacity(0.18)))
-                    }
-                    .buttonStyle(.plain)
-                    .help(L("Dismiss", lang: lang))
-                    .accessibilityLabel(L("Dismiss", lang: lang))
-                }
-            }
-            .frame(width: Island.wing - 12, alignment: .trailing).padding(.trailing, 12)
-        }
-    }
-
-    private var wingText: String {
-        if model.step > 0 { return L("Step %d", model.step, lang: lang) }
-        guard let stage = model.stage else { return L("Starting", lang: lang) }
-        return stage.wing(seconds: Int(Date().timeIntervalSince(model.stageSince)), lang: lang)
-    }
-
-    /// The Island board's dot: orange while it works and when a card needs you, grey while it gets ready, while it waits
-    /// for you to stop using the Mac and when it didn't finish, white when done (the palette's own: no yellow, no green).
-    private var dotColor: Color {
-        switch model.phase {
-        case .running: !model.asking && (model.waiting || (model.step == 0 && model.stage != nil)) ? Color(ShellPalette.islandMuted) : Brand.dot
-        case .passed: Color(ShellPalette.islandText)
-        case .failed: Color(ShellPalette.islandMuted)
-        }
-    }
-
-    /// Open: the task, what is happening now (or the stage a starting run is in), and the buttons.
-    private var details: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(model.title).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.islandText).opacity(0.55)).lineLimit(1)
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                Text(currentLine).font(.system(size: 13, weight: .semibold, design: .rounded)).foregroundStyle(Color(ShellPalette.islandText))
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            HStack(spacing: 6) {
-                if model.phase == .running && (model.waiting || model.takenOver) { shareButtons }
-                Spacer()
-                if model.phase == .running {
-                    // a card waits in the window: the way to it, besides the Dock and the notification
-                    if model.asking { pill(L("Open DeskMind", lang: lang), prominent: true, action: Activation.onClick { RunOverlay.shared.openWindow($0) }) }
-                    pill(L("Stop", lang: lang), prominent: !model.asking, action: onStop)
-                } else {
-                    pill(L("Dismiss", lang: lang), action: onDismiss)
-                    pill(L("Show Details", lang: lang), prominent: true, action: Activation.onClick(onDetails))
-                }
-            }
-        }
-        .padding(.horizontal, 18).padding(.top, 6).padding(.bottom, 12)
-    }
-
-    private var currentLine: String {
-        if model.phase == .running, let s = ScreenShareButtons.status(model, lang: lang) { return s }
-        if model.phase == .running, model.step == 0, let stage = model.stage {
-            return stage.line(seconds: Int(Date().timeIntervalSince(model.stageSince)), typical: model.typical, lang: lang)
-        }
-        return model.line
-    }
-
-    /// The same choices as ScreenShareButtons, drawn for the black island.
-    @ViewBuilder private var shareButtons: some View {
-        if model.takenOver {
-            pill(L("I need it back", lang: lang)) { RunOverlay.shared.holdOff() }
-        } else if model.holdUntil != nil {
-            pill(L("Go ahead now", lang: lang)) { RunOverlay.shared.takeOver(seconds: 300) }
-        } else {
-            pill(L("I'm using it · 5 min", lang: lang)) { RunOverlay.shared.holdOff() }
-            pill(L("Go ahead now", lang: lang)) { RunOverlay.shared.takeOver(seconds: 300) }
-        }
-    }
-
-    private func pill(_ title: String, prominent: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title).font(.system(size: 11, weight: .semibold, design: .rounded))
-                .padding(.horizontal, 11).padding(.vertical, 5)
-                .foregroundStyle(prominent ? Color(ShellPalette.islandFill) : Color(ShellPalette.islandText))
-                .background(Capsule().fill(prominent ? Color(ShellPalette.islandText) : Color(ShellPalette.islandText).opacity(0.16)))
-                .contentShape(Capsule())
+            .padding(.horizontal, 16)
+            .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
+            .background(shape.fill(Color(ShellPalette.islandFill)))
+            .contentShape(shape)
         }
         .buttonStyle(.plain)
+        .onHover { hover = $0 }
+        .animation(reduce ? nil : .easeOut(duration: 0.35), value: wide)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L("%@ · %@", model.frame?.left ?? "", rightText, lang: lang))
+        .onAppear { breathe = true }
+    }
+
+    private var shape: AnyShape {
+        notched ? AnyShape(UnevenRoundedRectangle(bottomLeadingRadius: 18, bottomTrailingRadius: 18, style: .continuous))
+                : AnyShape(Capsule())
+    }
+
+    /// The dot (orange, breathing, while it works; grey preparing, paused, didn't finish or stopped; the text's colour
+    /// when done) -- or, while it needs you, 小方 looking up in its place.
+    @ViewBuilder private var lead: some View {
+        let color: Color = switch kind {
+        case .working, .needsYou: Brand.dot
+        case .done: Color(ShellPalette.islandText)
+        case .preparing, .paused, .failed, .stopped: Color(ShellPalette.islandGrey)
+        }
+        let period: Double? = kind == .working ? 1.6 : kind == .needsYou ? 0.8 : nil
+        if kind == .needsYou {
+            XiaoFace(eyes: .up, size: 20, onInk: true)
+        } else {
+        Circle().fill(color).frame(width: 8, height: 8)
+            .overlay(Circle().stroke(Brand.dot.opacity(kind == .needsYou ? 0.35 : 0), lineWidth: 4))
+            .scaleEffect(period != nil && breathe && !reduce ? 1.25 : 1)
+            .opacity(period != nil && breathe && !reduce ? 0.7 : 1)
+            .animation(period.map { reduce ? nil : .easeInOut(duration: $0 / 2).repeatForever(autoreverses: true) } ?? nil, value: breathe)
+            .accessibilityHidden(true)
+        }
+    }
+
+    /// The right side: the feed's words, or -- working, preparing -- the time, counted here each second.
+    private var right: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            Text(rightText).font(.system(size: 13).monospacedDigit()).foregroundStyle(Color(ShellPalette.islandMuted)).lineLimit(1)
+        }
+    }
+
+    private var rightText: String {
+        guard let f = model.frame else { return "" }
+        let secs = f.startedAt.map { max(0, Int(now() - $0)) }
+        switch f.kind {
+        case .working: return L("Step %d · %@", f.step, String(format: "%d:%02d", (secs ?? 0) / 60, (secs ?? 0) % 60), lang: lang)
+        case .preparing: return secs.map { L("%d s", $0, lang: lang) } ?? ""
+        default: return f.right
+        }
     }
 }
 

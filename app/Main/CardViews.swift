@@ -391,6 +391,8 @@ struct PlanSteps: View {
 /// on, the site, and every line of what goes out.
 struct ConsentFields: View {
     let consent: CardLayout.Consent
+    /// On an ink surface (the float): a darker block, its words in the ink surface's colours.
+    var onInk = false
     @Environment(\.lang) private var lang
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -398,18 +400,20 @@ struct ConsentFields: View {
             if !consent.object.isEmpty { row(L("On", lang: lang), consent.object) }
             if let site = consent.site, !site.isEmpty { row(L("Site", lang: lang), site) }
             if !consent.outgoing.isEmpty {
-                Text(L("What goes out", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary).padding(.top, 2)
+                Text(L("What goes out", lang: lang)).font(.system(size: onInk ? 11 : 12, weight: .semibold)).foregroundStyle(quiet).padding(.top, 2)
                 ForEach(Array(consent.outgoing.enumerated()), id: \.offset) { _, o in row(o.label, o.value, strong: true) }
             }
         }
-        .padding(.horizontal, 14).padding(.vertical, 10)
+        .padding(.horizontal, onInk ? 12 : 14).padding(.vertical, onInk ? 8 : 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Brand.paper))
+        .background(RoundedRectangle(cornerRadius: onInk ? 10 : 12).fill(onInk ? Color(ShellPalette.inkButton) : Brand.paper))
     }
+    private var quiet: Color { onInk ? Color(ShellPalette.onInkMuted) : ShellColor.secondary }
     private func row(_ label: String, _ value: String, strong: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label).font(.system(size: 13)).foregroundStyle(ShellColor.secondary)
-            Text(value).font(.system(size: strong ? 15 : 13, weight: strong ? .bold : .regular)).foregroundStyle(Brand.ink)
+            Text(label).font(.system(size: onInk ? 11 : 13)).foregroundStyle(quiet)
+            Text(value).font(.system(size: onInk ? (strong ? 13 : 11) : (strong ? 15 : 13), weight: strong ? .bold : .regular))
+                .foregroundStyle(onInk ? Color(ShellPalette.onInk) : Brand.ink)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)

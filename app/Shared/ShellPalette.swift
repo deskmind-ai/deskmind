@@ -45,9 +45,6 @@ enum ShellPalette {
     static let frame = Tone(light: 0x262B28, dark: 0x0F1110)
     static let frameText = Tone(light: 0xF4F1EA, dark: 0xF4F1EA)
     static let frameQuiet = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
-    /// 小方's badge: light in both appearances -- its images are dark ink, drawn on it in Dark Mode (#124 delta review:
-    /// on the dark paper they were all but gone, ~1.15:1).
-    static let badge = Tone(light: 0xFFFEFA, dark: 0xFFFEFA)
 
     /// The sidebar and the agent's column: the card at 60 % over the paper.
     static let panel = tint(card, 0.6, over: paper)
@@ -58,12 +55,24 @@ enum ShellPalette {
     /// A problem row: the orange at 7 % over the paper.
     static let problem = tint(dot, 0.07, over: paper)
 
-    /// The island (the notch's black pill, the same in both appearances, as the hardware is): its fill, its text, and
-    /// its muted dot (preparing, paused, didn't finish: #8C958C). Working and needing you are the orange dot, done is
-    /// the text's white (Island board: no colour outside the palette).
-    static let islandFill = Tone(light: 0x000000, dark: 0x000000)
-    static let islandText = Tone(light: 0xFFFFFF, dark: 0xFFFFFF)
-    static let islandMuted = Tone(light: 0x8C958C, dark: 0x8C958C)
+    /// The ink surfaces (the float, the first run's left column; P1Float, P1Setup): the same in both appearances.
+    static let inkSurface = Tone(light: 0x262B28, dark: 0x262B28)
+    static let onInk = Tone(light: 0xF4F1EA, dark: 0xF4F1EA)            // text on it; its primary button's fill
+    static let onInkMuted = Tone(light: 0xB9C1B8, dark: 0xB9C1B8)       // its secondary text
+    static let onInkOrange = Tone(light: 0xF2B3A1, dark: 0xF2B3A1)      // 「等你」「需要你」 on it
+    static let onInkLink = Tone(light: 0xF2C9BC, dark: 0xF2C9BC)        // 「去主窗口回答」 on it
+    static let onInkPromise = Tone(light: 0xE58A6E, dark: 0xE58A6E)     // the first run's promise marks
+    static let inkButton = Tone(light: 0x313632, dark: 0x313632)        // its secondary button's fill
+    static let inkButtonLine = Tone(light: 0x4A524B, dark: 0x4A524B)    // that button's edge
+    static let inkStop = Tone(light: 0x3A3F3B, dark: 0x3A3F3B)          // its round Stop's fill
+
+    /// The island (one bar at the notch, the same in both appearances, as the hardware is): its fill, its left text,
+    /// its right text, and its grey dot (preparing, paused, didn't finish). Working and needing you are the orange dot,
+    /// done is the text's colour (Island board: no colour outside the palette).
+    static let islandFill = Tone(light: 0x0E0F0E, dark: 0x0E0F0E)
+    static let islandText = Tone(light: 0xF4F1EA, dark: 0xF4F1EA)
+    static let islandMuted = Tone(light: 0xB2BBAF, dark: 0xB2BBAF)
+    static let islandGrey = Tone(light: 0x8C958C, dark: 0x8C958C)
 
     /// Text colours and the backgrounds each is drawn on (both appearances: `textOn(_:)`).
     static let textPairs: [(text: Tone, background: Tone)] = [
@@ -75,7 +84,10 @@ enum ShellPalette {
         (frameText, frame), (frameQuiet, frame),
         (error, card), (error, paper),
         (paper, ink),                       // the prominent button: paper text on an ink capsule
-        (islandText, islandFill), (islandMuted, islandFill), (islandFill, islandText), (dot, islandFill),
+        (islandText, islandFill), (islandMuted, islandFill), (onInkOrange, islandFill),
+        (onInk, inkSurface), (onInkMuted, inkSurface), (onInkOrange, inkSurface), (onInkLink, inkSurface), (onInkPromise, inkSurface),
+        (inkSurface, onInk),                // the float's primary button: ink text on its light fill
+        (onInk, inkButton), (onInkMuted, inkButton),
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }

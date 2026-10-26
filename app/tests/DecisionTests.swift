@@ -117,14 +117,18 @@ enum DecisionTests {
         check(Island.notch(screen: screen, safeTop: 0, left: nil, right: nil) == nil, "no notch on an external screen")
         check(Island.notch(screen: screen, safeTop: 32, left: CGRect(x: 0, y: 0, width: 900, height: 32),
                            right: CGRect(x: 800, y: 0, width: 900, height: 32)) == nil, "overlapping areas: no notch")
-        if let n = notch {
-            let c = Island.collapsedFrame(notch: n)
-            check(c.midX == n.midX && c.width == n.width + 2 * Island.wing && c.maxY == screen.maxY, "collapsed: \(c)")
-            let e = Island.expandedFrame(notch: n, screen: screen)
-            check(e.midX == n.midX && e.maxY == screen.maxY && e.width >= c.width && e.height > c.height, "expanded: \(e)")
+        // the bar (U2): at the notch, as tall as it, 380 / 460 wide; no notch: a 34 pt capsule 10 under the menu bar
+        let visible = CGRect(x: 0, y: 0, width: 1920, height: 1050), plain = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let bars: [(CGRect?, CGRect, Bool, CGRect, String)] = [
+            (notch, screen, false, CGRect(x: 674, y: 1085, width: 380, height: 32), "notch, working"),
+            (notch, screen, true, CGRect(x: 634, y: 1085, width: 460, height: 32), "notch, needs you: wider, same centre"),
+            (nil, plain, false, CGRect(x: 770, y: 1006, width: 380, height: 34), "no notch, working"),
+            (nil, plain, true, CGRect(x: 730, y: 1006, width: 460, height: 34), "no notch, needs you"),
+        ]
+        for (n, sc, wide, want, name) in bars {
+            let got = Island.barFrame(notch: n, screen: sc, visible: visible, needsYou: wide)
+            check(got == want, "bar, \(name): \(got)")
         }
-        let pill = Island.pillFrame(visible: CGRect(x: 0, y: 0, width: 1920, height: 1050), size: CGSize(width: 560, height: 64))
-        check(pill == CGRect(x: 680, y: 976, width: 560, height: 64), "pill: \(pill)")
 
         // A starting run's stage: the seconds once counting, the usual time when known and not long past.
         check(RunStage.eyes.line(seconds: 0, lang: .en) == "Loading the vision model…", "stage, no seconds")

@@ -333,9 +333,11 @@ enum L10nTests {
                      ".font(.system(size: 11, weight: .semibold))", ".stroke(Brand.dot.opacity(0.35))"] {
             check(!probe(good), "the allowlist lets \(good) through")
         }
-        // 小方 in Dark Mode: its dark-ink images on a light badge
-        check(ShellPalette.contrast(ShellPalette.ink.light, ShellPalette.badge.dark) >= 4.5 && source("Main/Brand.swift").contains("Circle().fill(Color(ShellPalette.badge))"),
-              "小方 on a light badge in Dark Mode")
+        // 小方 is drawn (XiaoFace) in the ink token -- the paper's colour on an ink surface: never an image, which had to sit
+        // on a light badge in Dark Mode (#124 delta review)
+        let brandCode = source("Main/Brand.swift")
+        check(brandCode.contains("struct XiaoFace") && !brandCode.contains("Image(nsImage: Brand.image") && brandCode.contains("Color(ShellPalette.onInk) : Brand.ink"),
+              "小方 drawn in the tokens, in both appearances")
         check(!split.contains("preferredColorScheme"), "the window follows the system's appearance (no pin: owner 10-25)")
         // no translucent fill behind text in the window's views: what is checked is what is on screen
         let views = ShellTests.windowViewFiles().filter { ["Main/MainSplitView.swift", "Main/CardViews.swift", "Main/TaskViews.swift"].contains($0.name) }

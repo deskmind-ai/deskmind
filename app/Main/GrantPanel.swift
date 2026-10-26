@@ -153,7 +153,7 @@ struct GrantAccessory: View {
 
     var body: some View {
         HStack(spacing: 16) {
-            XiaoFang(mood: granted ? .done : .notice, size: 64)
+            XiaoFace(eyes: granted ? .happy : .up, size: 56)
             VStack(alignment: .leading, spacing: 6) {
                 if granted {
                     Text(L("“%@” is allowed", grant.title(lang), lang: lang)).font(.system(size: 15, weight: .semibold, design: .rounded))
