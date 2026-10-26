@@ -369,7 +369,8 @@ struct FloatCard: View {
     /// beyond lines and the consent fields say it).
     @ViewBuilder private func whole(_ layout: CardLayout) -> some View {
         title(layout)
-        if let t = layout.shownText { Text(t).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true) }
+        // (an action card whose words do not say all of its text: the text whole -- the float has no 「细节」)
+        if let t = layout.wholeText { Text(t).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true) }
         if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
         ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
             Text(line).font(.system(size: 11)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)

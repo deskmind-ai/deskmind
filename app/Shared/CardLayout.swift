@@ -96,8 +96,30 @@ struct CardLayout: Equatable {
     var beyond: [String]
     /// The text and the plan's steps are folded under 「细节」: only with a headline (else they are the card).
     var folds: Bool
-    /// 「细节」 is there: the card folds, and it is not an action card whose block shows every consent field.
-    var hasDetails: Bool { folds && (consent?.unshown.isEmpty != true) }
+    /// 「细节」 is there: the card folds, and it is not an action card that draws its whole text. An action card hides it
+    /// only when every piece of its text is in the words it draws, whole (Self.covers), and its block shows every
+    /// consent field (unshown, the second guard) -- #129 Codex review: the action_text the harness cuts at 40 is no
+    /// account of a long replacement.
+    var hasDetails: Bool {
+        guard folds else { return false }
+        guard let c = consent else { return true }
+        return !c.unshown.isEmpty || !Self.covers(text, by: drawn)
+    }
+    /// What an action card draws with 「细节」 closed: its title, the beyond lines, the block's words (its effect line in
+    /// either language: the harness's text says it in the task's).
+    var drawn: [String] {
+        guard let c = consent else { return [title] + beyond }
+        var w = [title] + beyond + [c.action, c.object, c.site ?? ""] + c.outgoing.flatMap { [$0.label, $0.value] } + c.selected
+        if let e = c.effect {
+            let key = e == .sends ? "This sends something out" : "This changes your things"
+            w += [L(key, lang: .en), L(key, lang: .zhHans)]
+        }
+        w += c.uncertain.flatMap { [$0.text] + $0.outgoing.flatMap { [$0.label, $0.value] } }
+        if let m = c.modelSays { w.append(m) }
+        return w.filter { !$0.isEmpty }
+    }
+    /// The text whole where the card is not drawn with its 「细节」 (the float): an action card's when it keeps them.
+    var wholeText: String? { shownText ?? (consent != nil && hasDetails && !text.isEmpty ? text : nil) }
     /// The text, shown whole under the title, when the card has a headline and folds nothing (an action card with no
     /// consent fields: its text is the only account of what it does). nil: the text is the title, or it is folded.
     /// #124 Codex review at 80c339e: such a card showed its headline only, and its 「可以」 took a click.
@@ -175,6 +197,36 @@ struct CardLayout: Equatable {
             }
         }
         return parts.isEmpty ? nil : parts.joined(separator: lang == .zhHans ? "" : " ")
+    }
+
+    /// Every piece of `text` -- its lines and clauses, whitespace and quote styles evened out -- is in one of `drawn`,
+    /// verbatim; and nothing drawn is cut short (an ellipsis in it: the harness's cardText cut, 「…（共 n 字）」, as in
+    /// a long value's action_text).
+    static func covers(_ text: String, by drawn: [String]) -> Bool {
+        let shown = drawn.map(normalised)
+        if shown.contains(where: { $0.contains("…") || $0.contains("...") }) { return false }
+        return pieces(text).allSatisfy { p in shown.contains { $0.contains(p) } }
+    }
+
+    /// The text's lines and clauses, evened out, with no empty ones and none of punctuation only.
+    static func pieces(_ text: String) -> [String] {
+        var parts = [normalised(text)]
+        for sep in ["\n", "。", "！", "？", "；", ";", "，", ",", "：", ":"] { parts = parts.flatMap { $0.components(separatedBy: sep) } }
+        return parts.map { $0.trimmingCharacters(in: .punctuationCharacters) }.filter { !$0.isEmpty }
+    }
+
+    /// With no white space but its line ends (「把 “正文” 设为」 and 「把「正文」设为」 are the same words); every quote
+    /// mark as ", every single one as '.
+    static func normalised(_ s: String) -> String {
+        var out = ""
+        for ch in s where !ch.isWhitespace || ch == "\n" {
+            switch ch {
+            case "“", "”", "„", "\"", "＂", "「", "」", "『", "』", "«", "»": out.append("\"")
+            case "‘", "’", "'", "＇": out.append("'")
+            default: out.append(ch)
+            }
+        }
+        return out
     }
 
     /// The control key `n` (1–9) picks, if the card has one.

@@ -26,6 +26,7 @@ enum CardLayoutTests {
         DecisionTests.group("layout.factsTests"); factsTests()
         DecisionTests.group("layout.consentKeysTests"); consentKeysTests()
         DecisionTests.group("layout.consentScopeTests"); consentScopeTests()
+        DecisionTests.group("layout.consentTextTests"); consentTextTests()
         DecisionTests.group("layout.keyGateTests"); keyGateTests()
         DecisionTests.group("layout.cardModeTests"); cardModeTests()
         DecisionTests.group("layout.cardModeEndsTests"); cardModeEndsTests()
@@ -322,6 +323,60 @@ enum CardLayoutTests {
         // a card with no consent folds its text as before
         check(CardLayout(model(["kind": "plan", "text": "一步", "headline": "要这样做吗？", "free_text": false, "blocking": true,
                                 "options": [opt("approve", "可以")]])).hasDetails, "a plan card with a headline still has 「细节」")
+    }
+
+    /// 「细节」 stays unless every piece of the card's text is drawn whole (#129 Codex review: a long set_value).
+    static func consentTextTests() {
+        func card(_ text: String, headline: String, _ c: [String: Any]) -> CardModel {
+            model(["kind": "action", "text": text, "headline": headline, "free_text": false, "blocking": true, "consent": c,
+                   "options": [opt("approve", "可以"), opt("skip_step", "这一步不要"), opt("cancel", "先别做了")]])
+        }
+        let facts: [String: Any] = ["action": "set_value", "target": "正文", "object": "window:textedit#4", "object_label": "TextEdit 窗口「笔记」",
+                                    "consequence": "modify_user", "outgoing": [], "site": NSNull()]
+        // (the harness's shapes, b0d928c: action_text is stepText, its value cut at 40 by cardText -- 「…（共 n 字）」;
+        // the card's text keeps it whole)
+        let long = "周一上午十点在三楼会议室开项目例会，请各位提前准备好上周的进展、遇到的问题和本周计划，会后把纪要发到群里，谢谢大家配合"
+        let cut = String(long.prefix(40)) + "…（共 \(long.count) 字）"
+        let longCard = card("这会改动你的东西：把「正文」设为「\(long)」", headline: "把「正文」设为「\(cut)」",
+                            facts.merging(["action_text": "把「正文」设为「\(cut)」"]) { $1 })
+        let l = CardLayout(longCard)
+        check(long.count > 40 && l.hasDetails && l.text.contains(long), "a long set_value: 「细节」 stays, and it holds the whole replacement")
+        check(l.wholeText == l.text, "a long set_value: the float shows the text whole")
+        let short = CardLayout(card("这会改动你的东西：把「正文」设为「好」", headline: "把「正文」设为「好」",
+                                    facts.merging(["action_text": "把「正文」设为「好」"]) { $1 }))
+        check(!short.hasDetails && short.wholeText == nil, "a short one, every part drawn: no 「细节」")
+        // (quote styles and spaces evened out; a clause drawn nowhere keeps it; a cut even where the rest is drawn)
+        check(!CardLayout(card("这会改动你的东西：把 “正文”  设为 “好”", headline: "把「正文」设为「好」",
+                               facts.merging(["action_text": "把「正文」 设为「好」"]) { $1 })).hasDetails, "quotes and spaces: the same words")
+        check(CardLayout(card("这会改动你的东西：把「正文」设为「好」，然后保存", headline: "把「正文」设为「好」",
+                              facts.merging(["action_text": "把「正文」设为「好」"]) { $1 })).hasDetails, "a clause drawn nowhere: 「细节」")
+        check(CardLayout(card("这会改动你的东西：把「正文」设为「好」", headline: "把「正文」设为「好」",
+                              facts.merging(["action_text": "把「正文」设为「好」", "model_says_unchecked": "好…（共 9 字）"]) { $1 })).hasDetails,
+              "a field cut short: 「细节」")
+        // property: for random cards, every word of the text is drawn, or 「细节」 is there
+        var seed: UInt64 = 0x9E3779B97F4A7C15
+        func next(_ n: Int) -> Int { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Int((seed >> 33) % UInt64(n)) }
+        let pool = ["点「发送」", "周报", "wang@example.com", "正文", "好的", "TextEdit 窗口「笔记」", "mail.example.com", "第一封", "“引号”", "长长的一段话"]
+        let seps = ["，", "：", "\n", "。", " "]
+        var hidden = 0
+        for i in 0..<400 {
+            var given: [String] = []     // (the fields' words: the text is mostly made of them, now and then of others)
+            func pick() -> String { let w = pool[next(pool.count)]; given.append(w); return w }
+            var c = facts
+            c["action_text"] = pick(); c["object_label"] = next(2) == 0 ? pick() : ""
+            if next(2) == 0 { c["outgoing"] = [["kind": "field", "label": pick(), "value": pick()]] }
+            if next(3) == 0 { c["selected"] = [pick()] }
+            if next(4) == 0 { c["model_says_unchecked"] = pick() }
+            if next(5) == 0 { c["site"] = pick() }
+            let words = (0..<(1 + next(4))).map { _ in next(5) == 0 ? pool[next(pool.count)] : given[next(given.count)] }
+            let text = words.enumerated().map { $0.offset == 0 ? $0.element : seps[next(seps.count)] + $0.element }.joined()
+            let l = CardLayout(card(text, headline: c["action_text"] as! String, c))
+            let shown = shownWords(l).map(CardLayout.normalised).joined(separator: "\n")
+            if !l.hasDetails { hidden += 1 }
+            check(l.hasDetails || words.allSatisfy { shown.contains(CardLayout.normalised($0)) },
+                  "random card \(i): every word of 「\(text)」 drawn, or 「细节」: \(shown)")
+        }
+        check(hidden > 20, "the property is not empty: \(hidden) of 400 random cards hide 「细节」")
     }
 
     static func consentScopeTests() {
