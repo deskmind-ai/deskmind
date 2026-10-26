@@ -17,11 +17,9 @@ struct FirstRunView: View {
     @Environment(\.lang) private var lang
     @State var flow: FirstRun
     let done: () -> Void
-    @State private var form = FirstRunPage.KeyForm(provider: CloudModelSettings.provider)
+    /// What is typed: the model sheet's own form (ModelForm), so the step saves all the sheet saves.
+    @State private var form = ModelForm(provider: CloudModelSettings.provider, settings: KeyStatus.shared.now.settings)
     @State private var busy = false
-    @State private var checkOK: Bool?
-    @State private var why: String?
-    @State private var reached: String?
 
     /// The facts as the helper says them now.
     private var facts: FirstRun.Facts {
@@ -35,13 +33,18 @@ struct FirstRunView: View {
     var body: some View {
         var shown = flow
         shown.facts = facts
-        return FirstRunPage(flow: shown, language: $language, form: $form,
+        return FirstRunPage(flow: shown, language: $language,
+                            form: Binding(get: { form }, set: { new in
+                                // (another service: as loaded anew -- its key and its check's result go)
+                                if new.provider != form.provider { form.select(new.provider, settings: keys.snapshot.settings) } else { form = new }
+                            }),
                             keyState: FirstRun.keyState(known: keys.snapshot.known, readable: keys.snapshot.readable,
-                                                        last4: keys.snapshot.keys[form.provider.keyEnv], busy: busy, checkOK: checkOK,
-                                                        why: why, model: reached),
+                                                        last4: keys.snapshot.keys[form.provider.keyEnv], busy: busy, checkOK: form.checkOK,
+                                                        why: form.why, model: form.reached),
                             granted: { model.granted($0) }, grant: { model.grant($0) },
                             act: act, example: { e in shell.draft = L(e, lang: lang); finish() })
             .onAppear { KeyStatus.shared.refresh() }
+            .onChange(of: keys.snapshot) { _, s in form.settingsCame(s.settings) }
     }
 
     private func act(_ e: FirstRunPage.Action) {
@@ -65,50 +68,43 @@ struct FirstRunView: View {
         done()
     }
 
-    /// 「继续」 on the key step: a typed key saved as the model sheet saves it -- keys.set's merge, replacing only keys
-    /// the helper can't read (A11: the key in effect is the last one set) -- then tried with the key the helper keeps;
-    /// one that works moves on by itself, one that doesn't stays (稍后 still goes on).
+    /// 「继续」 on the key step: the form saved as the model sheet saves it (ModelForm.plan: the key if typed -- keys.set's
+    /// merge, replacing only keys the helper can't read, A11 -- a custom service's URL and model, the service, its
+    /// configuration) with the engine on (the conversations need it); then tried with the key the helper keeps. One
+    /// that works moves on by itself, one that doesn't stays (稍后 still goes on).
     private func continueKey() {
-        let p = form.provider
-        let modelName = ModelChoice.modelName(form.model)
-        var pairs: [String: String] = [:]
-        if !form.key.isEmpty { pairs[p.keyEnv] = form.key }
-        if p.custom && !form.key.isEmpty { pairs["CUSTOM_URL"] = form.url; pairs["CUSTOM_MODEL"] = modelName }
+        let plan = form.plan(engine: true)
         let replace = keys.snapshot.known && !keys.snapshot.readable
-        busy = true; why = nil; checkOK = nil
+        busy = true; form.why = nil; form.checkOK = nil
         Task.detached {
             var failure: String?
-            if !pairs.isEmpty {
-                do { try CloudModelSettings.set(pairs, replace: replace) } catch { failure = error.localizedDescription }
-            }
+            do { try CloudModelSettings.save(plan, replace: replace) } catch { failure = error.localizedDescription }
             await MainActor.run {
-                if !pairs.isEmpty { flow.apply(.saved(ok: failure == nil)) }
-                if let failure { busy = false; why = failure; return }
-                CloudModelSettings.provider = p
-                CloudModelSettings.engineConfig = CloudModelSettings.config(for: p, model: modelName)
+                if !plan.pairs.isEmpty { flow.apply(.saved(ok: failure == nil)) }
+                if let failure { busy = false; form.why = failure; return }
+                CloudModelSettings.apply(plan)
                 form.key = ""
                 model.refreshCloud()
-                check()
+                check(config: plan.engineConfig ?? "")
             }
         }
     }
 
     /// One tiny question to the model with the key the helper keeps (model_check): its answer, said as it is.
-    private func check() {
+    private func check(config: String) {
         busy = true
-        let config = CloudModelSettings.config(for: form.provider, model: keys.snapshot.settings["CUSTOM_MODEL"] ?? ModelChoice.modelName(form.model))
         Task.detached {
             let reply = DeskMindIPC.request(["op": "model_check", "config": config, "lang": ResolvedLang.current.rawValue], timeout: 60)
             await MainActor.run {
                 busy = false
                 let ok = reply?["ok"] as? Bool == true
-                checkOK = ok
+                form.checkOK = ok
                 if ok {
-                    reached = reply?["model"] as? String ?? config
+                    form.reached = reply?["model"] as? String ?? config
                     // (「能用」 seen for a moment, then on)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { flow.apply(.checked(ok: true)) }
                 } else {
-                    why = (reply?["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? L("No answer from the helper", lang: lang)
+                    form.why = (reply?["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? L("No answer from the helper", lang: lang)
                     flow.apply(.checked(ok: false))
                 }
             }
@@ -119,15 +115,9 @@ struct FirstRunView: View {
 /// The first run as drawn (P1Setup): what it is given, nothing it asks for itself.
 struct FirstRunPage: View {
     enum Action { case next, later, back, skipAll }
-    struct KeyForm: Equatable {
-        var provider: CloudProvider
-        var key = ""
-        var url = ""
-        var model = ""
-    }
     let flow: FirstRun
     @Binding var language: String
-    @Binding var form: KeyForm
+    @Binding var form: ModelForm
     let keyState: FirstRun.KeyState
     let granted: (Grant) -> Bool
     let grant: (Grant) -> Void
@@ -245,8 +235,8 @@ struct FirstRunPage: View {
 
     /// The bottom line: 「全部跳过」「上一步」 on the left; 「稍后」 and the one main button on the right.
     private var bar: some View {
-        let typed = !form.key.isEmpty
-        let on = flow.canContinue(typed: typed) && keyState != .checking
+        // (the key step: what the form can save -- a key typed or set, a custom service's URL and model)
+        let on = (flow.step == .key ? form.canSave(keySet: flow.facts.keySet) : flow.canContinue(typed: false)) && keyState != .checking
         return HStack(spacing: 18) {
             Button(L("Skip all", lang: lang)) { act(.skipAll) }.buttonStyle(.plain)
             if flow.step != .language { Button(L("Back", lang: lang)) { act(.back) }.buttonStyle(.plain) }

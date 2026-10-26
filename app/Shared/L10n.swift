@@ -695,6 +695,7 @@ enum L10n {
         "Answer in the main window ›": "去主窗口回答 ›",
         "Plan · %d steps, %d go out and are confirmed then": "计划 · %d 步，%d 步往外发，到时再确认",
         "Plan · %d steps": "计划 · %d 步",
+        "Plan · %@": "计划 · %@",
         // the island as one bar (U2)
         "Getting ready": "准备中",
         "You're on the Mac, paused": "你在用电脑，先停一下",

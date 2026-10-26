@@ -128,8 +128,7 @@ struct CardView: View {
         HStack(spacing: 8) {
             if card.blocking && !card.isResult {
                 if phase == .open {
-                    Circle().fill(Brand.dot).frame(width: 8, height: 8)
-                        .overlay(Circle().stroke(Brand.dot.opacity(0.3), lineWidth: 3)).accessibilityHidden(true)
+                    XiaoFace(eyes: .up, size: 22)      // (P1Waiting: 小方 looking up at you, the card's fourth place)
                     Text(L("Waiting for you · %@", ShellText.cardKind(card.kind.name, lang: lang), lang: lang))
                         .font(.system(size: 13, weight: .bold)).foregroundStyle(ShellColor.orangeText)
                 } else {

@@ -145,7 +145,7 @@ struct LiveFrame: View {
     private func picture(height: CGFloat) -> some View {
             ZStack {
                 // (light on the float's ink in both appearances, as the board draws it)
-                Rectangle().fill(chrome ? Brand.card : Color(ShellPalette.onInk))
+                Rectangle().fill(chrome ? Brand.card : Color(ShellPalette.shotWell))
                 if let p = picture {
                     GeometryReader { g in
                         let size = LiveDockView.fit(p.image.size, in: g.size)
@@ -167,15 +167,16 @@ struct LiveFrame: View {
                     .overlay(alignment: .topLeading) {
                         // (the card's own words for what it is about to act on: not placed on the step's box)
                         if let about {
-                            Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Brand.card)
+                            Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Color(ShellPalette.shotWell))
                                 .padding(.horizontal, 8).frame(height: 20)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(ShellColor.orangeText))
+                                .background(RoundedRectangle(cornerRadius: 4).fill(Color(ShellPalette.shotTag)))
                                 .padding(8)
                         }
                     }
                     .accessibilityLabel(L("Live view of the task's window", lang: lang))
                 } else {
-                    Text(LiveDockView.note(state, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                    Text(LiveDockView.note(state, lang: lang)).font(.system(size: chrome ? 12 : 11))
+                        .foregroundStyle(chrome ? ShellColor.secondary : Color(ShellPalette.inkSurface))
                         .multilineTextAlignment(.center).padding(14)
                 }
             }

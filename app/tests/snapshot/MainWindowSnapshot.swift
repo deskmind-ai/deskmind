@@ -115,7 +115,7 @@ enum MainWindowSnapshot {
         flow.facts.accessibility = granted; flow.facts.screen = granted
         if case .set = key { flow.facts.keySet = true }
         let page = FirstRunPage(flow: flow, language: .constant(AppLanguage.zhHans.rawValue),
-                                form: .constant(FirstRunPage.KeyForm(provider: CloudProvider.all[0])), keyState: key,
+                                form: .constant(ModelForm(provider: CloudProvider.all[0], settings: [:])), keyState: key,
                                 granted: { _ in granted }, grant: { _ in }, act: { _ in }, example: { _ in })
         renderView(page.environment(\.lang, .zhHans), size: NSSize(width: 1080, height: 780), dark: dark, wait: 0.5, to: file)
     }
@@ -233,6 +233,10 @@ enum MainWindowSnapshot {
         ]
         let planCard: [String: Any] = [
             "kind": "plan", "blocking": true, "headline": "回复许诺：4 步，1 步往外发，到时再确认",
+            "plan": ["steps": [["purpose": "找到许诺 10 月 20 日的邮件", "class": "read", "objects": [], "sites": []],
+                               ["purpose": "点「回复」，写入「我看一下再说」", "class": "modify_user", "objects": [], "sites": []],
+                               ["purpose": "点「发送」", "class": "external", "objects": [], "sites": [["host": "mail.example.com", "sends": "「我看一下再说」"]]],
+                               ["purpose": "确认已经发出", "class": "read", "objects": [], "sites": []]]],
             "text": "我打算这样做：\n1. 找到许诺 10 月 20 日的邮件\n2. 点「回复」，写入「我看一下再说」\n3. 点「发送」——往外发，到时再确认\n4. 确认已经发出",
             "options": [["kind": "approve", "text": "可以，就这样做"], ["kind": "cancel", "text": "先别做了"]],
         ]

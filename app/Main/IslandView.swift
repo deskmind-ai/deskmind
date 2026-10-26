@@ -29,33 +29,38 @@ struct IslandView: View {
 
     var body: some View {
         let wide = kind == .needsYou
-        Button(action: Activation.onClick { g in onTap(g) }) {
-            HStack(spacing: 8) {
-                lead
-                Text(model.frame?.left ?? "").font(.system(size: 13, weight: kind == .needsYou || !running ? .semibold : .regular))
-                    .foregroundStyle(kind == .needsYou ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.islandText)).lineLimit(1)
-                Spacer(minLength: 84)
-                ZStack(alignment: .trailing) {
+        // (the bar's click and Stop side by side, never one inside the other: a click on Stop is Stop's)
+        ZStack(alignment: .trailing) {
+            Button(action: Activation.onClick { g in onTap(g) }) {
+                HStack(spacing: 8) {
+                    lead
+                    Text(model.frame?.left ?? "").font(.system(size: 13, weight: kind == .needsYou || !running ? .semibold : .regular))
+                        .foregroundStyle(kind == .needsYou ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.islandText)).lineLimit(1)
+                    Spacer(minLength: 84)
                     right.opacity(hover && running ? 0 : 1)
-                    if running {
-                        Button(action: onStop) {
-                            Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.islandText))
-                                .frame(width: 20, height: 20).background(Circle().fill(Color(ShellPalette.islandText).opacity(0.18)))
-                        }
-                        .buttonStyle(.plain)
-                        .opacity(hover ? 1 : 0)
-                        .help(L("Stop this task (or press ⌘. in the DeskMind window)", lang: lang))
-                        .accessibilityLabel(L("Stop", lang: lang))     // (in the tree whether shown or not)
-                    }
                 }
-                .animation(reduce ? nil : .easeOut(duration: 0.15), value: hover)
+                .padding(.horizontal, 16)
+                .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
+                .background(shape.fill(Color(ShellPalette.islandFill)))
+                .contentShape(shape)
             }
-            .padding(.horizontal, 16)
-            .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
-            .background(shape.fill(Color(ShellPalette.islandFill)))
-            .contentShape(shape)
+            .buttonStyle(.plain)
+            if running {
+                Button(action: onStop) {
+                    Image(systemName: "stop.fill").font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.islandText))
+                        .frame(width: 20, height: 20).background(Circle().fill(Color(ShellPalette.islandText).opacity(0.18)))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .opacity(hover ? 1 : 0)
+                .allowsHitTesting(hover)
+                .help(L("Stop this task (or press ⌘. in the DeskMind window)", lang: lang))
+                .accessibilityLabel(L("Stop", lang: lang))     // (in the tree whether shown or not)
+                .padding(.trailing, 16)
+            }
         }
-        .buttonStyle(.plain)
+        .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
+        .animation(reduce ? nil : .easeOut(duration: 0.15), value: hover)
         .onHover { hover = $0 }
         .animation(reduce ? nil : .easeOut(duration: 0.35), value: wide)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

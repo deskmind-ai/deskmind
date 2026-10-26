@@ -143,8 +143,9 @@ final class FloatController: ObservableObject {
     /// (when they show) -- judged against what the panel has, not a constant (#125 delta check: a short screen).
     private var cardRoom: Double {
         let screen = (panel?.screen ?? NSScreen.main ?? NSScreen.screens.first)?.visibleFrame.height ?? 600
-        // (its title bar 36, the picture 116, its foot 36 and a row of buttons 54: P1Float)
-        let chrome = userCollapsed ? 36 : 36 + 116 + 36 + 54
+        // (its title bar 36, the picture 116, its foot 36 and a row of buttons 54: P1Float -- a card is always drawn in
+        // the whole float, never the capsule: FloatPolicy.collapsed)
+        let chrome = 36 + 116 + 36 + 54
         return max(0, Double(screen) * 0.7 - Double(chrome))
     }
     private func fits(_ card: CardModel) -> Bool {
@@ -292,7 +293,7 @@ struct FloatView: View {
 
     var body: some View {
         if let n = float.now {
-            if float.userCollapsed { capsule(n) } else { panel(n) }
+            if FloatPolicy.collapsed(user: float.userCollapsed, cardWaiting: waits(n)) { capsule(n) } else { panel(n) }
         }
     }
 
@@ -305,9 +306,11 @@ struct FloatView: View {
         let last = n.task.steps.last
         return VStack(alignment: .leading, spacing: 0) {
             titleBar(n)
+            // (「准备点」 and the box by the right column's rule: the open click card's own target, the card's own rect)
             LiveFrame(picture: still ?? float.dock.picture, state: still == nil ? float.dock.state : .streaming,
-                      app: nil, waiting: waits(n), about: nil, step: nil, stepWindow: LiveFeed.windowNumber(last?.object),
-                      target: last?.target, boxRect: nil, zoomed: $zoomed, popOut: {}, chrome: false)
+                      app: nil, waiting: waits(n), about: Self.aboutToAct(n), step: nil, stepWindow: LiveFeed.windowNumber(last?.object),
+                      target: last?.target, boxRect: LiveFeed.boxRect(cardWaitsOnButton: Self.aboutToAct(n) != nil, card: nil),
+                      zoomed: $zoomed, popOut: {}, chrome: false)
             if let card = n.card, let phase = n.phase, let p = n.placement {
                 FloatCard(shell: shell, sessionId: n.sessionId, card: card, phase: phase, placement: p)
             } else if let step = last {
@@ -333,9 +336,12 @@ struct FloatView: View {
                 .foregroundStyle(waits(n) ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.onInk))
             Text(verbatim: "· " + detail).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(1)
             Spacer(minLength: 4)
-            Button(L("Collapse", lang: lang)) { float.userCollapsed = true }
-                .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted))
-                .opacity(hover ? 1 : 0)
+            // (none while a card waits: the float stays whole until it is answered)
+            if !waits(n) {
+                Button(L("Collapse", lang: lang)) { float.userCollapsed = true }
+                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted))
+                    .opacity(hover ? 1 : 0)
+            }
             stopButton(n, size: 26)
         }
         .padding(.leading, 12).padding(.trailing, 6).frame(height: 36)
@@ -370,6 +376,12 @@ struct FloatView: View {
         .buttonStyle(.plain)
         .help(L("Stop", lang: lang))
         .accessibilityLabel(L("Stop", lang: lang))
+    }
+
+    /// The button the open action card names (its consent: a click on its target) -- the right column's rule.
+    static func aboutToAct(_ n: FloatController.Now) -> String? {
+        guard n.phase == .open, let c = n.card?.consent, c.action == "click", let t = c.target, !t.isEmpty else { return nil }
+        return t
     }
 
     private func stateWord(_ n: FloatController.Now) -> String {
@@ -497,7 +509,9 @@ struct FloatCard: View {
 
     /// 「计划 · 4 步，1 步往外发，到时再确认」 for a plan card (its steps, the ones that send out), else its title.
     static func summary(_ card: CardModel, layout: CardLayout, lang: ResolvedLang) -> String {
-        guard card.kind == .plan, !layout.plan.isEmpty else { return layout.title }
+        guard card.kind == .plan else { return layout.title }
+        // (a plan card always says it is the plan; with no steps in fields, its title after it)
+        guard !layout.plan.isEmpty else { return L("Plan · %@", layout.title, lang: lang) }
         let out = layout.plan.filter(\.sendsOut).count
         return out > 0 ? L("Plan · %d steps, %d go out and are confirmed then", layout.plan.count, out, lang: lang)
                        : L("Plan · %d steps", layout.plan.count, lang: lang)

@@ -68,8 +68,8 @@ struct FirstRun: Equatable {
     /// the keychain can't be read.
     enum KeyState: Equatable { case empty, set(last4: String), checking, ok(model: String), bad(why: String), unreadable }
     static func keyState(known: Bool, readable: Bool, last4: String?, busy: Bool, checkOK: Bool?, why: String?, model: String?) -> KeyState {
+        if busy { return .checking }         // (first: a save over unreadable keys is under way -- no second press)
         if known && !readable { return .unreadable }
-        if busy { return .checking }
         if checkOK == true { return .ok(model: model ?? "") }
         if let why, !why.isEmpty { return .bad(why: why) }
         if let l = last4, !l.isEmpty { return .set(last4: l) }

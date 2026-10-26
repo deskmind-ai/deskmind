@@ -7,23 +7,6 @@
 import Foundation
 import SwiftUI
 
-/// One cloud service the harness can use. `config` is the harness's model configuration for it.
-struct CloudProvider: Identifiable, Hashable {
-    let id: String          // the harness's provider name (its PROVIDERS key)
-    let title: String       // shown as is: a brand name, not translated
-    let keyEnv: String      // the environment variable the key goes in
-    let config: String      // the harness configuration (a CONFIGS name, or built for custom)
-    let custom: Bool        // needs a URL and a model id too
-
-    static let all: [CloudProvider] = [
-        CloudProvider(id: "deepseek", title: "DeepSeek", keyEnv: "DEEPSEEK_API_KEY", config: "ds-flash", custom: false),
-        CloudProvider(id: "openrouter", title: "OpenRouter", keyEnv: "OPENROUTER_API_KEY", config: "or-luna", custom: false),
-        CloudProvider(id: "volcengine", title: "火山引擎 (doubao)", keyEnv: "VOLCENGINE_API_KEY", config: "ark-evolving", custom: false),
-        CloudProvider(id: "custom", title: "OpenAI-compatible", keyEnv: "CUSTOM_API_KEY", config: "openai:custom|", custom: true),
-    ]
-    static func named(_ id: String) -> CloudProvider { all.first { $0.id == id } ?? all[0] }
-}
-
 /// What the helper says of the model settings (keys.status): each key by its last 4 characters, the settings that are
 /// no secret (a custom service's URL and model), the digest the helper computes over all of it. Read from any thread.
 final class KeyStatus: ObservableObject {
@@ -104,7 +87,19 @@ enum CloudModelSettings {
         set { UserDefaults.standard.set(newValue, forKey: "engine.config"); ModelSettingsSaved.post() }
     }
     /// The harness configuration the main app sends with every run (History.swift reads `engine.config`).
-    static func config(for p: CloudProvider, model: String) -> String { p.custom ? p.config + model : p.config }
+    static func config(for p: CloudProvider, model: String) -> String { p.configuration(model: model) }
+
+    /// A form's save (ModelForm.plan), the sheet's and the first run's alike: the keys through the helper -- off the
+    /// main thread (keys.set's merge; `replace` only over keys the helper cannot read) --
+    static func save(_ plan: ModelForm.Plan, replace: Bool) throws {
+        if !plan.pairs.isEmpty { try set(plan.pairs, replace: replace) }
+    }
+    /// -- then, on the main queue once they are kept, the service, its configuration and the engine.
+    @MainActor static func apply(_ plan: ModelForm.Plan) {
+        if let p = plan.provider { provider = p }
+        if let c = plan.engineConfig { engineConfig = c }
+        if let e = plan.engine { engineIsCloud = e }
+    }
 
     /// Whether the chosen provider has what it needs: a key (and, custom, a URL and a model) -- as the helper says.
     static var configured: Bool { configured(KeyStatus.shared.now, provider) }
@@ -151,13 +146,11 @@ struct CloudModelSheet: View {
     @EnvironmentObject var model: HelperModel
     @Environment(\.lang) private var lang
     @Environment(\.dismiss) private var dismiss
-    @State private var useCloud = CloudModelSettings.engineIsCloud
     /// The engine as stored when the sheet opened: Save writes it only if the switch was moved from it.
     @State private var savedCloud = CloudModelSettings.engineIsCloud
-    @State private var provider = CloudModelSettings.provider
-    @State private var key = ""
-    @State private var url = ""
-    @State private var modelID = ""
+    /// What is typed (ModelForm: the first run's key step holds the same).
+    @State private var form = ModelForm(provider: CloudModelSettings.provider, settings: KeyStatus.shared.now.settings,
+                                        useCloud: CloudModelSettings.engineIsCloud)
     @State private var testing = false
     @State private var result: String? = nil
     @State private var resultOK = false
@@ -168,32 +161,31 @@ struct CloudModelSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(L("Which model thinks", lang: lang)).font(.system(size: 16, weight: .semibold, design: .rounded))
-            Toggle(L("Use a cloud model (the harness engine)", lang: lang), isOn: $useCloud)
+            Toggle(L("Use a cloud model (the harness engine)", lang: lang), isOn: $form.useCloud)
                 .disabled(ModelChoice.switchLocked(inShell: inShell, saved: savedCloud))
             if !ModelChoice.offersLocalOnly(inShell: inShell) {
                 Text(L("Conversations in DeskMind 0.5 need a cloud model.", lang: lang))
                     .font(.system(size: 11)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            if useCloud {
-                Picker(L("Service", lang: lang), selection: $provider) {
+            if form.useCloud {
+                Picker(L("Service", lang: lang), selection: Binding(get: { form.provider }, set: { p in form.select(p, settings: status.settings); result = nil })) {
                     ForEach(CloudProvider.all) { p in Text(p.title).tag(p) }
                 }
-                .onChange(of: provider) { _, p in load(p) }
                 // (the key as the helper knows it: set or not, its last 4 -- never shown, never read back)
                 if status.known && !status.readable {
                     // (the truth, and the way out: the user's own save replaces them -- #127 review)
                     Text(L("The keys in the keychain can't be read (another build of DeskMind saved them, or the keychain is locked). Enter the key again and save: it replaces them.", lang: lang))
                         .font(.system(size: 11)).foregroundStyle(ShellColor.error).fixedSize(horizontal: false, vertical: true)
-                } else if let last4 = status.keys[provider.keyEnv], !last4.isEmpty {
+                } else if let last4 = status.keys[form.provider.keyEnv], !last4.isEmpty {
                     Text(L("Set · ends in %@", last4, lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
                 }
-                SecureField(status.keys[provider.keyEnv] == nil ? L("API key", lang: lang) : L("New API key (empty: keep it)", lang: lang), text: $key)
-                if provider.custom {
-                    TextField(L("Base URL (…/v1)", lang: lang), text: $url)
-                    TextField(L("Model id", lang: lang), text: $modelID)
+                SecureField(status.keys[form.provider.keyEnv] == nil ? L("API key", lang: lang) : L("New API key (empty: keep it)", lang: lang), text: $form.key)
+                if form.provider.custom {
+                    TextField(L("Base URL (…/v1)", lang: lang), text: $form.url)
+                    TextField(L("Model id", lang: lang), text: $form.model)
                 }
                 HStack(spacing: 10) {
-                    Button(L("Test", lang: lang)) { test() }.disabled(testing || (key.isEmpty && status.keys[provider.keyEnv] == nil))
+                    Button(L("Test", lang: lang)) { test() }.disabled(testing || (form.key.isEmpty && status.keys[form.provider.keyEnv] == nil))
                     if testing { ProgressView().controlSize(.small) }
                     if let result {
                         Text(result).font(.system(size: 12)).foregroundStyle(resultOK ? ShellColor.secondary : ShellColor.error)
@@ -210,38 +202,28 @@ struct CloudModelSheet: View {
                 Spacer()
                 Button(L("Cancel", lang: lang)) { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(L("Save", lang: lang)) { save() }.keyboardShortcut(.defaultAction).disabled(saving)
-                    .disabled(useCloud && ((key.isEmpty && status.keys[provider.keyEnv] == nil) || (provider.custom && (url.isEmpty || modelID.isEmpty))))
+                    .disabled(!form.canSave(keySet: status.keys[form.provider.keyEnv] != nil))
             }
         }
         .padding(22).frame(width: 440)
         // (the custom service's URL and model as the helper keeps them, once its answer comes)
-        .onChange(of: keys.snapshot) { _, s in
-            if url.isEmpty && modelID.isEmpty { url = s.settings["CUSTOM_URL"] ?? ""; modelID = s.settings["CUSTOM_MODEL"] ?? "" }
-        }
+        .onChange(of: keys.snapshot) { _, s in form.settingsCame(s.settings) }
         .onAppear {
             savedCloud = CloudModelSettings.engineIsCloud
-            useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)
-            load(provider)
+            form.useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)
+            form.load(status.settings); result = nil
             KeyStatus.shared.refresh()
         }
-    }
-
-    /// The service's fields: its key field empty (a key is never read back), the custom URL and model as kept.
-    private func load(_ p: CloudProvider) {
-        key = ""
-        url = status.settings["CUSTOM_URL"] ?? ""
-        modelID = status.settings["CUSTOM_MODEL"] ?? ""
-        result = nil
     }
 
     /// Ask the helper to reach the model once with what is typed — sent for this check only, nothing written:
     /// Cancel after a test leaves the saved settings as they were.
     private func test() {
         testing = true; result = nil
-        let config = CloudModelSettings.config(for: provider, model: modelID)
+        let config = form.provider.configuration(model: form.model)
         // (a key typed now is checked; none typed: the helper checks with the one it keeps)
-        var env: [String: String] = key.isEmpty ? [:] : [provider.keyEnv: key]
-        if provider.custom { env["CUSTOM_URL"] = url; env["CUSTOM_MODEL"] = modelID }
+        var env: [String: String] = form.key.isEmpty ? [:] : [form.provider.keyEnv: form.key]
+        if form.provider.custom { env["CUSTOM_URL"] = form.url; env["CUSTOM_MODEL"] = form.model }
         Task.detached {
             let reply = DeskMindIPC.request(["op": "model_check", "config": config, "env": env, "lang": ResolvedLang.current.rawValue], timeout: 60)
             await MainActor.run {
@@ -257,31 +239,20 @@ struct CloudModelSheet: View {
         }
     }
 
-    /// The keys through the helper, off the main thread; then the service and its configuration, the engine, done.
+    /// The form's save (ModelForm.plan, CloudModelSettings.save / apply): the engine only if the user moved the
+    /// switch (a privacy setting, shared with the window as it was).
     private func save() {
-        let model = ModelChoice.modelName(modelID)         // (a pasted name's spaces never saved)
-        var pairs: [String: String] = [:]
-        if useCloud {
-            if !key.isEmpty { pairs[provider.keyEnv] = key }   // (empty: the key kept as it is)
-            if provider.custom { pairs["CUSTOM_URL"] = url; pairs["CUSTOM_MODEL"] = model }
-        }
+        let plan = form.plan(engine: ModelChoice.engineToWrite(saved: savedCloud, shown: form.useCloud))
         // (keys the helper cannot read: the user's save replaces them -- the sheet said so)
         let replace = status.known && !status.readable
         saving = true
         Task.detached {
             var failure: String?
-            if !pairs.isEmpty {
-                do { try CloudModelSettings.set(pairs, replace: replace) } catch { failure = error.localizedDescription }
-            }
+            do { try CloudModelSettings.save(plan, replace: replace) } catch { failure = error.localizedDescription }
             await MainActor.run {
                 saving = false
                 if let failure { result = failure; resultOK = false; return }
-                if useCloud {
-                    CloudModelSettings.provider = provider
-                    CloudModelSettings.engineConfig = CloudModelSettings.config(for: provider, model: model)
-                }
-                // the engine only if the user moved the switch (a privacy setting, shared with the window as it was)
-                if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }
+                CloudModelSettings.apply(plan)
                 self.model.refreshCloud()
                 dismiss()
             }

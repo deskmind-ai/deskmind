@@ -65,6 +65,10 @@ enum ShellPalette {
     static let inkButton = Tone(light: 0x313632, dark: 0x313632)        // its secondary button's fill
     static let inkButtonLine = Tone(light: 0x4A524B, dark: 0x4A524B)    // that button's edge
     static let inkStop = Tone(light: 0x3A3F3B, dark: 0x3A3F3B)          // its round Stop's fill
+    /// The float's picture well (CardStates): white in both appearances, round the window's picture.
+    static let shotWell = Tone(light: 0xFFFFFF, dark: 0xFFFFFF)
+    /// 「准备点：…」 over a window's picture: the same in both appearances (the picture is the app's, not ours).
+    static let shotTag = Tone(light: 0xA3402A, dark: 0xA3402A)
 
     /// The island (one bar at the notch, the same in both appearances, as the hardware is): its fill, its left text,
     /// its right text, and its grey dot (preparing, paused, didn't finish). Working and needing you are the orange dot,
@@ -88,6 +92,8 @@ enum ShellPalette {
         (onInk, inkSurface), (onInkMuted, inkSurface), (onInkOrange, inkSurface), (onInkLink, inkSurface), (onInkPromise, inkSurface),
         (inkSurface, onInk),                // the float's primary button: ink text on its light fill
         (onInk, inkButton), (onInkMuted, inkButton),
+        (inkSurface, shotWell),             // the float's 「还没有画面」 in its well
+        (shotWell, shotTag),                // 「准备点：…」 on the picture
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }

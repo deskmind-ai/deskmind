@@ -12,6 +12,7 @@ enum FirstRunTests {
         DecisionTests.group("firstrun.table"); tableTests()
         DecisionTests.group("firstrun.sequences"); sequenceTests()
         DecisionTests.group("firstrun.static"); staticTests()
+        DecisionTests.group("firstrun.form"); formTests()
     }
 
     static func tableTests() {
@@ -46,7 +47,8 @@ enum FirstRunTests {
             (F.keyState(known: true, readable: true, last4: "abcd", busy: true, checkOK: nil, why: nil, model: nil), .checking, "being tried"),
             (F.keyState(known: true, readable: true, last4: "abcd", busy: false, checkOK: true, why: nil, model: "m"), .ok(model: "m"), "works"),
             (F.keyState(known: true, readable: true, last4: "abcd", busy: false, checkOK: false, why: "401", model: nil), .bad(why: "401"), "doesn't, why"),
-            (F.keyState(known: true, readable: false, last4: "abcd", busy: true, checkOK: true, why: nil, model: nil), .unreadable, "unreadable over all"),
+            (F.keyState(known: true, readable: false, last4: "abcd", busy: false, checkOK: true, why: nil, model: nil), .unreadable, "unreadable over a result"),
+            (F.keyState(known: true, readable: false, last4: nil, busy: true, checkOK: nil, why: nil, model: nil), .checking, "a save over unreadable keys under way: busy (no second press)"),
         ]
         for (got, want, name) in ks { check(got == want, "key state, \(name): \(got)") }
         check(F.examples.count == 3 && F.examples.allSatisfy { L($0, lang: .zhHans) != $0 }, "three examples, each in Chinese too")
@@ -71,6 +73,48 @@ enum FirstRunTests {
         }
     }
 
+    /// The model settings' one form (#130 review: the first run's key step had re-made the sheet's save and dropped parts
+    /// of it): the first run turns the engine on; a custom service's settings survive 继续 with no new key; another
+    /// service clears what was typed and its check.
+    static func formTests() {
+        let deepseek = CloudProvider.named("deepseek"), openrouter = CloudProvider.named("openrouter"), custom = CloudProvider.named("custom")
+        // 1. the first run turns the engine on (a fresh install's first message needs it)
+        var f = ModelForm(provider: deepseek, settings: [:])
+        f.key = "sk-new"
+        let p = f.plan(engine: true)
+        check(p.engine == true && p.pairs == ["DEEPSEEK_API_KEY": "sk-new"] && p.engineConfig == "ds-flash" && p.provider == deepseek,
+              "first run, a key typed: the key, the service, its configuration, the engine on: \(p)")
+        // 2. a custom service: its URL and model as kept, through 继续 with no new key and with one
+        let kept = ["CUSTOM_URL": "https://llm.example/v1", "CUSTOM_MODEL": "m-7"]
+        var c = ModelForm(provider: custom, settings: kept)
+        check(c.url == kept["CUSTOM_URL"] && c.model == "m-7" && c.canSave(keySet: true), "custom: loaded as kept, savable with the key it has")
+        let none = c.plan(engine: true)
+        check(none.pairs == kept && none.engineConfig == "openai:custom|m-7", "custom, no new key: its URL and model kept, its configuration whole: \(none)")
+        c.key = "sk-c"
+        check(c.plan(engine: true).pairs == kept.merging(["CUSTOM_API_KEY": "sk-c"]) { a, _ in a }, "custom, a new key: with its URL and model, never empty ones")
+        check(!ModelForm(provider: custom, settings: [:]).canSave(keySet: true), "custom with no URL and model: not savable")
+        var late = ModelForm(provider: custom, settings: [:]); late.settingsCame(kept)
+        check(late.url == kept["CUSTOM_URL"] && late.model == "m-7", "the helper's answer after opening: filled in")
+        // 3. another service: what was typed and its check go
+        var s = ModelForm(provider: deepseek, settings: [:])
+        s.key = "sk-deepseek"; s.checkOK = false; s.why = "401"; s.reached = "x"
+        s.select(openrouter, settings: [:])
+        check(s.key.isEmpty && s.checkOK == nil && s.why == nil && s.reached == nil && s.plan(engine: true).pairs["OPENROUTER_API_KEY"] == nil,
+              "another service: the key typed for the last one never saved in its place, its check gone")
+        check(!s.canSave(keySet: false) && s.canSave(keySet: true), "nothing typed: savable only with a key set")
+        var off = ModelForm(provider: deepseek, settings: [:], useCloud: false); off.key = "sk"
+        check(off.plan(engine: false) == ModelForm.Plan(pairs: [:], provider: nil, engineConfig: nil, engine: false), "the cloud off: nothing but the engine")
+        // both windows save the one way
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        func read(_ f: String) -> String { (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? "" }
+        let firstRun = read("Main/FirstRunView.swift"), sheet = read("Main/CloudModel.swift")
+        check(firstRun.contains("form.plan(engine: true)") && firstRun.contains("CloudModelSettings.apply(plan)") && !firstRun.contains("CloudModelSettings.set(")
+              && !firstRun.contains("CloudModelSettings.provider = ") && !firstRun.contains("engineConfig = "),
+              "the first run saves through the form: the engine on, nothing written by hand")
+        check(sheet.contains("@State private var form = ModelForm(") && sheet.contains("form.plan(engine: ModelChoice.engineToWrite(") && sheet.contains("CloudModelSettings.apply(plan)"),
+              "the sheet saves through the same form")
+    }
+
     /// The flow asks the helper only for what a step is about, and opens no conversation.
     static func staticTests() {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -89,7 +133,7 @@ enum FirstRunTests {
         check(Set(ops).isSubset(of: ["model_check"]), "its own requests: model_check only (permissions through the grant panel, keys through keys.set): \(ops)")
         // (U2: the key typed in place, saved as the model sheet saves it -- keys.set's merge, `replace` only over keys
         // the helper can't read: A11's "the key in effect is the last one set")
-        check(view.contains("grant: { model.grant($0) }") && view.contains("CloudModelSettings.set(pairs, replace: replace)"), "the permissions and the key through their own paths")
+        check(view.contains("grant: { model.grant($0) }") && view.contains("CloudModelSettings.save(plan, replace: replace)"), "the permissions and the key through their own paths")
         check(view.contains("granted: { model.granted($0) }") && view.contains("if granted(g)"), "「已授权」 only from the helper's status")
         check(view.contains("shell.draft = L(e, lang: lang)") && !view.contains("submit"), "an example fills the composer, never sends")
     }
