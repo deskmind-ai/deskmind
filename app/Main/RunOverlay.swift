@@ -67,7 +67,7 @@ final class RunOverlay {
     /// Its own panel, outside the window: LocalizedRoot gives it the language setting (and any switch).
     private func makePanel(notch: CGRect?) -> NSPanel {
         let host = NSHostingView(rootView: LocalizedRoot {
-            IslandView(model: model, height: notch?.height ?? Island.barHeight, notched: notch != nil,
+            IslandView(model: model, height: notch?.height ?? Island.barHeight, notched: notch != nil, notchWidth: notch?.width,
                        onStop: { [weak self] in self?.onStop?() }, onTap: { [weak self] g in self?.tapped(g) })
         })
         host.frame = NSRect(x: 0, y: 0, width: Island.barWideWidth, height: notch?.height ?? Island.barHeight)

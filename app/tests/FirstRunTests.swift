@@ -13,6 +13,8 @@ enum FirstRunTests {
         DecisionTests.group("firstrun.sequences"); sequenceTests()
         DecisionTests.group("firstrun.static"); staticTests()
         DecisionTests.group("firstrun.form"); formTests()
+        DecisionTests.group("firstrun.staleCheck"); staleCheckTests()
+        DecisionTests.group("firstrun.later"); laterTests()
     }
 
     static func tableTests() {
@@ -113,6 +115,74 @@ enum FirstRunTests {
               "the first run saves through the form: the engine on, nothing written by hand")
         check(sheet.contains("@State private var form = ModelForm(") && sheet.contains("form.plan(engine: ModelChoice.engineToWrite(") && sheet.contains("CloudModelSettings.apply(plan)"),
               "the sheet saves through the same form")
+    }
+
+    /// A save or check answers for the form it was made from: one that comes after the user changed the form is
+    /// dropped -- no advance, no 「能用」 (#130 Codex review). The view's steps, as FirstRunView takes them.
+    static func staleCheckTests() {
+        let deepseek = CloudProvider.named("deepseek"), openrouter = CloudProvider.named("openrouter")
+        var flow = FirstRun(step: .key, facts: FirstRun.Facts(accessibility: true, screen: true))
+        var form = ModelForm(provider: deepseek, settings: [:])
+        form.edit({ var n = form; n.key = "sk-deepseek"; return n }(), settings: [:])
+        // 继续: tagged with the form as it is
+        let v = form.version
+        check(form.saved(version: v, failure: nil) == true, "the save of the form as it is: taken")
+        flow.apply(.saved(ok: true))
+        // the user switches the service while the check is out
+        form.edit({ var n = form; n.provider = openrouter; return n }(), settings: [:])
+        check(form.version != v && form.provider == openrouter && form.checkOK == nil, "another service: a new version, nothing checked")
+        // the old service's 「能用」 arrives
+        if let ok = form.checked(version: v, ok: true, reached: "deepseek-chat", why: nil), ok { flow.apply(.checked(ok: true)) }
+        check(flow.step == .key, "the old check's ok: no advance (step \(flow.step))")
+        check(form.checkOK == nil && form.reached == nil, "the old check's ok: no 「能用」 on the new form")
+        check(FirstRun.keyState(known: false, readable: true, last4: nil, busy: false, checkOK: form.checkOK, why: form.why, model: form.reached) == .empty,
+              "the key step shows nothing checked")
+        // a stale failure says nothing either
+        check(form.checked(version: v, ok: false, reached: nil, why: "401") == nil && form.why == nil, "the old check's failure: no 「不能用」 on the new form")
+        check(form.saved(version: v, failure: "disk") == nil && form.why == nil, "an old save's failure: nothing said")
+        // the same form, typed into: also a new version; a check of the current form is taken
+        var g = ModelForm(provider: deepseek, settings: [:]); let g0 = g.version
+        g.edit({ var n = g; n.key = "sk-1"; return n }(), settings: [:])
+        check(g.version == g0 + 1, "a key typed: a new version")
+        let gv = g.version
+        g.edit(g, settings: [:])
+        check(g.version == gv, "nothing changed: the same version")
+        g.checkOK = nil
+        check(g.checked(version: gv, ok: true, reached: "deepseek-chat", why: nil) == true && g.checkOK == true && g.reached == "deepseek-chat",
+              "the current form's check: taken")
+        // the page holds its fields while a save or check is out
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let src = (try? String(contentsOf: dir.appendingPathComponent("Main/FirstRunView.swift"), encoding: .utf8)) ?? ""
+        let fields = src.components(separatedBy: "private var keyFields").dropFirst().first?.components(separatedBy: "            status\n").first ?? ""
+        check(fields.components(separatedBy: ".disabled(keyState == .checking)").count - 1 == 2 && fields.contains("Picker(") && fields.contains("SecureField("),
+              "the service picker, the key and a custom service's fields are off while checking")
+        check(src.contains("form.saved(version: version") && src.contains("form.checked(version: version") && src.contains("form.edit(new"),
+              "the view takes results only through the version")
+    }
+
+    /// 「稍后」 on the key step whenever the last save or check failed or the keychain can't be read: a key saved but
+    /// not working never leaves only 「全部跳过」 (#130 Codex review).
+    static func laterTests() {
+        func flow(keySet: Bool, saveOK: Bool? = nil, checkOK: Bool? = nil) -> FirstRun {
+            FirstRun(step: .key, facts: FirstRun.Facts(accessibility: true, screen: true, keySet: keySet, saveOK: saveOK, checkOK: checkOK))
+        }
+        let table: [(String, FirstRun, FirstRun.KeyState, Bool)] = [
+            ("no key: 继续 off", flow(keySet: false), .empty, true),
+            ("a key set, never checked", flow(keySet: true), .set(last4: "abcd"), false),
+            ("a key set, checking", flow(keySet: true), .checking, false),
+            ("a key saved, its check failed", flow(keySet: true, saveOK: true, checkOK: false), .bad(why: "401"), true),
+            ("a key set, its check failed (state only)", flow(keySet: true), .bad(why: "401"), true),
+            ("a key set, check failed (fact only)", flow(keySet: true, checkOK: false), .set(last4: "abcd"), true),
+            ("a save failed", flow(keySet: true, saveOK: false), .set(last4: "abcd"), true),
+            ("the keychain unreadable", flow(keySet: true), .unreadable, true),
+            ("a key that works", flow(keySet: true, saveOK: true, checkOK: true), .ok(model: "m"), false),
+        ]
+        for (what, f, k, later) in table { check(f.showsLater(k) == later, "\(what): 稍后 \(later ? "shown" : "not shown")") }
+        var lang = FirstRun(step: .language); lang.facts.keySet = true
+        check(!lang.showsLater(.bad(why: "x")), "the language step never has 稍后")
+        let perm = FirstRun(step: .permissions)
+        check(perm.showsLater(.empty) && !FirstRun(step: .permissions, facts: FirstRun.Facts(accessibility: true, screen: true)).showsLater(.bad(why: "x")),
+              "permissions: 稍后 only while one is missing, whatever the key")
     }
 
     /// The flow asks the helper only for what a step is about, and opens no conversation.

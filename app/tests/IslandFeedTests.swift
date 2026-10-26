@@ -14,6 +14,7 @@ enum IslandFeedTests {
         DecisionTests.group("island.tableTests"); tableTests()
         DecisionTests.group("island.notifyTests"); notifyTests()
         DecisionTests.group("island.barTests"); barTests()
+        DecisionTests.group("island.notchSideTests"); notchSideTests()
     }
 
     static let action = #""card":{"kind":"action","text":"要点「发送」吗？","options":[{"kind":"approve","text":"可以"},{"kind":"cancel","text":"先别做了"}],"free_text":false,"blocking":true}"#
@@ -115,5 +116,25 @@ enum IslandFeedTests {
         func setAsking(_ on: Bool) { calls.append("asking:\(on)") }
         func finish(passed: Bool, stopped: Bool, summary: String) { calls.append("finish:\(passed):\(summary)") }
         func notify(title: String, body: String) { calls.append("notify") }
+    }
+
+    /// Each side of the bar at a notch: what is outside the notch, less the inset and the gap; the two sides and the
+    /// notch never overlap, at any notch width and either bar width (#130 Codex review).
+    static func notchSideTests() {
+        check(Island.sideWidth(bar: 380, notchWidth: nil) == nil && Island.sideWidth(bar: 380, notchWidth: 0) == nil, "no notch: no sides")
+        check(Island.sideWidth(bar: 380, notchWidth: 200) == 66 && Island.sideWidth(bar: 460, notchWidth: 200) == 106, "the 200 pt notch: 66 / 106 a side")
+        check(Island.sideWidth(bar: 380, notchWidth: 400) == 0, "a notch wider than the bar: no room, never negative")
+        for bar in [Island.barWidth, Island.barWideWidth] {
+            for n in stride(from: CGFloat(1), through: 500, by: 7) {
+                let side = Island.sideWidth(bar: bar, notchWidth: n)!
+                // the left side ends, and the right one starts, at least the gap away from the notch
+                let leftEnd = Island.barInset + side, notchStart = (bar - n) / 2
+                check(side >= 0 && (side == 0 || leftEnd + Island.notchGap <= notchStart + 0.001), "bar \(bar), notch \(n): the left side \(side) stays clear")
+            }
+        }
+        // the screen's notch is what the bar is told: the gap between the menu bar's two areas
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let n = Island.notch(screen: screen, safeTop: 37, left: CGRect(x: 0, y: 945, width: 656, height: 37), right: CGRect(x: 856, y: 945, width: 656, height: 37))
+        check(n?.width == 200, "the notch between the two areas: 200 pt")
     }
 }

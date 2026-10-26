@@ -79,6 +79,18 @@ struct FirstRun: Equatable {
     /// What the step's main button says: 下一步 when what it asks for is there, else the step can still be left (稍后).
     var canLater: Bool { step != .language && step != .done }
 
+    /// 「稍后」 is shown: when the step's main button is off, and on the key step whenever the last save or check
+    /// failed or the keychain can't be read -- a key that saved but doesn't work never traps (#130 Codex review).
+    func showsLater(_ key: KeyState) -> Bool {
+        guard canLater else { return false }
+        if !canContinue(typed: false) { return true }
+        guard step == .key else { return false }
+        switch key {
+        case .bad, .unreadable: return true
+        default: return facts.checkOK == false || facts.saveOK == false
+        }
+    }
+
     /// What is still unmet once the flow is over: rows in the empty chat (in this order).
     enum Unmet: Equatable { case permissions, key, keyUnreadable }
     /// `keysReadable`: false when the helper cannot read the keychain -- said as that, never as "no key".

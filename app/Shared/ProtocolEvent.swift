@@ -157,9 +157,67 @@ struct ConsentFacts: Codable, Equatable {
             frame = (try? c.decodeIfPresent([Double].self, forKey: .frame)) ?? nil
         }
     }
-    enum CodingKeys: String, CodingKey {
-        case action, actionText = "action_text", target, object, objectLabel = "object_label", consequence, outgoing, site, targetBox = "target_box"
+    /// The run's earlier steps whose result is unknown (they may already have gone out or taken effect), the last 20,
+    /// and how many there are in all; what the model says of the situation now (its words, not checked); what is
+    /// selected in the window the action acts in.
+    @LList<Uncertain> var uncertain: [Uncertain] = []
+    @LNum var uncertainTotal: Double = 0
+    @LStr var modelSaysUnchecked: String = ""
+    @LList<String> var selected: [String] = []
+    /// The keys with a value that this app does not know (a newer harness's field): the card's fields cannot show
+    /// them, so the card keeps its whole text reachable (CardLayout.Consent.unshown). Not on the wire.
+    var unknownKeys: Set<String> = []
+    struct Uncertain: Codable, Equatable {
+        @LStr var consequence: String = ""
+        @LStr var object: String = ""
+        @LStr var text: String = ""
+        @LList<Outgoing> var outgoing: [Outgoing] = []
     }
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case action, actionText = "action_text", target, object, objectLabel = "object_label", consequence, outgoing, site, targetBox = "target_box"
+        case uncertain, uncertainTotal = "uncertain_total", modelSaysUnchecked = "model_says_unchecked", selected
+    }
+}
+
+extension ConsentFacts {
+    /// Every field leniently (#124), and which keys came that the app does not know.
+    init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        _action = try c.decode(LStr.self, forKey: .action)
+        _actionText = try c.decode(LStr.self, forKey: .actionText)
+        target = try? c.decodeIfPresent(String.self, forKey: .target)
+        _object = try c.decode(LStr.self, forKey: .object)
+        _objectLabel = try c.decode(LStr.self, forKey: .objectLabel)
+        _consequence = try c.decode(LStr.self, forKey: .consequence)
+        _outgoing = try c.decode(LList<Outgoing>.self, forKey: .outgoing)
+        site = try? c.decodeIfPresent(String.self, forKey: .site)
+        targetBox = try c.decodeIfPresent(TargetBox.self, forKey: .targetBox)
+        _uncertain = try c.decode(LList<Uncertain>.self, forKey: .uncertain)
+        _uncertainTotal = try c.decode(LNum.self, forKey: .uncertainTotal)
+        _modelSaysUnchecked = try c.decode(LStr.self, forKey: .modelSaysUnchecked)
+        _selected = try c.decode(LList<String>.self, forKey: .selected)
+        let known = Set(CodingKeys.allCases.map(\.rawValue))
+        let all = try decoder.container(keyedBy: AnyKey.self)
+        unknownKeys = Set(all.allKeys.filter { k in
+            guard !known.contains(k.stringValue), let v = try? all.decode(JSONValue.self, forKey: k) else { return false }
+            switch v {
+            case .null: return false
+            case .string(let s): return !s.isEmpty
+            case .array(let a): return !a.isEmpty
+            case .object(let o): return !o.isEmpty
+            default: return true
+            }
+        }.map(\.stringValue))
+    }
+}
+
+/// Any key, by its name (to see which keys a line has).
+struct AnyKey: CodingKey {
+    var stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
 }
 
 struct CardEvent: Codable, Equatable {

@@ -57,6 +57,23 @@ struct CardLayout: Equatable {
         var object: String
         var site: String?
         var outgoing: [Outgoing]
+        /// What it does to the user's things (the card text's own clause): it sends out, it changes them.
+        var effect: Effect? = nil
+        /// What is selected in the window it acts in.
+        var selected: [String] = []
+        /// The earlier steps whose result is unknown -- they may already have gone out -- each with what it sent, and
+        /// how many more there are than listed.
+        var uncertain: [Uncertain] = []
+        var uncertainMore: Int = 0
+        /// What the model says of the situation now: its words, not checked.
+        var modelSays: String? = nil
+        /// What a yes covers (the harness signs it: harness service.ts consentFor).
+        var scope: Scope = .once(target: nil)
+        /// The action is said in the block: the card's title does not say it (a headline names it as a question).
+        var actionRow = false
+        /// The consent keys with a value the block does not show (a newer harness's field, a class it does not know,
+        /// an element its action does not name): while there is one, the card's whole text stays under 「细节」.
+        var unshown: [String] = []
 
         /// 「要发出去的」 as the P1Waiting board lays it out, by the executor's kinds and order only (never by what a label
         /// says, U3 §2.2): the lead line -- the first of what the task typed, else the first filled field -- the other
@@ -84,7 +101,15 @@ struct CardLayout: Equatable {
         var text: [Outgoing] = []
         var other: [Outgoing] = []
         var count: Int { (lead == nil ? 0 : 1) + fields.count + selected.count + text.count + other.count }
+        /// The lead line's own label (none when it is only its kind's name).
+        var leadLabel: String? { lead.flatMap { $0.label.isEmpty || $0.label == $0.kind ? nil : $0.label } }
     }
+    enum Effect: Equatable { case sends, changes }
+    struct Uncertain: Equatable { var text: String; var outgoing: [Outgoing] }
+    /// What a yes on an action card covers. A site asked about with no uncertain step: that site, for the rest of the
+    /// task (a site token); anything else: this one action (an action token). Unknown: a field the app does not know
+    /// came with it -- the card claims neither.
+    enum Scope: Equatable { case once(target: String?), site(String), unknown }
 
     /// One option's control.
     struct Control: Equatable {
@@ -108,6 +133,8 @@ struct CardLayout: Equatable {
     var beyond: [String]
     /// The text and the plan's steps are folded under 「细节」: only with a headline (else they are the card).
     var folds: Bool
+    /// 「细节」 is there: the card folds, and it is not an action card whose block shows every consent field.
+    var hasDetails: Bool { folds && (consent?.unshown.isEmpty != true) }
     /// The text, shown whole under the title, when the card has a headline and folds nothing (an action card with no
     /// consent fields: its text is the only account of what it does). nil: the text is the title, or it is folded.
     /// #124 Codex review at 80c339e: such a card showed its headline only, and its 「可以」 took a click.
@@ -140,10 +167,52 @@ struct CardLayout: Equatable {
         foreground = card.plan?.foreground?.apps ?? []
         // (an action card with no consent fields: its text is the only account of what it does -- never folded; #124 review)
         folds = card.headline != nil && (!card.text.isEmpty || !plan.isEmpty) && !(card.kind == .action && card.consent == nil)
-        consent = card.consent.map { c in
-            Consent(action: c.actionText.isEmpty ? c.action : c.actionText, object: c.objectLabel.isEmpty ? c.object : c.objectLabel,
-                    site: c.site, outgoing: c.outgoing.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value, kind: $0.kind) })
+        consent = card.consent.map { Self.consent($0, title: card.headline ?? card.text) }
+    }
+
+    static func consent(_ c: ConsentFacts, title: String) -> Consent {
+        let out = { (o: [ConsentFacts.Outgoing]) in o.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value, kind: $0.kind) } }
+        var k = Consent(action: c.actionText.isEmpty ? c.action : c.actionText, object: c.objectLabel.isEmpty ? c.object : c.objectLabel,
+                        site: c.site, outgoing: out(c.outgoing))
+        k.actionRow = !k.action.isEmpty && !title.contains(k.action)
+        k.effect = ["external": .sends, "modify_user": .changes][c.consequence]
+        k.selected = c.selected.filter { !$0.isEmpty }
+        k.uncertain = c.uncertain.map { Uncertain(text: $0.text, outgoing: out($0.outgoing)) }
+        let total = Int(exactly: c.uncertainTotal.rounded(.down)) ?? 0
+        k.uncertainMore = max(0, total - k.uncertain.count)
+        k.modelSays = c.modelSaysUnchecked.isEmpty ? nil : c.modelSaysUnchecked
+        let uncertain = !c.uncertain.isEmpty || total > 0
+        if !c.unknownKeys.isEmpty { k.scope = .unknown }
+        else if let s = c.site, !s.isEmpty, !uncertain { k.scope = .site(s) }
+        else { k.scope = .once(target: c.target.flatMap { $0.isEmpty ? nil : $0 }) }
+        // (the machine forms -- action, object, an uncertain step's object and class -- are shown by their words)
+        var unshown = c.unknownKeys.sorted()
+        if !c.consequence.isEmpty && k.effect == nil { unshown.append(ConsentFacts.CodingKeys.consequence.rawValue) }
+        if let t = c.target, !t.isEmpty, !k.action.contains(t), !title.contains(t) { unshown.append(ConsentFacts.CodingKeys.target.rawValue) }
+        k.unshown = unshown
+        return k
+    }
+
+    /// The line under an action card's buttons (P1Waiting): what 「可以」 covers, by the scope the yes is signed for --
+    /// this once (the card's own target), or the site for the rest of the task; nothing claimed when it is unknown
+    /// -- and what its 「这一步不要」 and 「先别做了」 do, each by the button's own words.
+    static func consentHint(_ card: CardModel, lang: ResolvedLang) -> String? {
+        guard let c = card.consent else { return nil }
+        var parts: [String] = []
+        switch consent(c, title: card.headline ?? card.text).scope {
+        case .once(let t?): parts.append(L("Only for this one 「%@」.", t, lang: lang))
+        case .once(nil): parts.append(L("Only for this once.", lang: lang))
+        case .site(let s): parts.append(L("Once you agree, this task opens 「%@」 again without asking you.", s, lang: lang))
+        case .unknown: break
         }
+        for b in card.buttons {
+            switch b.role {
+            case .skipStep: parts.append(L("%@: this step is not done; the task goes on.", b.text, lang: lang))
+            case .cancel: parts.append(L("%@: the whole task stops here.", b.text, lang: lang))
+            default: break
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: lang == .zhHans ? "" : " ")
     }
 
     /// The control key `n` (1–9) picks, if the card has one.

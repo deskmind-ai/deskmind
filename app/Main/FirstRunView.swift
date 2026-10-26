@@ -35,8 +35,9 @@ struct FirstRunView: View {
         shown.facts = facts
         return FirstRunPage(flow: shown, language: $language,
                             form: Binding(get: { form }, set: { new in
-                                // (another service: as loaded anew -- its key and its check's result go)
-                                if new.provider != form.provider { form.select(new.provider, settings: keys.snapshot.settings) } else { form = new }
+                                // (another service: as loaded anew -- its key and its check's result go; any edit
+                                // moves the version, so a save or check still out for the old form is dropped)
+                                form.edit(new, settings: keys.snapshot.settings)
                             }),
                             keyState: FirstRun.keyState(known: keys.snapshot.known, readable: keys.snapshot.readable,
                                                         last4: keys.snapshot.keys[form.provider.keyEnv], busy: busy, checkOK: form.checkOK,
@@ -76,35 +77,38 @@ struct FirstRunView: View {
         let plan = form.plan(engine: true)
         let replace = keys.snapshot.known && !keys.snapshot.readable
         busy = true; form.why = nil; form.checkOK = nil
+        let version = form.version
         Task.detached {
             var failure: String?
             do { try CloudModelSettings.save(plan, replace: replace) } catch { failure = error.localizedDescription }
             await MainActor.run {
-                if !plan.pairs.isEmpty { flow.apply(.saved(ok: failure == nil)) }
-                if let failure { busy = false; form.why = failure; return }
+                // (the form changed meanwhile: this save's result is not the form's -- nothing said, nothing moved)
+                guard let ok = form.saved(version: version, failure: failure) else { busy = false; return }
+                if !plan.pairs.isEmpty { flow.apply(.saved(ok: ok)) }
+                if !ok { busy = false; return }
                 CloudModelSettings.apply(plan)
                 form.key = ""
                 model.refreshCloud()
-                check(config: plan.engineConfig ?? "")
+                check(config: plan.engineConfig ?? "", version: version)
             }
         }
     }
 
-    /// One tiny question to the model with the key the helper keeps (model_check): its answer, said as it is.
-    private func check(config: String) {
+    /// One tiny question to the model with the key the helper keeps (model_check): its answer, said as it is -- if
+    /// the form is still the one it was asked for.
+    private func check(config: String, version: Int) {
         busy = true
         Task.detached {
             let reply = DeskMindIPC.request(["op": "model_check", "config": config, "lang": ResolvedLang.current.rawValue], timeout: 60)
             await MainActor.run {
                 busy = false
-                let ok = reply?["ok"] as? Bool == true
-                form.checkOK = ok
+                let why = (reply?["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? L("No answer from the helper", lang: lang)
+                guard let ok = form.checked(version: version, ok: reply?["ok"] as? Bool == true, reached: reply?["model"] as? String ?? config, why: why)
+                else { return }
                 if ok {
-                    form.reached = reply?["model"] as? String ?? config
-                    // (「能用」 seen for a moment, then on)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { flow.apply(.checked(ok: true)) }
+                    // (「能用」 seen for a moment, then on -- unless the form changed in that moment)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { if form.version == version { flow.apply(.checked(ok: true)) } }
                 } else {
-                    form.why = (reply?["error"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? L("No answer from the helper", lang: lang)
                     flow.apply(.checked(ok: false))
                 }
             }
@@ -241,7 +245,7 @@ struct FirstRunPage: View {
             Button(L("Skip all", lang: lang)) { act(.skipAll) }.buttonStyle(.plain)
             if flow.step != .language { Button(L("Back", lang: lang)) { act(.back) }.buttonStyle(.plain) }
             Spacer()
-            if flow.canLater && !flow.canContinue(typed: false) { Button(L("Later", lang: lang)) { act(.later) }.buttonStyle(.plain) }
+            if flow.showsLater(keyState) { Button(L("Later", lang: lang)) { act(.later) }.buttonStyle(.plain) }
             Button(flow.step == .examples ? L("Finish", lang: lang) : L("Continue", lang: lang)) { act(.next) }
                 .buttonStyle(InkButtonStyle(prominent: true))
                 .frame(minWidth: 120)
@@ -313,6 +317,7 @@ struct FirstRunPage: View {
     private var keyFields: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L("Which cloud model", lang: lang)).font(.system(size: 16, weight: .bold)).foregroundStyle(Brand.ink)
+            // (held while a save or check is out: what it answers is about these)
             HStack(alignment: .top, spacing: 14) {
                 field(L("Provider", lang: lang)) {
                     Picker("", selection: $form.provider) {
@@ -329,11 +334,13 @@ struct FirstRunPage: View {
                         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(isBad ? ShellColor.error : Brand.ink, lineWidth: 1.5))
                 }
             }
+            .disabled(keyState == .checking)
             if form.provider.custom {
                 HStack(spacing: 14) {
                     field(L("Base URL (…/v1)", lang: lang)) { TextField("", text: $form.url).textFieldStyle(.roundedBorder) }
                     field(L("Model id", lang: lang)) { TextField("", text: $form.model).textFieldStyle(.roundedBorder) }
                 }
+                .disabled(keyState == .checking)
             }
             status
             Text(L("The key stays in this Mac's keychain; only DeskMind's helper can read it", lang: lang))

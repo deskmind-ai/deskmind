@@ -61,6 +61,7 @@ enum MainWindowSnapshot {
             Scene(name: "idle", lines: others + running(), now: t0 + 38, selected: nil),
             Scene(name: "running", lines: others + running(), now: t0 + 38),
             Scene(name: "waiting", lines: others + running() + waiting(), now: t0 + 58),
+            Scene(name: "waiting-uncertain", lines: others + running() + waiting(uncertain: true), now: t0 + 58),
             Scene(name: "answered", lines: others + running() + waiting() + answered(), now: t0 + 66),
             // (U3: the answered lines after a reopen -- the stored session.task_answer only -- and from an older log)
             Scene(name: "answered-replay", lines: others + strip(running() + waiting() + answered()) + stored(), now: t0 + 66),
@@ -118,6 +119,8 @@ enum MainWindowSnapshot {
         var flow = FirstRun(step: step)
         flow.facts.accessibility = granted; flow.facts.screen = granted
         if case .set = key { flow.facts.keySet = true }
+        // (the bad key saved, its check failed: the case 稍后 must still show -- #130 Codex review)
+        if case .bad = key { flow.facts.keySet = true; flow.facts.saveOK = true; flow.facts.checkOK = false }
         let page = FirstRunPage(flow: flow, language: .constant(AppLanguage.zhHans.rawValue),
                                 form: .constant(ModelForm(provider: CloudProvider.all[0], settings: [:])), keyState: key,
                                 granted: { _ in granted }, grant: { _ in }, act: { _ in }, example: { _ in })
@@ -203,9 +206,11 @@ enum MainWindowSnapshot {
                 Color(red: 0.16, green: 0.17, blue: 0.19).frame(height: notched ? 37 : 24)     // (the menu bar)
                 if !notched { Color.clear.frame(height: 10) }
             }
-            IslandView(model: model, height: h, notched: notched, onStop: {}, onTap: { _ in }, now: { t0 + 58 })
+            IslandView(model: model, height: h, notched: notched, notchWidth: notched ? 200 : nil, onStop: {}, onTap: { _ in }, now: { t0 + 58 })
                 .frame(width: Island.barWideWidth, height: h)
                 .padding(.top, notched ? 0 : 34)
+            // (the notch itself, 200 pt as on a 14" MacBook Pro, drawn over the bar as the hardware hides what is under it)
+            if notched { Color.black.frame(width: 200, height: h) }
         }
         renderView(view.environment(\.lang, .zhHans), size: NSSize(width: 560, height: notched ? 60 : 84), dark: dark, wait: 0.3, to: file)
     }
@@ -263,8 +268,9 @@ enum MainWindowSnapshot {
     }
 
     /// Step 2 done; step 3 sends: the action card waits, pinned above the composer.
-    static func waiting() -> [[String: Any]] {
-        let card: [String: Any] = [
+    /// `uncertain`: an earlier send of this run has an unknown result -- the card names it, and the yes is for this once.
+    static func waiting(uncertain: Bool = false) -> [[String: Any]] {
+        var card: [String: Any] = [
             "kind": "action", "blocking": true, "headline": "要在网页邮箱里点「发送」吗？",
             "text": "要在网页邮箱里点「发送」吗？这会把回复发给许诺。",
             "consent": ["action": "click", "action_text": "点「发送」", "target": "发送", "object": "window:com.apple.Safari#4242",
@@ -276,6 +282,14 @@ enum MainWindowSnapshot {
                         "target_box": ["rect_norm": [0.22, 0.87, 0.12, 0.075], "frame": [100, 600, 84, 36]]],
             "options": [["kind": "approve", "text": "可以"], ["kind": "skip_step", "text": "这一步不要"], ["kind": "cancel", "text": "先别做了"]],
         ]
+        if uncertain, var c = card["consent"] as? [String: Any] {
+            c["uncertain"] = [["consequence": "external", "object": "window:com.apple.Safari#4242", "text": "点「发送」",
+                               "outgoing": [["kind": "typed", "label": "内容", "value": "「我看一下」"]]]]
+            c["uncertain_total"] = 1
+            c["model_says_unchecked"] = "上一次点「发送」后页面没有变化，可能没发出去"
+            card["consent"] = c
+            card["headline"] = "要在网页邮箱里点「发送」吗？（之前有 1 步结果不确定，先看一眼）"
+        }
         return [
             line("step_result", 9, 40, ["step_id": "st_2", "status": "ok"]),
             line("changes", 10, 40, ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": [], "created_windows": []]),
