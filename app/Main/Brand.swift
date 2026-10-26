@@ -14,6 +14,13 @@ enum Brand {
     static let mist = Color(ShellPalette.mist)
     static let line = Color(ShellPalette.line)
 
+    /// A picture for the appearance it is drawn in: `<name>-dark` in dark when there is one (Resources/brand/dark.swift
+    /// makes it from the light one), else `<name>`.
+    static func image(_ name: String, scheme: ColorScheme) -> NSImage {
+        if scheme == .dark, Bundle.main.url(forResource: name + "-dark", withExtension: "png") != nil { return image(name + "-dark") }
+        return image(name)
+    }
+
     static func image(_ name: String) -> NSImage {
         if let url = Bundle.main.url(forResource: name, withExtension: "png"), let img = NSImage(contentsOf: url) {
             return img

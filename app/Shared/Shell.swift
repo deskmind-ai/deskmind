@@ -109,17 +109,30 @@ enum ShellText {
     /// When, in a word (U4 §2.2; the Home board's 「最近」): under a minute 「刚才」; under an hour 「n 分钟前」; the
     /// same day its time; the day before 「昨天」; this year its month and day; else with its year -- by `calendar`
     /// (the user's; a test's own).
-    static func when(_ t: Double, now: Double, lang: ResolvedLang, calendar: Calendar = .current) -> String {
+    static func when(_ t: Double, now: Double, lang: ResolvedLang, calendar: Calendar = .current, hourLocale: Locale = .current) -> String {
         let d = now - t
-        if d < 60 { return L("Just now", lang: lang) }
-        if d < 3600 { return L("%d min ago", Int(d / 60), lang: lang) }
         let date = Date(timeIntervalSince1970: t), today = Date(timeIntervalSince1970: now)
         let f = DateFormatter()
         f.calendar = calendar; f.timeZone = calendar.timeZone
         f.locale = Locale(identifier: lang == .zhHans ? "zh_CN" : "en_US")
-        if calendar.isDate(date, inSameDayAs: today) { f.dateFormat = "HH:mm"; return f.string(from: date) }
+        // (the clock as the user set it, 12 or 24 hours; the language's own words round it)
+        let clock = { () -> String in
+            f.dateFormat = DateFormatter.dateFormat(fromTemplate: "jmm", options: 0, locale: hourLocale) ?? "HH:mm"
+            return f.string(from: date)
+        }
+        // (a time after now -- another Mac's clock, a skew: its time, never 「刚才」 for ever)
+        if d < 0 { return clock() }
+        if d < 60 { return L("Just now", lang: lang) }
+        if d < 3600 { return L("%d min ago", Int(d / 60), lang: lang) }
+        if calendar.isDate(date, inSameDayAs: today) { return clock() }
         if let y = calendar.date(byAdding: .day, value: -1, to: today), calendar.isDate(date, inSameDayAs: y) { return L("Yesterday", lang: lang) }
         let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: today)
+        // (zh as the boards write it, spaced: 「3 月 5 日」, 「2025 年 12 月 31 日」; en by its locale: "Mar 5", "Dec 31, 2025")
+        if lang == .zhHans {
+            let c = calendar.dateComponents([.year, .month, .day], from: date)
+            let md = L("%d month %d day", c.month ?? 0, c.day ?? 0, lang: lang)
+            return sameYear ? md : L("%d year %@", c.year ?? 0, md, lang: lang)
+        }
         f.setLocalizedDateFormatFromTemplate(sameYear ? "MMMd" : "yMMMd")
         return f.string(from: date)
     }
@@ -507,7 +520,7 @@ final class ShellModel: ObservableObject {
     /// The selection: a session, or the new conversation not opened yet (nil: its first message opens it).
     @Published var selected: String? {
         // (another session shown: the card mode of this one's card ends — a new move into it when it is back)
-        didSet { if oldValue != selected { leaveCardMode() }; if selected != nil { freshAsked = false } }
+        didSet { if oldValue != selected { leaveCardMode() } }
     }
     @Published private(set) var rows: [ShellRow] = []
     @Published private(set) var states: [String: SessionState] = [:]
@@ -825,21 +838,20 @@ final class ShellModel: ObservableObject {
     func newConversation() {
         selected = nil
         notice = nil
-        freshAsked = true
         askComposerFocus()          // (the user's own ⌘N or click: the new conversation's typing is in the composer -- P3States)
     }
 
-    /// The user asked for a new conversation (⌘N, the button): its row shows at the top while it is the one shown, and
-    /// goes once another is selected -- its first message selects the session it opened (U4 §2.2).
-    @Published private(set) var freshAsked = false
-    /// The rows the list draws: the new conversation's first while it is shown, then the sessions.
+    /// The rows the list draws: while the new conversation is the one shown -- at launch, after ⌘N or the button, the
+    /// same state (fable, U4) -- its own row first, selected; it goes once another is selected or its first message
+    /// opened a session (U4 §2.2). Then the sessions.
     var listRows: [ShellRow] {
-        freshAsked && selected == nil ? [ShellRow.fresh(title: L("New conversation", lang: lang()))] + rows : rows
+        selected == nil ? [ShellRow.fresh(title: L("New conversation", lang: lang()))] + rows : rows
     }
 
     /// An example of the empty chat (P3States): its words into the composer, the typing there -- never sent.
     func fillExample(_ words: String) {
-        draft = words
+        // (a draft being written is the user's: never replaced; the click only moves the typing there -- U4 review)
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft = words }
         askComposerFocus()
     }
 

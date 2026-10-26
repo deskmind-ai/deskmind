@@ -18,6 +18,7 @@ enum ShellTests {
         DecisionTests.group("shell.newConversationTests"); newConversationTests()
         DecisionTests.group("shell.idleRowsTests"); idleRowsTests()
         DecisionTests.group("shell.whenTests"); whenTests()
+        DecisionTests.group("shell.closingWordsTests"); closingWordsTests()
         DecisionTests.group("shell.queueTests"); queueTests()
         DecisionTests.group("shell.cardAnswerTests"); cardAnswerTests()
         DecisionTests.group("shell.deleteRenameTests"); deleteRenameTests()
@@ -323,13 +324,14 @@ enum ShellTests {
                                 now: now, lang: .zhHans) == "等你：动手前确认", "a waiting one: its state, as before")
         check(ShellText.rowLine(ShellRow(id: "i", title: "t", status: .idle, updatedAt: nil, taskRunning: false), now: now, lang: .zhHans) == "空闲",
               "no time known: 「空闲」")
-        // the new conversation's row: only after ⌘N / the button, while it is shown; gone once another is selected or
-        // its first message opened a session
+        // the new conversation's row: while it is the one shown -- at launch as after ⌘N (fable, U4) -- first and
+        // selected; gone once another is selected or its first message opened a session
         let mock = Mock()
         mock.replies = [SessionClient.Op.open: ["ok": true, "session_id": "ses_new", "last_seq": 0], SessionClient.Op.send: ["ok": true],
                         SessionClient.Op.list: ["ok": true, "sessions": []]]
         let m = model(mock)
-        check(m.selected == nil && !m.listRows.contains { $0.fresh }, "at launch: no new conversation's row (the list as the helper has it)")
+        check(m.selected == nil && m.listRows.first?.fresh == true && m.listRows.filter(\.fresh).count == 1,
+              "at launch: the new conversation's row, first (the same as ⌘N): \(m.listRows.map(\.title))")
         m.newConversation()
         check(m.listRows.first?.fresh == true && m.listRows.first?.title == "新对话", "⌘N: its row at the top: \(m.listRows.map(\.title))")
         m.draft = "hello"; m.submit()
@@ -339,6 +341,35 @@ enum ShellTests {
         check(m.listRows.first?.fresh == true, "⌘N again: the row again")
         m.select("ses_new")
         check(!m.listRows.contains { $0.fresh }, "another selected before a message: the row goes")
+    }
+
+    /// The U4 logic review: every real task log has the model's closing words right after task_end (the recorded
+    /// sessions, tests/fixtures/session) -- the newest task still decides: done keeps its check and 「完成」, a stopped one
+    /// 「已停下」, in the list and in the right column; an unconfirmed or failed end its problem until seen.
+    static func closingWordsTests() {
+        let now = 1_900_000_000.0
+        let table: [(String, SessionStatus.Shape, String?)] = [
+            ("task-card", .check, "完成 · "), ("task-question", .check, "完成 · "), ("task-steer", .check, "完成 · "),
+            ("task-stop", .check, L("Stopped", lang: .zhHans)), ("task-locked", .bang, nil), ("task-paused-unconfirmed", .bang, nil),
+        ]
+        for (name, shape, line) in table {
+            let s = SessionTests.final(name)
+            let lastTask = s.timeline.lastIndex { if case .task = $0 { return true }; return false }
+            let after = lastTask.map { s.timeline[($0 + 1)...].contains { if case .message(let id) = $0 { return s.message(id)?.role == "assistant" }; return false } } ?? false
+            check(after, "\(name): the log has the model's words after its task (the case under test)")
+            let row = ShellList.rows(summaries: [], states: [s.sessionId ?? name: s], names: [:], deleted: [], untitled: "新对话").first!
+            let words = ShellText.rowLine(row, now: now, lang: .zhHans)
+            check(row.status.shape == shape && (line.map { words.hasPrefix($0) } ?? true), "\(name): the row \(row.status.shape) «\(words)» (want \(shape) «\(line ?? "its problem")…»)")
+            let col = RightColumn.model(s, otherRunning: nil, now: now)
+            check(col.status == row.status && !col.idle, "\(name): the right column says the same, not idle: \(col.status)")
+        }
+        // a pick of the empty chat: into an empty composer only; a draft being written is left as it is
+        let m = model(Mock())
+        m.fillExample("把下载里的发票按月份整理")
+        check(m.draft == "把下载里的发票按月份整理", "an example into the empty composer")
+        m.draft = "我自己写的"
+        m.fillExample("回复许诺说我看一下再说")
+        check(m.draft == "我自己写的", "a draft being written is not replaced by an example: \(m.draft)")
     }
 
     /// U4 §2.2: the time words, in both languages, by a fixed calendar.
@@ -356,13 +387,21 @@ enum ShellTests {
             ("the same day", at(2026, 10, 27, 9, 5), "09:05", "09:05"),
             ("just after midnight, the same day", at(2026, 10, 27, 0, 1), "00:01", "00:01"),
             ("yesterday", at(2026, 10, 26, 22, 0), "昨天", "Yesterday"),
-            ("this year", at(2026, 3, 5, 12, 0), "3月5日", "Mar 5"),
-            ("another year", at(2025, 12, 31, 12, 0), "2025年12月31日", "Dec 31, 2025"),
+            ("this year", at(2026, 3, 5, 12, 0), "3 月 5 日", "Mar 5"),
+            ("another year", at(2025, 12, 31, 12, 0), "2025 年 12 月 31 日", "Dec 31, 2025"),
         ]
         for (what, t, zh, en) in rows {
-            let z = ShellText.when(t, now: now, lang: .zhHans, calendar: cal), e = ShellText.when(t, now: now, lang: .en, calendar: cal)
+            let h24 = Locale(identifier: "en_GB")
+            let z = ShellText.when(t, now: now, lang: .zhHans, calendar: cal, hourLocale: h24), e = ShellText.when(t, now: now, lang: .en, calendar: cal, hourLocale: h24)
             check(z == zh && e == en, "\(what): «\(z)» «\(e)» (want «\(zh)» «\(en)»)")
         }
+        // the clock as the user set it (12 hours here), as the old time() did; a time after now: its time, never 「刚才」
+        let h12 = Locale(identifier: "en_US")
+        let am = ShellText.when(at(2026, 10, 27, 9, 5), now: now, lang: .en, calendar: cal, hourLocale: h12)
+        let amZh = ShellText.when(at(2026, 10, 27, 9, 5), now: now, lang: .zhHans, calendar: cal, hourLocale: h12)
+        check(am.replacingOccurrences(of: "\u{202F}", with: " ") == "9:05 AM" && amZh.contains("9:05") && !amZh.contains("AM"), "12 hours: «\(am)» «\(amZh)»")
+        let ahead = ShellText.when(now + 600, now: now, lang: .zhHans, calendar: cal, hourLocale: Locale(identifier: "en_GB"))
+        check(ahead == "15:40", "a time after now (a skewed clock): its time, not 「刚才」: «\(ahead)»")
     }
 
     // MARK: the new conversation: open, then send

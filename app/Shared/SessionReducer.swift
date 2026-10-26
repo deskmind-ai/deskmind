@@ -1145,8 +1145,9 @@ enum SessionStatus: Equatable {
         if let p = problem(s) { return p }
         // 4. thinking: a reply is streaming
         if s.streamingMessage != nil { return .thinking }
-        // 5. done: the newest thing in the chat is a task that ended -- a reply is chat, never a done (the list's check
-        // is a finished task's only: U4 §2.2; P1Main)
+        // 5. done: the newest task, whatever was said after it -- the model's closing words come right after every
+        // task's end, and a chat after it does not undo it; messages are chat, never a done themselves (the list's
+        // check is a finished task's only: U4 §2.2, P1Main). No task: idle.
         for item in s.timeline.reversed() {
             switch item {
             case .task(let id):
@@ -1156,9 +1157,8 @@ enum SessionStatus: Equatable {
                 if st == "succeeded" { return .done(at: t.doneAt ?? s.lastEventAt, stopped: false) }
                 if st == "cancelled" || st == "stopped" { return .done(at: t.doneAt ?? s.lastEventAt, stopped: true) }
                 return .idle
-            case .message(let id):
-                guard s.message(id) != nil else { continue }
-                return .idle
+            case .message:
+                continue
             case .error:
                 return .idle
             }

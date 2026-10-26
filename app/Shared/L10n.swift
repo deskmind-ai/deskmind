@@ -558,6 +558,8 @@ enum L10n {
         "Just now": "刚才",
         "%d min ago": "%d 分钟前",
         "Yesterday": "昨天",
+        "%d month %d day": "%d 月 %d 日",
+        "%d year %@": "%d 年 %@",
         "Just started": "刚开始",
         "What should it do?": "想让它做什么？",
         "Say what to do, or /cua and it works the computer": "说说要做什么，或者输入 /cua 让它直接操作电脑",

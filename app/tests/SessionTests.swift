@@ -192,7 +192,8 @@ enum SessionTests {
         check(s.timeline.map { if case .task = $0 { return "task" }; if case .message(let id) = $0 { return s.message(id)!.role }; return "error" }
               == ["user", "task", "assistant"], "timeline: \(s.timeline)")
         check(s.tasks[0].end?.status == "succeeded" && s.tasks[0].end?.undo == "none" && s.tasks[0].by == "model" && s.tasks[0].goal == "把笔记正文改成「新的」", "task_end and the task's origin")
-        check(s.status == .idle, "the model's last word: chat, idle -- the check is a finished task's only (U4 §2.2)")
+        check(s.status == .done(at: s.tasks[0].doneAt ?? s.lastEventAt, stopped: false),
+              "the model's closing words after task_end: still done -- the newest task decides (U4 logic review): \(s.status)")
         check(s.tasks[0].lastSeq == 21, "the run's last seq: \(s.tasks[0].lastSeq)")
     }
 

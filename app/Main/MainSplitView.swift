@@ -151,7 +151,8 @@ struct WindowFitter: NSViewRepresentable {
             guard let w = window else { return }
             w.contentMinSize = min
             let least = w.frameRect(forContentRect: NSRect(origin: .zero, size: min)).size
-            let screen = (w.screen ?? NSScreen.main)?.visibleFrame ?? w.frame
+            // (no screen known: left as it is -- never moved to the main one from a second display)
+            guard let screen = w.screen?.visibleFrame else { return }
             let f = WindowFit.fit(restored: w.frame, min: least, screen: screen)
             if f != w.frame { w.setFrame(f, display: true) }
         }
@@ -708,6 +709,7 @@ struct EmptyChat: View {
     var openSetup: (FirstRun.Step) -> Void = { _ in }
     var pick: (String) -> Void = { _ in }
     @Environment(\.lang) private var lang
+    @Environment(\.colorScheme) private var scheme
 
     /// The examples' keys (L10n: zh and en).
     static let examples = ["Reply to Xu Nuo: I'll take a look first", "Sort the invoices in Downloads by month", "/cua Open Display in System Settings"]
@@ -715,7 +717,7 @@ struct EmptyChat: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 16) {
-                Image(nsImage: Brand.image("idle")).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                Image(nsImage: Brand.image("idle", scheme: scheme)).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
                     .frame(height: 71).accessibilityHidden(true)
                 Text(opening ? L("Starting the conversation…", lang: lang) : L("What should it do?", lang: lang))
                     .font(.system(size: 24, weight: .bold)).foregroundStyle(Brand.ink)
@@ -980,7 +982,8 @@ struct Composer: View {
         let mode = shell.composer
         let twoRows = mode.taskRunning || mode.replying || shell.draft.contains("\n")
         VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .center, spacing: 8) {
+            // (bottom: when the field wraps, the buttons stay on its last line)
+            HStack(alignment: .bottom, spacing: 8) {
                 field(mode)
                 if !twoRows {
                     recordButton
