@@ -59,6 +59,7 @@ enum MainWindowSnapshot {
             Scene(name: "idle", lines: others + running(), now: t0 + 38, selected: nil),
             Scene(name: "running", lines: others + running(), now: t0 + 38),
             Scene(name: "waiting", lines: others + running() + waiting(), now: t0 + 58),
+            Scene(name: "waiting-uncertain", lines: others + running() + waiting(uncertain: true), now: t0 + 58),
             Scene(name: "answered", lines: others + running() + waiting() + answered(), now: t0 + 66),
             Scene(name: "process", lines: others + running() + waiting() + answered(), now: t0 + 66, process: true),
         ]
@@ -121,8 +122,9 @@ enum MainWindowSnapshot {
     }
 
     /// Step 2 done; step 3 sends: the action card waits, pinned above the composer.
-    static func waiting() -> [[String: Any]] {
-        let card: [String: Any] = [
+    /// `uncertain`: an earlier send of this run has an unknown result -- the card names it, and the yes is for this once.
+    static func waiting(uncertain: Bool = false) -> [[String: Any]] {
+        var card: [String: Any] = [
             "kind": "action", "blocking": true, "headline": "要在网页邮箱里点「发送」吗？",
             "text": "要在网页邮箱里点「发送」吗？这会把回复发给许诺。",
             "consent": ["action": "click", "action_text": "点「发送」", "target": "发送", "object": "button:send", "object_label": "发送",
@@ -131,6 +133,14 @@ enum MainWindowSnapshot {
                                      ["kind": "body", "label": "内容", "value": "「我看一下再说」"]]],
             "options": [["kind": "approve", "text": "可以"], ["kind": "skip_step", "text": "这一步不要"], ["kind": "cancel", "text": "先别做了"]],
         ]
+        if uncertain, var c = card["consent"] as? [String: Any] {
+            c["uncertain"] = [["consequence": "external", "object": "window:com.apple.Safari#4242", "text": "点「发送」",
+                               "outgoing": [["kind": "typed", "label": "内容", "value": "「我看一下」"]]]]
+            c["uncertain_total"] = 1
+            c["model_says_unchecked"] = "上一次点「发送」后页面没有变化，可能没发出去"
+            card["consent"] = c
+            card["headline"] = "要在网页邮箱里点「发送」吗？（之前有 1 步结果不确定，先看一眼）"
+        }
         return [
             line("step_result", 9, 40, ["step_id": "st_2", "status": "ok"]),
             line("step", 10, 48, ["step_id": "st_3", "plan_step": 3, "text": "{\"kind\":\"click\"}", "human": "准备点「发送」，等你确认",
