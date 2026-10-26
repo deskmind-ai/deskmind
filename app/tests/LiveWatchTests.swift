@@ -54,6 +54,23 @@ enum LiveWatchTests {
         let shown = CGSize(width: 300, height: 200)
         let onIt = LiveFeed.cursor(pictureWindow: 1, stepWindow: 1, rectNorm: [0.5, 0.5, 0, 0], picture: shown, visible: vis ?? [])
         check(onIt.map { abs($0.x - 100) < 0.01 && abs($0.y - 100) < 0.01 } == true, "a target at the window's middle: a third into the picture: \(String(describing: onIt))")
+        // the dashed box round the target (U1): the cursor's rule, the rect cut to what the picture shows
+        func near(_ r: CGRect?, _ x: Double, _ y: Double, _ w: Double, _ h: Double) -> Bool {
+            guard let r else { return false }
+            return abs(r.minX - x) < 0.01 && abs(r.minY - y) < 0.01 && abs(r.width - w) < 0.01 && abs(r.height - h) < 0.01
+        }
+        let boxes: [(rect: [Double], window: Int, visible: [Double], want: (Double, Double, Double, Double)?, why: String)] = [
+            ([0.5, 0.5, 0.1, 0.2], 9, [0, 0, 1, 1], (100, 50, 20, 20), "whole window: the rect scaled"),
+            ([0.5, 0.5, 0.1, 0.2], 7, [0, 0, 1, 1], nil, "another window's picture: none"),
+            ([0.9, 0.9, 0.2, 0.2], 9, [0, 0, 1, 1], (180, 90, 20, 10), "past the edge: cut to the picture"),
+            ([1.5, 0, 0.1, 0.1], 9, [0, 0, 1, 1], nil, "outside: none"),
+            ([0.5, 0.5, 0, 0.1], 9, [0, 0, 1, 1], nil, "no width: none"),
+            ([0.0, 0.0, 0.5, 0.5], 9, [0.25, 0, 0.75, 1], (0, 0, 200.0 / 3, 50), "partly off its display: the shown part only"),
+        ]
+        for b in boxes {
+            let got = LiveFeed.box(pictureWindow: b.window, stepWindow: 9, rectNorm: b.rect, picture: pic, visible: b.visible)
+            check(b.want.map { near(got, $0.0, $0.1, $0.2, $0.3) } ?? (got == nil), "box: \(b.why): \(String(describing: got))")
+        }
         check(LiveFeed.cursor(pictureWindow: 1, stepWindow: 1, rectNorm: [0.1, 0.5, 0, 0], picture: shown, visible: vis ?? []) == nil, "a target in the part off the display: no cursor")
         check(LiveFeed.bestDisplay(window: CGRect(x: 900, y: 0, width: 400, height: 200), displays: [disp, CGRect(x: 1000, y: 0, width: 1000, height: 800)]) == 1,
               "across two displays: the one showing most of it")

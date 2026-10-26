@@ -1,6 +1,6 @@
-// The main window: three columns — the conversations, the chat, and the right column
-// (a placeholder until M3: 小方 and the session's state). Its logic is ShellModel (Shared/Shell.swift); these are
-// views only.
+// The main window: three columns — the conversations (256), the chat, and the right column (400: 小方, the live view,
+// this Mac, the steps, the changes; or the task's 「过程」), as the P1Main board lays them out. Its logic is ShellModel
+// (Shared/Shell.swift); these are views only.
 //
 // Focus (handoff §3.1): nothing here activates the app or brings a window forward. Only the user's own clicks and
 // keys act; the composer never takes the keyboard by itself when a card arrives, and nothing here ever moves the
@@ -22,6 +22,15 @@ enum ShellColor {
     static let banner = Color(ShellPalette.banner)
     static let problem = Color(ShellPalette.problem)
     static let error = Color(ShellPalette.error)
+    static let sidebar = Color(ShellPalette.sidebar)
+    static let bubble = Color(ShellPalette.bubble)
+    static let waitRow = Color(ShellPalette.waitRow)
+    static let softLine = Color(ShellPalette.softLine)
+    static let buttonLine = Color(ShellPalette.buttonLine)
+    static let ok = Color(ShellPalette.ok)
+    static let frame = Color(ShellPalette.frame)
+    static let frameText = Color(ShellPalette.frameText)
+    static let frameQuiet = Color(ShellPalette.frameQuiet)
 }
 
 struct MainSplitView: View {
@@ -35,20 +44,9 @@ struct MainSplitView: View {
     @ObservedObject private var keys = KeyStatus.shared
 
     var body: some View {
-        NavigationSplitView {
-            SessionList(shell: shell)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
-        } detail: {
-            HStack(spacing: 0) {
-                ChatColumn(shell: shell, openSettings: openSettings, unmet: setupAt == nil ? unmet : [], openSetup: { setupAt = $0 })
-                    .frame(minWidth: 420, maxWidth: .infinity)
-                Divider()
-                AgentPanel(shell: shell)
-                    .frame(width: 260)
-            }
-        }
-        .frame(minWidth: 980, idealWidth: 1180, minHeight: 600, idealHeight: 760)
-        .background(Brand.paper)
+        MainColumns(shell: shell, openSettings: openSettings, unmet: setupAt == nil ? unmet : [], openSetup: { setupAt = $0 },
+                    cloud: cloud, mac: mac)
+        .frame(minWidth: MainColumns.minWidth, idealWidth: 1440, minHeight: 600, idealHeight: 900)
         .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
             CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
         }
@@ -78,6 +76,21 @@ struct MainSplitView: View {
 
     private func openSettings() { settingsOpen = true }
 
+    /// The sidebar's foot: the cloud model as the settings and the helper have it.
+    private var cloud: SidebarCloud {
+        let p = CloudModelSettings.provider
+        return SidebarCloud(on: CloudModelSettings.engineIsCloud, ready: keys.snapshot.known && CloudModelSettings.configured(keys.snapshot, p), provider: p.title)
+    }
+
+    /// 「这台 Mac」's permission row: the grants the helper is missing (nil: not known yet).
+    private var mac: MacFacts {
+        guard model.helperReady else { return MacFacts(missing: nil) }
+        var missing: [String] = []
+        if !model.granted(.accessibility) { missing.append(L("Accessibility", lang: lang)) }
+        if !model.granted(.screen) { missing.append(L("Screen Recording", lang: lang)) }
+        return MacFacts(missing: missing)
+    }
+
     /// What the first run left unmet, as the helper says it now (rows in the empty chat).
     private var unmet: [FirstRun.Unmet] {
         guard model.helperReady, keys.snapshot.known else { return [] }
@@ -99,6 +112,58 @@ struct MainSplitView: View {
         if let c = CloudModelSettings.engineConfig, !c.isEmpty { return SessionClient.normalizeConfig(c) }
         let p = CloudModelSettings.provider
         return SessionClient.normalizeConfig(CloudModelSettings.config(for: p, model: KeyStatus.shared.now.settings["CUSTOM_MODEL"] ?? ""))
+    }
+}
+
+/// The sidebar's foot (P1Main): the cloud model's service, a dot for whether it is ready, and the settings.
+struct SidebarCloud: Equatable {
+    var on: Bool
+    var ready: Bool
+    var provider: String
+}
+
+/// 「这台 Mac」's first row: the permissions the helper is missing (nil: not known yet).
+struct MacFacts: Equatable {
+    var missing: [String]?
+}
+
+/// The window's three columns side by side (P1Main: 256 / the chat / 400), on the paper, hairlines between. The app's
+/// window and the offscreen render (tests/snapshot) draw the same.
+struct MainColumns: View {
+    @ObservedObject var shell: ShellModel
+    let openSettings: () -> Void
+    var unmet: [FirstRun.Unmet] = []
+    var openSetup: (FirstRun.Step) -> Void = { _ in }
+    var cloud: SidebarCloud
+    var mac: MacFacts
+    /// For the offscreen render only: a fixed picture in the live view, nothing watched.
+    var still: LiveDock.Picture? = nil
+
+    static let sidebarWidth: CGFloat = 256
+    static let rightWidth: CGFloat = 400
+    static let chatMinWidth: CGFloat = 440
+    static var minWidth: CGFloat { sidebarWidth + chatMinWidth + rightWidth + 2 }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            SessionList(shell: shell, cloud: cloud, openSettings: openSettings)
+                .frame(width: Self.sidebarWidth)
+            Hairline(vertical: true)
+            ChatColumn(shell: shell, openSettings: openSettings, unmet: unmet, openSetup: openSetup)
+                .frame(minWidth: Self.chatMinWidth, maxWidth: .infinity)
+            Hairline(vertical: true)
+            AgentPanel(shell: shell, mac: mac, still: still)
+                .frame(width: Self.rightWidth)
+        }
+        .background(Brand.paper)
+    }
+}
+
+/// A 1 pt line in the hairline colour (#D5D3C9), between columns and under the header.
+struct Hairline: View {
+    var vertical = false
+    var body: some View {
+        Rectangle().fill(Brand.line).frame(width: vertical ? 1 : nil, height: vertical ? nil : 1)
     }
 }
 
@@ -155,41 +220,59 @@ struct ShellCommands: Commands {
 
 struct SessionList: View {
     @ObservedObject var shell: ShellModel
+    let cloud: SidebarCloud
+    let openSettings: () -> Void
     @Environment(\.lang) private var lang
     @State private var renaming: String?
     @State private var newName = ""
     @State private var deleting: String?
 
+    /// Top to bottom (P1Main): 「新对话 ⌘N」, the 「对话」 caption, the rows (each a button: a click selects it; ⌘↑ ⌘↓
+    /// move), and the foot -- the cloud model and the settings. Below the window's buttons, on the sidebar's colour.
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 14) {
             Button {
                 shell.newConversation()
             } label: {
-                Label(L("New conversation", lang: lang), systemImage: "square.and.pencil")
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    Image(systemName: "plus").font(.system(size: 13, weight: .semibold)).accessibilityHidden(true)
+                    Text(L("New conversation", lang: lang))
+                    Spacer(minLength: 4)
+                    Text(L("⌘N", lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
+                }
+                .font(.system(size: 14, weight: .semibold)).foregroundStyle(Brand.ink)
+                .padding(.horizontal, 12).frame(height: 40)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(shell.selected == nil ? Brand.ink : Brand.line, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: 12))
             }
             .buttonStyle(.plain)
-            .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .foregroundStyle(Brand.ink)
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .background(shell.selected == nil ? ShellColor.panelSelected : Color.clear)
             .help(L("New conversation (⌘N)", lang: lang))
             .accessibilityHint(L("Starts a new conversation", lang: lang))
-            List(selection: Binding(get: { shell.selected }, set: { id in if let id { shell.select(id) } })) {
-                ForEach(shell.rows) { row in
-                    SessionRowView(row: row)
-                        .tag(Optional(row.id))
-                        .contextMenu {
-                            Button(L("Rename…", lang: lang)) { newName = shell.name(row.id) ?? row.title; renaming = row.id }
-                            Button(L("Delete…", lang: lang), role: .destructive) { deleting = row.id }
-                                .disabled(!shell.canDelete(row.id))
-                        }
+            .accessibilityAddTraits(shell.selected == nil ? .isSelected : [])
+            Text(L("Conversations", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+                .padding(.horizontal, 6).padding(.top, 6)
+                .accessibilityAddTraits(.isHeader)
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(shell.rows) { row in
+                        Button { shell.select(row.id) } label: { SessionRowView(row: row, selected: shell.selected == row.id) }
+                            .buttonStyle(.plain)
+                            .accessibilityAddTraits(shell.selected == row.id ? .isSelected : [])
+                            .contextMenu {
+                                Button(L("Rename…", lang: lang)) { newName = shell.name(row.id) ?? row.title; renaming = row.id }
+                                Button(L("Delete…", lang: lang), role: .destructive) { deleting = row.id }
+                                    .disabled(!shell.canDelete(row.id))
+                            }
+                    }
                 }
             }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
+            .frame(maxHeight: .infinity)
+            footer
         }
-        .background(ShellColor.panel)
+        .padding(.horizontal, 12).padding(.top, 40).padding(.bottom, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(ShellColor.sidebar)
         .alert(L("Rename conversation", lang: lang), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField(L("Name", lang: lang), text: $newName)
             Button(L("Cancel", lang: lang), role: .cancel) { renaming = nil }
@@ -206,22 +289,60 @@ struct SessionList: View {
                  + (deleting.map(shell.undoOpen) == true ? " " + L("Its last task's changes can still be undone; deleting the conversation gives that up.", lang: lang) : ""))
         }
     }
+
+    /// 「● 云端模型 · <服务商>」 and the settings gear (the window's one standing way to the model settings).
+    private var footer: some View {
+        HStack(spacing: 8) {
+            Circle().fill(cloud.on && cloud.ready ? ShellColor.ok : Brand.mist).frame(width: 7, height: 7).accessibilityHidden(true)
+            Text(!cloud.on ? L("Cloud models are off", lang: lang)
+                 : cloud.ready ? L("Cloud model · %@", cloud.provider, lang: lang) : L("Cloud model · %@ · no key", cloud.provider, lang: lang))
+                .font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(1)
+            Spacer(minLength: 4)
+            Button(action: openSettings) {
+                Image(systemName: "gearshape").font(.system(size: 15)).foregroundStyle(Brand.ink)
+                    .frame(width: 32, height: 32).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(L("Model settings", lang: lang))
+            .accessibilityLabel(L("Model settings", lang: lang))
+        }
+        .padding(.horizontal, 6).padding(.top, 10)
+        .overlay(alignment: .top) { Hairline() }
+    }
 }
 
+/// A conversation in the sidebar: its state's shape, its title on one line, the state in words; the one waiting for
+/// you on the orange tint with 「等你」, the selected one on the card colour.
 struct SessionRowView: View {
     let row: ShellRow
+    var selected = false
     @Environment(\.lang) private var lang
+
+    private var waits: Bool {
+        switch row.status { case .waitingForYou, .cardExpired: true; default: false }
+    }
 
     var body: some View {
         let status = ShellText.status(row.status, lang: lang)
-        HStack(alignment: .firstTextBaseline, spacing: 9) {
-            StatusDot(status: row.status, label: status)
+        HStack(spacing: 10) {
+            StatusDot(status: row.status, label: status).frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                Text(row.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Brand.ink).lineLimit(2)
-                Text(status).font(.system(size: 11)).foregroundStyle(ShellColor.secondary).lineLimit(1)
+                Text(row.title).font(.system(size: 14, weight: selected || waits ? .semibold : .regular)).foregroundStyle(Brand.ink).lineLimit(1)
+                Text(status).font(.system(size: 12, weight: waits ? .semibold : .regular))
+                    .foregroundStyle(waits ? ShellColor.orangeText : ShellColor.secondary).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if waits {
+                Text(L("Waiting", lang: lang)).font(.system(size: 12, weight: .bold)).foregroundStyle(Brand.card)
+                    .padding(.horizontal, 8).frame(height: 22)
+                    .background(Capsule().fill(ShellColor.orangeText))
+                    .accessibilityHidden(true)
             }
         }
-        .padding(.vertical, 3)
+        .padding(.horizontal, 10).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 12).fill(waits ? ShellColor.waitRow : selected ? Brand.card : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(waits ? Brand.dot : selected ? Brand.line : Color.clear, lineWidth: 1.5))
+        .contentShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(L("%@, %@", row.title, status, lang: lang))
     }
@@ -245,9 +366,9 @@ struct StatusDot: View {
             case .solidDot:
                 Circle().fill(Brand.dot).frame(width: 8, height: 8)
             case .hollowRing:
-                Circle().stroke(Brand.dot, lineWidth: 1.6).frame(width: 9, height: 9)
+                Circle().stroke(ShellColor.secondary, lineWidth: 2).frame(width: 9, height: 9)
             case .check:
-                Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Brand.ink)
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.ok)
             case .mistDot:
                 Circle().fill(Brand.mist).frame(width: 7, height: 7)
             }
@@ -306,7 +427,7 @@ struct ChatColumn: View {
                         if let s { timeline(s) } else { EmptyChat(opening: shell.opening, unmet: unmet, openSetup: openSetup) }
                         Color.clear.frame(height: 1).id("bottom")
                     }
-                    .padding(.horizontal, 22).padding(.vertical, 16)
+                    .padding(.horizontal, 40).padding(.top, 18).padding(.bottom, 12)
                 }
                 // (not while a card too tall to pin waits in place in the chat: the chat would pull away from it)
                 .onChange(of: s?.lastSeq) { _, _ in if !inlineCard(s) { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } } }
@@ -323,7 +444,7 @@ struct ChatColumn: View {
             if let s { pinned(s, queueCap: CardBody.cap(columnHeight: height)).layoutPriority(1) }
             if let n = shell.notice {
                 Text(n).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 22).padding(.bottom, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 40).padding(.bottom, 4)
                     .fixedSize(horizontal: false, vertical: true)
                     .layoutPriority(2)
             }
@@ -334,31 +455,48 @@ struct ChatColumn: View {
         .frame(height: height)
     }
 
+    /// 60 pt (P1Main): the conversation's title, and under it its state in a line (orange while it waits for you);
+    /// 「■ 停止任务 ⌘.」 while a task runs.
     private func header(_ s: SessionState?) -> some View {
-        HStack {
-            Text(shell.rows.first { $0.id == shell.selected }?.title ?? L("New conversation", lang: lang))
-                .font(.system(size: 14, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink).lineLimit(1)
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(shell.rows.first { $0.id == shell.selected }?.title ?? L("New conversation", lang: lang))
+                    .font(.system(size: 16, weight: .bold)).foregroundStyle(Brand.ink).lineLimit(1)
+                if let s, s.status != .idle {
+                    let waits: Bool = { switch s.status { case .waitingForYou, .cardExpired: true; default: false } }()
+                    Text(ShellText.status(s.status, lang: lang)).font(.system(size: 12, weight: waits ? .semibold : .regular))
+                        .foregroundStyle(waits ? ShellColor.orangeText : ShellColor.secondary).lineLimit(1)
+                }
+            }
             Spacer()
             if let t = s?.runningTask {
-                Button(L("Stop task", lang: lang)) { shell.stop() }
-                    .buttonStyle(InkButtonStyle(prominent: false))
-                    .disabled(t.stopping)
-                    .help(L("Stop the task (⌘.)", lang: lang))
-                    .accessibilityHint(L("Stops the computer task; what it changed can be undone where the result offers it", lang: lang))
+                Button { shell.stop() } label: {
+                    HStack(spacing: 8) {
+                        RoundedRectangle(cornerRadius: 2).fill(Brand.ink).frame(width: 9, height: 9).accessibilityHidden(true)
+                        Text(L("Stop task", lang: lang))
+                        Text(verbatim: "⌘.").foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
+                    }
+                }
+                .buttonStyle(InkButtonStyle(prominent: false, small: true))
+                .disabled(t.stopping)
+                .help(L("Stop the task (⌘.)", lang: lang))
+                .accessibilityLabel(L("Stop task", lang: lang))
+                .accessibilityHint(L("Stops the computer task; what it changed can be undone where the result offers it", lang: lang))
             }
         }
-        .padding(.horizontal, 22).padding(.vertical, 12)
+        .padding(.horizontal, 28).frame(height: 60)
+        .overlay(alignment: .bottom) { Hairline() }
     }
 
     @ViewBuilder private func timeline(_ s: SessionState) -> some View {
         let last = s.timeline.last
         let idle = s.runningTask == nil && s.streamingMessage == nil
-        ForEach(Array(s.timeline.enumerated()), id: \.offset) { _, item in
+        ForEach(Array(s.timeline.enumerated()), id: \.offset) { i, item in
             switch item {
             case .message(let id):
-                if let m = s.message(id) { MessageRow(message: m) }
+                if let m = s.message(id) { MessageRow(message: m, labelled: Self.speaks(s, at: i)) }
             case .task(let run):
-                if let t = s.task(run) { TaskRow(shell: shell, task: t, session: s) }
+                if let t = s.task(run) { TaskRow(shell: shell, task: t, session: s, labelled: Self.speaks(s, at: i)) }
             case .error(let seq):
                 if let e = s.errors.first(where: { $0.seq == seq }) {
                     ErrorRow(row: ErrorRowModel(e.error, latest: last == item, idle: idle, lang: lang),
@@ -367,6 +505,20 @@ struct ChatColumn: View {
             }
         }
         ForEach(s.shownOutbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
+    }
+
+    /// The 「● DeskMind」 label goes above DeskMind's turn: the first of its items after the user's words (a reply, a
+    /// task) -- never twice in a row.
+    static func speaks(_ s: SessionState, at i: Int) -> Bool {
+        func mine(_ item: TimelineItem) -> Bool {
+            switch item {
+            case .message(let id): return s.message(id)?.role != "user"
+            case .task: return true
+            case .error: return false
+            }
+        }
+        guard mine(s.timeline[i]) else { return false }
+        return i == 0 || !mine(s.timeline[i - 1])
     }
 
     /// Above the composer: the open card (handoff §3.3, pinned while it waits) -- whole when it fits the pinned place
@@ -380,7 +532,7 @@ struct ChatColumn: View {
             }
             if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, queueCap)) }
         }
-        .padding(.horizontal, 22)
+        .padding(.horizontal, 40)
         .animation(.easeOut(duration: 0.2), value: shell.pinned(s)?.card.askId)
     }
 
@@ -430,7 +582,7 @@ struct CloudOffRow: View {
             Label(L("Cloud models are off. Conversations need one: nothing is sent until it is on.", lang: lang), systemImage: "cloud.slash")
                 .font(.system(size: 12)).foregroundStyle(Brand.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button(L("Open model settings", lang: lang), action: openSettings).buttonStyle(InkButtonStyle(prominent: true))
+            Button(L("Open model settings", lang: lang), action: openSettings).buttonStyle(InkButtonStyle(prominent: true, small: true))
         }
         .padding(.horizontal, 22).padding(.vertical, 8)
         .background(ShellColor.banner)
@@ -468,25 +620,47 @@ struct EmptyChat: View {
     }
 }
 
+/// The user's bubble (P1Main): #E6E3DA, its corner by the user's side squared off.
+struct UserBubble: Shape {
+    func path(in rect: CGRect) -> Path {
+        UnevenRoundedRectangle(topLeadingRadius: 16, bottomLeadingRadius: 16, bottomTrailingRadius: 4, topTrailingRadius: 16).path(in: rect)
+    }
+}
+
+/// 「● DeskMind」 above DeskMind's turn.
+struct SpeakerLabel: View {
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle().fill(Brand.dot).frame(width: 7, height: 7)
+            Text(verbatim: "DeskMind")
+        }
+        .font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+        .accessibilityHidden(true)      // (each row says who speaks itself)
+    }
+}
+
 struct MessageRow: View {
     let message: ChatMessage
+    var labelled = false
     @Environment(\.lang) private var lang
 
     var body: some View {
         let user = message.role == "user"
         HStack {
             if user { Spacer(minLength: 60) }
-            VStack(alignment: user ? .trailing : .leading, spacing: 4) {
+            VStack(alignment: user ? .trailing : .leading, spacing: 6) {
+                if !user && labelled { SpeakerLabel() }
                 Text(message.text.isEmpty && message.streaming ? "…" : message.text)
-                    .font(.system(size: 13.5)).foregroundStyle(Brand.ink)
+                    .font(.system(size: 15)).lineSpacing(3).foregroundStyle(Brand.ink)
                     .textSelection(.enabled)
-                    .padding(.horizontal, user ? 12 : 0).padding(.vertical, user ? 8 : 0)
-                    .background(user ? RoundedRectangle(cornerRadius: 12).fill(Brand.card) : nil)
+                    .padding(.horizontal, user ? 14 : 0).padding(.vertical, user ? 10 : 0)
+                    .background(user ? UserBubble().fill(ShellColor.bubble) : nil)
                     .opacity(message.retracted ? 0.5 : 1)
                 if let note = note {
-                    Text(note).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
+                    Text(note).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 }
             }
+            .frame(maxWidth: user ? 460 : 640, alignment: user ? .trailing : .leading)
             if !user { Spacer(minLength: 60) }
         }
         .accessibilityElement(children: .combine)
@@ -547,9 +721,9 @@ struct OutgoingRow: View {
         HStack {
             Spacer(minLength: 60)
             VStack(alignment: .trailing, spacing: 4) {
-                Text(item.text).font(.system(size: 13.5)).foregroundStyle(Brand.ink)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
+                Text(item.text).font(.system(size: 15)).lineSpacing(3).foregroundStyle(Brand.ink)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(UserBubble().fill(ShellColor.bubble))
                     .opacity(item.sending ? 0.6 : 1)
                 if item.sending {
                     Text(L("Sending…", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
@@ -640,12 +814,14 @@ struct Composer: View {
     /// The focus funnel's one consumer (ShellModel.focusRequest: the user's Esc out of a card).
     @FocusState private var focused: Bool
 
+    /// P1Main: the field (15 px) on the card colour in a 1.5 pt ink outline, radius 18; under it, while a task runs, an
+    /// orange dot and 「任务进行中」, then Stop, 「录制这个任务」 and the round send button.
     var body: some View {
         let mode = shell.composer
-        HStack(alignment: .bottom, spacing: 8) {
+        VStack(alignment: .leading, spacing: 4) {
             TextField(placeholder(mode), text: Binding(get: { shell.draft }, set: { shell.draft = $0 }), axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13.5))
+                .font(.system(size: 15))
                 .lineLimit(1...8)
                 .disabled(!mode.enabled || shell.opening)
                 .focused($focused)
@@ -661,74 +837,101 @@ struct Composer: View {
                 .accessibilityLabel(L("Message", lang: lang))
                 .accessibilityHint(mode.taskRunning ? L("Return sends it to the task now", lang: lang)
                                                     : L("Return sends; start with /cua to run a computer task", lang: lang))
-            if mode.canStop {
-                Button(L("Stop", lang: lang)) { shell.stop() }
-                    .buttonStyle(InkButtonStyle(prominent: false))
-                    .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
+                .padding(.horizontal, 16).padding(.top, 12)
+            HStack(spacing: 12) {
+                if mode.taskRunning {
+                    HStack(spacing: 6) {
+                        Circle().fill(Brand.dot).frame(width: 6, height: 6).accessibilityHidden(true)
+                        Text(L("Task running", lang: lang))
+                    }
+                    .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                }
+                Spacer()
+                if mode.canStop {
+                    Button(L("Stop", lang: lang)) { shell.stop() }
+                        .buttonStyle(InkButtonStyle(prominent: false, small: true))
+                        .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
+                }
+                // 「录制这个任务」: this conversation's next computer task recorded (TaskRecording), off unless turned on
+                Toggle(isOn: Binding(get: { shell.recordsNext }, set: { shell.setRecording($0) })) {
+                    Image(systemName: shell.recordsNext ? "record.circle.fill" : "record.circle").font(.system(size: 17))
+                        .frame(width: 34, height: 34).contentShape(Rectangle())
+                }
+                .toggleStyle(.button).buttonStyle(.plain)
+                .foregroundStyle(shell.recordsNext ? ShellColor.orangeText : ShellColor.secondary)
+                .help(L("Record this task", lang: lang))
+                .accessibilityLabel(L("Record this task", lang: lang))
+                if !mode.replying {
+                    let off = mode.control(shell.draft, sendNow: false) == nil || shell.opening
+                    Button { shell.submit() } label: {
+                        Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Brand.paper)
+                            .frame(width: 36, height: 36).background(Circle().fill(Brand.ink)).contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(off)
+                    .opacity(off ? 0.35 : 1)
+                    .help(L("Send", lang: lang))
+                    .accessibilityLabel(L("Send", lang: lang))
+                }
             }
-            // 「录制这个任务」: this conversation's next computer task recorded (TaskRecording), off unless turned on
-            Toggle(isOn: Binding(get: { shell.recordsNext }, set: { shell.setRecording($0) })) {
-                Image(systemName: shell.recordsNext ? "record.circle.fill" : "record.circle")
-            }
-            .toggleStyle(.button).buttonStyle(.plain)
-            .foregroundStyle(shell.recordsNext ? ShellColor.orangeText : ShellColor.secondary)
-            .help(L("Record this task", lang: lang))
-            .accessibilityLabel(L("Record this task", lang: lang))
-            if !mode.replying {
-                Button(L("Send", lang: lang)) { shell.submit() }
-                    .buttonStyle(InkButtonStyle(prominent: true))
-                    .disabled(mode.control(shell.draft, sendNow: false) == nil || shell.opening)
-            }
+            .padding(.leading, 16).padding(.trailing, 10).padding(.bottom, 8)
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Brand.card))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Brand.line))
-        .padding(.horizontal, 18).padding(.bottom, 16).padding(.top, 6)
+        .background(RoundedRectangle(cornerRadius: 18).fill(Brand.card))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.ink, lineWidth: 1.5))
+        .shadow(color: Brand.ink.opacity(0.08), radius: 10, y: 6)
+        .padding(.horizontal, 40).padding(.bottom, 20).padding(.top, 6)
         .opacity(mode.enabled ? 1 : 0.7)
     }
 
     private func placeholder(_ m: ComposerMode) -> String {
         if !m.enabled { return L("Answer the card above to go on", lang: lang) }
-        if m.taskRunning { return L("Add something: Return queues it, ⌘Return sends it to the task now", lang: lang) }
+        if m.taskRunning { return L("Add something: Return sends it to the task now", lang: lang) }
         if m.replying { return L("Wait for the reply, or stop it", lang: lang) }
         return L("Message DeskMind, or /cua and a task for the computer", lang: lang)
     }
 }
 
-// MARK: - Right: the agent (a placeholder until M3)
+// MARK: - Right: the agent
 
 struct AgentPanel: View {
     @ObservedObject var shell: ShellModel
+    var mac = MacFacts(missing: nil)
+    /// For the offscreen render only (tests/snapshot): this picture in the live view, nothing watched.
+    var still: LiveDock.Picture? = nil
     @Environment(\.lang) private var lang
     /// The live view (A4): watched only while a task runs here and this window is on screen.
     @StateObject private var dock = LiveDock()
     @ObservedObject private var monitor = FloatController.shared.monitor      // (the app's one)
+    /// 「放大」: the picture taller, in this column (the window's own; nothing is sent).
+    @State private var zoomed = false
 
     /// The run the dock should watch now (nil: none).
     private var watched: String? {
         // (in front only: behind, the float has the picture -- §3.2; popped out, too)
-        guard monitor.window == .front, let sid = shell.selected, !shell.poppedOut.contains(sid), let t = shell.current?.runningTask else { return nil }
+        guard still == nil, monitor.window == .front, let sid = shell.selected, !shell.poppedOut.contains(sid), let t = shell.current?.runningTask else { return nil }
         return t.runId
     }
 
     /// The column's two tabs, 「现在」 and 「过程」 (ProcessTabs: switching sends nothing): 现在's blocks (RightColumn.model:
     /// only what the events said), each second while a task runs; 过程, the run as its folder recorded it.
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 12) {
             Picker("", selection: Binding(get: { shell.currentTabs.tab }, set: { shell.pickTab($0) })) {
                 Text(L("Now", lang: lang)).tag(ProcessTabs.Tab.now)
                 Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
             }
             .pickerStyle(.segmented).labelsHidden()
+            .padding(.horizontal, 18).padding(.top, 16)
             if shell.currentTabs.tab == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
-                ProcessPane(sessionId: sid, runId: run).equatable().id(sid + "/" + run)
+                ProcessPane(sessionId: sid, runId: run).equatable().id(sid + "/" + run).padding(.horizontal, 18)
             } else if shell.currentTabs.tab == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in content(column) }
             }
         }
+        .background(Brand.paper)
         .onChange(of: watched, initial: true) { _, run in dock.watch(run) }
         .onDisappear { dock.watch(nil) }
     }
@@ -738,58 +941,59 @@ struct AgentPanel: View {
         return RightColumn.model(shell.current, otherRunning: other?.title, otherId: other?.id, now: shell.now())
     }
 
+    /// P1Main's right column: 小方 and the state in a line (the step and the time on the right), the live view in its
+    /// ink frame, then white cards -- this Mac (always its three rows), the steps, the changes.
     private func content(_ c: RightColumn) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(spacing: 6) {
-                    XiaoFang(mood: Self.mood(c.status), size: 84).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    XiaoFang(mood: Self.mood(c.status), size: 40).accessibilityHidden(true)
                     Text(ShellText.status(c.status, lang: lang))
-                        .font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(Brand.ink)
-                        .multilineTextAlignment(.center)
+                        .font(.system(size: 14, weight: .bold)).foregroundStyle(Self.waits(c.status) ? ShellColor.orangeText : Brand.ink)
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel(L("Status: %@", ShellText.status(c.status, lang: lang), lang: lang))
+                    Spacer(minLength: 4)
                     if let p = c.progress {
                         Text(L("Step %d · %d:%02d", p.step, p.seconds / 60, p.seconds % 60, lang: lang))
-                            .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+                            .font(.system(size: 12).monospacedDigit()).foregroundStyle(ShellColor.secondary)
                     }
                 }
-                .frame(maxWidth: .infinity)
                 // the live view of the task's window (A4), while one runs here
-                if let t = shell.current?.runningTask, watched != nil {
+                if let t = shell.current?.runningTask, watched != nil || still != nil {
                     let last = t.steps.last
-                    LiveDockView(dock: dock, stepWindow: LiveFeed.windowNumber(last?.object), target: last?.target?.rectNorm)
+                    LiveFrame(picture: still ?? dock.picture, state: still == nil ? dock.state : .streaming,
+                              app: Self.appName(last?.object), waiting: Self.waits(c.status),
+                              step: last.map(\.displayText), stepWindow: LiveFeed.windowNumber(last?.object),
+                              target: last?.target, zoomed: $zoomed, popOut: { shell.togglePopOut() })
                 } else if shell.current?.runningTask != nil {
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-                        .overlay(Text(L("The live view is in the float", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-                                    .multilineTextAlignment(.center).padding(14))
-                        .frame(height: 150)
+                    placeholder(L("The live view is in the float", lang: lang))
                 } else {
-                    RoundedRectangle(cornerRadius: 12)
-                        .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
-                        .overlay(Text(L("The live view of the task's window and its steps will show here.", lang: lang))
-                                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-                                    .multilineTextAlignment(.center).padding(14))
-                        .frame(height: 150)
+                    placeholder(L("The live view of the task's window and its steps will show here.", lang: lang))
                 }
                 if let who = c.computerUsedBy {
                     Button(L("The computer is being used by 「%@」", who, lang: lang)) { if let id = c.computerUsedById { shell.select(id) } }
                         .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                         .accessibilityHint(L("Shows that conversation", lang: lang))
                 }
-                if c.youAreUsingIt || c.screenLocked {
-                    section(L("This Mac", lang: lang)) {
-                        if c.youAreUsingIt { line(L("You're using it: the task waits for you to stop", lang: lang)) }
-                        if c.screenLocked { line(L("The screen was locked, so the task stopped", lang: lang)) }
-                    }
+                section(L("This Mac", lang: lang)) {
+                    macRow(L("Permissions", lang: lang),
+                           mac.missing.map { $0.isEmpty ? L("All granted", lang: lang) : L("Missing: %@", $0.joined(separator: L(", ", lang: lang)), lang: lang) }
+                               ?? L("Checking…", lang: lang),
+                           ok: mac.missing?.isEmpty)
+                    macRow(L("Screen", lang: lang),
+                           c.screenLocked ? L("The screen was locked, so the task stopped", lang: lang) : L("Not locked", lang: lang), ok: !c.screenLocked)
+                    macRow(L("In use", lang: lang),
+                           c.youAreUsingIt ? L("You're using it: the task waits for you to stop", lang: lang) : L("No conflict", lang: lang), ok: !c.youAreUsingIt)
                 }
                 if !c.plan.isEmpty {
-                    section(L("Steps", lang: lang)) {
+                    section(L("Current steps", lang: lang), link: shell.current?.tasks.last.map { t in (L("All records ›", lang: lang), { shell.showProcess(t.runId) }) }) {
                         ForEach(c.plan, id: \.n) { r in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text(Self.markSymbol(r.mark)).font(.system(size: 11, weight: .semibold)).foregroundStyle(r.mark == .current ? ShellColor.orangeText : ShellColor.secondary)
-                                    .accessibilityHidden(true)
-                                Text(r.purpose).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
-                                if r.asksFirst { Text(L("asks before sending", lang: lang)).font(.system(size: 10)).foregroundStyle(ShellColor.secondary) }
+                            HStack(spacing: 9) {
+                                Self.markShape(r.mark).frame(width: 16, height: 16).accessibilityHidden(true)
+                                Text(r.purpose).font(.system(size: 13, weight: r.mark == .current ? .semibold : .regular))
+                                    .foregroundStyle(r.mark == .done ? ShellColor.secondary : Brand.ink).fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 4)
+                                if r.asksFirst { Text(L("asks before sending", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText) }
                             }
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel(L("Step %d: %@, %@", r.n, r.purpose, Self.markWord(r.mark, lang: lang), lang: lang))
@@ -810,30 +1014,79 @@ struct AgentPanel: View {
                     }
                 }
             }
-            .padding(18)
+            .padding(.horizontal, 18).padding(.bottom, 16)
         }
         .frame(maxHeight: .infinity)
-        .background(ShellColor.panel)
     }
 
-    @ViewBuilder private func section(_ title: String, @ViewBuilder _ body: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+    private func placeholder(_ text: String) -> some View {
+        RoundedRectangle(cornerRadius: 14)
+            .strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [5, 4]))
+            .overlay(Text(text).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                        .multilineTextAlignment(.center).padding(14))
+            .frame(height: 150)
+    }
+
+    /// A white card: its title (13 px bold), a link on the right when it has one, its rows.
+    @ViewBuilder private func section(_ title: String, link: (String, () -> Void)? = nil, @ViewBuilder _ body: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title).font(.system(size: 13, weight: .bold)).foregroundStyle(Brand.ink).accessibilityAddTraits(.isHeader)
+                Spacer()
+                if let link {
+                    Button(link.0, action: link.1).buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                }
+            }
             body()
         }
+        .padding(.horizontal, 14).padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Brand.card))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(ShellColor.softLine))
+    }
+    /// A row of 「这台 Mac」: a dot (green: fine; orange: not; mist: not known), the label, the value.
+    private func macRow(_ label: String, _ value: String, ok: Bool?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Circle().fill(ok == true ? ShellColor.ok : ok == false ? Brand.dot : Brand.mist).frame(width: 7, height: 7)
+                .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 1 }
+                .accessibilityHidden(true)
+            Text(label).foregroundStyle(ShellColor.secondary).frame(width: 64, alignment: .leading)
+            Text(value).foregroundStyle(ok == false ? ShellColor.orangeText : Brand.ink).fontWeight(ok == false ? .semibold : .regular)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.system(size: 13))
+        .accessibilityElement(children: .combine)
     }
     @ViewBuilder private func list(_ label: String, _ items: [String]) -> some View {
         if !items.isEmpty { line(L("%@: %@", label, items.joined(separator: L(", ", lang: lang)), lang: lang)) }
     }
     private func line(_ text: String) -> some View {
-        Text(text).font(.system(size: 12)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+        Text(text).font(.system(size: 13)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
     }
 
-    static func markSymbol(_ m: RightColumn.PlanRow.Mark) -> String {
-        switch m { case .done: "✓"; case .current: "▶"; case .todo: "·" }
+    /// A step's mark (P1Main): done, a green check; now, the orange dot; still to do, a hollow ring.
+    @ViewBuilder static func markShape(_ m: RightColumn.PlanRow.Mark) -> some View {
+        switch m {
+        case .done: Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.ok)
+        case .current: Circle().fill(Brand.dot).frame(width: 10, height: 10)
+        case .todo: Circle().strokeBorder(ShellColor.secondary, lineWidth: 1.5).frame(width: 10, height: 10)
+        }
     }
     static func markWord(_ m: RightColumn.PlanRow.Mark, lang: ResolvedLang) -> String {
         switch m { case .done: L("done", lang: lang); case .current: L("doing now", lang: lang); case .todo: L("not yet", lang: lang) }
+    }
+
+    static func waits(_ s: SessionStatus) -> Bool {
+        switch s { case .waitingForYou, .cardExpired: true; default: false }
+    }
+
+    /// The app a step acts in, by its window's object (window:<bundle id>#<number>): the app's own name where this Mac
+    /// has it, else nil (the frame then says only the window's state).
+    static func appName(_ object: String?) -> String? {
+        guard let o = object, o.hasPrefix("window:") else { return nil }
+        let id = String(o.dropFirst("window:".count).split(separator: "#").first ?? "")
+        guard id.contains("."), let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return nil }
+        return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
     }
 
     /// 小方's face for the state (LiveView.face): looking while it works, up when it waits for you, happy when done,

@@ -56,7 +56,7 @@ struct IslandView: View {
             HStack(spacing: 6) {
                 if let ending = model.ending {
                     Image(systemName: ending == .done ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                        .font(.system(size: 12)).foregroundStyle(ending == .done ? Color(ShellPalette.islandDone) : Brand.dot)
+                        .font(.system(size: 12)).foregroundStyle(ending == .done ? Color(ShellPalette.islandText) : Color(ShellPalette.islandMuted))
                     Text(L(Island.endWord(ending), lang: lang))
                         .font(.system(size: 11, weight: .semibold, design: .rounded)).foregroundStyle(Color(ShellPalette.islandText))
                         .lineLimit(1)
@@ -101,11 +101,13 @@ struct IslandView: View {
         return stage.wing(seconds: Int(Date().timeIntervalSince(model.stageSince)), lang: lang)
     }
 
+    /// The Island board's dot: orange while it works and when a card needs you, grey while it gets ready, while it waits
+    /// for you to stop using the Mac and when it didn't finish, white when done (the palette's own: no yellow, no green).
     private var dotColor: Color {
         switch model.phase {
-        case .running: model.waiting || model.takenOver ? Color(ShellPalette.islandWait) : Brand.dot
-        case .passed: Color(ShellPalette.islandDone)
-        case .failed: Brand.dot
+        case .running: !model.asking && (model.waiting || (model.step == 0 && model.stage != nil)) ? Color(ShellPalette.islandMuted) : Brand.dot
+        case .passed: Color(ShellPalette.islandText)
+        case .failed: Color(ShellPalette.islandMuted)
         }
     }
 

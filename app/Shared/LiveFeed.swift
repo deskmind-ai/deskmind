@@ -111,6 +111,18 @@ struct LiveFeed: Equatable {
         return CGPoint(x: x * picture.width, y: y * picture.height)
     }
 
+    /// The step's target as a box on the picture (its own points, top-left origin), cut to the part the picture shows:
+    /// on a picture of the step's window only, none when the target is outside it (the cursor's rule, for the dashed box
+    /// around what it acts on).
+    static func box(pictureWindow: Int, stepWindow: Int?, rectNorm: [Double]?, picture: CGSize, visible: [Double] = [0, 0, 1, 1]) -> CGRect? {
+        guard let s = stepWindow, s == pictureWindow, let r = rectNorm, r.count == 4, r[2] > 0, r[3] > 0, picture.width > 0, picture.height > 0,
+              visible.count == 4, visible[2] > 0, visible[3] > 0 else { return nil }
+        let x0 = max(0, (r[0] - visible[0]) / visible[2]), y0 = max(0, (r[1] - visible[1]) / visible[3])
+        let x1 = min(1, (r[0] + r[2] - visible[0]) / visible[2]), y1 = min(1, (r[1] + r[3] - visible[1]) / visible[3])
+        guard x1 > x0, y1 > y0 else { return nil }
+        return CGRect(x: x0 * picture.width, y: y0 * picture.height, width: (x1 - x0) * picture.width, height: (y1 - y0) * picture.height)
+    }
+
     /// The part of `window` that `display` shows, as [x, y, w, h] of the window (0–1); nil when none.
     static func visiblePart(window: CGRect, display: CGRect) -> [Double]? {
         let v = window.intersection(display)

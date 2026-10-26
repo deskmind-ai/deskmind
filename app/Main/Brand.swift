@@ -58,19 +58,55 @@ struct XiaoFang: View {
     }
 }
 
-/// The primary button: ink capsule, paper text. The secondary one is outlined in ink.
+/// A button (P1Waiting): 44 pt tall, radius 13, 15 px -- the primary one ink with paper text, the secondary one the card
+/// colour in a 1 pt #C9C6BB edge. `small`: a pill in a bar or a line (the header's Stop, the composer's): 32 pt, 13 px,
+/// the hairline edge. `fill`: as wide as it is given (buttons side by side share a row: WeightedRow).
 struct InkButtonStyle: ButtonStyle {
     var prominent = true
+    var small = false
+    var fill = false
     func makeBody(configuration: Configuration) -> some View {
+        let shape = RoundedRectangle(cornerRadius: small ? 16 : 13, style: .continuous)
         configuration.label
-            .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .padding(.horizontal, 16).padding(.vertical, 7)
+            .font(.system(size: small ? 13 : 15, weight: prominent ? .semibold : .regular))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, small ? 14 : 16).padding(.vertical, small ? 6 : 10)
+            .frame(maxWidth: fill ? .infinity : nil, minHeight: small ? 32 : 44)
             .foregroundStyle(prominent ? Brand.paper : Brand.ink)
-            .background(Capsule().fill(prominent ? Brand.ink : Color.clear))
-            .overlay(Capsule().strokeBorder(Brand.ink, lineWidth: prominent ? 0 : 1.2))
+            .background(shape.fill(prominent ? Brand.ink : Brand.card))
+            .overlay(shape.strokeBorder(prominent ? Color.clear : small ? Brand.line : Color(ShellPalette.buttonLine), lineWidth: 1))
             .opacity(configuration.isPressed ? 0.75 : 1)
-            .contentShape(Capsule())
+            .contentShape(shape)
             .pointerStyle(.link)   // a hand over every button, as a click target should show
+    }
+}
+
+/// Buttons side by side in one row, sharing its width by weight (P1Waiting: the primary 1.3, each other 1), as tall as
+/// the tallest.
+struct WeightedRow: Layout {
+    var weights: [Double]
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let widths = split(proposal.width ?? subviews.reduce(0) { $0 + $1.sizeThatFits(.unspecified).width } + spacing * CGFloat(max(0, subviews.count - 1)), subviews.count)
+        let h = zip(subviews, widths).map { $0.sizeThatFits(ProposedViewSize(width: $1, height: nil)).height }.max() ?? 0
+        return CGSize(width: proposal.width ?? widths.reduce(0, +) + spacing * CGFloat(max(0, subviews.count - 1)), height: h)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        for (v, w) in zip(subviews, split(bounds.width, subviews.count)) {
+            v.place(at: CGPoint(x: x, y: bounds.minY), proposal: ProposedViewSize(width: w, height: bounds.height))
+            x += w + spacing
+        }
+    }
+
+    private func split(_ total: CGFloat, _ n: Int) -> [CGFloat] {
+        guard n > 0 else { return [] }
+        let ws = (0..<n).map { $0 < weights.count ? weights[$0] : 1 }
+        let room = max(0, total - spacing * CGFloat(n - 1))
+        let sum = ws.reduce(0, +)
+        return ws.map { CGFloat($0 / sum) * room }
     }
 }
 

@@ -20,42 +20,46 @@ struct TaskRow: View {
     var stop: (() -> Void)? = nil
     @Environment(\.lang) private var lang
 
+    /// The 「● DeskMind」 label above it (the first of DeskMind's turn: ChatColumn.speaks).
+    var labelled = false
+
+    /// Not a box (P1Main): what was asked is the user's bubble above, so it is not said again here. DeskMind's label,
+    /// then a line -- the orange dot while it runs, where it is and its current step -- with 「过程」, 「已录制」 and Stop;
+    /// its cards; how it ended and its result card.
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            if labelled { SpeakerLabel() }
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Image(systemName: "macwindow").foregroundStyle(Brand.ink).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(task.raw.isEmpty ? L("Computer task", lang: lang) : task.raw)
-                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.ink).lineLimit(3)
-                    if let o = ShellText.origin(task, lang: lang) {
-                        Text(o).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-                    }
-                    Text(ShellText.task(task, lang: lang)).font(.system(size: 12)).foregroundStyle(task.running ? ShellColor.orangeText : ShellColor.secondary)
+                if task.running {
+                    Circle().fill(Brand.dot).frame(width: 8, height: 8)
+                        .overlay(Circle().stroke(Brand.dot.opacity(0.2), lineWidth: 4))
+                        .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 1 }
+                        .accessibilityHidden(true)
+                } else {
+                    Image(systemName: "macwindow").font(.system(size: 12)).foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
                 }
-                Spacer()
+                Text(line).font(.system(size: 13)).foregroundStyle(task.running ? Brand.ink : ShellColor.secondary)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
                 // the task's 「过程」 in the right column (M5): the one way to it from the chat
                 if stop == nil {
                     Button(L("Process", lang: lang)) { shell.showProcess(task.runId) }
-                        .buttonStyle(.link).font(.system(size: 11))
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
                         .accessibilityHint(L("Shows this task's process in the right column", lang: lang))
                 }
                 // 「已录制」: the task's movie (Movies › DeskMind), when one was made
                 if task.ended, let path = shell.movies[task.runId] {
                     Button(L("Recorded", lang: lang)) { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
-                        .buttonStyle(.link).font(.system(size: 11))
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
                         .accessibilityHint(L("Opens the task's recording", lang: lang))
                 }
                 if task.running {
                     Button(L("Stop", lang: lang)) { if let stop { stop() } else { shell.stop() } }
-                        .buttonStyle(InkButtonStyle(prominent: false))
+                        .buttonStyle(InkButtonStyle(prominent: false, small: true))
                         .disabled(task.stopping)
                         .accessibilityLabel(L("Stop", lang: lang))
                         .accessibilityHint(L("Stops the computer task", lang: lang))
                 }
-            }
-            if task.running, let step = task.steps.last {
-                Text(step.displayText).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2)
-                    .accessibilityLabel(L("Current step: %@", step.displayText, lang: lang))
             }
             // (the pinned card is above the composer -- or here, whole, when it is too tall to pin: A2; the rest are a line
             // each, in their phase)
@@ -66,20 +70,33 @@ struct TaskRow: View {
                 }
             }
             ForEach(task.cards.filter { $0.askId != shell.pinned(session)?.card.askId }, id: \.askId) { c in
-                Text(ShellText.cardLine(shell.phase(task.runId, c, in: session), kind: c.card.kind, lang: lang))
-                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary).lineLimit(2)
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.ok).accessibilityHidden(true)
+                    Text(ShellText.cardLine(shell.phase(task.runId, c, in: session), kind: c.card.kind, lang: lang))
+                        .font(.system(size: 13)).foregroundStyle(Brand.ink).lineLimit(2)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .frame(maxWidth: 600, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(ShellColor.softLine))
             }
             if !task.running {
                 let summary = ShellText.summary(task, lang: lang)
-                if !summary.isEmpty { Text(summary).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
-                if ShellText.fullyUndone(task) == nil, let a = task.answer, !a.isEmpty, a != summary { Text(a).font(.system(size: 13)).foregroundStyle(Brand.ink).textSelection(.enabled) }
+                if !summary.isEmpty { Text(summary).font(.system(size: 15)).foregroundStyle(Brand.ink).textSelection(.enabled) }
+                if ShellText.fullyUndone(task) == nil, let a = task.answer, !a.isEmpty, a != summary { Text(a).font(.system(size: 15)).foregroundStyle(Brand.ink).textSelection(.enabled) }
                 ResultSection(shell: shell, task: task, session: session)
             }
         }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 12).strokeBorder(task.running ? Brand.dot.opacity(0.6) : Brand.line, lineWidth: 1))
+        .frame(maxWidth: 640, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L("Computer task: %@", task.raw, lang: lang))
+    }
+
+    /// 「执行中 · 第 2 步，共 4 步：写入回复」: where it is, and while it runs its current step in words.
+    private var line: String {
+        let state = ShellText.task(task, lang: lang)
+        guard task.running, let step = task.steps.last, shell.pinned(session)?.runId != task.runId else { return state }
+        return L("%@: %@", state, step.displayText, lang: lang)
     }
 
     /// Where 「跳到卡片」 scrolls to: a card drawn in place in the chat.

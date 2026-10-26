@@ -297,7 +297,7 @@ struct PermissionRow: View {
                 .background(Capsule().fill(Brand.dot.opacity(0.10)))
                 .transition(.scale.combined(with: .opacity))
             } else {
-                Button(actionTitle ?? L("Allow", lang: lang), action: action).buttonStyle(InkButtonStyle(prominent: false))
+                Button(actionTitle ?? L("Allow", lang: lang), action: action).buttonStyle(InkButtonStyle(prominent: false, small: true))
             }
         }
         .padding(.vertical, 8)
@@ -455,7 +455,7 @@ struct DevTools: View {
                     .font(.system(size: 11).monospacedDigit()).foregroundStyle(ShellColor.secondary)
                 Spacer()
                 LanguagePicker()
-            }.buttonStyle(InkButtonStyle(prominent: false))
+            }.buttonStyle(InkButtonStyle(prominent: false, small: true))
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(model.log, id: \.self) {

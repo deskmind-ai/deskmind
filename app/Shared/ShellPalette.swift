@@ -32,6 +32,19 @@ enum ShellPalette {
     static let sage = Tone(light: 0x69736A, dark: 0x8E988F)         // graphics only
     static let mist = Tone(light: 0xB2BBAF, dark: 0x4C554E)         // graphics, and the selected row's tint
     static let line = Tone(light: 0xD5D3C9, dark: 0x3B413D)         // hairlines
+    static let softLine = Tone(light: 0xE2DFD6, dark: 0x323834)     // a section card's edge (the right column), a fold's rule
+    static let buttonLine = Tone(light: 0xC9C6BB, dark: 0x4A524B)   // a secondary button's edge
+    static let ok = Tone(light: 0x3F6B41, dark: 0x7FB283)           // all is well (a dot, a check): graphics only
+    /// The sidebar: a step darker than the paper (P1Main #EAE6DC).
+    static let sidebar = Tone(light: 0xEAE6DC, dark: 0x151816)
+    /// The user's bubble (#E6E3DA).
+    static let bubble = Tone(light: 0xE6E3DA, dark: 0x2F3430)
+    /// A conversation waiting for you, in the sidebar (#FBE7E1); its 「等你」 pill is card-coloured text on orangeText.
+    static let waitRow = Tone(light: 0xFBE7E1, dark: 0x3A2822)
+    /// The live view's frame (the ink one, dark in both appearances), its text and its quieter text and icons.
+    static let frame = Tone(light: 0x262B28, dark: 0x0F1110)
+    static let frameText = Tone(light: 0xF4F1EA, dark: 0xF4F1EA)
+    static let frameQuiet = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
     /// 小方's badge: light in both appearances -- its images are dark ink, drawn on it in Dark Mode (#124 delta review:
     /// on the dark paper they were all but gone, ~1.15:1).
     static let badge = Tone(light: 0xFFFEFA, dark: 0xFFFEFA)
@@ -46,20 +59,23 @@ enum ShellPalette {
     static let problem = tint(dot, 0.07, over: paper)
 
     /// The island (the notch's black pill, the same in both appearances, as the hardware is): its fill, its text, and
-    /// its two signal colours (done, waiting) -- graphics and short status words on the fill.
+    /// its muted dot (preparing, paused, didn't finish: #8C958C). Working and needing you are the orange dot, done is
+    /// the text's white (Island board: no colour outside the palette).
     static let islandFill = Tone(light: 0x000000, dark: 0x000000)
     static let islandText = Tone(light: 0xFFFFFF, dark: 0xFFFFFF)
-    static let islandDone = Tone(light: 0x4ADE80, dark: 0x4ADE80)
-    static let islandWait = Tone(light: 0xFACC15, dark: 0xFACC15)
+    static let islandMuted = Tone(light: 0x8C958C, dark: 0x8C958C)
 
     /// Text colours and the backgrounds each is drawn on (both appearances: `textOn(_:)`).
     static let textPairs: [(text: Tone, background: Tone)] = [
-        (ink, paper), (ink, card), (ink, panel), (ink, panelSelected), (ink, banner),
-        (secondary, paper), (secondary, card), (secondary, panel), (secondary, problem), (secondary, banner),
-        (orangeText, paper), (orangeText, card), (orangeText, problem), (orangeText, banner),
+        (ink, paper), (ink, card), (ink, panel), (ink, panelSelected), (ink, banner), (ink, sidebar), (ink, bubble), (ink, waitRow),
+        (secondary, paper), (secondary, card), (secondary, panel), (secondary, problem), (secondary, banner), (secondary, sidebar),
+        (secondary, bubble), (secondary, waitRow),
+        (orangeText, paper), (orangeText, card), (orangeText, problem), (orangeText, banner), (orangeText, sidebar), (orangeText, waitRow),
+        (card, orangeText),                 // the sidebar's 「等你」 pill
+        (frameText, frame), (frameQuiet, frame),
         (error, card), (error, paper),
         (paper, ink),                       // the prominent button: paper text on an ink capsule
-        (islandText, islandFill), (islandDone, islandFill), (islandWait, islandFill), (islandFill, islandText),
+        (islandText, islandFill), (islandMuted, islandFill), (islandFill, islandText), (dot, islandFill),
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }
