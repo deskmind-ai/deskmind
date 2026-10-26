@@ -531,6 +531,10 @@ struct FloatCard: View {
             Text(line).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).fixedSize(horizontal: false, vertical: true)
         }
         if let c = layout.consent { ConsentFields(consent: c, onInk: true) }
+        // (a consent field the block does not show: the float has no 「细节」, so the whole text is here -- #129 Codex review)
+        if layout.consent?.unshown.isEmpty == false, layout.shownText == nil, !layout.text.isEmpty, layout.text != layout.title {
+            Text(layout.text).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// The picks one under another (QuestionCard: its number, its words, its second line); the buttons side by side

@@ -61,8 +61,9 @@ struct CardView: View {
             if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
             if let c = layout.consent { ConsentFields(consent: c) }
             // (an action card is its headline and its fields: the board has no 「细节」 on it -- protocol.md: the
-            // consent is the text split, no more and no less)
-            if layout.folds && layout.consent == nil {
+            // consent is the text split, no more and no less -- unless a field came that the block does not show:
+            // then the whole text stays reachable, #129 Codex review)
+            if layout.hasDetails {
                 DisclosureGroup(isExpanded: detailsOpen) {
                     VStack(alignment: .leading, spacing: 8) {
                         if !layout.text.isEmpty {
@@ -88,7 +89,7 @@ struct CardView: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
-            if phase.ending == nil, layout.consent != nil, let hint = Self.consentHint(card, lang: lang) {
+            if phase.ending == nil, layout.consent != nil, let hint = CardLayout.consentHint(card, lang: lang) {
                 Text(hint).font(.system(size: 12)).lineSpacing(2).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let held = phase.pending, case .pending(_, let until) = phase { takeBackRow(held, until: until) }
@@ -241,22 +242,6 @@ struct CardView: View {
         }
     }
 
-    /// The line under an action card's buttons (P1Waiting): what 「可以」 covers -- this once, the card's own target --
-    /// and what its 「这一步不要」 and 「先别做了」 do, each by the button's own words.
-    static func consentHint(_ card: CardModel, lang: ResolvedLang) -> String? {
-        var parts: [String] = []
-        if let t = card.consent?.target, !t.isEmpty { parts.append(L("Only for this one 「%@」.", t, lang: lang)) }
-        else { parts.append(L("Only for this once.", lang: lang)) }
-        for b in card.buttons {
-            switch b.role {
-            case .skipStep: parts.append(L("%@: this step is not done; the task goes on.", b.text, lang: lang))
-            case .cancel: parts.append(L("%@: the whole task stops here.", b.text, lang: lang))
-            default: break
-            }
-        }
-        return parts.count > 1 ? parts.joined(separator: lang == .zhHans ? "" : " ") : nil
-    }
-
     /// What a held answer picked, in the card's own words.
     static func picked(_ a: CardAnswer, card: CardModel) -> String {
         switch a {
@@ -398,16 +383,23 @@ struct ConsentFields: View {
             if !consent.action.isEmpty { row(L("Action", lang: lang), consent.action) }
             if !consent.object.isEmpty { row(L("On", lang: lang), consent.object) }
             if let site = consent.site, !site.isEmpty { row(L("Site", lang: lang), site) }
+            ForEach(Array(consent.selected.enumerated()), id: \.offset) { _, v in row(L("Selected", lang: lang), v) }
             if !consent.outgoing.isEmpty {
                 Text(L("What goes out", lang: lang)).font(.system(size: onInk ? 11 : 12, weight: .semibold)).foregroundStyle(quiet).padding(.top, 2)
                 ForEach(Array(consent.outgoing.enumerated()), id: \.offset) { _, o in row(o.label, o.value, strong: true) }
             }
+            if let e = consent.effect { note(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
+            if !consent.uncertain.isEmpty || consent.uncertainMore > 0 { UncertainSteps(consent: consent, onInk: onInk) }
+            if let m = consent.modelSays { note(L("What the model says (not checked): %@", m, lang: lang)) }
         }
         .padding(.horizontal, onInk ? 12 : 14).padding(.vertical, onInk ? 8 : 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: onInk ? 10 : 12).fill(onInk ? Color(ShellPalette.inkButton) : Brand.paper))
     }
     private var quiet: Color { onInk ? Color(ShellPalette.onInkMuted) : ShellColor.secondary }
+    private func note(_ s: String) -> some View {
+        Text(s).font(.system(size: onInk ? 11 : 12)).foregroundStyle(quiet).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    }
     private func row(_ label: String, _ value: String, strong: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label).font(.system(size: onInk ? 11 : 13)).foregroundStyle(quiet)
@@ -416,6 +408,37 @@ struct ConsentFields: View {
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// 「之前不确定是否已发出的」: each earlier step whose result is unknown, in its own words, with what it sent -- so a yes
+/// to this send is given knowing which earlier one may already have gone out -- and how many more there are.
+struct UncertainSteps: View {
+    let consent: CardLayout.Consent
+    var onInk = false
+    @Environment(\.lang) private var lang
+    private var quiet: Color { onInk ? Color(ShellPalette.onInkMuted) : ShellColor.secondary }
+    private var strong: Color { onInk ? Color(ShellPalette.onInk) : Brand.ink }
+    private var size: CGFloat { onInk ? 11 : 12 }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(L("Earlier steps that may already have gone out", lang: lang)).font(.system(size: size, weight: .semibold)).foregroundStyle(quiet)
+            ForEach(Array(consent.uncertain.enumerated()), id: \.offset) { _, u in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(u.text).font(.system(size: size)).foregroundStyle(strong).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    ForEach(Array(u.outgoing.enumerated()), id: \.offset) { _, o in
+                        Text(L("%@: %@", o.label, o.value, lang: lang)).font(.system(size: size)).foregroundStyle(quiet)
+                            .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .accessibilityElement(children: .combine)
+            }
+            if consent.uncertainMore > 0 {
+                Text(L("%d more steps with an unknown result", consent.uncertainMore, lang: lang)).font(.system(size: size)).foregroundStyle(quiet)
+            }
+        }
+        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
