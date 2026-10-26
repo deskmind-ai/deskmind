@@ -97,7 +97,7 @@ enum CardNoticesTests {
         // to the main window selects the card's own conversation first
         let floatCard = float.components(separatedBy: "struct FloatCard").last ?? ""
         check(floatCard.contains("if let c = layout.consent { ConsentFields(consent: c, onInk: true) }") && floatCard.contains("ForEach(Array(layout.beyond.enumerated())")
-              && floatCard.contains("if let t = layout.shownText") && floatCard.contains("FloatController.shared.cardLaidOut(card, height: h)"),
+              && floatCard.contains("if let t = layout.shownText") && floatCard.contains("let t = layout.wholeText") && floatCard.contains("FloatController.shared.cardLaidOut(card, height: h)"),
               "the float card: shown text, beyond lines, every consent field, its height measured")
         check(floatCard.contains("shell.select(sessionId); MainWindow.comeBack(g)"), "去主窗口回答: the card's conversation selected, then the window")
         check(float.contains("CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)], room: cardRoom)")
