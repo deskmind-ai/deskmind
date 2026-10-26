@@ -88,6 +88,8 @@ struct StepState: Equatable {
     var object: String?
     var planStep: Int?
     var target: StepTarget?
+    /// The window it acts in, by name (step.object_label, harness U3): nil from a harness before it.
+    var objectLabel: String? = nil
     /// What the step shows: its result, else what the task's end makes of a step with none (SessionReducer.settle).
     var status: Status = .running
     /// Its own result (step_result, or an older harness's status on the step): nil while it has none.
@@ -124,6 +126,9 @@ struct CardState: Equatable {
     var explicit: Outcome? = nil
     /// consent.picked after an action card was answered: what the consent covers (action / object / rule), if any.
     var picked: String? = nil
+    /// The answer the executor applied (resumed{ask_id, answer} live; session.task_answer on a replay -- harness U3):
+    /// what the answered line names. nil: none recorded (an older harness or log), the line says only 「已回答」.
+    var answer: AppliedAnswer? = nil
 }
 
 enum UndoState: Equatable {
@@ -832,6 +837,8 @@ enum SessionReducer {
             let i = taskIndex(&s, e.runId)
             s.tasks[i].respond = e
             s.tasks[i].respondAt = line.t
+        case .taskAnswer(let e):
+            if let i = s.taskPos[e.runId], let a = e.answer { applied(&s.tasks[i], e.askId, a) }
 
         case .sessionConfig(let e):
             s.settings = e
@@ -952,6 +959,7 @@ enum SessionReducer {
             st.object = e.object
             st.planStep = e.planStep
             st.target = e.target
+            st.objectLabel = e.objectLabel.isEmpty ? nil : e.objectLabel
             if e.stepId == nil, let old = e.status { st.result = resultStatus(old, else: .ok) }   // an older harness: one line per step
             if let i = task.steps.firstIndex(where: { $0.id == id }) { task.steps[i] = st } else { task.steps.append(st) }
         case .stepResult(let r):
@@ -980,6 +988,7 @@ enum SessionReducer {
         case .resumed(let r):
             if let id = r.askId {
                 setOutcome(&task, id, r.voided.map { .void($0) } ?? .answered, at: t)
+                if r.voided == nil, let a = r.answer { applied(&task, id, a) }
             } else {
                 task.userActive = false
             }
@@ -1030,6 +1039,14 @@ enum SessionReducer {
     static let answerFor = "answer for "
 
     /// The run's word on a card (the first wins): over whatever the task's end implied, which was only provisional.
+    /// The applied answer of a card, from whichever record comes first (the live `resumed`, the stored
+    /// session.task_answer: the same answer, said twice on a replay); a voided card never takes one.
+    static func applied(_ task: inout TaskState, _ askId: String, _ a: AppliedAnswer) {
+        guard let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].answer == nil else { return }
+        if case .void? = task.cards[i].explicit { return }
+        task.cards[i].answer = a
+    }
+
     private static func setOutcome(_ task: inout TaskState, _ askId: String, _ outcome: CardState.Outcome, at t: Double?) {
         if let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].explicit == nil {
             task.cards[i].explicit = outcome; task.cards[i].explicitAt = t

@@ -240,6 +240,7 @@ enum DecisionTests {
         OnePathTests.run()
         FirstRunTests.run()
         RecordingTests.run()
+        CardContentTests.run()
         ProcessTests.run()
         UIEventsTests.run()
         TaskResultTests.run()

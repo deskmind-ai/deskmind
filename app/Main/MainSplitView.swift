@@ -989,7 +989,8 @@ struct AgentPanel: View {
                               step: last.map(\.displayText), stepWindow: LiveFeed.windowNumber(last?.object),
                               target: last?.target,
                               // (only a card waiting on a button, by a rect of its own: cards carry none today, so no box)
-                              boxRect: LiveFeed.boxRect(cardWaitsOnButton: aboutToAct != nil, card: nil),
+                              boxRect: LiveFeed.boxRect(cardWaitsOnButton: waitingClick != nil, card: waitingClick?.targetBox?.rectNorm),
+                              boxWindow: LiveFeed.windowNumber(waitingClick?.object),
                               zoomed: $zoomed, popOut: { shell.togglePopOut() })
                 } else if shell.current?.runningTask != nil {
                     placeholder(L("The live view is in the float", lang: lang))
@@ -1026,16 +1027,16 @@ struct AgentPanel: View {
                         }
                     }
                 }
-                if !c.changes.isEmpty {
-                    section(L("Changes and outputs", lang: lang)) {
+                if !c.changeRows.isEmpty || c.sentLine != nil {
+                    section(L("Changes and outputs", lang: lang), link: shell.current?.tasks.last.map { t in (L("Details ›", lang: lang), { shell.showProcess(t.runId) }) }) {
+                        ForEach(Array(c.changeRows.enumerated()), id: \.offset) { _, r in changeRow(r) }
                         if c.changes.undone { line(L("All undone", lang: lang)) }
-                        list(L("Created", lang: lang), c.changes.created)
-                        list(L("Modified", lang: lang), c.changes.modified)
-                        list(L("Deleted", lang: lang), c.changes.deleted)
-                        list(L("Sent out", lang: lang), c.changes.external)
-                        if !c.changes.unconfirmed.isEmpty {
-                            line(L("Files that appeared or changed while the task worked in apps; not known to be this task's (not undone)", lang: lang))
-                            ForEach(c.changes.unconfirmed, id: \.self) { line($0) }
+                        if let s = c.sentLine {
+                            HStack(spacing: 10) {
+                                Image(systemName: "paperplane").font(.system(size: 13)).foregroundStyle(ShellColor.secondary).frame(width: 16).accessibilityHidden(true)
+                                Text(s == .noneYetWaiting ? L("Sent: none yet, waiting for you", lang: lang) : { if case .count(let n) = s { return L("Sent: %d", n, lang: lang) }; return "" }())
+                                    .font(.system(size: 13)).foregroundStyle(ShellColor.secondary)
+                            }
                         }
                     }
                 }
@@ -1048,10 +1049,15 @@ struct AgentPanel: View {
     /// 「准备点：<target>」: the button the open action card itself names (its consent: a click, on its target), while
     /// it waits -- never worked out from the steps; none when the card names none.
     private var aboutToAct: String? {
-        guard let s = shell.current, let p = shell.pinned(s), p.phase == .open,
-              let c = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId).consent, c.action == "click",
-              let t = c.target, !t.isEmpty else { return nil }
+        guard let t = waitingClick?.target, !t.isEmpty else { return nil }
         return t
+    }
+
+    /// The open action card's consent when it waits on a button (a click): its target's name and box are the mark.
+    private var waitingClick: ConsentFacts? {
+        guard let s = shell.current, let p = shell.pinned(s), p.phase == .open,
+              let c = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId).consent, c.action == "click" else { return nil }
+        return c
     }
 
     /// The open card's own target (any action), for 「任务停在<它>前」.
@@ -1120,8 +1126,29 @@ struct AgentPanel: View {
         .font(.system(size: 13))
         .accessibilityElement(children: .combine)
     }
-    @ViewBuilder private func list(_ label: String, _ items: [String]) -> some View {
-        if !items.isEmpty { line(L("%@: %@", label, items.joined(separator: L(", ", lang: lang)), lang: lang)) }
+    /// One thing changed (RightColumn.ChangeRow): its icon, its name, and under it where it is or what was done and
+    /// how; struck through when undone.
+    private func changeRow(_ r: RightColumn.ChangeRow) -> some View {
+        let icon = switch r.icon { case .file: "doc"; case .window: "macwindow"; case .send: "paperplane"; case .unknown: "questionmark.circle" }
+        let what: String = switch r.what {
+        case .sent: L("went out", lang: lang)
+        case .changedYours, .modified: L("Changed yours", lang: lang)
+        case .created: L("Created", lang: lang)
+        case .deleted: L("deleted", lang: lang)
+        case .byAnother: L("Changed by another program, not undone", lang: lang)
+        case .unsure: L("Can't tell if it happened", lang: lang)
+        case .openedWindow: L("Opened window", lang: lang)
+        }
+        let sub = ([r.detail, what, r.unverified ? L("not read back", lang: lang) : nil, r.struck ? L("Undone", lang: lang) : nil])
+            .compactMap { $0 }.joined(separator: " · ")
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon).font(.system(size: 13)).foregroundStyle(Brand.ink).frame(width: 16).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(r.name).font(.system(size: 13)).foregroundStyle(Brand.ink).strikethrough(r.struck).lineLimit(1).truncationMode(.middle)
+                Text(sub).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
     private func line(_ text: String) -> some View {
         Text(text).font(.system(size: 13)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)

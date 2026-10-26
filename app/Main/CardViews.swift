@@ -59,7 +59,7 @@ struct CardView: View {
                 Text(line).font(.system(size: 13)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
             }
             if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
-            if let c = layout.consent { ConsentFields(consent: c) }
+            if let c = layout.consent { ConsentFields(consent: c, showsAction: card.headline == nil) }
             // (an action card is its headline and its fields: the board has no 「细节」 on it -- protocol.md: the
             // consent is the text split, no more and no less)
             if layout.folds && layout.consent == nil {
@@ -343,6 +343,54 @@ struct KeyCap: View {
     }
 }
 
+/// A card no longer pinned, in one line (U3, P1Main): its kind in bold, what was picked, how and when it closed
+/// (ShellText.cardSummary); a plan's opens to its steps.
+struct AnsweredRow: View {
+    let card: CardState
+    let runId: String
+    let phase: CardPhase
+    @Environment(\.lang) private var lang
+    @State private var open = false
+
+    var body: some View {
+        let s = ShellText.cardSummary(card, phase: phase, runId: runId, lang: lang)
+        let layout = CardLayout(CardModel(card: card.card, runId: runId, askId: card.askId))
+        let plan = layout.plan.isEmpty ? nil : layout
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
+                (Text(s.kind).fontWeight(.semibold).foregroundColor(Brand.ink)
+                 + Text(s.pick.map { "  " + $0 } ?? "").foregroundColor(Brand.ink)
+                 + Text("  " + s.tail).foregroundColor(ShellColor.secondary))
+                    .font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 4)
+                if plan != nil {
+                    Button(open ? L("Collapse", lang: lang) : L("Expand", lang: lang)) { open.toggle() }
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                        .accessibilityLabel(open ? L("Collapse", lang: lang) : L("Expand", lang: lang))
+                        .accessibilityHint(L("Shows the plan's steps", lang: lang))
+                }
+            }
+            if open, let plan { PlanSteps(rows: plan.plan, foreground: plan.foreground) }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(maxWidth: 600, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(ShellColor.softLine))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(s.line)
+    }
+
+    private var icon: String {
+        switch CardModel.Kind(card.card.kind) {
+        case .ambiguity, .missing: "list.bullet"
+        case .plan: "list.number"
+        case .action: "checkmark.seal"
+        default: "questionmark.circle"
+        }
+    }
+}
+
 /// A plan card's steps (card.plan): what each does, what it touches, the sites it opens and what goes to them, with
 /// words for what changes the user's things and what goes out (never colour alone, handoff §3.10).
 struct PlanSteps: View {
@@ -392,15 +440,37 @@ struct ConsentFields: View {
     let consent: CardLayout.Consent
     /// On an ink surface (the float): a darker block, its words in the ink surface's colours.
     var onInk = false
+    /// The card has no headline (an older harness): the action in the block's first line, else it is the title's.
+    var showsAction = false
     @Environment(\.lang) private var lang
+
+    /// P1Waiting: 「要发出去的」, then what the task typed (or the first field) large, the other fields as label and
+    /// value, what is picked, the window's other text quietly -- every line (CardLayout.Block: none lost) -- and the
+    /// site and the window it acts in.
     var body: some View {
+        let b = consent.block
         VStack(alignment: .leading, spacing: 6) {
-            if !consent.action.isEmpty { row(L("Action", lang: lang), consent.action) }
-            if !consent.object.isEmpty { row(L("On", lang: lang), consent.object) }
-            if let site = consent.site, !site.isEmpty { row(L("Site", lang: lang), site) }
-            if !consent.outgoing.isEmpty {
-                Text(L("What goes out", lang: lang)).font(.system(size: onInk ? 11 : 12, weight: .semibold)).foregroundStyle(quiet).padding(.top, 2)
-                ForEach(Array(consent.outgoing.enumerated()), id: \.offset) { _, o in row(o.label, o.value, strong: true) }
+            if showsAction && !consent.action.isEmpty { pair(L("Action", lang: lang), consent.action) }
+            if b.count == 0 {
+                Text(L("Nothing to send shows in the window", lang: lang)).font(.system(size: 12)).foregroundStyle(quiet)
+            } else {
+                Text(L("What goes out", lang: lang)).font(.system(size: onInk ? 11 : 12, weight: .semibold)).foregroundStyle(quiet)
+                if let l = b.lead {
+                    Text(verbatim: "「" + l.value + "」").font(.system(size: onInk ? 13 : 15, weight: .bold)).foregroundStyle(strong)
+                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(Array((b.fields + b.other).enumerated()), id: \.offset) { _, o in pair(o.label, o.value) }
+                ForEach(Array(b.selected.enumerated()), id: \.offset) { _, o in pair(L("Selected", lang: lang), o.value) }
+                if !b.text.isEmpty {
+                    Text(L("Also in the window:", lang: lang)).font(.system(size: onInk ? 11 : 12)).foregroundStyle(quiet).padding(.top, 2)
+                    ForEach(Array(b.text.enumerated()), id: \.offset) { _, o in
+                        Text(o.value).font(.system(size: onInk ? 11 : 12)).foregroundStyle(quiet).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            if let site = consent.site, !site.isEmpty { pair(L("Site", lang: lang), site) }
+            if !consent.object.isEmpty {
+                Text(L("In %@", consent.object, lang: lang)).font(.system(size: onInk ? 11 : 13)).foregroundStyle(quiet).fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.horizontal, onInk ? 12 : 14).padding(.vertical, onInk ? 8 : 10)
@@ -408,11 +478,11 @@ struct ConsentFields: View {
         .background(RoundedRectangle(cornerRadius: onInk ? 10 : 12).fill(onInk ? Color(ShellPalette.inkButton) : Brand.paper))
     }
     private var quiet: Color { onInk ? Color(ShellPalette.onInkMuted) : ShellColor.secondary }
-    private func row(_ label: String, _ value: String, strong: Bool = false) -> some View {
+    private var strong: Color { onInk ? Color(ShellPalette.onInk) : Brand.ink }
+    private func pair(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(label).font(.system(size: onInk ? 11 : 13)).foregroundStyle(quiet)
-            Text(value).font(.system(size: onInk ? (strong ? 13 : 11) : (strong ? 15 : 13), weight: strong ? .bold : .regular))
-                .foregroundStyle(onInk ? Color(ShellPalette.onInk) : Brand.ink)
+            Text(value).font(.system(size: onInk ? 11 : 13)).foregroundStyle(strong)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)

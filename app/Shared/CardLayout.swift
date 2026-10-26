@@ -43,14 +43,47 @@ struct CardLayout: Equatable {
         var sendsOut: Bool
     }
     struct Site: Equatable { var host: String; var sends: String?; var asksEach: Bool }
-    /// One line of what goes out (a consent card's outgoing).
-    struct Outgoing: Equatable { var label: String; var value: String }
+    /// One line of what goes out (a consent card's outgoing): its kind as the executor gave it (field, selected, typed,
+    /// text), its label (the kind when it has none), its value.
+    struct Outgoing: Equatable {
+        var label: String
+        var value: String
+        var kind: String = ""
+        init(label: String, value: String, kind: String = "") { self.label = label; self.value = value; self.kind = kind }
+    }
     /// A consent card's fields.
     struct Consent: Equatable {
         var action: String
         var object: String
         var site: String?
         var outgoing: [Outgoing]
+
+        /// 「要发出去的」 as the P1Waiting board lays it out, by the executor's kinds and order only (never by what a label
+        /// says, U3 §2.2): the lead line -- the first of what the task typed, else the first filled field -- the other
+        /// fields, the picked items, the window's other text, and any line of a kind not known. Every line of
+        /// `outgoing` is in exactly one of them (none lost: A2).
+        var block: Block {
+            var b = Block()
+            let leadAt = outgoing.firstIndex { $0.kind == "typed" } ?? outgoing.firstIndex { $0.kind == "field" }
+            for (i, o) in outgoing.enumerated() {
+                if i == leadAt { b.lead = o; continue }
+                switch o.kind {
+                case "field", "typed": b.fields.append(o)
+                case "selected": b.selected.append(o)
+                case "text": b.text.append(o)
+                default: b.other.append(o)
+                }
+            }
+            return b
+        }
+    }
+    struct Block: Equatable {
+        var lead: Outgoing?
+        var fields: [Outgoing] = []
+        var selected: [Outgoing] = []
+        var text: [Outgoing] = []
+        var other: [Outgoing] = []
+        var count: Int { (lead == nil ? 0 : 1) + fields.count + selected.count + text.count + other.count }
     }
 
     /// One option's control.
@@ -109,7 +142,7 @@ struct CardLayout: Equatable {
         folds = card.headline != nil && (!card.text.isEmpty || !plan.isEmpty) && !(card.kind == .action && card.consent == nil)
         consent = card.consent.map { c in
             Consent(action: c.actionText.isEmpty ? c.action : c.actionText, object: c.objectLabel.isEmpty ? c.object : c.objectLabel,
-                    site: c.site, outgoing: c.outgoing.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value) })
+                    site: c.site, outgoing: c.outgoing.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value, kind: $0.kind) })
         }
     }
 

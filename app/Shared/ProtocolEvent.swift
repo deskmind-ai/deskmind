@@ -143,8 +143,22 @@ struct ConsentFacts: Codable, Equatable {
     @LStr var consequence: String = ""
     @LList<Outgoing> var outgoing: [Outgoing] = []
     var site: String?
+    /// Where its element is (harness U3: as step.target's rect_norm / frame), from the look the card was made from: the
+    /// app marks it on the picture while the card waits. Absent: no mark.
+    var targetBox: TargetBox?
+    struct TargetBox: Codable, Equatable {
+        var rectNorm: [Double]?
+        var frame: [Double]?
+        enum CodingKeys: String, CodingKey { case rectNorm = "rect_norm", frame }
+        init(rectNorm: [Double]? = nil, frame: [Double]? = nil) { self.rectNorm = rectNorm; self.frame = frame }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            rectNorm = (try? c.decodeIfPresent([Double].self, forKey: .rectNorm)) ?? nil
+            frame = (try? c.decodeIfPresent([Double].self, forKey: .frame)) ?? nil
+        }
+    }
     enum CodingKeys: String, CodingKey {
-        case action, actionText = "action_text", target, object, objectLabel = "object_label", consequence, outgoing, site
+        case action, actionText = "action_text", target, object, objectLabel = "object_label", consequence, outgoing, site, targetBox = "target_box"
     }
 }
 
@@ -434,7 +448,10 @@ struct StepEvent: Codable, Equatable {
     var human: String?
     var planStep: Int?
     var target: StepTarget?
-    enum CodingKeys: String, CodingKey { case text, consequence, object, status, purpose, stepId = "step_id", human, planStep = "plan_step", target }
+    /// The window it acts in, by name (harness U3; the card's object_label's words): only on a step with a window ("":
+    /// none, or a harness before U3).
+    @LStr var objectLabel: String = ""
+    enum CodingKeys: String, CodingKey { case text, consequence, object, status, purpose, stepId = "step_id", human, planStep = "plan_step", target, objectLabel = "object_label" }
 }
 
 struct Frame: Codable, Equatable {
@@ -482,7 +499,59 @@ struct ResumedEvent: Codable, Equatable {
     var voided: String?
     /// Without ask_id: how the wait for the user ended — "" they paused, "stopped", "timed_out".
     var why: String?
-    enum CodingKeys: String, CodingKey { case askId = "ask_id", voided, why }
+    /// With ask_id, never with voided (harness U3): the answer the executor applied to the card; absent when it closed
+    /// on none (an index out of range, blank words) or from a harness before U3.
+    var answer: AppliedAnswer?
+    enum CodingKeys: String, CodingKey { case askId = "ask_id", voided, why, answer }
+    init(askId: String? = nil, voided: String? = nil, why: String? = nil, answer: AppliedAnswer? = nil) {
+        self.askId = askId; self.voided = voided; self.why = why; self.answer = answer
+    }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        askId = try? c.decodeIfPresent(String.self, forKey: .askId)
+        voided = try? c.decodeIfPresent(String.self, forKey: .voided)
+        why = try? c.decodeIfPresent(String.self, forKey: .why)
+        answer = (try? c.decodeIfPresent(AppliedAnswer.self, forKey: .answer)) ?? nil     // (lenient: a wrong shape is no answer)
+    }
+}
+
+/// The answer the executor applied to a card (harness U3): an option's index into the card's options, or the user's
+/// own words. What was used, not what was sent.
+enum AppliedAnswer: Codable, Equatable {
+    case option(Int)
+    case text(String)
+    private enum K: String, CodingKey { case option, text }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        if let i = try? c.decode(Int.self, forKey: .option) { self = .option(i); return }
+        if let t = try? c.decode(String.self, forKey: .text), !t.isEmpty { self = .text(t); return }
+        throw DecodingError.dataCorrupted(.init(codingPath: d.codingPath, debugDescription: "no option or text"))
+    }
+    func encode(to e: Encoder) throws {
+        var c = e.container(keyedBy: K.self)
+        switch self { case .option(let i): try c.encode(i, forKey: .option); case .text(let t): try c.encode(t, forKey: .text) }
+    }
+}
+
+/// session.task_answer (harness U3, stored): the answer the executor applied to a card, as the session recorded it
+/// before passing on the `resumed` -- the history's copy, replayed on reopen.
+struct SessionTaskAnswer: Codable, Equatable {
+    @LStr var runId: String = ""
+    @LStr var askId: String = ""
+    var option: Int?
+    var text: String?
+    enum CodingKeys: String, CodingKey { case runId = "run_id", askId = "ask_id", option, text }
+    init(runId: String, askId: String, option: Int? = nil, text: String? = nil) {
+        self.runId = runId; self.askId = askId; self.option = option; self.text = text
+    }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        _runId = try c.decode(LStr.self, forKey: .runId)
+        _askId = try c.decode(LStr.self, forKey: .askId)
+        option = (try? c.decodeIfPresent(Int.self, forKey: .option)) ?? nil
+        text = (try? c.decodeIfPresent(String.self, forKey: .text)) ?? nil
+    }
+    var answer: AppliedAnswer? { option.map { .option($0) } ?? text.flatMap { $0.isEmpty ? nil : .text($0) } }
 }
 
 struct AskVoid: Codable, Equatable {
@@ -562,6 +631,12 @@ enum TaskCause: String, Codable, Equatable {
 }
 
 extension KeyedDecodingContainer {
+    /// `consent.target_box`: one of another shape is none -- never a lost card (#124 review).
+    func decodeIfPresent(_ type: ConsentFacts.TargetBox.Type, forKey key: Key) throws -> ConsentFacts.TargetBox? {
+        guard contains(key) else { return nil }
+        return try? decode(ConsentFacts.TargetBox.self, forKey: key)
+    }
+
     /// `cause`: an unknown value, or one of another type, is nil.
     func decodeIfPresent(_ type: TaskCause.Type, forKey key: Key) throws -> TaskCause? {
         ((try? decodeIfPresent(String.self, forKey: key)) ?? nil).flatMap(TaskCause.init(rawValue:))
@@ -612,6 +687,7 @@ enum ProtocolEvent: Equatable {
     case taskClosed(SessionTaskClosed)
     case taskUndo(SessionTaskUndo)
     case taskRespond(SessionTaskRespond)
+    case taskAnswer(SessionTaskAnswer)
     case sessionConfig(SessionConfigEvent)
     case steer(SessionSteer)
     case retry(SessionRetry)
@@ -657,6 +733,7 @@ enum ProtocolEvent: Equatable {
         case .taskClosed: return "session.task_closed"
         case .taskUndo: return "session.task_undo"
         case .taskRespond: return "session.task_respond"
+        case .taskAnswer: return "session.task_answer"
         case .sessionConfig: return "session.config"
         case .steer: return "session.steer"
         case .retry: return "session.retry"
@@ -720,6 +797,7 @@ extension ProtocolEvent: Codable {
         case "session.task_closed": self = read(ProtocolEvent.taskClosed)
         case "session.task_undo": self = read(ProtocolEvent.taskUndo)
         case "session.task_respond": self = read(ProtocolEvent.taskRespond)
+        case "session.task_answer": self = read(ProtocolEvent.taskAnswer)
         case "session.config": self = read(ProtocolEvent.sessionConfig)
         case "session.steer": self = read(ProtocolEvent.steer)
         case "session.retry": self = read(ProtocolEvent.retry)
@@ -765,6 +843,7 @@ extension ProtocolEvent: Codable {
         case .taskClosed(let v): try v.encode(to: encoder)
         case .taskUndo(let v): try v.encode(to: encoder)
         case .taskRespond(let v): try v.encode(to: encoder)
+        case .taskAnswer(let v): try v.encode(to: encoder)
         case .sessionConfig(let v): try v.encode(to: encoder)
         case .steer(let v): try v.encode(to: encoder)
         case .retry(let v): try v.encode(to: encoder)

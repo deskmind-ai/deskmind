@@ -236,8 +236,30 @@ enum CardLayoutTests {
               "two steps: the external one sends out, its site and what goes; an object with no label shows its ref; the front app")
         let action = CardLayout(model(samples().first { $0.name == "action: consent" }!.card))
         check(action.consent == CardLayout.Consent(action: "在 Mail 里点「发送」", object: "Mail「周报」", site: "mail.example.com",
-                                                   outgoing: [.init(label: "收件人", value: "wang@example.com"), .init(label: "主题", value: "周报"), .init(label: "正文", value: "本周…")]),
+                                                   outgoing: [.init(label: "收件人", value: "wang@example.com", kind: "to"), .init(label: "主题", value: "周报", kind: "subject"),
+                                                              .init(label: "正文", value: "本周…", kind: "body")]),
               "the action card: the action, its object, the site, every line of what goes out: \(String(describing: action.consent))")
+        // U3 §2.2: 「要发出去的」 by the executor's kinds and order, never by what a label says; no line lost
+        typealias O = CardLayout.Outgoing
+        func block(_ o: [O]) -> CardLayout.Block { CardLayout.Consent(action: "", object: "", site: nil, outgoing: o).block }
+        let mail = block([O(label: "url", value: "https://mail.example.com", kind: "url"), O(label: "收件人", value: "许诺", kind: "field"),
+                          O(label: "主题", value: "Re: 方案评审", kind: "field"), O(label: "typed", value: "我看一下再说", kind: "typed"),
+                          O(label: "text", value: "10月20日 许诺 写道", kind: "text")])
+        check(mail.lead?.value == "我看一下再说" && mail.fields.map(\.label) == ["收件人", "主题"] && mail.text.map(\.value) == ["10月20日 许诺 写道"]
+              && mail.other.map(\.kind) == ["url"] && mail.count == 5, "mail: what was typed leads, the fields in order, the window's text, the URL kept: \(mail)")
+        let picked = block([O(label: "选项", value: "加急", kind: "selected")])
+        check(picked.lead == nil && picked.selected.map(\.value) == ["加急"] && picked.count == 1, "only a picked item: no lead, the item")
+        let noTyped = block([O(label: "金额", value: "120", kind: "field"), O(label: "备注", value: "x", kind: "field")])
+        check(noTyped.lead?.label == "金额" && noTyped.fields.map(\.label) == ["备注"], "nothing typed: the first field leads")
+        check(block([]).count == 0 && block([]).lead == nil, "nothing goes out: an empty block")
+        var g = CardStoreTests.RNG(x: 77)
+        let kinds = ["field", "selected", "typed", "text", "url", "other"]
+        for _ in 0..<300 {
+            let o = (0..<g.next(9)).map { i in O(label: "l\(i)", value: "v\(i)", kind: kinds[g.next(kinds.count)]) }
+            let b = block(o)
+            let all = (b.lead.map { [$0] } ?? []) + b.fields + b.selected + b.text + b.other
+            if Set(all.map(\.value)) != Set(o.map(\.value)) || all.count != o.count { check(false, "a line lost or twice: \(o) -> \(b)"); break }
+        }
         check(CardLayout(model(samples().first { $0.name == "ambiguity" }!.card)).consent == nil, "no consent on a choice card")
         // VoiceOver's card label: its state, its kind, its first sentence, its number of options (handoff §3.10)
         let hint = CardLayout.hint(action.controls[0], keys: true, lang: .zhHans)

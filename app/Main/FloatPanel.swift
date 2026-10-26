@@ -309,7 +309,8 @@ struct FloatView: View {
             // (「准备点」 and the box by the right column's rule: the open click card's own target, the card's own rect)
             LiveFrame(picture: still ?? float.dock.picture, state: still == nil ? float.dock.state : .streaming,
                       app: nil, waiting: waits(n), about: Self.aboutToAct(n), step: nil, stepWindow: LiveFeed.windowNumber(last?.object),
-                      target: last?.target, boxRect: LiveFeed.boxRect(cardWaitsOnButton: Self.aboutToAct(n) != nil, card: nil),
+                      target: last?.target, boxRect: LiveFeed.boxRect(cardWaitsOnButton: Self.waitingClick(n) != nil, card: Self.waitingClick(n)?.targetBox?.rectNorm),
+                      boxWindow: LiveFeed.windowNumber(Self.waitingClick(n)?.object),
                       zoomed: $zoomed, popOut: {}, chrome: false)
             if let card = n.card, let phase = n.phase, let p = n.placement {
                 FloatCard(shell: shell, sessionId: n.sessionId, card: card, phase: phase, placement: p)
@@ -380,8 +381,12 @@ struct FloatView: View {
 
     /// The button the open action card names (its consent: a click on its target) -- the right column's rule.
     static func aboutToAct(_ n: FloatController.Now) -> String? {
-        guard n.phase == .open, let c = n.card?.consent, c.action == "click", let t = c.target, !t.isEmpty else { return nil }
+        guard let t = waitingClick(n)?.target, !t.isEmpty else { return nil }
         return t
+    }
+    static func waitingClick(_ n: FloatController.Now) -> ConsentFacts? {
+        guard n.phase == .open, let c = n.card?.consent, c.action == "click" else { return nil }
+        return c
     }
 
     private func stateWord(_ n: FloatController.Now) -> String {
