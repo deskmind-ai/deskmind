@@ -24,7 +24,13 @@ struct ProcessTabs: Equatable {
         /// `latest`: the conversation's latest run, the one 过程 would show when it shows none yet.
         case picked(Tab, latest: String?)
         case clickedTask(String)
+        /// 「明细 ›」: the run's 过程, at its 改动 section.
+        case clickedChanges(String)
     }
+    /// Where 过程 is asked to show (a section), and how many times it was asked (each ask scrolls again).
+    enum Focus: Equatable { case changes }
+    var focus: Focus?
+    var focusAsks = 0
 
     var tab: Tab = .now
     /// The run 过程 shows (nil: the conversation's latest).
@@ -45,7 +51,9 @@ struct ProcessTabs: Equatable {
             stayNow = t == .now
             if t == .process, run == nil { run = latest }
         case .clickedTask(let r):
-            tab = .process; run = r; stayNow = false
+            tab = .process; run = r; stayNow = false; focus = nil
+        case .clickedChanges(let r):
+            tab = .process; run = r; stayNow = false; focus = .changes; focusAsks += 1
         }
     }
 }

@@ -41,6 +41,12 @@ enum RunDir {
         var shot: String?
         /// The trace's executor.act for it (nil: no trace, or none for this step).
         var act: Act?
+        /// What 改动和产出 reads of it (RightColumn.ChangeInput): its object, its window's name (object_label), its
+        /// own words, its consequence (step_result's when it says one).
+        var object: String? = nil
+        var objectLabel: String? = nil
+        var human: String? = nil
+        var consequence: String? = nil
     }
     struct Act: Equatable {
         var status: String
@@ -101,12 +107,17 @@ enum RunDir {
         var notCredited: [String]?
         var externalChange: [String]?
         var windowsCreated: [String]?
+        /// The windows the task made (changes.created_windows: task_done's, else the last changes event's).
+        var createdWindows: [String] = []
+        /// All of it undone (result_response: every change, none refused).
+        var fullyUndone = false
 
         static func == (a: Changes, b: Changes) -> Bool {
             a.created == b.created && a.modified == b.modified && a.deleted == b.deleted && a.external == b.external
                 && a.unconfirmed == b.unconfirmed && a.final == b.final && a.undo?.effect == b.undo?.effect
                 && a.undo?.undone == b.undo?.undone && a.undo?.total == b.undo?.total && a.filesWritten == b.filesWritten
                 && a.notCredited == b.notCredited && a.externalChange == b.externalChange && a.windowsCreated == b.windowsCreated
+                && a.createdWindows == b.createdWindows && a.fullyUndone == b.fullyUndone
         }
     }
 
@@ -186,10 +197,13 @@ enum RunDir {
                 guard index[id] == nil else { continue }
                 index[id] = m.steps.count
                 m.steps.append(Step(stepId: id, planStep: e["plan_step"] as? Int, words: str(e["human"]) ?? str(e["text"]) ?? "",
-                                    act: trace == nil ? nil : acts[id]))
+                                    act: trace == nil ? nil : acts[id], object: str(e["object"]),
+                                    objectLabel: str(e["object_label"]).flatMap { $0.isEmpty ? nil : $0 },
+                                    human: str(e["human"]).flatMap { $0.isEmpty ? nil : $0 }, consequence: str(e["consequence"])))
             case "step_result":
                 guard let i = index[id] else { continue }
                 m.steps[i].status = str(e["status"]); m.steps[i].why = str(e["why"]).flatMap { $0.isEmpty ? nil : $0 }
+                if let c = str(e["consequence"]) { m.steps[i].consequence = c }
                 if let s = str(e["shot"]).flatMap(contained), f.shots.contains(shotName(s)) { m.steps[i].shot = s }
             case "shot_ready":
                 guard let i = index[id], let s = str(e["shot"]).flatMap(contained), f.shots.contains(shotName(s)) else { continue }
@@ -227,8 +241,12 @@ enum RunDir {
         if let c = (done?["changes"] as? [String: Any]) ?? lastChanges {
             var ch = Changes(created: list(c["created"]), modified: list(c["modified"]), deleted: list(c["deleted"]),
                              external: list(c["external"]), unconfirmed: list(c["unconfirmed"]), final: done?["changes"] != nil)
+            ch.createdWindows = list((done?["changes"] as? [String: Any])?["created_windows"]).isEmpty
+                ? list(lastChanges?["created_windows"]) : list((done?["changes"] as? [String: Any])?["created_windows"])
             if let r = events.last(where: { $0["kind"] as? String == "result_response" }), let effect = str(r["effect"]) {
-                ch.undo = (effect, (r["undone"] as? NSNumber)?.intValue, (r["total"] as? NSNumber)?.intValue)
+                let undone = (r["undone"] as? NSNumber)?.intValue, total = (r["total"] as? NSNumber)?.intValue
+                ch.undo = (effect, undone, total)
+                ch.fullyUndone = undone != nil && undone == total && (total ?? 0) > 0 && str(r["refused"]) == nil
             }
             if trace != nil {
                 func paths(_ kind: String) -> [String] { t.filter { $0["kind"] as? String == kind }.flatMap { list($0["paths"]) } }

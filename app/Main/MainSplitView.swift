@@ -163,6 +163,36 @@ struct MainColumns: View {
     }
 }
 
+/// One thing changed (RightColumn.ChangeRow): its icon, its name, and under it where it is or what was done and how;
+/// struck through when undone. The right column's 改动和产出 and 过程's 改动 draw the same rows with it.
+struct ChangeRowView: View {
+    let row: RightColumn.ChangeRow
+    @Environment(\.lang) private var lang
+    var body: some View {
+        let r = row
+        let icon = switch r.icon { case .file: "doc"; case .window: "macwindow"; case .send: "paperplane"; case .unknown: "questionmark.circle" }
+        let what: String = switch r.what {
+        case .sent: L("went out", lang: lang)
+        case .changedYours, .modified: L("Changed yours", lang: lang)
+        case .created: L("Created", lang: lang)
+        case .deleted: L("deleted", lang: lang)
+        case .byAnother: L("Changed by another program, not undone", lang: lang)
+        case .unsure: L("Can't tell if it happened", lang: lang)
+        case .openedWindow: L("Opened window", lang: lang)
+        }
+        let sub = ([r.detail, what, r.unverified ? L("not read back", lang: lang) : nil, r.struck ? L("Undone", lang: lang) : nil])
+            .compactMap { $0 }.joined(separator: " · ")
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon).font(.system(size: 13)).foregroundStyle(Brand.ink).frame(width: 16).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(r.name).font(.system(size: 13)).foregroundStyle(Brand.ink).strikethrough(r.struck).lineLimit(1).truncationMode(.middle)
+                Text(sub).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// A 1 pt line in the hairline colour (#D5D3C9), between columns and under the header.
 struct Hairline: View {
     var vertical = false
@@ -941,7 +971,8 @@ struct AgentPanel: View {
             .padding(.horizontal, 18).padding(.top, 16)
             if shell.currentTabs.tab == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
-                ProcessPane(sessionId: sid, runId: run).equatable().id(sid + "/" + run).padding(.horizontal, 18)
+                ProcessPane(sessionId: sid, runId: run, focus: shell.currentTabs.focus, focusAsks: shell.currentTabs.focusAsks)
+                    .equatable().id(sid + "/" + run).padding(.horizontal, 18)
             } else if shell.currentTabs.tab == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -1028,9 +1059,8 @@ struct AgentPanel: View {
                     }
                 }
                 if !c.changeRows.isEmpty || c.sentLine != nil {
-                    section(L("Changes and outputs", lang: lang), link: shell.current?.tasks.last.map { t in (L("Details ›", lang: lang), { shell.showProcess(t.runId) }) }) {
-                        ForEach(Array(c.changeRows.enumerated()), id: \.offset) { _, r in changeRow(r) }
-                        if c.changes.undone { line(L("All undone", lang: lang)) }
+                    section(L("Changes and outputs", lang: lang), link: shell.current?.tasks.last.map { t in (L("Details ›", lang: lang), { shell.showChanges(t.runId) }) }) {
+                        ForEach(Array(c.changeRows.enumerated()), id: \.offset) { _, r in ChangeRowView(row: r) }
                         if let s = c.sentLine {
                             HStack(spacing: 10) {
                                 Image(systemName: "paperplane").font(.system(size: 13)).foregroundStyle(ShellColor.secondary).frame(width: 16).accessibilityHidden(true)
@@ -1038,6 +1068,7 @@ struct AgentPanel: View {
                                     .font(.system(size: 13)).foregroundStyle(ShellColor.secondary)
                             }
                         }
+                        if c.changes.undone { line(L("All undone", lang: lang)) }
                     }
                 }
             }
@@ -1124,30 +1155,6 @@ struct AgentPanel: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .font(.system(size: 13))
-        .accessibilityElement(children: .combine)
-    }
-    /// One thing changed (RightColumn.ChangeRow): its icon, its name, and under it where it is or what was done and
-    /// how; struck through when undone.
-    private func changeRow(_ r: RightColumn.ChangeRow) -> some View {
-        let icon = switch r.icon { case .file: "doc"; case .window: "macwindow"; case .send: "paperplane"; case .unknown: "questionmark.circle" }
-        let what: String = switch r.what {
-        case .sent: L("went out", lang: lang)
-        case .changedYours, .modified: L("Changed yours", lang: lang)
-        case .created: L("Created", lang: lang)
-        case .deleted: L("deleted", lang: lang)
-        case .byAnother: L("Changed by another program, not undone", lang: lang)
-        case .unsure: L("Can't tell if it happened", lang: lang)
-        case .openedWindow: L("Opened window", lang: lang)
-        }
-        let sub = ([r.detail, what, r.unverified ? L("not read back", lang: lang) : nil, r.struck ? L("Undone", lang: lang) : nil])
-            .compactMap { $0 }.joined(separator: " · ")
-        return HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon).font(.system(size: 13)).foregroundStyle(Brand.ink).frame(width: 16).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(r.name).font(.system(size: 13)).foregroundStyle(Brand.ink).strikethrough(r.struck).lineLimit(1).truncationMode(.middle)
-                Text(sub).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-            }
-        }
         .accessibilityElement(children: .combine)
     }
     private func line(_ text: String) -> some View {

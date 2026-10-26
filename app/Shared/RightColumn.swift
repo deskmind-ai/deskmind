@@ -119,23 +119,57 @@ struct RightColumn: Equatable {
         var col = RightColumn(status: status, progress: progress, youAreUsingIt: t.running && t.userActive,
                               screenLocked: t.ended && t.cause == .screenLocked, plan: plan, changes: changes,
                               computerUsedBy: s.runningTask == nil ? otherRunning : nil)
-        col.changeRows = rows(t, undone: changes.undone)
+        col.changeRows = rows(ChangeInput.of(t))
         let sent = col.changeRows.filter { $0.what == .sent }.count
         let waitsToSend: Bool = { if case .waitingForYou = status { return plan.contains { $0.asksFirst && $0.mark != .done } }; return false }()
         col.sentLine = sent > 0 ? .count(sent) : waitsToSend ? .noneYetWaiting : nil
         return col
     }
 
-    /// The task's changes as rows (the second table).
-    static func rows(_ t: TaskState, undone: Bool) -> [ChangeRow] {
+    /// What the rows are made from: the steps and the changes, from the session's state (the right column) or from the
+    /// run's own record (过程: RunDir) -- one input, one function, the same rows in both places.
+    struct ChangeInput: Equatable {
+        struct Step: Equatable {
+            var id: String
+            var object: String?
+            var objectLabel: String?
+            var human: String?
+            var consequence: String?
+            /// step_result's status (ok, unverified, refused, …; nil: none yet).
+            var result: String?
+        }
+        var steps: [Step] = []
+        var created: [String] = [], modified: [String] = [], deleted: [String] = [], external: [String] = [], unconfirmed: [String] = []
+        var createdWindows: [String] = []
+        var undone = false
+
+        static func of(_ t: TaskState) -> ChangeInput {
+            let c = t.changes
+            return ChangeInput(steps: t.steps.map { Step(id: $0.id, object: $0.object, objectLabel: $0.objectLabel, human: $0.human,
+                                                         consequence: $0.consequence, result: $0.result?.rawValue) },
+                               created: c.created, modified: c.modified, deleted: c.deleted, external: c.external, unconfirmed: c.unconfirmed,
+                               createdWindows: c.createdWindows ?? [], undone: ShellText.fullyUndone(t) != nil)
+        }
+        static func of(_ m: RunDir.Model) -> ChangeInput {
+            let c = m.changes ?? RunDir.Changes()
+            return ChangeInput(steps: m.steps.map { Step(id: $0.stepId, object: $0.object, objectLabel: $0.objectLabel, human: $0.human,
+                                                         consequence: $0.consequence, result: $0.status) },
+                               created: c.created, modified: c.modified, deleted: c.deleted, external: c.external, unconfirmed: c.unconfirmed,
+                               createdWindows: c.createdWindows, undone: c.fullyUndone)
+        }
+    }
+
+    /// The changes as rows (the second table).
+    static func rows(_ input: ChangeInput) -> [ChangeRow] {
         var byObject: [String: ChangeRow] = [:], order: [String] = []
-        for st in t.steps where st.result == .ok || st.result == .unverified {
+        let undone = input.undone
+        for st in input.steps where st.result == "ok" || st.result == "unverified" {
             let what: ChangeRow.What
             switch st.consequence { case "external": what = .sent; case "modify_user": what = .changedYours; default: continue }
             let key = (st.object ?? st.id) + "/" + (what == .sent ? "sent" : "changed")
             if byObject[key] == nil { order.append(key) }
-            byObject[key] = ChangeRow(icon: what == .sent ? .send : .window, name: thingName(st), detail: st.displayText, what: what,
-                                      unverified: st.result == .unverified)
+            byObject[key] = ChangeRow(icon: what == .sent ? .send : .window, name: thingName(st), detail: st.human, what: what,
+                                      unverified: st.result == "unverified")
         }
         let steps = order.compactMap { byObject[$0] }
         func files(_ paths: [String], _ what: ChangeRow.What, icon: ChangeRow.Icon = .file) -> [ChangeRow] {
@@ -145,11 +179,11 @@ struct RightColumn: Equatable {
                 return ChangeRow(icon: icon, name: u.lastPathComponent, detail: folder.isEmpty || folder == "/" ? nil : folder, what: what)
             }
         }
-        let c = t.changes
+        let c = input
         var all = steps.filter { $0.what == .sent } + steps.filter { $0.what == .changedYours }
         all += files(c.modified, .modified) + files(c.created, .created) + files(c.deleted, .deleted)
         all += files(c.external, .byAnother) + files(c.unconfirmed, .unsure, icon: .unknown)
-        all += (c.createdWindows ?? []).map { ChangeRow(icon: .window, name: $0, detail: nil, what: .openedWindow) }
+        all += c.createdWindows.map { ChangeRow(icon: .window, name: $0, detail: nil, what: .openedWindow) }
         // (an undo takes back this Mac's files -- what the task created, changed, deleted -- never what went out, what
         // it did in an app's window, another program's change or an unsure one: those stay as they were)
         if undone { for i in all.indices where [.created, .modified, .deleted].contains(all[i].what) { all[i].struck = true } }
@@ -158,7 +192,7 @@ struct RightColumn: Equatable {
 
     /// What a step acted on, by name: its window's (step.object_label, harness U3), else its words up to the first
     /// comma (they name the window: an older harness), else its object's ref.
-    static func thingName(_ st: StepState) -> String {
+    static func thingName(_ st: ChangeInput.Step) -> String {
         if let l = st.objectLabel, !l.isEmpty { return l }
         if let h = st.human, !h.isEmpty {
             let cut = h.split(whereSeparator: { $0 == "，" || $0 == "," }).first.map(String.init) ?? h

@@ -105,6 +105,36 @@ enum CardContentTests {
         check(timed.tail == "你选的 · " + ShellText.time(1_000), "with when it closed: \(timed.tail)")
     }
 
+    /// 改动和产出 in the right column (the session's state) and in 过程 (the run's own record, RunDir): from the same
+    /// run lines, the same rows -- one function over one input (#131 review: no second list that can drift).
+    static func oneSourceTests(_ lines: [ProtocolLine]) {
+        func runFolder(_ ls: [ProtocolLine]) -> RunDir.Model {
+            // (the run's events.jsonl: its own lines, as the harness writes them -- no session ids)
+            let events = ls.filter { $0.runId == "r1" }.map { l -> String in
+                var o = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode(l))) as? [String: Any] ?? [:]
+                o.removeValue(forKey: "session_id"); o.removeValue(forKey: "run_id")
+                return String(decoding: try! JSONSerialization.data(withJSONObject: o, options: [.sortedKeys]), as: UTF8.self)
+            }
+            return RunDir.model(RunDir.Files(events: ([#"{"seq":1,"kind":"start","raw":"x"}"#] + events).joined(separator: "\n") + "\n"))
+        }
+        let done = S.ex(12, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","result_card":null,"changes":{"created":["/Users/u/Desktop/新的.txt"],"modified":["/Users/u/Notes/笔记.txt"],"deleted":[],"external":["/Users/u/Notes/别人改的.txt"],"unconfirmed":[],"created_windows":["TextEdit 窗口"]}"#)
+        let undo = S.ex(13, #""kind":"result_response","picked":"undo","effect":"undone 2/2","undone":2,"total":2,"refused":null"#)
+        for (name, ls) in [("running", lines), ("ended", lines + [done]), ("undone", lines + [done, undo])] {
+            let task = RightColumn.ChangeInput.of(reduce(ls).task("r1")!), run = RightColumn.ChangeInput.of(runFolder(ls))
+            var t2 = task; if name == "undone" { t2.undone = run.undone }     // (the session's undone needs its respond record: the run's says it)
+            check(RightColumn.rows(t2) == RightColumn.rows(run), "\(name): the right column's rows and 过程's are the same: \(RightColumn.rows(t2)) vs \(RightColumn.rows(run))")
+            check(!RightColumn.rows(run).isEmpty, "\(name): rows from the run's record")
+        }
+        check(RightColumn.ChangeInput.of(runFolder(lines + [done, undo])).undone, "the run's record: all undone")
+        // both views draw them through the one row view
+        let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        func read(_ f: String) -> String { (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? "" }
+        let pane = read("Main/ProcessPane.swift"), panel = read("Main/MainSplitView.swift")
+        check(pane.contains("RightColumn.rows(.of(m))") && pane.contains("ChangeRowView(row:") && panel.contains("ChangeRowView(row:")
+              && !pane.contains("list(L(\"Created\"") && !pane.contains("list(L(\"Sent out\""),
+              "过程 and the right column draw the same rows with the same view; 过程's own lists are gone")
+    }
+
     /// The changes as rows: each from an event field; merged by thing; ordered; struck when undone; the sent line.
     static func rowTests() {
         typealias R = RightColumn.ChangeRow
@@ -121,7 +151,7 @@ enum CardContentTests {
             + step(9, "s4", "modify_user", object: "window:x#9", human: "这一步被拒了", result: "refused")
             + [changes]
         let t = reduce(lines).task("r1")!
-        let rows = RightColumn.rows(t, undone: false)
+        let rows = RightColumn.rows(.of(t))
         check(rows.map(\.what) == [.sent, .changedYours, .modified, .created, .deleted, .byAnother, .unsure, .openedWindow],
               "one row per thing, sent first, then changed, created, deleted, another program's, unsure, opened windows: \(rows.map(\.what))")
         guard rows.count == 8 else { check(false, "rows: \(rows)"); return }
@@ -131,16 +161,18 @@ enum CardContentTests {
         check(rows[2] == R(icon: .file, name: "笔记.txt", detail: "Notes", what: .modified) && rows[5].name == "别人改的.txt" && rows[6].icon == .unknown,
               "files: the name, its folder; another program's; unsure")
         check(!rows.contains { $0.detail == "这一步被拒了" }, "a refused step changed nothing: no row")
-        var noLabel = StepState(id: "s", n: 1, text: "x"); noLabel.human = "在 Safari 窗口「Re: 评审」，写入「好」"; noLabel.object = "window:mail#4"
+        var noLabel = RightColumn.ChangeInput.Step(id: "s", object: "window:mail#4", objectLabel: nil, human: "在 Safari 窗口「Re: 评审」，写入「好」", consequence: nil, result: "ok")
         check(RightColumn.thingName(noLabel) == "在 Safari 窗口「Re: 评审」", "no object_label (an older harness): its words up to the first comma")
         noLabel.human = nil
         check(RightColumn.thingName(noLabel) == "window:mail#4", "no words either: its ref")
-        let undoneRows = RightColumn.rows(t, undone: true)
+        var allUndone = RightColumn.ChangeInput.of(t); allUndone.undone = true
+        let undoneRows = RightColumn.rows(allUndone)
         check(undoneRows.filter(\.struck).map(\.what) == [.modified, .created, .deleted],
               "all undone: the files' rows struck; what went out, a window's change, another program's, unsure: not: \(undoneRows.filter(\.struck).map(\.what))")
         let both = reduce(step(2, "s1", "modify_user", object: "window:m#1", human: "写", label: "邮件", result: "ok")
                           + step(4, "s2", "external", object: "window:m#1", human: "发", label: "邮件", result: "ok")).task("r1")!
-        check(RightColumn.rows(both, undone: false).map(\.what) == [.sent, .changedYours], "one window changed, then sent from: two rows, neither hidden")
+        check(RightColumn.rows(.of(both)).map(\.what) == [.sent, .changedYours], "one window changed, then sent from: two rows, neither hidden")
+        oneSourceTests(lines)
         let col = RightColumn.model(reduce(lines), otherRunning: nil, now: 0)
         check(col.sentLine == .count(1), "the sent line: how many went out: \(String(describing: col.sentLine))")
         let waiting = RightColumn.model(reduce([lines[0]] + step(3, "s1", "modify_user", object: "w", human: "写", result: "ok") + [ask]), otherRunning: nil, now: 0)

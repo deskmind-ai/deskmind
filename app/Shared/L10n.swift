@@ -578,7 +578,7 @@ enum L10n {
         "doing now": "正在做",
         "not yet": "还没做",
         "Changes and outputs": "改动和产出",
-        "All undone": "都已撤回",
+        "All undone": "全部已撤回",
         "Sent out": "发出的",
         "Live view of the task's window": "任务窗口的实时画面",
         "DeskMind Hands needs Screen Recording to show the window": "DeskMind Hands 需要屏幕录制权限才能显示窗口",

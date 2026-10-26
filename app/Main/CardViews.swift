@@ -360,8 +360,8 @@ struct AnsweredRow: View {
             HStack(spacing: 10) {
                 Image(systemName: icon).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
                 (Text(s.kind).fontWeight(.semibold).foregroundColor(Brand.ink)
-                 + Text(s.pick.map { "  " + $0 } ?? "").foregroundColor(Brand.ink)
-                 + Text("  " + s.tail).foregroundColor(ShellColor.secondary))
+                 + Text(s.pick.map { " · " + $0 } ?? "").foregroundColor(Brand.ink)
+                 + Text(" · " + s.tail).foregroundColor(ShellColor.secondary))
                     .font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 4)
                 if plan != nil {

@@ -1193,6 +1193,11 @@ final class ShellModel: ObservableObject {
         guard let id = selected else { return }
         tabs[id, default: ProcessTabs()].apply(.clickedTask(runId))
     }
+    /// 「明细 ›」 under 改动和产出: the task's 过程, at its 改动 section.
+    func showChanges(_ runId: String) {
+        guard let id = selected else { return }
+        tabs[id, default: ProcessTabs()].apply(.clickedChanges(runId))
+    }
     /// The runs whose folders may still be written: a task running, or one whose result card waits (its process
     /// lingers) -- never pruned (RunRetention).
     var liveRuns: Set<String> {

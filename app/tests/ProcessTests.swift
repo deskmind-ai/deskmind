@@ -63,7 +63,8 @@ enum ProcessTests {
         let m = RunDir.model(full)
         check(m.state == .ended && m.steps.count == 2 && m.judges.count == 2, "the whole run: \(m.state) \(m.steps.count) \(m.judges.count)")
         check(m.steps[0] == RunDir.Step(stepId: "st_1", planStep: 1, words: "在「正文」里填入「新的」", status: "ok", why: nil, shot: "shots/st_1.png",
-                                        act: RunDir.Act(status: "ok", epochReason: nil, changed: "{\"value\":true}")), "step 1: \(m.steps[0])")
+                                        act: RunDir.Act(status: "ok", epochReason: nil, changed: "{\"value\":true}"), human: "在「正文」里填入「新的」"),
+              "step 1: \(m.steps[0])")
         check(m.steps[1].shot == "shots/st_2.png" && m.steps[1].act?.epochReason == "the window's elements changed" && m.steps[1].why == "the screen moved", "step 2: its late picture, its epoch reason")
         check(m.judges[0].prompt?.hasPrefix("Does this action") == true && m.judges[0].options?.map(\.id) == ["matches", "mismatch"] && m.judges[0].kind == "intent",
               "judge 1: its material from judge.asked")
@@ -312,25 +313,32 @@ enum ProcessTests {
         var u = T(); u.apply(.picked(.process, latest: "a")); u.apply(.taskStarted("b")); u.apply(.taskDone("b"))
         check(u.tab == .process && u.run == "a", "picked 过程 with no run shown: the latest, kept")
         t.apply(.clickedTask("old")); check(t.tab == .process && t.run == "old", "a task message clicked: its 过程")
+        var f = T(); f.apply(.clickedChanges("x")); f.apply(.clickedChanges("x"))
+        check(f.tab == .process && f.run == "x" && f.focus == .changes && f.focusAsks == 2, "「明细 ›」: 过程 at 改动, each click asks again")
+        f.apply(.clickedTask("x")); check(f.focus == nil, "a task's own 过程: from its top")
         t.apply(.taskStarted("B")); t.apply(.taskDone("B")); check(t.run == "old", "a queued task starts and ends while reading 'old': not yanked")
         t.apply(.picked(.now, latest: "B")); t.apply(.picked(.process, latest: "B")); t.apply(.taskDone("C"))
         check(t.tab == .process && t.run == "old", "back on 过程: still 'old', being read")
         // property: random sequences against an oracle written from the table
         var g = CardStoreTests.RNG(x: 5)
         for _ in 0..<500 {
-            var s = T(), tab = T.Tab.now, run: String? = nil, stayNow = false
+            var s = T(), tab = T.Tab.now, run: String? = nil, stayNow = false, focus: T.Focus? = nil, asks = 0
             for _ in 0..<20 {
                 let r = "r\(g.next(3))"
-                let e: T.Event = [.taskStarted(r), .taskDone(r), .picked(g.next(2) == 0 ? .now : .process, latest: g.next(4) == 0 ? nil : r), .clickedTask(r)][g.next(4)]
+                let e: T.Event = [.taskStarted(r), .taskDone(r), .picked(g.next(2) == 0 ? .now : .process, latest: g.next(4) == 0 ? nil : r), .clickedTask(r),
+                                  .clickedChanges(r)][g.next(5)]
                 let before = (tab, run)
                 switch e {
                 case .taskStarted(let x): if tab == .now { run = x }
                 case .taskDone(let x): if tab == .now && !stayNow { tab = .process; run = x }
                 case .picked(let p, let latest): tab = p; stayNow = p == .now; if p == .process && run == nil { run = latest }
-                case .clickedTask(let x): tab = .process; run = x; stayNow = false
+                case .clickedTask(let x): tab = .process; run = x; stayNow = false; focus = nil
+                case .clickedChanges(let x): tab = .process; run = x; stayNow = false; focus = .changes; asks += 1
                 }
                 s.apply(e)
-                if s.tab != tab || s.run != run { check(false, "tabs vs the table after \(e): \(s) vs \(tab) \(run ?? "-")"); return }
+                if s.tab != tab || s.run != run || s.focus != focus || s.focusAsks != asks {
+                    check(false, "tabs vs the table after \(e): \(s) vs \(tab) \(run ?? "-") \(String(describing: focus)) \(asks)"); return
+                }
                 // being read: 过程 with a run shown -- a task's start or end never moves it
                 if before.0 == .process, before.1 != nil, case .taskStarted = e, (s.tab, s.run) != (before.0, before.1) { check(false, "yanked on a start"); return }
                 if before.0 == .process, before.1 != nil, case .taskDone = e, (s.tab, s.run) != (before.0, before.1) { check(false, "yanked on an end"); return }

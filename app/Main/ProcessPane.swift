@@ -81,7 +81,12 @@ final class ShotCache: ObservableObject {
 struct ProcessPane: View, Equatable {
     let sessionId: String
     let runId: String
-    static func == (a: ProcessPane, b: ProcessPane) -> Bool { a.sessionId == b.sessionId && a.runId == b.runId }
+    /// Where to show (「明细 ›」: 改动), and its asks: each one scrolls there again.
+    var focus: ProcessTabs.Focus? = nil
+    var focusAsks = 0
+    static func == (a: ProcessPane, b: ProcessPane) -> Bool {
+        a.sessionId == b.sessionId && a.runId == b.runId && a.focus == b.focus && a.focusAsks == b.focusAsks
+    }
     @StateObject private var loader = ProcessLoader()
     @StateObject private var shots = ShotCache()
     @Environment(\.lang) private var lang
@@ -92,9 +97,14 @@ struct ProcessPane: View, Equatable {
 
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) { content }
-                .padding(.vertical, 4)
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) { content }
+                    .padding(.vertical, 4)
+            }
+            // (「明细 ›」: to 改动 -- once laid out, and on each new ask)
+            .onChange(of: focusAsks, initial: true) { _, _ in if focus == .changes { scroll(proxy) } }
+            .onChange(of: loader.model.changes != nil) { _, _ in if focus == .changes { scroll(proxy) } }
         }
         .onAppear { loader.watch(session: sessionId, run: runId) }
         .onDisappear { loader.stop() }
@@ -279,14 +289,17 @@ struct ProcessPane: View, Equatable {
 
     // MARK: changes
 
+    private func scroll(_ proxy: ScrollViewProxy) {
+        DispatchQueue.main.async { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.changesAnchor, anchor: .top) } }
+    }
+    static let changesAnchor = "process/changes"
+
+    /// 改动: the right column's rows, from the run's own record (RightColumn.rows over ChangeInput.of: one function,
+    /// one view -- ChangeRowView); then the undo's answer and the trace's own lists.
     private func changes(_ m: RunDir.Model) -> some View {
         section(L("Changes", lang: lang)) {
             if let c = m.changes {
-                list(L("Created", lang: lang), c.created)
-                list(L("Modified", lang: lang), c.modified)
-                list(L("Deleted", lang: lang), c.deleted)
-                list(L("Sent out", lang: lang), c.external)
-                list(L("Not known to be the task's", lang: lang), c.unconfirmed)
+                ForEach(Array(RightColumn.rows(.of(m)).enumerated()), id: \.offset) { _, r in ChangeRowView(row: r) }
                 if let u = c.undo {
                     Text(L("Undo: %@", [u.effect, u.undone.map { "\($0)" }, u.total.map { "/\($0)" }].compactMap { $0 }.joined(), lang: lang)).font(.system(size: 10))
                 }
@@ -298,6 +311,7 @@ struct ProcessPane: View, Equatable {
                 }
             } else { noRecord }
         }
+        .id(Self.changesAnchor)
     }
 
     @ViewBuilder private func list(_ title: String, _ items: [String]) -> some View {
