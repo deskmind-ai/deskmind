@@ -142,10 +142,17 @@ enum CardContentTests {
                        S.ex(3, #""kind":"step_result","step_id":"t1","status":"ok""#),
                        S.ex(4, #""kind":"step","text":"x","step_id":"t2","consequence":"modify_user","human":"不知道改了哪里""#),
                        S.ex(5, #""kind":"step_result","step_id":"t2","status":"ok""#)]
+        // (an open_window into the user's app: modify_user on app:<App> -- harness executor.ts -- its row; a step on a
+        // capability's file is its file's row, like a path:)
+        let appOpen = [S.ex(2, #""kind":"step","text":"x","step_id":"a1","consequence":"modify_user","object":"app:Safari","object_label":"Safari","human":"在 Safari 里打开新窗口""#),
+                       S.ex(3, #""kind":"step_result","step_id":"a1","status":"ok""#),
+                       S.ex(4, #""kind":"step","text":"x","step_id":"a2","consequence":"modify_user","object":"cap:notes/笔记.txt","human":"改「笔记.txt」""#),
+                       S.ex(5, #""kind":"step_result","step_id":"a2","status":"ok""#)]
         let cases: [(String, [ProtocolLine], Bool?)] = [
             ("running", lines, nil), ("ended", lines + [done], nil),
             ("a file edit, all undone", fileEdit, true),
             ("a change on a browser tab", tabEdit, nil),
+            ("a window opened in the user's app", appOpen, nil),
             ("undone", lines + [done, respond] + undo(2, 2, refused: nil), true),
             ("undo refused part way", lines + [done, respond] + undo(1, 2, refused: "笔记.txt 被改过"), false),
             ("undo partial", lines + [done, respond] + undo(1, 2, refused: nil), false),
@@ -165,6 +172,10 @@ enum CardContentTests {
         for (side, input) in [("the right column", RightColumn.ChangeInput.of(reduce(tabEdit).task("r1")!)), ("过程", RightColumn.ChangeInput.of(runFolder(tabEdit)))] {
             let r = RightColumn.rows(input)
             check(r.map(\.what) == [.changedYours] && r[0].name == "Safari 标签页「表单」", "\(side): a tab's change is a row, a step with no object none: \(r)")
+        }
+        for (side, input) in [("the right column", RightColumn.ChangeInput.of(reduce(appOpen).task("r1")!)), ("过程", RightColumn.ChangeInput.of(runFolder(appOpen)))] {
+            let r = RightColumn.rows(input)
+            check(r.map(\.what) == [.changedYours] && r[0].name == "Safari", "\(side): an app: step is a row, a cap: file step is not: \(r)")
         }
         check(RightColumn.rows(.of(runFolder(oldLog))).map(\.what) == [.sent, .changedYours] && RightColumn.rows(.of(runFolder(oldLog)))[0].unverified,
               "an older harness's steps: their results from the step itself (refused: no row)")

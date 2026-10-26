@@ -167,10 +167,11 @@ struct RightColumn: Equatable {
             let what: ChangeRow.What
             switch st.consequence {
             case "external": what = .sent
-            // (a window row only for a step on a window or a browser tab: a file step is its file's row --
-            // changes.modified -- and never also a window row, which an undo would leave unstruck beside the struck
-            // file: #131 Codex review; a step with no object has none)
-            case "modify_user" where ["window:", "tab:"].contains { st.object?.hasPrefix($0) == true }: what = .changedYours
+            // (a change to the user's things on screen -- a window, a tab, an app it opens a window in -- is its row; a
+            // file step is its file's row alone -- changes.modified -- never also this one, which an undo would leave
+            // unstruck beside the struck file: #131 Codex review; a step with no object has none)
+            case "modify_user" where st.object.map { o in !o.isEmpty && !["path:", "cap:"].contains { o.hasPrefix($0) } } == true:
+                what = .changedYours
             default: continue
             }
             let key = (st.object ?? st.id) + "/" + (what == .sent ? "sent" : "changed")

@@ -447,7 +447,7 @@ struct ConsentFields: View {
                         .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
                 ForEach(Array((b.fields + b.other).enumerated()), id: \.offset) { _, o in pair(o.label, o.value) }
-                ForEach(Array(b.selected.enumerated()), id: \.offset) { _, o in pair(L("Selected", lang: lang), o.value) }
+                ForEach(Array(b.selected.enumerated()), id: \.offset) { _, o in pair(L("Selected", lang: lang), o.shown) }
                 if !b.text.isEmpty {
                     Text(L("Also in the window:", lang: lang)).font(.system(size: onInk ? 11 : 12)).foregroundStyle(quiet).padding(.top, 2)
                     ForEach(Array(b.text.enumerated()), id: \.offset) { _, o in

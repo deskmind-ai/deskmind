@@ -50,6 +50,9 @@ struct CardLayout: Equatable {
         var value: String
         var kind: String = ""
         init(label: String, value: String, kind: String = "") { self.label = label; self.value = value; self.kind = kind }
+        /// Its words on the card: its value, else (a selected element: its name is its label, its value empty --
+        /// harness executor.ts outgoingItems) its label.
+        var shown: String { value.isEmpty && label != kind ? label : value }
     }
     /// A consent card's fields.
     struct Consent: Equatable {

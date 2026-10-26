@@ -255,6 +255,15 @@ enum CardLayoutTests {
         let noTyped = block([O(label: "金额", value: "120", kind: "field"), O(label: "备注", value: "x", kind: "field")])
         check(noTyped.lead?.label == "金额" && noTyped.fields.map(\.label) == ["备注"], "nothing typed: the first field leads")
         check(block([]).count == 0 && block([]).lead == nil, "nothing goes out: an empty block")
+        // a selected element comes as its name in the label, its value empty (harness executor.ts outgoingItems): the
+        // row says its name, never an empty value (#131 delta review)
+        let selectedOnly = block([O(label: "「周报」那封", value: "", kind: "selected"), O(label: "搜索框", value: "", kind: "selected"),
+                            O(label: "收件人", value: "wang@example.com", kind: "selected")])
+        check(selectedOnly.selected.map(\.shown) == ["「周报」那封", "搜索框", "wang@example.com"], "selected: its name when it has no value: \(selectedOnly.selected.map(\.shown))")
+        check(O(label: "selected", value: "", kind: "selected").shown == "", "no name and no value: not the kind's word")
+        let pickedCard = CardLayout(consentCard(["action": "click", "action_text": "点「删除」", "object": "window:mail#3", "object_label": "Mail",
+                                                 "consequence": "modify_user", "outgoing": [["kind": "selected", "label": "「周报」那封", "value": ""]]]))
+        check(shownWords(pickedCard).contains("「周报」那封") && !pickedCard.hasDetails, "on the card: the selected element's name is shown")
         var g = CardStoreTests.RNG(x: 77)
         let kinds = ["field", "selected", "typed", "text", "url", "other"]
         for _ in 0..<300 {
@@ -299,7 +308,7 @@ enum CardLayoutTests {
         // its label beside the heading; the other lines' labels and values; the window's other text and picks by value)
         let b = c.block
         var w = [l.title] + l.beyond + (c.actionRow ? [c.action] : []) + [c.object, c.site ?? ""] + c.selected
-        w += [b.leadLabel ?? "", b.lead?.value ?? ""] + (b.fields + b.other).flatMap { [$0.label, $0.value] } + (b.selected + b.text).map(\.value)
+        w += [b.leadLabel ?? "", b.lead?.value ?? ""] + (b.fields + b.other).flatMap { [$0.label, $0.value] } + b.selected.map(\.shown) + b.text.map(\.value)
         if let e = c.effect { w.append(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
         w += c.uncertain.flatMap { [$0.text] + $0.outgoing.flatMap { [$0.label, $0.value] } }
         if c.uncertainMore > 0 { w.append(L("%d more steps with an unknown result", c.uncertainMore, lang: lang)) }
