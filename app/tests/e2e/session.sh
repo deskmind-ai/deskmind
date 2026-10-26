@@ -23,17 +23,19 @@ if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$
      > "$OUT/build.log" 2>&1; then
   cat "$OUT/build.log"; exit 1
 fi
+# The app's shared sources as build.sh's unit tests compile them (no window, no @main), without the tests: one list,
+# so a file added there is here too.
+APP_SOURCES=$(grep -A1 'decision-tests" \\' build.sh | tail -1 | tr ' ' '\n' | grep -v '^tests/' | grep -v '^$')
+[ -n "$APP_SOURCES" ] || { echo "session.sh: no unit-test source list in build.sh" >&2; exit 1; }
 # the app's session client (Shared/SessionClient.swift and its reducer) against the same helper
 CLIENT="$OUT/SessionClientE2E"
-if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$CLIENT" Shared/L10n.swift Shared/Protocol.swift \
-     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/ResultCard.swift Shared/CardModel.swift Shared/UIEvents.swift Shared/CardStore.swift Shared/CardLayout.swift Shared/SessionClient.swift tests/e2e/PathTransport.swift \
+if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$CLIENT" $APP_SOURCES tests/e2e/PathTransport.swift \
      tests/e2e/SessionClientE2E.swift > "$OUT/build-client.log" 2>&1; then
   cat "$OUT/build-client.log"; exit 1
 fi
 # the 0.5 window's model (Shared/Shell.swift) on that client, against the same helper
 SHELL_BIN="$OUT/ShellE2E"
-if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$SHELL_BIN" Shared/L10n.swift Shared/Protocol.swift \
-     Shared/ProtocolEvent.swift Shared/SessionReducer.swift Shared/ResultCard.swift Shared/CardModel.swift Shared/UIEvents.swift Shared/CardStore.swift Shared/CardLayout.swift Shared/SessionClient.swift Shared/ProcessTabs.swift Shared/TaskRecording.swift Shared/Shell.swift \
+if ! swiftc -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$SHELL_BIN" $APP_SOURCES \
      tests/e2e/PathTransport.swift tests/e2e/ShellE2E.swift > "$OUT/build-shell.log" 2>&1; then
   cat "$OUT/build-shell.log"; exit 1
 fi

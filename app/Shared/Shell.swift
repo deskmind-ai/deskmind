@@ -118,6 +118,81 @@ enum ShellText {
         return L("%@: %@", cardState(phase, lang: lang), k, lang: lang)
     }
 
+    /// A card no longer pinned, in one line (U3, P1Main / P1Flow): 「<种类> · <所选> · <尾巴>」. The kind: the card's
+    /// headline when it has one, else its kind in a word (an action card: its action's words). What was picked: the
+    /// answer the executor applied (CardState.answer) -- an option's words and second line, the user's words, a plan's
+    /// steps and the one that sends; none recorded (an older harness or log), none shown. The tail: how it closed --
+    /// by the picked option's role -- and when; else the card's state in words. Only what the events said.
+    struct CardSummary: Equatable {
+        var kind: String
+        var pick: String?
+        var tail: String
+        var line: String { ([kind] + (pick.map { [$0] } ?? []) + [tail]).joined(separator: " · ") }
+    }
+
+    static func cardSummary(_ c: CardState, phase: CardPhase, runId: String, lang: ResolvedLang) -> CardSummary {
+        let model = CardModel(card: c.card, runId: runId, askId: c.askId)
+        let layout = CardLayout(model)
+        let kind: String
+        // (a plan's headline is its counts again: the pick says them -- 「计划」 is its kind)
+        if model.kind != .plan, let h = model.headline, !h.isEmpty { kind = h } else {
+            switch model.kind {
+            case .ambiguity: kind = L("Which one", lang: lang)
+            case .missing: kind = L("Missing info", lang: lang)
+            case .plan: kind = L("Plan", lang: lang)
+            case .action: kind = layout.consent.map(\.action).flatMap { $0.isEmpty ? nil : $0 } ?? cardKind(c.card.kind, lang: lang)
+            case .resultCheck: kind = L("Check", lang: lang)
+            case .cannot: kind = L("Can't do", lang: lang)
+            default: kind = cardKind(c.card.kind, lang: lang)
+            }
+        }
+        let at = c.explicitAt.map(time)
+        func timed(_ s: String) -> String { at.map { L("%@ · %@", s, $0, lang: lang) } ?? s }
+        switch phase {
+        case .answered:
+            guard let a = c.answer else { return CardSummary(kind: kind, pick: nil, tail: timed(cardState(phase, lang: lang))) }
+            switch a {
+            case .text(let w):
+                let short = w.count > 40 ? String(w.prefix(40)) + "…" : w
+                return CardSummary(kind: kind, pick: L("You said: %@", short, lang: lang), tail: timed(L("Answered", lang: lang)))
+            case .option(let i):
+                guard c.card.options.indices.contains(i) else { return CardSummary(kind: kind, pick: nil, tail: timed(cardState(phase, lang: lang))) }
+                let o = c.card.options[i]
+                let role = CardModel.role(o.kind)
+                var pick = o.detail.isEmpty ? o.text : L("%@ · %@", o.text, o.detail, lang: lang)
+                if model.kind == .plan, role == .approve, !layout.plan.isEmpty {
+                    // (its 「可以」 not said again: its steps, and the one that sends, confirmed then)
+                    pick = L("%d steps", layout.plan.count, lang: lang)
+                    if let out = layout.plan.first(where: \.sendsOut) { pick += " · " + L("%@, confirmed then", out.purpose, lang: lang) }
+                }
+                let tail: String
+                switch role {
+                case .choice: tail = L("your pick", lang: lang)
+                case .approve: tail = L("you agreed", lang: lang)
+                case .delegate: tail = L("you let it decide", lang: lang)
+                case .skipStep: tail = L("skipped this step", lang: lang)
+                case .cancel: tail = L("stopped here", lang: lang)
+                case .undo: tail = L("undone", lang: lang)
+                default: tail = L("Answered", lang: lang)
+                }
+                return CardSummary(kind: kind, pick: pick, tail: timed(tail))
+            }
+        case .voided(let why):
+            let tail: String
+            switch why {
+            case "steer": tail = L("you changed the request", lang: lang)
+            case "stop": tail = L("stopped", lang: lang)
+            case "replaced": tail = L("replaced", lang: lang)
+            default: tail = cardState(phase, lang: lang)
+            }
+            return CardSummary(kind: kind, pick: nil, tail: timed(tail))
+        case .expired:
+            return CardSummary(kind: kind, pick: nil, tail: timed(L("expired", lang: lang)))
+        default:
+            return CardSummary(kind: kind, pick: nil, tail: cardState(phase, lang: lang))
+        }
+    }
+
     /// A card's state in words (handoff §2.2, plan §4.2).
     static func cardState(_ phase: CardPhase, lang: ResolvedLang) -> String {
         switch phase {
@@ -1117,6 +1192,16 @@ final class ShellModel: ObservableObject {
     func showProcess(_ runId: String) {
         guard let id = selected else { return }
         tabs[id, default: ProcessTabs()].apply(.clickedTask(runId))
+    }
+    /// 「明细 ›」 under 改动和产出: the task's 过程, at its 改动 section.
+    func showChanges(_ runId: String) {
+        guard let id = selected else { return }
+        tabs[id, default: ProcessTabs()].apply(.clickedChanges(runId))
+    }
+    /// 过程 scrolled to the asked section: the ask is used (one-shot).
+    func focusShown() {
+        guard let id = selected else { return }
+        tabs[id, default: ProcessTabs()].apply(.focusShown)
     }
     /// The runs whose folders may still be written: a task running, or one whose result card waits (its process
     /// lingers) -- never pruned (RunRetention).

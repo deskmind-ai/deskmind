@@ -73,6 +73,9 @@ enum LiveWatchTests {
         check(LiveFeed.boxRect(cardWaitsOnButton: true, card: nil) == nil, "a card waiting with no rect of its own: no box")
         check(LiveFeed.boxRect(cardWaitsOnButton: true, card: cardRect) == cardRect, "a card waiting with its own rect: that one")
         check(LiveFeed.boxRect(cardWaitsOnButton: false, card: cardRect) == nil, "a rect but no card waiting on a button: none")
+        // 「准备点」 over its box: above, left with its frame; no room above: below
+        check(LiveFeed.tagOrigin(box: CGRect(x: 100, y: 60, width: 40, height: 20), tagHeight: 20) == CGPoint(x: 96, y: 32), "the tag above its box")
+        check(LiveFeed.tagOrigin(box: CGRect(x: 2, y: 10, width: 40, height: 20), tagHeight: 20) == CGPoint(x: 0, y: 38), "no room above: below, never off the left edge")
         for b in boxes {
             let got = LiveFeed.box(pictureWindow: b.window, stepWindow: 9, rectNorm: b.rect, picture: pic, visible: b.visible)
             check(b.want.map { near(got, $0.0, $0.1, $0.2, $0.3) } ?? (got == nil), "box: \(b.why): \(String(describing: got))")

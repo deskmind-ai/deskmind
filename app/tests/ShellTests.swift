@@ -1000,7 +1000,7 @@ enum ShellTests {
         let card = (text.components(separatedBy: "struct CardView").dropFirst().first ?? "").components(separatedBy: "struct KeyCap").first ?? ""
         let code = card.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
         check(!code.contains("ScrollView") && !code.contains("Read the whole card first"), "no scrolling inside the card, nothing to scroll to")
-        let consent = code.range(of: "ConsentFields(consent: c)"), buttons = code.range(of: "ForEach(layout.buttons")
+        let consent = code.range(of: "ConsentFields(consent: c, showsAction:"), buttons = code.range(of: "ForEach(layout.buttons")
         check(consent != nil && buttons != nil && consent!.lowerBound < buttons!.lowerBound, "what goes out is laid out before the buttons")
     }
 

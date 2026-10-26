@@ -72,15 +72,7 @@ struct TaskRow: View {
                 }
             }
             ForEach(task.cards.filter { $0.askId != shell.pinned(session)?.card.askId }, id: \.askId) { c in
-                HStack(spacing: 10) {
-                    Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.ok).accessibilityHidden(true)
-                    Text(ShellText.cardLine(shell.phase(task.runId, c, in: session), kind: c.card.kind, lang: lang))
-                        .font(.system(size: 13)).foregroundStyle(Brand.ink).lineLimit(2)
-                }
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .frame(maxWidth: 600, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(ShellColor.softLine))
+                AnsweredRow(card: c, runId: task.runId, phase: shell.phase(task.runId, c, in: session))
             }
             if !task.running {
                 let summary = ShellText.summary(task, lang: lang)

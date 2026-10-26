@@ -104,8 +104,10 @@ struct LiveFrame: View {
     let step: String?
     let stepWindow: Int?
     let target: StepTarget?
-    /// The rect the dashed box marks (LiveFeed.boxRect): nil, no box.
+    /// The rect the dashed box marks (LiveFeed.boxRect): nil, no box; and the window it is in (the card's own, where it
+    /// names one; else the step's).
     let boxRect: [Double]?
+    var boxWindow: Int? = nil
     @Binding var zoomed: Bool
     let popOut: () -> Void
     /// The frame's own title bar and step line (the right column); false: the picture alone, 110 tall -- the float
@@ -151,10 +153,16 @@ struct LiveFrame: View {
                         let size = LiveDockView.fit(p.image.size, in: g.size)
                         ZStack(alignment: .topLeading) {
                             Image(nsImage: p.image).resizable().frame(width: size.width, height: size.height)
-                            if let b = LiveFeed.box(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: boxRect, picture: size, visible: p.visible) {
+                            let box = LiveFeed.box(pictureWindow: p.window, stepWindow: boxWindow ?? stepWindow, rectNorm: boxRect, picture: size, visible: p.visible)
+                            if let b = box {
                                 RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.dot, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
                                     .frame(width: b.width + 8, height: b.height + 8).offset(x: b.minX - 4, y: b.minY - 4)
                                     .accessibilityHidden(true)
+                                // 「准备点」 anchored on its box (U3 §2.4)
+                                if let about {
+                                    let o = LiveFeed.tagOrigin(box: b, tagHeight: 20)
+                                    tag(about).offset(x: o.x, y: o.y)
+                                }
                             }
                             if let c = LiveFeed.cursor(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target?.rectNorm, picture: size, visible: p.visible) {
                                 Circle().fill(Brand.dot).frame(width: 12, height: 12)
@@ -165,12 +173,10 @@ struct LiveFrame: View {
                         .frame(width: g.size.width, height: g.size.height)
                     }
                     .overlay(alignment: .topLeading) {
-                        // (the card's own words for what it is about to act on: not placed on the step's box)
-                        if let about {
-                            Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Color(ShellPalette.shotWell))
-                                .padding(.horizontal, 8).frame(height: 20)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(Color(ShellPalette.shotTag)))
-                                .padding(8)
+                        // (no box of the card's own: the tag in the corner, never on a step's box)
+                        if let about, LiveFeed.box(pictureWindow: p.window, stepWindow: boxWindow ?? stepWindow, rectNorm: boxRect,
+                                                   picture: CGSize(width: 1, height: 1), visible: p.visible) == nil {     // (whether it lands on this picture at all)
+                            tag(about).padding(8)
                         }
                     }
                     .accessibilityLabel(L("Live view of the task's window", lang: lang))
@@ -182,6 +188,13 @@ struct LiveFrame: View {
             }
             .frame(height: height)
             .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func tag(_ about: String) -> some View {
+        Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Color(ShellPalette.shotWell))
+            .padding(.horizontal, 8).frame(height: 20)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color(ShellPalette.shotTag)))
+            .fixedSize()
     }
 
     /// 「<应用> · <窗口的状态>」: whose window, and whether it is live, waits for you or has no picture.

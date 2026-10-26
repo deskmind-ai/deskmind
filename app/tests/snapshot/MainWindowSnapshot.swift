@@ -63,6 +63,10 @@ enum MainWindowSnapshot {
             Scene(name: "waiting", lines: others + running() + waiting(), now: t0 + 58),
             Scene(name: "waiting-uncertain", lines: others + running() + waiting(uncertain: true), now: t0 + 58),
             Scene(name: "answered", lines: others + running() + waiting() + answered(), now: t0 + 66),
+            // (U3: the answered lines after a reopen -- the stored session.task_answer only -- and from an older log)
+            Scene(name: "answered-replay", lines: others + strip(running() + waiting() + answered()) + stored(), now: t0 + 66),
+            Scene(name: "answered-oldlog", lines: others + strip(running() + waiting() + answered()), now: t0 + 66),
+            Scene(name: "undone", lines: others + running() + waiting() + answered() + undone(), now: t0 + 90),
             Scene(name: "process", lines: others + running() + waiting() + answered(), now: t0 + 66, process: true),
         ]
         writeRunFolder(support, run: running() + waiting() + answered())
@@ -132,7 +136,7 @@ enum MainWindowSnapshot {
             ("choice", running() + choice(), nil, true, false),
             ("plan-summary", Array(running().prefix(6)), nil, false, false),
             ("held", running() + waiting(), held, true, false),
-            ("expired", running() + waiting() + [line("ask_void", 13, 700, ["ask_id": "ask_send", "why": "timeout"])], nil, true, false),
+            ("expired", running() + waiting() + [line("ask_void", 14, 700, ["ask_id": "ask_send", "why": "timeout"])], nil, true, false),
             ("capsule", running(), nil, true, true),
         ]
     }
@@ -253,12 +257,12 @@ enum MainWindowSnapshot {
             line("plan", 2, 3, ["steps": plan]),
             line("ask", 3, 4, ["ask_id": "ask_plan", "card": planCard]),
             line("waiting", 4, 4, ["ask_id": "ask_plan"]),
-            line("resumed", 5, 9, ["ask_id": "ask_plan"]),
+            line("resumed", 5, 9, ["ask_id": "ask_plan", "answer": ["option": 0]]),
             line("step", 6, 12, ["step_id": "st_1", "plan_step": 1, "text": "{\"kind\":\"click\"}", "human": "打开许诺 10 月 20 日的邮件",
                                  "object": "window:com.apple.Safari#4242", "consequence": "read"]),
             line("step_result", 7, 18, ["step_id": "st_1", "status": "ok"]),
             line("step", 8, 22, ["step_id": "st_2", "plan_step": 2, "text": "{\"kind\":\"set_value\"}", "human": "正在输入「我看一下再说」",
-                                 "object": "window:com.apple.Safari#4242", "consequence": "modify_user",
+                                 "object": "window:com.apple.Safari#4242", "consequence": "modify_user", "object_label": "Safari 窗口「Re: 下周的方案评审」",
                                  "target": ["id": "body", "label": "正文", "role": "textarea", "rect_norm": [0.22, 0.30, 0.74, 0.16]]]),
         ]
     }
@@ -269,10 +273,13 @@ enum MainWindowSnapshot {
         var card: [String: Any] = [
             "kind": "action", "blocking": true, "headline": "要在网页邮箱里点「发送」吗？",
             "text": "要在网页邮箱里点「发送」吗？这会把回复发给许诺。",
-            "consent": ["action": "click", "action_text": "点「发送」", "target": "发送", "object": "button:send", "object_label": "发送",
-                        "consequence": "external", "site": "mail.example.com",
-                        "outgoing": [["kind": "to", "label": "收件人", "value": "许诺 <xu.nuo@example.com>"],
-                                     ["kind": "body", "label": "内容", "value": "「我看一下再说」"]]],
+            "consent": ["action": "click", "action_text": "点「发送」", "target": "发送", "object": "window:com.apple.Safari#4242",
+                        "object_label": "Safari 窗口「Re: 下周的方案评审」", "consequence": "external", "site": "mail.example.com",
+                        "outgoing": [["kind": "field", "label": "收件人", "value": "许诺 <xu.nuo@example.com>"],
+                                     ["kind": "field", "label": "主题", "value": "Re: 下周的方案评审"],
+                                     ["kind": "typed", "label": "", "value": "我看一下再说"],
+                                     ["kind": "text", "label": "", "value": "10月20日 许诺 写道：方案初稿在附件里。"]],
+                        "target_box": ["rect_norm": [0.22, 0.87, 0.12, 0.075], "frame": [100, 600, 84, 36]]],
             "options": [["kind": "approve", "text": "可以"], ["kind": "skip_step", "text": "这一步不要"], ["kind": "cancel", "text": "先别做了"]],
         ]
         if uncertain, var c = card["consent"] as? [String: Any] {
@@ -285,23 +292,49 @@ enum MainWindowSnapshot {
         }
         return [
             line("step_result", 9, 40, ["step_id": "st_2", "status": "ok"]),
-            line("step", 10, 48, ["step_id": "st_3", "plan_step": 3, "text": "{\"kind\":\"click\"}", "human": "准备点「发送」，等你确认",
-                                  "object": "window:com.apple.Safari#4242", "consequence": "external",
+            line("changes", 10, 40, ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": [], "created_windows": []]),
+            line("step", 11, 48, ["step_id": "st_3", "plan_step": 3, "text": "{\"kind\":\"click\"}", "human": "准备点「发送」，等你确认",
+                                  "object": "window:com.apple.Safari#4242", "consequence": "external", "object_label": "Safari 窗口「Re: 下周的方案评审」",
                                   "target": ["id": "send", "label": "发送", "role": "button", "rect_norm": [0.22, 0.86, 0.12, 0.08]]]),
-            line("ask", 11, 52, ["ask_id": "ask_send", "card": card]),
-            line("waiting", 12, 52, ["ask_id": "ask_send"]),
+            line("ask", 12, 52, ["ask_id": "ask_send", "card": card]),
+            line("waiting", 13, 52, ["ask_id": "ask_send"]),
         ]
     }
 
     /// Answered 「可以」: sent, step 4 under way.
     static func answered() -> [[String: Any]] {
         [
-            line("resumed", 13, 60, ["ask_id": "ask_send"]),
-            line("step_result", 14, 61, ["step_id": "st_3", "status": "ok"]),
-            line("changes", 15, 61, ["created": [], "modified": [], "deleted": [], "external": ["发给许诺的邮件"], "unconfirmed": []]),
-            line("step", 16, 63, ["step_id": "st_4", "plan_step": 4, "text": "{\"kind\":\"read\"}", "human": "确认已经发出",
+            line("resumed", 14, 60, ["ask_id": "ask_send", "answer": ["option": 0]]),
+            line("step_result", 15, 61, ["step_id": "st_3", "status": "ok"]),
+            line("changes", 16, 61, ["created": ["/Users/demo/Desktop/回复草稿.txt"], "modified": [], "deleted": [], "external": [], "unconfirmed": []]),
+            line("step", 17, 63, ["step_id": "st_4", "plan_step": 4, "text": "{\"kind\":\"read\"}", "human": "确认已经发出",
                                   "object": "window:com.apple.Safari#4242", "consequence": "read"]),
         ]
+    }
+
+    /// The task done, then all of it undone (its result card's undo).
+    static func undone() -> [[String: Any]] {
+        let result: [String: Any] = ["kind": "result", "text": "做完了：回复许诺「我看一下再说」",
+                                     "options": [["kind": "approve", "text": "好的"], ["kind": "undo", "text": "撤回"]], "free_text": false, "blocking": false]
+        return [
+            line("step_result", 18, 70, ["step_id": "st_4", "status": "ok"]),
+            line("task_done", 19, 72, ["status": "succeeded", "reason": "", "summary": "回复了许诺", "result_card": result, "answer": NSNull(),
+                                       "changes": ["created": ["/Users/demo/Desktop/回复草稿.txt"], "modified": [], "deleted": [], "external": [], "unconfirmed": []]]),
+            ["kind": "session.task_end", "session_id": sid, "seq": 3, "t": t0 + 73, "run_id": rid, "status": "succeeded", "summary": "回复了许诺",
+             "undo": "open", "reason": "", "changes": ["created": ["/Users/demo/Desktop/回复草稿.txt"], "modified": [], "deleted": [], "external": []]],
+            line("result_response", 20, 80, ["picked": "undo", "effect": "undone 1/1", "undone": 1, "total": 1, "refused": NSNull()]),
+            ["kind": "session.task_undo", "session_id": sid, "seq": 4, "t": t0 + 81, "run_id": rid, "undone": 1, "total": 1, "refused": NSNull()],
+        ]
+    }
+
+    /// The run lines without the answers they carried (a reopen replays the session's stored copy; an older log has none).
+    static func strip(_ lines: [[String: Any]]) -> [[String: Any]] {
+        lines.map { l in var l = l; l.removeValue(forKey: "answer"); return l }
+    }
+    /// The session's stored copies of the applied answers (session.task_answer).
+    static func stored() -> [[String: Any]] {
+        [["kind": "session.task_answer", "session_id": sid, "seq": 3, "t": t0 + 9, "run_id": rid, "ask_id": "ask_plan", "option": 0],
+         ["kind": "session.task_answer", "session_id": sid, "seq": 4, "t": t0 + 60, "run_id": rid, "ask_id": "ask_send", "option": 0]]
     }
 
     /// The run's own record (sessions/<session>/runs/<run>/events.jsonl), as the harness writes it, for 「过程」.

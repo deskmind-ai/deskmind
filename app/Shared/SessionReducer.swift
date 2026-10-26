@@ -88,6 +88,8 @@ struct StepState: Equatable {
     var object: String?
     var planStep: Int?
     var target: StepTarget?
+    /// The window it acts in, by name (step.object_label, harness U3): nil from a harness before it.
+    var objectLabel: String? = nil
     /// What the step shows: its result, else what the task's end makes of a step with none (SessionReducer.settle).
     var status: Status = .running
     /// Its own result (step_result, or an older harness's status on the step): nil while it has none.
@@ -124,6 +126,9 @@ struct CardState: Equatable {
     var explicit: Outcome? = nil
     /// consent.picked after an action card was answered: what the consent covers (action / object / rule), if any.
     var picked: String? = nil
+    /// The answer the executor applied (resumed{ask_id, answer} live; session.task_answer on a replay -- harness U3):
+    /// what the answered line names. nil: none recorded (an older harness or log), the line says only 「已回答」.
+    var answer: AppliedAnswer? = nil
 }
 
 enum UndoState: Equatable {
@@ -832,6 +837,8 @@ enum SessionReducer {
             let i = taskIndex(&s, e.runId)
             s.tasks[i].respond = e
             s.tasks[i].respondAt = line.t
+        case .taskAnswer(let e):
+            if let i = s.taskPos[e.runId], let a = e.answer { applied(&s.tasks[i], e.askId, a) }
 
         case .sessionConfig(let e):
             s.settings = e
@@ -943,7 +950,7 @@ enum SessionReducer {
         case .step(let e):
             task.preparing = false
             if let x = task.waitingOnExpired { task.movedOn.insert(x) }        // (it acts again: no longer waits on the expired card)
-            let id = e.stepId ?? "step-\(task.steps.count + 1)"
+            let id = StepIdentity.of(e.stepId, stepsSoFar: task.steps.count)
             var st = task.step(id) ?? StepState(id: id, n: task.steps.count + 1, text: e.text)
             st.text = e.text
             st.human = e.human
@@ -952,7 +959,8 @@ enum SessionReducer {
             st.object = e.object
             st.planStep = e.planStep
             st.target = e.target
-            if e.stepId == nil, let old = e.status { st.result = resultStatus(old, else: .ok) }   // an older harness: one line per step
+            st.objectLabel = e.objectLabel.isEmpty ? nil : e.objectLabel
+            if let r = StepIdentity.legacyResult(stepId: e.stepId, status: e.status) { st.result = StepState.Status(rawValue: r) ?? .ok }   // an older harness: one line per step
             if let i = task.steps.firstIndex(where: { $0.id == id }) { task.steps[i] = st } else { task.steps.append(st) }
         case .stepResult(let r):
             guard let i = task.steps.firstIndex(where: { $0.id == r.stepId }) else { return }
@@ -980,6 +988,7 @@ enum SessionReducer {
         case .resumed(let r):
             if let id = r.askId {
                 setOutcome(&task, id, r.voided.map { .void($0) } ?? .answered, at: t)
+                if r.voided == nil, let a = r.answer { applied(&task, id, a) }
             } else {
                 task.userActive = false
             }
@@ -1030,22 +1039,23 @@ enum SessionReducer {
     static let answerFor = "answer for "
 
     /// The run's word on a card (the first wins): over whatever the task's end implied, which was only provisional.
+    /// The applied answer of a card, from whichever record comes first (the live `resumed`, the stored
+    /// session.task_answer: the same answer, said twice on a replay); a voided card never takes one.
+    static func applied(_ task: inout TaskState, _ askId: String, _ a: AppliedAnswer) {
+        guard let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].answer == nil else { return }
+        if case .void? = task.cards[i].explicit { return }
+        task.cards[i].answer = a
+    }
+
     private static func setOutcome(_ task: inout TaskState, _ askId: String, _ outcome: CardState.Outcome, at t: Double?) {
         if let i = task.cards.firstIndex(where: { $0.askId == askId }), task.cards[i].explicit == nil {
             task.cards[i].explicit = outcome; task.cards[i].explicitAt = t
         }
     }
 
-    /// A step result's status from the wire: one of the results a step can have, else `fallback`.
+    /// A step result's status from the wire: one of the results a step can have, else `fallback` (StepIdentity's rule).
     private static func resultStatus(_ raw: String, else fallback: StepState.Status) -> StepState.Status {
-        switch StepState.Status(rawValue: raw) {
-        case .ok?: return .ok
-        case .unverified?: return .unverified
-        case .refused?: return .refused
-        case .stale?: return .stale
-        case .error?: return .error
-        default: return fallback
-        }
+        StepState.Status(rawValue: StepIdentity.result(raw, else: fallback.rawValue)) ?? fallback
     }
 
     /// What the task's facts make of its parts, whichever stream told what first (a replay sends the session's events

@@ -239,9 +239,46 @@ enum CardLayoutTests {
               "two steps: the external one sends out, its site and what goes; an object with no label shows its ref; the front app")
         let action = CardLayout(model(samples().first { $0.name == "action: consent" }!.card))
         check(action.consent == CardLayout.Consent(action: "在 Mail 里点「发送」", object: "Mail「周报」", site: "mail.example.com",
-                                                   outgoing: [.init(label: "收件人", value: "wang@example.com"), .init(label: "主题", value: "周报"), .init(label: "正文", value: "本周…")],
+                                                   outgoing: [.init(label: "收件人", value: "wang@example.com", kind: "to"), .init(label: "主题", value: "周报", kind: "subject"),
+                                                              .init(label: "正文", value: "本周…", kind: "body")],
                                                    effect: .sends, scope: .site("mail.example.com")),
               "the action card: the action, its object, the site, every line of what goes out: \(String(describing: action.consent))")
+        // U3 §2.2: 「要发出去的」 by the executor's kinds and order, never by what a label says; no line lost
+        typealias O = CardLayout.Outgoing
+        func block(_ o: [O]) -> CardLayout.Block { CardLayout.Consent(action: "", object: "", site: nil, outgoing: o).block }
+        let mail = block([O(label: "url", value: "https://mail.example.com", kind: "url"), O(label: "收件人", value: "许诺", kind: "field"),
+                          O(label: "主题", value: "Re: 方案评审", kind: "field"), O(label: "typed", value: "我看一下再说", kind: "typed"),
+                          O(label: "text", value: "10月20日 许诺 写道", kind: "text")])
+        check(mail.lead?.value == "我看一下再说" && mail.fields.map(\.label) == ["收件人", "主题"] && mail.text.map(\.value) == ["10月20日 许诺 写道"]
+              && mail.other.map(\.kind) == ["url"] && mail.count == 5, "mail: what was typed leads, the fields in order, the window's text, the URL kept: \(mail)")
+        let picked = block([O(label: "选项", value: "加急", kind: "selected")])
+        check(picked.lead == nil && picked.selected.map(\.value) == ["加急"] && picked.count == 1, "only a picked item: no lead, the item")
+        let noTyped = block([O(label: "金额", value: "120", kind: "field"), O(label: "备注", value: "x", kind: "field")])
+        check(noTyped.lead?.label == "金额" && noTyped.fields.map(\.label) == ["备注"], "nothing typed: the first field leads")
+        check(block([]).count == 0 && block([]).lead == nil, "nothing goes out: an empty block")
+        // a selected element comes as its name in the label, its value empty (harness executor.ts outgoingItems): the
+        // row says its name, never an empty value (#131 delta review)
+        let selectedOnly = block([O(label: "「周报」那封", value: "", kind: "selected"), O(label: "搜索框", value: "", kind: "selected"),
+                            O(label: "收件人", value: "wang@example.com", kind: "selected")])
+        check(selectedOnly.selected.map(\.shown) == ["「周报」那封", "搜索框", "wang@example.com"], "selected: its name when it has no value: \(selectedOnly.selected.map(\.shown))")
+        check(O(label: "selected", value: "", kind: "selected").shown == "", "no name and no value: not the kind's word")
+        let pickedCard = CardLayout(consentCard(["action": "click", "action_text": "点「删除」", "object": "window:mail#3", "object_label": "Mail",
+                                                 "consequence": "modify_user", "outgoing": [["kind": "selected", "label": "「周报」那封", "value": ""]]],
+                                             text: "这会改动你的东西：点「删除」"))
+        check(shownWords(pickedCard).contains("「周报」那封") && !pickedCard.hasDetails, "on the card: the selected element's name is shown")
+        // (a pick with a value is drawn by its value: its label is not on the card, so text that says it keeps 「细节」)
+        let pickedValue = CardLayout(consentCard(["action": "click", "action_text": "点「删除」", "object": "window:mail#3", "object_label": "Mail",
+                                                  "consequence": "modify_user", "outgoing": [["kind": "selected", "label": "收件人", "value": "wang@example.com"]]],
+                                                 text: "这会改动你的东西：点「删除」，收件人"))
+        check(pickedValue.hasDetails, "a pick's label drawn nowhere: 「细节」 stays")
+        var g = CardStoreTests.RNG(x: 77)
+        let kinds = ["field", "selected", "typed", "text", "url", "other"]
+        for _ in 0..<300 {
+            let o = (0..<g.next(9)).map { i in O(label: "l\(i)", value: "v\(i)", kind: kinds[g.next(kinds.count)]) }
+            let b = block(o)
+            let all = (b.lead.map { [$0] } ?? []) + b.fields + b.selected + b.text + b.other
+            if Set(all.map(\.value)) != Set(o.map(\.value)) || all.count != o.count { check(false, "a line lost or twice: \(o) -> \(b)"); break }
+        }
         check(CardLayout(model(samples().first { $0.name == "ambiguity" }!.card)).consent == nil, "no consent on a choice card")
         // VoiceOver's card label: its state, its kind, its first sentence, its number of options (handoff §3.10)
         let hint = CardLayout.hint(action.controls[0], keys: true, lang: .zhHans)
@@ -251,7 +288,7 @@ enum CardLayoutTests {
 
     // MARK: - every consent field is shown, or the whole text stays reachable (#129 Codex review)
 
-    /// Every key ActionCardFacts can carry (harness src/protocol/cards.ts at ebc8f92), each with a value as the harness
+    /// Every key ActionCardFacts can carry (harness src/protocol/cards.ts at ebc8f92, and U3's target_box), each with a value as the harness
     /// sends it and the words of it the user must be able to read: the test's own list, not the app's.
     static let consentKeys: [(key: String, value: Any, words: [String])] = [
         ("action", "click", []),                                   // machine form: its words are action_text's
@@ -262,6 +299,7 @@ enum CardLayoutTests {
         ("consequence", "external", ["这会把内容发出去"]),
         ("outgoing", [["kind": "field", "label": "收件人", "value": "wang@example.com"]], ["收件人", "wang@example.com"]),
         ("site", "mail.example.com", ["mail.example.com"]),
+        ("target_box", ["rect_norm": [0.2, 0.8, 0.1, 0.05]], []),  // no words: drawn as the mark on the picture (LiveFrame)
         ("uncertain", [["consequence": "external", "object": "window:mail#2", "text": "在 Mail 里点「发送」",
                         "outgoing": [["kind": "typed", "label": "正文", "value": "第一封"]]]], ["在 Mail 里点「发送」", "正文", "第一封"]),
         ("uncertain_total", 3, ["另有 2 条结果不确定的步骤"]),        // with the one listed above
@@ -273,16 +311,31 @@ enum CardLayoutTests {
     /// (ConsentFields draws exactly these).
     static func shownWords(_ l: CardLayout, lang: ResolvedLang = .zhHans) -> [String] {
         guard let c = l.consent else { return [l.title] }
-        var w = [l.title] + l.beyond + [c.action, c.object, c.site ?? ""] + c.outgoing.flatMap { [$0.label, $0.value] } + c.selected
+        // (as ConsentFields lays the block out: the action only when the title does not say it; the lead line's value,
+        // its label beside the heading; the other lines' labels and values; the window's other text and picks by value)
+        // (part by part, typed: the long + chain is past the CI compiler's type-check limit, as CardLayout.drawn's was)
+        let b: CardLayout.Block = c.block
+        var w: [String] = [l.title]
+        w.append(contentsOf: l.beyond)
+        if c.actionRow { w.append(c.action) }
+        w.append(contentsOf: [c.object, c.site ?? ""])
+        w.append(contentsOf: c.selected)
+        w.append(contentsOf: [b.leadLabel ?? "", b.lead?.value ?? ""])
+        for o: CardLayout.Outgoing in b.fields + b.other { w.append(o.label); w.append(o.value) }
+        w.append(contentsOf: b.selected.map { (o: CardLayout.Outgoing) -> String in o.shown })
+        w.append(contentsOf: b.text.map { (o: CardLayout.Outgoing) -> String in o.value })
         if let e = c.effect { w.append(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
-        w += c.uncertain.flatMap { [$0.text] + $0.outgoing.flatMap { [$0.label, $0.value] } }
+        for u: CardLayout.Uncertain in c.uncertain {
+            w.append(u.text)
+            for o: CardLayout.Outgoing in u.outgoing { w.append(o.label); w.append(o.value) }
+        }
         if c.uncertainMore > 0 { w.append(L("%d more steps with an unknown result", c.uncertainMore, lang: lang)) }
         if let m = c.modelSays { w.append(L("What the model says (not checked): %@", m, lang: lang)) }
         return w
     }
 
-    static func consentCard(_ consent: [String: Any], headline: String = "要点「发送」吗？") -> CardModel {
-        model(["kind": "action", "text": "这会把内容发出去：点「发送」", "headline": headline, "free_text": false, "blocking": true, "consent": consent,
+    static func consentCard(_ consent: [String: Any], headline: String = "要点「发送」吗？", text: String = "这会把内容发出去：点「发送」") -> CardModel {
+        model(["kind": "action", "text": text, "headline": headline, "free_text": false, "blocking": true, "consent": consent,
                "options": [opt("approve", "可以"), opt("skip_step", "这一步不要"), opt("cancel", "先别做了")]])
     }
 

@@ -13,6 +13,22 @@
 // | changes and outputs        | running: the running total (changes); ended: task_done's / task_end's; undone    |
 // |                            |   all: said so; unconfirmed: their own group                                     |
 // | 「电脑正被『X』使用」          | another conversation's task runs while this one is shown                         |
+//
+// The changes as rows (U3 §3, P1Main): one per thing, each from an event field --
+//
+// | from                                   | icon    | name                          | what                        |
+// |----------------------------------------|---------|-------------------------------|-----------------------------|
+// | a step, consequence external, ok /     | send    | its window (step.object_label,| sent (· not read back)      |
+// |   unverified                           |         |   else its words up to the    |                             |
+// | a step, consequence modify_user, …     | window  |   first comma, else the ref)  | changed yours (· not read…) |
+// | changes.created / modified / deleted   | file    | the path's last part          | created / changed / deleted |
+// | changes.external                       | file    |   (its folder beside it)      | changed by another program  |
+// | changes.unconfirmed                    | unknown |                               | can't tell if it happened   |
+// | changes.created_windows                | window  | as given                      | opened window               |
+//
+// A thing acted on by several steps is one row per kind of change -- changed, sent -- with its last step's words. Sent first, then changed, created, deleted,
+// another program's, unsure, opened windows. All undone: the files' rows struck (an undo takes back only those). The sent line: how many went out; none
+// yet while a card waits on a step of the plan that sends.
 
 import Foundation
 
@@ -37,6 +53,19 @@ struct RightColumn: Equatable {
         var isEmpty: Bool { created.isEmpty && modified.isEmpty && deleted.isEmpty && external.isEmpty && unconfirmed.isEmpty }
     }
 
+    struct ChangeRow: Equatable {
+        enum Icon: Equatable { case file, window, send, unknown }
+        enum What: Equatable { case sent, changedYours, created, modified, deleted, byAnother, unsure, openedWindow }
+        var icon: Icon
+        var name: String
+        /// Where it is (a file's folder) or what was done (a step's words); nil: none.
+        var detail: String?
+        var what: What
+        var unverified = false
+        var struck = false
+    }
+    enum SentLine: Equatable { case count(Int), noneYetWaiting }
+
     var status: SessionStatus
     /// 「第 n 步 · m:ss」 while a task runs (nil otherwise).
     var progress: (step: Int, seconds: Int)?
@@ -50,11 +79,14 @@ struct RightColumn: Equatable {
     /// one is shown.
     var computerUsedBy: String?
     var computerUsedById: String? = nil
+    /// The changes as rows (the table above), and the line under them.
+    var changeRows: [ChangeRow] = []
+    var sentLine: SentLine? = nil
 
     static func == (a: RightColumn, b: RightColumn) -> Bool {
         a.status == b.status && a.progress?.step == b.progress?.step && a.progress?.seconds == b.progress?.seconds
             && a.youAreUsingIt == b.youAreUsingIt && a.screenLocked == b.screenLocked && a.plan == b.plan && a.changes == b.changes
-            && a.computerUsedBy == b.computerUsedBy
+            && a.computerUsedBy == b.computerUsedBy && a.changeRows == b.changeRows && a.sentLine == b.sentLine
     }
 
     /// The column for `s` (the shown session; nil: none), its latest task's, at `now` (seconds since 1970);
@@ -84,8 +116,114 @@ struct RightColumn: Equatable {
         let c = t.changes
         var changes = ChangeList(created: c.created, modified: c.modified, deleted: c.deleted, external: c.external, unconfirmed: c.unconfirmed)
         changes.undone = ShellText.fullyUndone(t) != nil
-        return RightColumn(status: status, progress: progress, youAreUsingIt: t.running && t.userActive,
-                           screenLocked: t.ended && t.cause == .screenLocked, plan: plan, changes: changes,
-                           computerUsedBy: s.runningTask == nil ? otherRunning : nil)
+        var col = RightColumn(status: status, progress: progress, youAreUsingIt: t.running && t.userActive,
+                              screenLocked: t.ended && t.cause == .screenLocked, plan: plan, changes: changes,
+                              computerUsedBy: s.runningTask == nil ? otherRunning : nil)
+        col.changeRows = rows(ChangeInput.of(t))
+        let sent = col.changeRows.filter { $0.what == .sent }.count
+        let waitsToSend: Bool = { if case .waitingForYou = status { return plan.contains { $0.asksFirst && $0.mark != .done } }; return false }()
+        col.sentLine = sent > 0 ? .count(sent) : waitsToSend ? .noneYetWaiting : nil
+        return col
+    }
+
+    /// What the rows are made from: the steps and the changes, from the session's state (the right column) or from the
+    /// run's own record (过程: RunDir) -- one input, one function, the same rows in both places.
+    struct ChangeInput: Equatable {
+        struct Step: Equatable {
+            var id: String
+            var object: String?
+            var objectLabel: String?
+            var human: String?
+            var consequence: String?
+            /// step_result's status (ok, unverified, refused, …; nil: none yet).
+            var result: String?
+            /// The step's text: a screen action as JSON (the harness's step.text), a file step's capability and arguments.
+            var text: String? = nil
+        }
+        var steps: [Step] = []
+        var created: [String] = [], modified: [String] = [], deleted: [String] = [], external: [String] = [], unconfirmed: [String] = []
+        var createdWindows: [String] = []
+        var undone = false
+
+        static func of(_ t: TaskState) -> ChangeInput {
+            let c = t.changes
+            return ChangeInput(steps: t.steps.map { Step(id: $0.id, object: $0.object, objectLabel: $0.objectLabel, human: $0.human,
+                                                         consequence: $0.consequence, result: $0.result?.rawValue, text: $0.text) },
+                               created: c.created, modified: c.modified, deleted: c.deleted, external: c.external, unconfirmed: c.unconfirmed,
+                               createdWindows: c.createdWindows ?? [], undone: ShellText.fullyUndone(t) != nil)
+        }
+        static func of(_ m: RunDir.Model) -> ChangeInput {
+            let c = m.changes ?? RunDir.Changes()
+            return ChangeInput(steps: m.steps.map { Step(id: $0.stepId, object: $0.object, objectLabel: $0.objectLabel, human: $0.human,
+                                                         consequence: $0.consequence, result: $0.status, text: $0.text) },
+                               created: c.created, modified: c.modified, deleted: c.deleted, external: c.external, unconfirmed: c.unconfirmed,
+                               createdWindows: c.createdWindows, undone: c.fullyUndone)
+        }
+    }
+
+    /// The changes as rows (the second table).
+    static func rows(_ input: ChangeInput) -> [ChangeRow] {
+        var byObject: [String: ChangeRow] = [:], order: [String] = []
+        let undone = input.undone
+        for st in input.steps where st.result == "ok" || st.result == "unverified" {
+            let what: ChangeRow.What
+            switch st.consequence {
+            case "external": what = .sent
+            // (a change to the user's things on screen -- a window, a tab, an app it opens a window in -- is its row; a
+            // file step is its file's row alone -- changes.modified -- never also this one, which an undo would leave
+            // unstruck beside the struck file: #131 Codex review)
+            case "modify_user" where onScreen(st):
+                what = .changedYours
+            default: continue
+            }
+            let key = (st.object ?? st.id) + "/" + (what == .sent ? "sent" : "changed")
+            if byObject[key] == nil { order.append(key) }
+            byObject[key] = ChangeRow(icon: what == .sent ? .send : .window, name: thingName(st), detail: st.human, what: what,
+                                      unverified: st.result == "unverified")
+        }
+        let steps = order.compactMap { byObject[$0] }
+        func files(_ paths: [String], _ what: ChangeRow.What, icon: ChangeRow.Icon = .file) -> [ChangeRow] {
+            paths.map { p in
+                let u = URL(fileURLWithPath: p)
+                let folder = u.deletingLastPathComponent().lastPathComponent
+                return ChangeRow(icon: icon, name: u.lastPathComponent, detail: folder.isEmpty || folder == "/" ? nil : folder, what: what)
+            }
+        }
+        let c = input
+        var all = steps.filter { $0.what == .sent } + steps.filter { $0.what == .changedYours }
+        all += files(c.modified, .modified) + files(c.created, .created) + files(c.deleted, .deleted)
+        all += files(c.external, .byAnother) + files(c.unconfirmed, .unsure, icon: .unknown)
+        all += c.createdWindows.map { ChangeRow(icon: .window, name: $0, detail: nil, what: .openedWindow) }
+        // (an undo takes back this Mac's files -- what the task created, changed, deleted -- never what went out, what
+        // it did in an app's window, another program's change or an unsure one: those stay as they were)
+        if undone { for i in all.indices where [.created, .modified, .deleted].contains(all[i].what) { all[i].struck = true } }
+        return all
+    }
+
+    /// A step on the user's screen, not a file step: its object is not a path: / cap: one, and a step with none (the
+    /// harness's open_window: a link opened in a window of the user's app carries no object) is a screen action by its
+    /// text -- a file step's text is its capability and arguments, never an action's JSON.
+    static func onScreen(_ st: ChangeInput.Step) -> Bool {
+        if let o = st.object, !o.isEmpty { return !["path:", "cap:"].contains { o.hasPrefix($0) } }
+        return screenAction(st.text) != nil
+    }
+
+    /// The step's text as a screen action (a JSON object with a kind other than file), else nil.
+    static func screenAction(_ text: String?) -> [String: Any]? {
+        guard let d = text?.data(using: .utf8), let a = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+              let k = a["kind"] as? String, k != "file" else { return nil }
+        return a
+    }
+
+    /// What a step acted on, by name: its window's (step.object_label, harness U3), else the app its action names (an
+    /// open_window), else its words up to the first comma (they name the window: an older harness), else its object's ref.
+    static func thingName(_ st: ChangeInput.Step) -> String {
+        if let l = st.objectLabel, !l.isEmpty { return l }
+        if let app = screenAction(st.text)?["app"] as? String, !app.isEmpty { return app }
+        if let h = st.human, !h.isEmpty {
+            let cut = h.split(whereSeparator: { $0 == "，" || $0 == "," }).first.map(String.init) ?? h
+            return cut.trimmingCharacters(in: .whitespaces)
+        }
+        return st.object ?? ""
     }
 }

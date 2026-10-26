@@ -130,6 +130,14 @@ struct LiveFeed: Equatable {
         return CGRect(x: x0 * picture.width, y: y0 * picture.height, width: (x1 - x0) * picture.width, height: (y1 - y0) * picture.height)
     }
 
+    /// Where 「准备点：…」 goes over its box (P1Waiting): left-aligned with the dashed frame (4 pt out from the box), its
+    /// bottom 4 pt above it; with no room above, 4 pt below it. `tagHeight`: the tag's own.
+    static func tagOrigin(box: CGRect, tagHeight: CGFloat) -> CGPoint {
+        let x = max(0, box.minX - 4)
+        let above = box.minY - 4 - 4 - tagHeight
+        return CGPoint(x: x, y: above >= 0 ? above : box.maxY + 4 + 4)
+    }
+
     /// The part of `window` that `display` shows, as [x, y, w, h] of the window (0–1); nil when none.
     static func visiblePart(window: CGRect, display: CGRect) -> [Double]? {
         let v = window.intersection(display)

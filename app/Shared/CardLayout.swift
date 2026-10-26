@@ -43,8 +43,17 @@ struct CardLayout: Equatable {
         var sendsOut: Bool
     }
     struct Site: Equatable { var host: String; var sends: String?; var asksEach: Bool }
-    /// One line of what goes out (a consent card's outgoing).
-    struct Outgoing: Equatable { var label: String; var value: String }
+    /// One line of what goes out (a consent card's outgoing): its kind as the executor gave it (field, selected, typed,
+    /// text), its label (the kind when it has none), its value.
+    struct Outgoing: Equatable {
+        var label: String
+        var value: String
+        var kind: String = ""
+        init(label: String, value: String, kind: String = "") { self.label = label; self.value = value; self.kind = kind }
+        /// Its words on the card: its value, else (a selected element: its name is its label, its value empty --
+        /// harness executor.ts outgoingItems) its label.
+        var shown: String { value.isEmpty && label != kind ? label : value }
+    }
     /// A consent card's fields.
     struct Consent: Equatable {
         var action: String
@@ -63,9 +72,43 @@ struct CardLayout: Equatable {
         var modelSays: String? = nil
         /// What a yes covers (the harness signs it: harness service.ts consentFor).
         var scope: Scope = .once(target: nil)
+        /// The action is said in the block: the card's title does not say it (a headline names it as a question).
+        var actionRow = false
         /// The consent keys with a value the block does not show (a newer harness's field, a class it does not know,
         /// an element its action does not name): while there is one, the card's whole text stays under 「细节」.
         var unshown: [String] = []
+
+        /// 「要发出去的」 as the P1Waiting board lays it out, by the executor's kinds and order only (never by what a label
+        /// says, U3 §2.2): the lead line -- the first of what the task typed, else the first filled field -- the other
+        /// fields, the picked items, the window's other text, and any line of a kind not known. Every line of
+        /// `outgoing` is in exactly one of them (none lost: A2).
+        var block: Block {
+            var b = Block()
+            let leadAt = outgoing.firstIndex { $0.kind == "typed" } ?? outgoing.firstIndex { $0.kind == "field" }
+            for (i, o) in outgoing.enumerated() {
+                if i == leadAt { b.lead = o; continue }
+                switch o.kind {
+                case "field", "typed": b.fields.append(o)
+                case "selected": b.selected.append(o)
+                case "text": b.text.append(o)
+                default: b.other.append(o)
+                }
+            }
+            return b
+        }
+    }
+    struct Block: Equatable {
+        var lead: Outgoing?
+        var fields: [Outgoing] = []
+        var selected: [Outgoing] = []
+        var text: [Outgoing] = []
+        var other: [Outgoing] = []
+        var count: Int {
+            let lines: Int = fields.count + selected.count + text.count + other.count
+            return lines + (lead == nil ? 0 : 1)
+        }
+        /// The lead line's own label (none when it is only its kind's name).
+        var leadLabel: String? { lead.flatMap { $0.label.isEmpty || $0.label == $0.kind ? nil : $0.label } }
     }
     enum Effect: Equatable { case sends, changes }
     struct Uncertain: Equatable { var text: String; var outgoing: [Outgoing] }
@@ -109,12 +152,26 @@ struct CardLayout: Equatable {
     /// either language: the harness's text says it in the task's).
     var drawn: [String] {
         guard let c = consent else { return [title] + beyond }
-        var w = [title] + beyond + [c.action, c.object, c.site ?? ""] + c.outgoing.flatMap { [$0.label, $0.value] } + c.selected
+        // (the action, drawn or said by the title -- Consent.actionRow; the block as ConsentFields lays it out: the lead
+        // line's value and its label, the other lines' labels and values, the picks and the window's text by value)
+        // (one part at a time, each typed: a single long + chain is past a slower compiler's type-check limit -- #131 CI)
+        let b: Block = c.block
+        var w: [String] = [title]
+        w.append(contentsOf: beyond)
+        w.append(contentsOf: [c.action, c.object, c.site ?? ""])
+        w.append(contentsOf: c.selected)
+        w.append(contentsOf: [b.leadLabel ?? "", b.lead?.value ?? ""])
+        for o: Outgoing in b.fields + b.other { w.append(o.label); w.append(o.value) }
+        w.append(contentsOf: b.selected.map { (o: Outgoing) -> String in o.shown })
+        w.append(contentsOf: b.text.map { (o: Outgoing) -> String in o.value })
         if let e = c.effect {
-            let key = e == .sends ? "This sends something out" : "This changes your things"
-            w += [L(key, lang: .en), L(key, lang: .zhHans)]
+            let key: String = e == .sends ? "This sends something out" : "This changes your things"
+            w.append(L(key, lang: .en)); w.append(L(key, lang: .zhHans))
         }
-        w += c.uncertain.flatMap { [$0.text] + $0.outgoing.flatMap { [$0.label, $0.value] } }
+        for u: Uncertain in c.uncertain {
+            w.append(u.text)
+            for o: Outgoing in u.outgoing { w.append(o.label); w.append(o.value) }
+        }
         if let m = c.modelSays { w.append(m) }
         return w.filter { !$0.isEmpty }
     }
@@ -156,9 +213,10 @@ struct CardLayout: Equatable {
     }
 
     static func consent(_ c: ConsentFacts, title: String) -> Consent {
-        let out = { (o: [ConsentFacts.Outgoing]) in o.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value) } }
+        let out = { (o: [ConsentFacts.Outgoing]) in o.map { Outgoing(label: $0.label.isEmpty ? $0.kind : $0.label, value: $0.value, kind: $0.kind) } }
         var k = Consent(action: c.actionText.isEmpty ? c.action : c.actionText, object: c.objectLabel.isEmpty ? c.object : c.objectLabel,
                         site: c.site, outgoing: out(c.outgoing))
+        k.actionRow = !k.action.isEmpty && !title.contains(k.action)
         k.effect = ["external": .sends, "modify_user": .changes][c.consequence]
         k.selected = c.selected.filter { !$0.isEmpty }
         k.uncertain = c.uncertain.map { Uncertain(text: $0.text, outgoing: out($0.outgoing)) }
