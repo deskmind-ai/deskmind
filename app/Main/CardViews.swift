@@ -283,6 +283,8 @@ struct PinnedCard: View {
     var body: some View {
         if shell.cardPinnedWhole(card) {
             CardView(shell: shell, card: card, phase: phase, askedAt: askedAt, session: session)
+                // (P1Waiting: the pinned card that waits for you, and only it, in a 2 pt orange ring)
+                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(phase == .open && card.blocking ? Brand.dot : Color.clear, lineWidth: 2))
                 .id(ShellModel.cardKey(card))
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
         } else {

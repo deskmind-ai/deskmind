@@ -125,7 +125,7 @@ enum MainWindowSnapshot {
         let card: [String: Any] = [
             "kind": "action", "blocking": true, "headline": "要在网页邮箱里点「发送」吗？",
             "text": "要在网页邮箱里点「发送」吗？这会把回复发给许诺。",
-            "consent": ["action": "click", "action_text": "点「发送」", "object": "button:send", "object_label": "发送",
+            "consent": ["action": "click", "action_text": "点「发送」", "target": "发送", "object": "button:send", "object_label": "发送",
                         "consequence": "external", "site": "mail.example.com",
                         "outgoing": [["kind": "to", "label": "收件人", "value": "许诺 <xu.nuo@example.com>"],
                                      ["kind": "body", "label": "内容", "value": "「我看一下再说」"]]],

@@ -227,8 +227,8 @@ struct SessionList: View {
     @State private var newName = ""
     @State private var deleting: String?
 
-    /// Top to bottom (P1Main): 「新对话 ⌘N」, the 「对话」 caption, the rows (each a button: a click selects it; ⌘↑ ⌘↓
-    /// move), and the foot -- the cloud model and the settings. Below the window's buttons, on the sidebar's colour.
+    /// Top to bottom (P1Main): 「新对话 ⌘N」, the 「对话」 caption, the rows (each a button: a click selects it; with the
+    /// list focused -- a click in it, or Tab -- ↑ ↓ move, as ⌘↑ ⌘↓ do anywhere), and the foot -- the cloud model and the settings. Below the window's buttons, on the sidebar's colour.
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Button {
@@ -268,6 +268,15 @@ struct SessionList: View {
                 }
             }
             .frame(maxHeight: .infinity)
+            // (the user's own click or Tab focuses it; nothing here moves the focus)
+            .focusable()
+            .onMoveCommand { d in
+                switch d {
+                case .up: shell.move(-1)
+                case .down: shell.move(1)
+                default: break
+                }
+            }
             footer
         }
         .padding(.horizontal, 12).padding(.top, 40).padding(.bottom, 10)
@@ -962,7 +971,7 @@ struct AgentPanel: View {
                 if let t = shell.current?.runningTask, watched != nil || still != nil {
                     let last = t.steps.last
                     LiveFrame(picture: still ?? dock.picture, state: still == nil ? dock.state : .streaming,
-                              app: Self.appName(last?.object), waiting: Self.waits(c.status),
+                              app: Self.appName(last?.object), waiting: Self.waits(c.status), about: aboutToAct,
                               step: last.map(\.displayText), stepWindow: LiveFeed.windowNumber(last?.object),
                               target: last?.target, zoomed: $zoomed, popOut: { shell.togglePopOut() })
                 } else if shell.current?.runningTask != nil {
@@ -1017,6 +1026,14 @@ struct AgentPanel: View {
             .padding(.horizontal, 18).padding(.bottom, 16)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    /// 「准备点：<target>」: the element the open action card itself names (its consent.target), while it waits --
+    /// never worked out from the steps; none when the card names none.
+    private var aboutToAct: String? {
+        guard let s = shell.current, let p = shell.pinned(s), p.phase == .open,
+              let t = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId).consent?.target, !t.isEmpty else { return nil }
+        return t
     }
 
     private func placeholder(_ text: String) -> some View {

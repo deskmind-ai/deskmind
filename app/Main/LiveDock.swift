@@ -93,12 +93,14 @@ final class LiveDock: ObservableObject {
 
 /// The live view in its ink frame (P1Main, CardStates): a title bar -- the orange dot, the app and the window's state,
 /// 「放大」 and 「弹出成浮窗」 -- the picture with the agent's cursor and a dashed box round what the step acts on (its
-/// target's rect_norm; 「准备点：…」 over it while a card waits), and the step in a line under it (its human words).
+/// target's rect_norm; 「准备点：…」 on the picture while an action card naming its target waits), and the step in a line under it (its human words).
 struct LiveFrame: View {
     let picture: LiveDock.Picture?
     let state: LiveFeed.State?
     let app: String?
     let waiting: Bool
+    /// The element the open card says it is about to act on (its own consent.target), shown over the picture.
+    let about: String?
     let step: String?
     let stepWindow: Int?
     let target: StepTarget?
@@ -128,12 +130,6 @@ struct LiveFrame: View {
                                 RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.dot, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
                                     .frame(width: b.width + 8, height: b.height + 8).offset(x: b.minX - 4, y: b.minY - 4)
                                     .accessibilityHidden(true)
-                                if waiting, let label = target?.label, !label.isEmpty {
-                                    Text(L("About to click: %@", label, lang: lang)).font(.system(size: 10, weight: .bold)).foregroundStyle(Brand.card)
-                                        .padding(.horizontal, 7).frame(height: 18)
-                                        .background(RoundedRectangle(cornerRadius: 4).fill(ShellColor.orangeText))
-                                        .offset(x: b.minX - 4, y: max(0, b.minY - 26))
-                                }
                             }
                             if let c = LiveFeed.cursor(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target?.rectNorm, picture: size, visible: p.visible) {
                                 Circle().fill(Brand.dot).frame(width: 12, height: 12)
@@ -142,6 +138,15 @@ struct LiveFrame: View {
                             }
                         }
                         .frame(width: g.size.width, height: g.size.height)
+                    }
+                    .overlay(alignment: .topLeading) {
+                        // (the card's own words for what it is about to act on: not placed on the step's box)
+                        if let about {
+                            Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Brand.card)
+                                .padding(.horizontal, 8).frame(height: 20)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(ShellColor.orangeText))
+                                .padding(8)
+                        }
                     }
                     .accessibilityLabel(L("Live view of the task's window", lang: lang))
                 } else {
