@@ -971,7 +971,8 @@ struct AgentPanel: View {
             .padding(.horizontal, 18).padding(.top, 16)
             if shell.currentTabs.tab == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
-                ProcessPane(sessionId: sid, runId: run, focus: shell.currentTabs.focus, focusAsks: shell.currentTabs.focusAsks)
+                ProcessPane(sessionId: sid, runId: run, focus: shell.currentTabs.focus, focusAsks: shell.currentTabs.focusAsks,
+                            focusUsed: { shell.focusShown() })
                     .equatable().id(sid + "/" + run).padding(.horizontal, 18)
             } else if shell.currentTabs.tab == .process {
                 Text(L("No record", lang: lang)).foregroundStyle(ShellColor.secondary).frame(maxWidth: .infinity, maxHeight: .infinity)

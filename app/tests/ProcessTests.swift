@@ -316,6 +316,13 @@ enum ProcessTests {
         var f = T(); f.apply(.clickedChanges("x")); f.apply(.clickedChanges("x"))
         check(f.tab == .process && f.run == "x" && f.focus == .changes && f.focusAsks == 2, "「明细 ›」: 过程 at 改动, each click asks again")
         f.apply(.clickedTask("x")); check(f.focus == nil, "a task's own 过程: from its top")
+        // #131 review: one-shot -- a tab pick after 明细, a pane that used it, a task's start or end: no jump later
+        var p = T(); p.apply(.clickedChanges("x")); p.apply(.picked(.now, latest: "x")); p.apply(.picked(.process, latest: "x"))
+        check(p.focus == nil, "明细, then 现在 → 过程: 过程 from its top, no jump to 改动")
+        var q = T(); q.apply(.clickedChanges("x")); q.apply(.focusShown)
+        check(q.focus == nil && q.tab == .process && q.run == "x", "the pane scrolled: the ask used; a new pane (another run, a reopen) starts at the top")
+        var r = T(); r.apply(.clickedChanges("x")); r.apply(.taskStarted("y"))
+        check(r.focus == nil, "a task starts after 明细: the ask gone")
         t.apply(.taskStarted("B")); t.apply(.taskDone("B")); check(t.run == "old", "a queued task starts and ends while reading 'old': not yanked")
         t.apply(.picked(.now, latest: "B")); t.apply(.picked(.process, latest: "B")); t.apply(.taskDone("C"))
         check(t.tab == .process && t.run == "old", "back on 过程: still 'old', being read")
@@ -326,14 +333,17 @@ enum ProcessTests {
             for _ in 0..<20 {
                 let r = "r\(g.next(3))"
                 let e: T.Event = [.taskStarted(r), .taskDone(r), .picked(g.next(2) == 0 ? .now : .process, latest: g.next(4) == 0 ? nil : r), .clickedTask(r),
-                                  .clickedChanges(r)][g.next(5)]
+                                  .clickedChanges(r), .focusShown][g.next(6)]
                 let before = (tab, run)
+                // (the 改动 ask is one-shot: any other move clears it)
+                if case .clickedChanges = e {} else { focus = nil }
                 switch e {
                 case .taskStarted(let x): if tab == .now { run = x }
                 case .taskDone(let x): if tab == .now && !stayNow { tab = .process; run = x }
                 case .picked(let p, let latest): tab = p; stayNow = p == .now; if p == .process && run == nil { run = latest }
                 case .clickedTask(let x): tab = .process; run = x; stayNow = false; focus = nil
                 case .clickedChanges(let x): tab = .process; run = x; stayNow = false; focus = .changes; asks += 1
+                case .focusShown: break
                 }
                 s.apply(e)
                 if s.tab != tab || s.run != run || s.focus != focus || s.focusAsks != asks {

@@ -84,6 +84,8 @@ struct ProcessPane: View, Equatable {
     /// Where to show (「明细 ›」: 改动), and its asks: each one scrolls there again.
     var focus: ProcessTabs.Focus? = nil
     var focusAsks = 0
+    /// Called once it has scrolled to the asked section (the ask is used: ShellModel.focusShown).
+    var focusUsed: () -> Void = {}
     static func == (a: ProcessPane, b: ProcessPane) -> Bool {
         a.sessionId == b.sessionId && a.runId == b.runId && a.focus == b.focus && a.focusAsks == b.focusAsks
     }
@@ -103,8 +105,9 @@ struct ProcessPane: View, Equatable {
                     .padding(.vertical, 4)
             }
             // (「明细 ›」: to 改动 -- once laid out, and on each new ask)
-            .onChange(of: focusAsks, initial: true) { _, _ in if focus == .changes { scroll(proxy) } }
-            .onChange(of: loader.model.changes != nil) { _, _ in if focus == .changes { scroll(proxy) } }
+            // (once its record is read, so the section is there; then the ask is used)
+            .onChange(of: focusAsks, initial: true) { _, _ in show(proxy) }
+            .onChange(of: loader.model.changes != nil) { _, _ in show(proxy) }
         }
         .onAppear { loader.watch(session: sessionId, run: runId) }
         .onDisappear { loader.stop() }
@@ -289,8 +292,12 @@ struct ProcessPane: View, Equatable {
 
     // MARK: changes
 
-    private func scroll(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.changesAnchor, anchor: .top) } }
+    private func show(_ proxy: ScrollViewProxy) {
+        guard focus == .changes, loader.model.changes != nil else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(Self.changesAnchor, anchor: .top) }
+            focusUsed()
+        }
     }
     static let changesAnchor = "process/changes"
 

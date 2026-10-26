@@ -950,7 +950,7 @@ enum SessionReducer {
         case .step(let e):
             task.preparing = false
             if let x = task.waitingOnExpired { task.movedOn.insert(x) }        // (it acts again: no longer waits on the expired card)
-            let id = e.stepId ?? "step-\(task.steps.count + 1)"
+            let id = stepIdentity(e.stepId, stepsSoFar: task.steps.count)
             var st = task.step(id) ?? StepState(id: id, n: task.steps.count + 1, text: e.text)
             st.text = e.text
             st.human = e.human
@@ -960,7 +960,7 @@ enum SessionReducer {
             st.planStep = e.planStep
             st.target = e.target
             st.objectLabel = e.objectLabel.isEmpty ? nil : e.objectLabel
-            if e.stepId == nil, let old = e.status { st.result = resultStatus(old, else: .ok) }   // an older harness: one line per step
+            if let r = legacyResult(stepId: e.stepId, status: e.status) { st.result = r }   // an older harness: one line per step
             if let i = task.steps.firstIndex(where: { $0.id == id }) { task.steps[i] = st } else { task.steps.append(st) }
         case .stepResult(let r):
             guard let i = task.steps.firstIndex(where: { $0.id == r.stepId }) else { return }
@@ -1054,6 +1054,15 @@ enum SessionReducer {
     }
 
     /// A step result's status from the wire: one of the results a step can have, else `fallback`.
+    /// A step's id: its own, else (a harness before M0: no step_id) its place, step-<n>. The session's state and the run's
+    /// record (RunDir) both name steps by this (#131 review: one mapping, the same rows in both places).
+    static func stepIdentity(_ stepId: String?, stepsSoFar: Int) -> String { stepId ?? "step-\(stepsSoFar + 1)" }
+    /// A harness before M0 said a step's result on the step itself (no step_id, no step_result): that status, else ok.
+    static func legacyResult(stepId: String?, status: String?) -> StepState.Status? {
+        guard stepId == nil, let old = status else { return nil }
+        return resultStatus(old, else: .ok)
+    }
+
     private static func resultStatus(_ raw: String, else fallback: StepState.Status) -> StepState.Status {
         switch StepState.Status(rawValue: raw) {
         case .ok?: return .ok

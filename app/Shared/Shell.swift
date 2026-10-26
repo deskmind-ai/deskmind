@@ -1198,6 +1198,11 @@ final class ShellModel: ObservableObject {
         guard let id = selected else { return }
         tabs[id, default: ProcessTabs()].apply(.clickedChanges(runId))
     }
+    /// 过程 scrolled to the asked section: the ask is used (one-shot).
+    func focusShown() {
+        guard let id = selected else { return }
+        tabs[id, default: ProcessTabs()].apply(.focusShown)
+    }
     /// The runs whose folders may still be written: a task running, or one whose result card waits (its process
     /// lingers) -- never pruned (RunRetention).
     var liveRuns: Set<String> {

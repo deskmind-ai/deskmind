@@ -117,15 +117,34 @@ enum CardContentTests {
             }
             return RunDir.model(RunDir.Files(events: ([#"{"seq":1,"kind":"start","raw":"x"}"#] + events).joined(separator: "\n") + "\n"))
         }
-        let done = S.ex(12, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","result_card":null,"changes":{"created":["/Users/u/Desktop/新的.txt"],"modified":["/Users/u/Notes/笔记.txt"],"deleted":[],"external":["/Users/u/Notes/别人改的.txt"],"unconfirmed":[],"created_windows":["TextEdit 窗口"]}"#)
-        let undo = S.ex(13, #""kind":"result_response","picked":"undo","effect":"undone 2/2","undone":2,"total":2,"refused":null"#)
-        for (name, ls) in [("running", lines), ("ended", lines + [done]), ("undone", lines + [done, undo])] {
-            let task = RightColumn.ChangeInput.of(reduce(ls).task("r1")!), run = RightColumn.ChangeInput.of(runFolder(ls))
-            var t2 = task; if name == "undone" { t2.undone = run.undone }     // (the session's undone needs its respond record: the run's says it)
-            check(RightColumn.rows(t2) == RightColumn.rows(run), "\(name): the right column's rows and 过程's are the same: \(RightColumn.rows(t2)) vs \(RightColumn.rows(run))")
-            check(!RightColumn.rows(run).isEmpty, "\(name): rows from the run's record")
+        let card = #""result_card":{"kind":"result","text":"做了","options":[{"kind":"approve","text":"好的"},{"kind":"undo","text":"撤回"}],"free_text":false,"blocking":false}"#
+        let done = S.ex(12, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","# + card + #","changes":{"created":["/Users/u/Desktop/新的.txt"],"modified":["/Users/u/Notes/笔记.txt"],"deleted":[],"external":["/Users/u/Notes/别人改的.txt"],"unconfirmed":[],"created_windows":["TextEdit 窗口"]}"#)
+        let respond = S.se(2, #""kind":"session.task_respond","run_id":"r1","option":1,"undo":true"#)
+        // (the undo's answer, as a run writes it -- result_response -- and as the session stores it -- session.task_undo)
+        func undo(_ undone: Int, _ total: Int, refused: String?) -> [ProtocolLine] {
+            let r = #","refused":"# + (refused.map { "\"" + $0 + "\"" } ?? "null")
+            return [S.ex(13, #""kind":"result_response","picked":"undo","effect":"undone","undone":"# + "\(undone)" + #","total":"# + "\(total)" + r),
+                    S.se(3, #""kind":"session.task_undo","run_id":"r1","undone":"# + "\(undone)" + #","total":"# + "\(total)" + r)]
         }
-        check(RightColumn.ChangeInput.of(runFolder(lines + [done, undo])).undone, "the run's record: all undone")
+        // (a harness before M0: no step_id, the result on the step itself -- named and settled the same in both)
+        let oldLog = [S.ex(2, #""kind":"step","text":"x","consequence":"modify_user","object":"window:o#1","human":"在 TextEdit 窗口「笔记」，写入「好」","status":"ok""#),
+                      S.ex(3, #""kind":"step","text":"x","consequence":"external","object":"window:o#2","human":"点「发送」","status":"unverified""#),
+                      S.ex(4, #""kind":"step","text":"x","consequence":"modify_user","object":"window:o#3","human":"被拒的","status":"refused""#)]
+        let cases: [(String, [ProtocolLine], Bool?)] = [
+            ("running", lines, nil), ("ended", lines + [done], nil),
+            ("undone", lines + [done, respond] + undo(2, 2, refused: nil), true),
+            ("undo refused part way", lines + [done, respond] + undo(1, 2, refused: "笔记.txt 被改过"), false),
+            ("undo partial", lines + [done, respond] + undo(1, 2, refused: nil), false),
+            ("an older harness's steps", oldLog, nil),
+        ]
+        for (name, ls, undone) in cases {
+            let task = RightColumn.ChangeInput.of(reduce(ls).task("r1")!), run = RightColumn.ChangeInput.of(runFolder(ls))
+            check(RightColumn.rows(task) == RightColumn.rows(run), "\(name): the right column's rows and 过程's are the same: \(RightColumn.rows(task)) vs \(RightColumn.rows(run))")
+            check(!RightColumn.rows(run).isEmpty, "\(name): rows from the run's record")
+            if let undone { check(task.undone == undone && run.undone == undone, "\(name): undone \(undone) in both (session \(task.undone), run \(run.undone))") }
+        }
+        check(RightColumn.rows(.of(runFolder(oldLog))).map(\.what) == [.sent, .changedYours] && RightColumn.rows(.of(runFolder(oldLog)))[0].unverified,
+              "an older harness's steps: their results from the step itself (refused: no row)")
         // both views draw them through the one row view
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         func read(_ f: String) -> String { (try? String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)) ?? "" }

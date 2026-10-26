@@ -26,11 +26,14 @@ struct ProcessTabs: Equatable {
         case clickedTask(String)
         /// 「明细 ›」: the run's 过程, at its 改动 section.
         case clickedChanges(String)
+        /// 过程 showed the asked section (the pane scrolled there): the ask is done.
+        case focusShown
     }
     /// Where 过程 is asked to show (a section), and how many times it was asked (each ask scrolls again).
     enum Focus: Equatable { case changes }
     var focus: Focus?
     var focusAsks = 0
+    private static func asks(_ e: Event) -> Bool { if case .clickedChanges = e { return true }; return false }
 
     var tab: Tab = .now
     /// The run 过程 shows (nil: the conversation's latest).
@@ -38,7 +41,10 @@ struct ProcessTabs: Equatable {
     /// The user picked 现在: no switch to 过程 until they pick 过程 (or open a task's).
     var stayNow = false
 
+    /// The 改动 ask is one-shot (#131 review): used once the pane has scrolled, and gone with any other move -- a tab
+    /// picked, a task started or ended, another run opened -- so 过程 never jumps to 改动 by itself later.
     mutating func apply(_ e: Event) {
+        if e != .focusShown, !Self.asks(e) { focus = nil }
         switch e {
         case .taskStarted(let r):
             guard tab == .now else { return }       // (过程 shows a run: being read)
@@ -54,6 +60,8 @@ struct ProcessTabs: Equatable {
             tab = .process; run = r; stayNow = false; focus = nil
         case .clickedChanges(let r):
             tab = .process; run = r; stayNow = false; focus = .changes; focusAsks += 1
+        case .focusShown:
+            focus = nil
         }
     }
 }
