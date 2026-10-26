@@ -104,7 +104,7 @@ enum L10n {
         "Background helper": "后台助手",
         "DeskMind Hands is standing by. Restarting it won't close this window.":
             "DeskMind Hands 在后台待命，重启不影响这个窗口",
-        "Starting DeskMind Hands…": "正在启动 DeskMind Hands…",
+        "Starting Hands…": "正在启动 Hands…",
         "DeskMind Hands isn't running": "DeskMind Hands 没有运行",
         "Launch": "启动",
         "Allow": "授权",
@@ -698,7 +698,7 @@ enum L10n {
         "Plan · %@": "计划 · %@",
         // the island as one bar (U2)
         "Getting ready": "准备中",
-        "You're on the Mac, paused": "你在用电脑，先停一下",
+        "You're on the Mac": "你在用电脑",
         "Resumes when you stop": "停手后继续",
         "%d steps · %@": "%d 步 · %@",
         "%d steps": "%d 步",
