@@ -165,7 +165,13 @@ struct RightColumn: Equatable {
         let undone = input.undone
         for st in input.steps where st.result == "ok" || st.result == "unverified" {
             let what: ChangeRow.What
-            switch st.consequence { case "external": what = .sent; case "modify_user": what = .changedYours; default: continue }
+            switch st.consequence {
+            case "external": what = .sent
+            // (a window row only for a step on a window: a file step is its file's row -- changes.modified -- and never
+            // also a window row, which an undo would leave unstruck beside the struck file: #131 Codex review)
+            case "modify_user" where st.object?.hasPrefix("window:") == true: what = .changedYours
+            default: continue
+            }
             let key = (st.object ?? st.id) + "/" + (what == .sent ? "sent" : "changed")
             if byObject[key] == nil { order.append(key) }
             byObject[key] = ChangeRow(icon: what == .sent ? .send : .window, name: thingName(st), detail: st.human, what: what,

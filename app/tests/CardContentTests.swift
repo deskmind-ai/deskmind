@@ -130,8 +130,16 @@ enum CardContentTests {
         let oldLog = [S.ex(2, #""kind":"step","text":"x","consequence":"modify_user","object":"window:o#1","human":"在 TextEdit 窗口「笔记」，写入「好」","status":"ok""#),
                       S.ex(3, #""kind":"step","text":"x","consequence":"external","object":"window:o#2","human":"点「发送」","status":"unverified""#),
                       S.ex(4, #""kind":"step","text":"x","consequence":"modify_user","object":"window:o#3","human":"被拒的","status":"refused""#)]
+        // (a file edited by a step, then all undone: the file's row only, struck -- no window row beside it, #131 Codex)
+        let fileEdit = [S.ex(2, #""kind":"step","text":"x","step_id":"f1","consequence":"modify_user","object":"path:/Users/u/Notes/笔记.txt","human":"改「笔记.txt」""#),
+                        S.ex(3, #""kind":"step_result","step_id":"f1","status":"ok""#),
+                        S.ex(4, #""kind":"task_done","status":"succeeded","reason":"","summary":"s","# + card + #","changes":{"created":[],"modified":["/Users/u/Notes/笔记.txt"],"deleted":[],"external":[],"unconfirmed":[]}"#),
+               respond,
+               S.ex(5, #""kind":"result_response","picked":"undo","effect":"undone","undone":1,"total":1,"refused":null"#),
+               S.se(3, #""kind":"session.task_undo","run_id":"r1","undone":1,"total":1,"refused":null"#)]
         let cases: [(String, [ProtocolLine], Bool?)] = [
             ("running", lines, nil), ("ended", lines + [done], nil),
+            ("a file edit, all undone", fileEdit, true),
             ("undone", lines + [done, respond] + undo(2, 2, refused: nil), true),
             ("undo refused part way", lines + [done, respond] + undo(1, 2, refused: "笔记.txt 被改过"), false),
             ("undo partial", lines + [done, respond] + undo(1, 2, refused: nil), false),
@@ -142,6 +150,11 @@ enum CardContentTests {
             check(RightColumn.rows(task) == RightColumn.rows(run), "\(name): the right column's rows and 过程's are the same: \(RightColumn.rows(task)) vs \(RightColumn.rows(run))")
             check(!RightColumn.rows(run).isEmpty, "\(name): rows from the run's record")
             if let undone { check(task.undone == undone && run.undone == undone, "\(name): undone \(undone) in both (session \(task.undone), run \(run.undone))") }
+        }
+        for (side, input) in [("the right column", RightColumn.ChangeInput.of(reduce(fileEdit).task("r1")!)), ("过程", RightColumn.ChangeInput.of(runFolder(fileEdit)))] {
+            let r = RightColumn.rows(input)
+            check(r.count == 1 && r[0].what == .modified && r[0].struck && r[0].name == "笔记.txt",
+                  "\(side): a file edit then a full undo: exactly one row, the file's, struck: \(r)")
         }
         check(RightColumn.rows(.of(runFolder(oldLog))).map(\.what) == [.sent, .changedYours] && RightColumn.rows(.of(runFolder(oldLog)))[0].unverified,
               "an older harness's steps: their results from the step itself (refused: no row)")
@@ -194,9 +207,9 @@ enum CardContentTests {
         oneSourceTests(lines)
         let col = RightColumn.model(reduce(lines), otherRunning: nil, now: 0)
         check(col.sentLine == .count(1), "the sent line: how many went out: \(String(describing: col.sentLine))")
-        let waiting = RightColumn.model(reduce([lines[0]] + step(3, "s1", "modify_user", object: "w", human: "写", result: "ok") + [ask]), otherRunning: nil, now: 0)
+        let waiting = RightColumn.model(reduce([lines[0]] + step(3, "s1", "modify_user", object: "window:w", human: "写", result: "ok") + [ask]), otherRunning: nil, now: 0)
         check(waiting.sentLine == .noneYetWaiting, "nothing out yet, a card waits and the plan has a step that sends: 「还没有，等你确认」: \(String(describing: waiting.sentLine))")
-        let quiet = RightColumn.model(reduce(step(2, "s1", "modify_user", object: "w", human: "写", result: "ok")), otherRunning: nil, now: 0)
+        let quiet = RightColumn.model(reduce(step(2, "s1", "modify_user", object: "window:w", human: "写", result: "ok")), otherRunning: nil, now: 0)
         check(quiet.changeRows.count == 1 && quiet.sentLine == nil, "a change, nothing out, no card waiting: no sent line")
     }
 }

@@ -192,9 +192,9 @@ enum RunDir {
         var index: [String: Int] = [:]
         for e in events {
             // (a step with no step_id, from a harness before M0: named and given its result as the session's state does --
-            // SessionReducer.stepIdentity / legacyResult)
+            // StepIdentity, the one mapping)
             let legacy = e["kind"] as? String == "step" && !(e["step_id"] is String)
-            guard let id = legacy ? SessionReducer.stepIdentity(nil, stepsSoFar: m.steps.count) : e["step_id"] as? String else { continue }
+            guard let id = legacy ? StepIdentity.of(nil, stepsSoFar: m.steps.count) : e["step_id"] as? String else { continue }
             switch e["kind"] as? String {
             case "step":
                 guard index[id] == nil else { continue }
@@ -203,7 +203,7 @@ enum RunDir {
                                     act: trace == nil ? nil : acts[id], object: str(e["object"]),
                                     objectLabel: str(e["object_label"]).flatMap { $0.isEmpty ? nil : $0 },
                                     human: str(e["human"]).flatMap { $0.isEmpty ? nil : $0 }, consequence: str(e["consequence"])))
-                if legacy, let r = SessionReducer.legacyResult(stepId: nil, status: str(e["status"])) { m.steps[m.steps.count - 1].status = r.rawValue }
+                if legacy, let r = StepIdentity.legacyResult(stepId: nil, status: str(e["status"])) { m.steps[m.steps.count - 1].status = r }
             case "step_result":
                 guard let i = index[id] else { continue }
                 m.steps[i].status = str(e["status"]); m.steps[i].why = str(e["why"]).flatMap { $0.isEmpty ? nil : $0 }
