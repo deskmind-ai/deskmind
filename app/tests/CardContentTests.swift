@@ -137,9 +137,15 @@ enum CardContentTests {
                respond,
                S.ex(5, #""kind":"result_response","picked":"undo","effect":"undone","undone":1,"total":1,"refused":null"#),
                S.se(3, #""kind":"session.task_undo","run_id":"r1","undone":1,"total":1,"refused":null"#)]
+        // (a change on a browser tab is a change to the user's page: its row; a step with no object: none)
+        let tabEdit = [S.ex(2, #""kind":"step","text":"x","step_id":"t1","consequence":"modify_user","object":"tab:safari#7","object_label":"Safari 标签页「表单」","human":"填写「表单」""#),
+                       S.ex(3, #""kind":"step_result","step_id":"t1","status":"ok""#),
+                       S.ex(4, #""kind":"step","text":"x","step_id":"t2","consequence":"modify_user","human":"不知道改了哪里""#),
+                       S.ex(5, #""kind":"step_result","step_id":"t2","status":"ok""#)]
         let cases: [(String, [ProtocolLine], Bool?)] = [
             ("running", lines, nil), ("ended", lines + [done], nil),
             ("a file edit, all undone", fileEdit, true),
+            ("a change on a browser tab", tabEdit, nil),
             ("undone", lines + [done, respond] + undo(2, 2, refused: nil), true),
             ("undo refused part way", lines + [done, respond] + undo(1, 2, refused: "笔记.txt 被改过"), false),
             ("undo partial", lines + [done, respond] + undo(1, 2, refused: nil), false),
@@ -155,6 +161,10 @@ enum CardContentTests {
             let r = RightColumn.rows(input)
             check(r.count == 1 && r[0].what == .modified && r[0].struck && r[0].name == "笔记.txt",
                   "\(side): a file edit then a full undo: exactly one row, the file's, struck: \(r)")
+        }
+        for (side, input) in [("the right column", RightColumn.ChangeInput.of(reduce(tabEdit).task("r1")!)), ("过程", RightColumn.ChangeInput.of(runFolder(tabEdit)))] {
+            let r = RightColumn.rows(input)
+            check(r.map(\.what) == [.changedYours] && r[0].name == "Safari 标签页「表单」", "\(side): a tab's change is a row, a step with no object none: \(r)")
         }
         check(RightColumn.rows(.of(runFolder(oldLog))).map(\.what) == [.sent, .changedYours] && RightColumn.rows(.of(runFolder(oldLog)))[0].unverified,
               "an older harness's steps: their results from the step itself (refused: no row)")
