@@ -42,6 +42,10 @@ struct ModelForm: Equatable {
     var checkOK: Bool?
     var reached: String?
     var why: String?
+    /// Counts the user's edits (edit): a save or check is tagged with the version it was made from, and its result is
+    /// taken only while the form is still that version (#130 Codex review: a provider switched mid-check took the old
+    /// one's 「能用」 and moved on).
+    var version = 0
 
     init(provider: CloudProvider, settings: [String: String], useCloud: Bool = true) {
         self.provider = provider
@@ -61,6 +65,29 @@ struct ModelForm: Equatable {
         guard p != provider else { return }
         provider = p
         load(settings)
+    }
+
+    /// What the user changed on the page: another service is loaded anew (select), anything else taken as typed; the
+    /// version moves when what would be saved changes.
+    mutating func edit(_ new: ModelForm, settings: [String: String]) {
+        let before = (provider.id, key, url, model, useCloud)
+        if new.provider != provider { select(new.provider, settings: settings) } else { let v = version; self = new; version = v }
+        if (provider.id, key, url, model, useCloud) != before { version += 1 }
+    }
+
+    /// A save made from `version` finished: nil (it is stale -- dropped), or whether it went through (`why` set if not).
+    mutating func saved(version v: Int, failure: String?) -> Bool? {
+        guard v == version else { return nil }
+        if let failure { why = failure }
+        return failure == nil
+    }
+
+    /// A check made from `version` answered: nil (stale -- dropped, nothing said), or its result, kept on the form.
+    mutating func checked(version v: Int, ok: Bool, reached r: String?, why w: String?) -> Bool? {
+        guard v == version else { return nil }
+        checkOK = ok
+        if ok { reached = r } else { why = w }
+        return ok
     }
 
     /// The helper's answer about the custom settings came: filled in, unless the user typed some already.

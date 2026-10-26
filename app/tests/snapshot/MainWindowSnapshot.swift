@@ -115,6 +115,8 @@ enum MainWindowSnapshot {
         var flow = FirstRun(step: step)
         flow.facts.accessibility = granted; flow.facts.screen = granted
         if case .set = key { flow.facts.keySet = true }
+        // (the bad key saved, its check failed: the case 稍后 must still show -- #130 Codex review)
+        if case .bad = key { flow.facts.keySet = true; flow.facts.saveOK = true; flow.facts.checkOK = false }
         let page = FirstRunPage(flow: flow, language: .constant(AppLanguage.zhHans.rawValue),
                                 form: .constant(ModelForm(provider: CloudProvider.all[0], settings: [:])), keyState: key,
                                 granted: { _ in granted }, grant: { _ in }, act: { _ in }, example: { _ in })
@@ -200,9 +202,11 @@ enum MainWindowSnapshot {
                 Color(red: 0.16, green: 0.17, blue: 0.19).frame(height: notched ? 37 : 24)     // (the menu bar)
                 if !notched { Color.clear.frame(height: 10) }
             }
-            IslandView(model: model, height: h, notched: notched, onStop: {}, onTap: { _ in }, now: { t0 + 58 })
+            IslandView(model: model, height: h, notched: notched, notchWidth: notched ? 200 : nil, onStop: {}, onTap: { _ in }, now: { t0 + 58 })
                 .frame(width: Island.barWideWidth, height: h)
                 .padding(.top, notched ? 0 : 34)
+            // (the notch itself, 200 pt as on a 14" MacBook Pro, drawn over the bar as the hardware hides what is under it)
+            if notched { Color.black.frame(width: 200, height: h) }
         }
         renderView(view.environment(\.lang, .zhHans), size: NSSize(width: 560, height: notched ? 60 : 84), dark: dark, wait: 0.3, to: file)
     }

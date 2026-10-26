@@ -15,6 +15,9 @@ struct IslandView: View {
     /// The bar's height: the notch's (or the capsule's, with none).
     let height: CGFloat
     let notched: Bool
+    /// The notch's width (NSScreen's auxiliary top areas: Island.notch), nil with none: each side of the bar keeps
+    /// to the room outside it.
+    var notchWidth: CGFloat? = nil
     let onStop: () -> Void
     let onTap: (UserGesture) -> Void
     /// The clock the step's time is counted on (the offscreen render gives its own).
@@ -32,14 +35,24 @@ struct IslandView: View {
         // (the bar's click and Stop side by side, never one inside the other: a click on Stop is Stop's)
         ZStack(alignment: .trailing) {
             Button(action: Activation.onClick { g in onTap(g) }) {
-                HStack(spacing: 8) {
-                    lead
-                    Text(model.frame?.left ?? "").font(.system(size: 13, weight: kind == .needsYou || !running ? .semibold : .regular))
-                        .foregroundStyle(kind == .needsYou ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.islandText)).lineLimit(1)
-                    Spacer(minLength: 84)
-                    right.opacity(hover && running ? 0 : 1)
+                Group {
+                    if let side = Island.sideWidth(bar: wide ? Island.barWideWidth : Island.barWidth, notchWidth: notchWidth) {
+                        // (at a notch: each side cut to the room outside it, the notch's width clear between them)
+                        HStack(spacing: 0) {
+                            HStack(spacing: 8) { lead; leftText }.frame(width: side, alignment: .leading).clipped()
+                            Spacer(minLength: 0)
+                            right.opacity(hover && running ? 0 : 1).frame(width: side, alignment: .trailing).clipped()
+                        }
+                    } else {
+                        HStack(spacing: 8) {
+                            lead
+                            leftText
+                            Spacer(minLength: 84)
+                            right.opacity(hover && running ? 0 : 1)
+                        }
+                    }
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, Island.barInset)
                 .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
                 .background(shape.fill(Color(ShellPalette.islandFill)))
                 .contentShape(shape)
@@ -56,7 +69,7 @@ struct IslandView: View {
                 .allowsHitTesting(hover)
                 .help(L("Stop this task (or press ⌘. in the DeskMind window)", lang: lang))
                 .accessibilityLabel(L("Stop", lang: lang))     // (in the tree whether shown or not)
-                .padding(.trailing, 16)
+                .padding(.trailing, Island.barInset)
             }
         }
         .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
@@ -67,6 +80,12 @@ struct IslandView: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L("%@ · %@", model.frame?.left ?? "", rightText, lang: lang))
         .onAppear { breathe = true }
+    }
+
+    private var leftText: some View {
+        Text(model.frame?.left ?? "").font(.system(size: 13, weight: kind == .needsYou || !running ? .semibold : .regular))
+            .foregroundStyle(kind == .needsYou ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.islandText))
+            .lineLimit(1).truncationMode(.tail)
     }
 
     private var shape: AnyShape {
@@ -98,7 +117,7 @@ struct IslandView: View {
     /// The right side: the feed's words, or -- working, preparing -- the time, counted here each second.
     private var right: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            Text(rightText).font(.system(size: 13).monospacedDigit()).foregroundStyle(Color(ShellPalette.islandMuted)).lineLimit(1)
+            Text(rightText).font(.system(size: 13).monospacedDigit()).foregroundStyle(Color(ShellPalette.islandMuted)).lineLimit(1).truncationMode(.tail)
         }
     }
 

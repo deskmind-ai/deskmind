@@ -28,6 +28,18 @@ enum Island {
         return CGRect(x: visible.midX - w / 2, y: visible.maxY - barHeight - 10, width: w, height: barHeight)
     }
 
+    /// The bar's inset from its ends, and the room it keeps clear on each side of the notch.
+    static let barInset: CGFloat = 16
+    static let notchGap: CGFloat = 8
+
+    /// How wide each side of the bar is at a notch `notchWidth` wide (the bar centred on it): what is left of the bar
+    /// outside the notch, its inset and a gap -- the words on each side are cut to it, never under the notch (#130
+    /// Codex review: an 84 pt spacer let a 200 pt notch hide the paused line). nil: no notch, the sides share the bar.
+    static func sideWidth(bar: CGFloat, notchWidth: CGFloat?) -> CGFloat? {
+        guard let n = notchWidth, n > 0 else { return nil }
+        return max(0, (bar - n) / 2 - barInset - notchGap)
+    }
+
     /// How a run ended, in the collapsed island's word beside ✓ or !.
     enum Ending: Equatable { case done, failed, stopped }
 
