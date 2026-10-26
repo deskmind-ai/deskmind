@@ -36,7 +36,7 @@ struct IslandView: View {
         ZStack(alignment: .trailing) {
             Button(action: Activation.onClick { g in onTap(g) }) {
                 Group {
-                    if let side = Island.sideWidth(bar: wide ? Island.barWideWidth : Island.barWidth, notchWidth: notchWidth) {
+                    if let side = Island.sideWidth(bar: Island.width(notched: notched, needsYou: wide), notchWidth: notchWidth) {
                         // (at a notch: each side cut to the room outside it, the notch's width clear between them)
                         HStack(spacing: 0) {
                             HStack(spacing: 8) { lead; leftText }.frame(width: side, alignment: .leading).clipped()
@@ -53,7 +53,7 @@ struct IslandView: View {
                     }
                 }
                 .padding(.horizontal, Island.barInset)
-                .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
+                .frame(width: Island.width(notched: notched, needsYou: wide), height: height)
                 .background(shape.fill(Color(ShellPalette.islandFill)))
                 .contentShape(shape)
             }
@@ -72,7 +72,7 @@ struct IslandView: View {
                 .padding(.trailing, Island.barInset)
             }
         }
-        .frame(width: wide ? Island.barWideWidth : Island.barWidth, height: height)
+        .frame(width: Island.width(notched: notched, needsYou: wide), height: height)
         .animation(reduce ? nil : .easeOut(duration: 0.15), value: hover)
         .onHover { hover = $0 }
         .animation(reduce ? nil : .easeOut(duration: 0.35), value: wide)

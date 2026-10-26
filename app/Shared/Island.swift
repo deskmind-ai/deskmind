@@ -20,10 +20,14 @@ enum Island {
     static let barWideWidth: CGFloat = 460
     static let barHeight: CGFloat = 34
 
+    /// How wide the bar is: at a notch always the wide one, whatever the state -- it never grows or shrinks around
+    /// the notch (fable, #130); with no notch 380, and 460 while it needs you.
+    static func width(notched: Bool, needsYou: Bool) -> CGFloat { notched || needsYou ? barWideWidth : barWidth }
+
     /// The bar: centred on the notch and as tall as it, hanging from the top of the screen; with no notch, a capsule
     /// 10 pt under the menu bar, centred on the visible area.
     static func barFrame(notch: CGRect?, screen: CGRect, visible: CGRect, needsYou: Bool) -> CGRect {
-        let w = needsYou ? barWideWidth : barWidth
+        let w = width(notched: notch != nil, needsYou: needsYou)
         if let n = notch { return CGRect(x: n.midX - w / 2, y: screen.maxY - n.height, width: w, height: n.height) }
         return CGRect(x: visible.midX - w / 2, y: visible.maxY - barHeight - 10, width: w, height: barHeight)
     }
@@ -77,7 +81,7 @@ enum RunStage: String, CaseIterable {
         case .starting: "Connecting to the helper…"
         case .brain: "Loading the local model…"
         case .eyes: "Loading the vision model…"
-        case .hands: "Starting DeskMind Hands…"
+        case .hands: "Starting Hands…"
         case .looking: "Looking at the screen and choosing the first step…"
         }
     }

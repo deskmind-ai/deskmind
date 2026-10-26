@@ -117,11 +117,12 @@ enum DecisionTests {
         check(Island.notch(screen: screen, safeTop: 0, left: nil, right: nil) == nil, "no notch on an external screen")
         check(Island.notch(screen: screen, safeTop: 32, left: CGRect(x: 0, y: 0, width: 900, height: 32),
                            right: CGRect(x: 800, y: 0, width: 900, height: 32)) == nil, "overlapping areas: no notch")
-        // the bar (U2): at the notch, as tall as it, 380 / 460 wide; no notch: a 34 pt capsule 10 under the menu bar
+        // the bar (U2): at the notch, as tall as it, 460 wide in every state (it never grows or shrinks around the
+        // notch: fable, #130); no notch: a 34 pt capsule 10 under the menu bar, 380 / 460 while it needs you
         let visible = CGRect(x: 0, y: 0, width: 1920, height: 1050), plain = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let bars: [(CGRect?, CGRect, Bool, CGRect, String)] = [
-            (notch, screen, false, CGRect(x: 674, y: 1085, width: 380, height: 32), "notch, working"),
-            (notch, screen, true, CGRect(x: 634, y: 1085, width: 460, height: 32), "notch, needs you: wider, same centre"),
+            (notch, screen, false, CGRect(x: 634, y: 1085, width: 460, height: 32), "notch, working: 460 too"),
+            (notch, screen, true, CGRect(x: 634, y: 1085, width: 460, height: 32), "notch, needs you: the same frame"),
             (nil, plain, false, CGRect(x: 770, y: 1006, width: 380, height: 34), "no notch, working"),
             (nil, plain, true, CGRect(x: 730, y: 1006, width: 460, height: 34), "no notch, needs you"),
         ]

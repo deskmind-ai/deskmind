@@ -77,7 +77,7 @@ enum IslandFeedTests {
             ("a card, no float: its title", bar([ask]), .needsYou, z("Needs you"), "要点「发送」吗？"),
             ("held (take-back): still needs you", bar([ask], phase: .pending(.option(runId: "r1", askId: "a1", option: 0), until: 0)), .needsYou, z("Needs you"), "要点「发送」吗？"),
             ("expired, still answerable", bar([ask, #""kind":"ask_void","ask_id":"a1","why":"timeout""#]), .needsYou, z("Needs you"), "要点「发送」吗？"),
-            ("paused", bar([step, #""kind":"waiting""#]), .paused, z("You're on the Mac, paused"), z("Resumes when you stop")),
+            ("paused", bar([step, #""kind":"waiting""#]), .paused, z("You're on the Mac"), z("Resumes when you stop")),
             ("done", bar([step, #""kind":"task_done","status":"succeeded","reason":"","summary":"s""#]), .done, z("Done"), "1 步 · 0 秒"),
             ("failed", bar([#""kind":"task_done","status":"failed","reason":"","summary":"s""#]), .failed, z("Didn't finish"), z("See why")),
             ("stopped", bar([step, #""kind":"task_done","status":"stopped","reason":"","summary":"s""#]), .stopped, z("Stopped"), "1 步"),
@@ -124,6 +124,12 @@ enum IslandFeedTests {
         check(Island.sideWidth(bar: 380, notchWidth: nil) == nil && Island.sideWidth(bar: 380, notchWidth: 0) == nil, "no notch: no sides")
         check(Island.sideWidth(bar: 380, notchWidth: 200) == 66 && Island.sideWidth(bar: 460, notchWidth: 200) == 106, "the 200 pt notch: 66 / 106 a side")
         check(Island.sideWidth(bar: 380, notchWidth: 400) == 0, "a notch wider than the bar: no room, never negative")
+        // at a notch the bar is 460 in every state (fable, #130): 106 a side at the 200 pt notch, needing you or not
+        check(Island.width(notched: true, needsYou: false) == 460 && Island.width(notched: true, needsYou: true) == 460,
+              "at the notch: 460 whatever the state")
+        check(Island.width(notched: false, needsYou: false) == 380 && Island.width(notched: false, needsYou: true) == 460,
+              "no notch: 380, 460 while it needs you")
+        check(Island.sideWidth(bar: Island.width(notched: true, needsYou: false), notchWidth: 200) == 106, "working at the 200 pt notch: 106 a side")
         for bar in [Island.barWidth, Island.barWideWidth] {
             for n in stride(from: CGFloat(1), through: 500, by: 7) {
                 let side = Island.sideWidth(bar: bar, notchWidth: n)!

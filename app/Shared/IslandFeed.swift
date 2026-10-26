@@ -24,7 +24,7 @@
 // | working   | running, a step, no card                  | orange  | the app, else the task  | 第 n 步 · m:ss (the view)      |
 // | needsYou  | a card waits (open / held / sent / an     | orange, | 需要你                    | the card's kind when the float|
 // |           |   expired one still answerable)           |   halo  |                         |   shows it, else its title    |
-// | paused    | you use the Mac                           | grey    | 你在用电脑，先停一下          | 停手后继续                       |
+// | paused    | you use the Mac                           | grey    | 你在用电脑                  | 停手后继续                       |
 // | done      | ended, succeeded                          | white   | 完成了                    | n 步 · its time                 |
 // | failed    | ended, anything else but stopped          | grey    | 没做完                    | 查看原因                         |
 // | stopped   | ended, cancelled / stopped                | grey    | 已停下                    | n 步                            |
@@ -84,7 +84,7 @@ enum IslandFeed {
             f.kind = .needsYou; f.left = L("Needs you", lang: lang)
             f.right = floatShows ? ShellText.cardKind(p.card.card.kind, lang: lang) : CardLayout(CardModel(card: p.card.card, runId: t.runId, askId: p.card.askId)).title
         } else if t.userActive {
-            f.kind = .paused; f.left = L("You're on the Mac, paused", lang: lang); f.right = L("Resumes when you stop", lang: lang)
+            f.kind = .paused; f.left = L("You're on the Mac", lang: lang); f.right = L("Resumes when you stop", lang: lang)
         } else if t.preparing && n == 0 {
             f.kind = .preparing; f.left = L("Getting ready", lang: lang)
         } else {
