@@ -142,12 +142,18 @@ enum CardContentTests {
                        S.ex(3, #""kind":"step_result","step_id":"t1","status":"ok""#),
                        S.ex(4, #""kind":"step","text":"x","step_id":"t2","consequence":"modify_user","human":"不知道改了哪里""#),
                        S.ex(5, #""kind":"step_result","step_id":"t2","status":"ok""#)]
-        // (an open_window into the user's app: modify_user on app:<App> -- harness executor.ts -- its row; a step on a
-        // capability's file is its file's row, like a path:)
-        let appOpen = [S.ex(2, #""kind":"step","text":"x","step_id":"a1","consequence":"modify_user","object":"app:Safari","object_label":"Safari","human":"在 Safari 里打开新窗口""#),
-                       S.ex(3, #""kind":"step_result","step_id":"a1","status":"ok""#),
-                       S.ex(4, #""kind":"step","text":"x","step_id":"a2","consequence":"modify_user","object":"cap:notes/笔记.txt","human":"改「笔记.txt」""#),
-                       S.ex(5, #""kind":"step_result","step_id":"a2","status":"ok""#)]
+        // (the harness's own shapes, b0d928c -- cli/app.ts toProtocol of service.ts step.start: `text` the action as JSON,
+        // no object on an open_window, its class on step.end when the executor settles it -- a link opened in the
+        // user's Safari window is a change to it, named by the app; a file step's text is its capability and arguments
+        // and it has no object either: its file's row only, changes.modified)
+        let appOpen = [S.ex(2, #""kind":"step","text":"{\"app\":\"Safari\",\"kind\":\"open_window\",\"url\":\"https://example.com/a\"}","purpose":"打开链接","step_id":"st_a1b2c3d4","human":"在 Safari 里打开网页 https://example.com/a""#),
+                       S.ex(3, #""kind":"step_result","step_id":"st_a1b2c3d4","status":"ok","consequence":"modify_user""#),
+                       S.ex(4, #""kind":"step","text":"{\"app\":\"Safari\",\"kind\":\"open_window\",\"url\":\"https://example.com/b\"}","purpose":"打开链接","consequence":"modify_user","step_id":"st_e5f6a7b8","object_label":"Safari 窗口「表单」","human":"在 Safari 里打开网页 https://example.com/b""#),
+                       S.ex(5, #""kind":"step_result","step_id":"st_e5f6a7b8","status":"ok""#),
+                       S.ex(6, #""kind":"step","text":"notes.write {\"path\":\"笔记.txt\",\"text\":\"好\"}","purpose":"记下来","consequence":"modify_user","step_id":"st_c9d0e1f2","human":"改「笔记.txt」""#),
+                       S.ex(7, #""kind":"step_result","step_id":"st_c9d0e1f2","status":"ok""#),
+                       S.ex(8, #""kind":"step","text":"x","step_id":"a2","consequence":"modify_user","object":"cap:notes/笔记.txt","human":"改「笔记.txt」""#),
+                       S.ex(9, #""kind":"step_result","step_id":"a2","status":"ok""#)]
         let cases: [(String, [ProtocolLine], Bool?)] = [
             ("running", lines, nil), ("ended", lines + [done], nil),
             ("a file edit, all undone", fileEdit, true),
@@ -175,7 +181,8 @@ enum CardContentTests {
         }
         for (side, input) in [("the right column", RightColumn.ChangeInput.of(reduce(appOpen).task("r1")!)), ("过程", RightColumn.ChangeInput.of(runFolder(appOpen)))] {
             let r = RightColumn.rows(input)
-            check(r.map(\.what) == [.changedYours] && r[0].name == "Safari", "\(side): an app: step is a row, a cap: file step is not: \(r)")
+            check(r.map(\.what) == [.changedYours, .changedYours] && r.map(\.name) == ["Safari", "Safari 窗口「表单」"],
+                  "\(side): an open_window with no object is a row, by its app (else its window's name); a file step is not: \(r)")
         }
         check(RightColumn.rows(.of(runFolder(oldLog))).map(\.what) == [.sent, .changedYours] && RightColumn.rows(.of(runFolder(oldLog)))[0].unverified,
               "an older harness's steps: their results from the step itself (refused: no row)")

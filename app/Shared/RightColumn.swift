@@ -137,6 +137,8 @@ struct RightColumn: Equatable {
             var consequence: String?
             /// step_result's status (ok, unverified, refused, …; nil: none yet).
             var result: String?
+            /// The step's text: a screen action as JSON (the harness's step.text), a file step's capability and arguments.
+            var text: String? = nil
         }
         var steps: [Step] = []
         var created: [String] = [], modified: [String] = [], deleted: [String] = [], external: [String] = [], unconfirmed: [String] = []
@@ -146,14 +148,14 @@ struct RightColumn: Equatable {
         static func of(_ t: TaskState) -> ChangeInput {
             let c = t.changes
             return ChangeInput(steps: t.steps.map { Step(id: $0.id, object: $0.object, objectLabel: $0.objectLabel, human: $0.human,
-                                                         consequence: $0.consequence, result: $0.result?.rawValue) },
+                                                         consequence: $0.consequence, result: $0.result?.rawValue, text: $0.text) },
                                created: c.created, modified: c.modified, deleted: c.deleted, external: c.external, unconfirmed: c.unconfirmed,
                                createdWindows: c.createdWindows ?? [], undone: ShellText.fullyUndone(t) != nil)
         }
         static func of(_ m: RunDir.Model) -> ChangeInput {
             let c = m.changes ?? RunDir.Changes()
             return ChangeInput(steps: m.steps.map { Step(id: $0.stepId, object: $0.object, objectLabel: $0.objectLabel, human: $0.human,
-                                                         consequence: $0.consequence, result: $0.status) },
+                                                         consequence: $0.consequence, result: $0.status, text: $0.text) },
                                created: c.created, modified: c.modified, deleted: c.deleted, external: c.external, unconfirmed: c.unconfirmed,
                                createdWindows: c.createdWindows, undone: c.fullyUndone)
         }
@@ -169,8 +171,8 @@ struct RightColumn: Equatable {
             case "external": what = .sent
             // (a change to the user's things on screen -- a window, a tab, an app it opens a window in -- is its row; a
             // file step is its file's row alone -- changes.modified -- never also this one, which an undo would leave
-            // unstruck beside the struck file: #131 Codex review; a step with no object has none)
-            case "modify_user" where st.object.map { o in !o.isEmpty && !["path:", "cap:"].contains { o.hasPrefix($0) } } == true:
+            // unstruck beside the struck file: #131 Codex review)
+            case "modify_user" where onScreen(st):
                 what = .changedYours
             default: continue
             }
@@ -198,10 +200,26 @@ struct RightColumn: Equatable {
         return all
     }
 
-    /// What a step acted on, by name: its window's (step.object_label, harness U3), else its words up to the first
-    /// comma (they name the window: an older harness), else its object's ref.
+    /// A step on the user's screen, not a file step: its object is not a path: / cap: one, and a step with none (the
+    /// harness's open_window: a link opened in a window of the user's app carries no object) is a screen action by its
+    /// text -- a file step's text is its capability and arguments, never an action's JSON.
+    static func onScreen(_ st: ChangeInput.Step) -> Bool {
+        if let o = st.object, !o.isEmpty { return !["path:", "cap:"].contains { o.hasPrefix($0) } }
+        return screenAction(st.text) != nil
+    }
+
+    /// The step's text as a screen action (a JSON object with a kind other than file), else nil.
+    static func screenAction(_ text: String?) -> [String: Any]? {
+        guard let d = text?.data(using: .utf8), let a = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+              let k = a["kind"] as? String, k != "file" else { return nil }
+        return a
+    }
+
+    /// What a step acted on, by name: its window's (step.object_label, harness U3), else the app its action names (an
+    /// open_window), else its words up to the first comma (they name the window: an older harness), else its object's ref.
     static func thingName(_ st: ChangeInput.Step) -> String {
         if let l = st.objectLabel, !l.isEmpty { return l }
+        if let app = screenAction(st.text)?["app"] as? String, !app.isEmpty { return app }
         if let h = st.human, !h.isEmpty {
             let cut = h.split(whereSeparator: { $0 == "，" || $0 == "," }).first.map(String.init) ?? h
             return cut.trimmingCharacters(in: .whitespaces)

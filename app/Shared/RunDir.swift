@@ -47,6 +47,8 @@ enum RunDir {
         var objectLabel: String? = nil
         var human: String? = nil
         var consequence: String? = nil
+        /// Its text (the action as JSON, a file step's capability and arguments).
+        var text: String? = nil
     }
     struct Act: Equatable {
         var status: String
@@ -202,7 +204,8 @@ enum RunDir {
                 m.steps.append(Step(stepId: id, planStep: e["plan_step"] as? Int, words: str(e["human"]) ?? str(e["text"]) ?? "",
                                     act: trace == nil ? nil : acts[id], object: str(e["object"]),
                                     objectLabel: str(e["object_label"]).flatMap { $0.isEmpty ? nil : $0 },
-                                    human: str(e["human"]).flatMap { $0.isEmpty ? nil : $0 }, consequence: str(e["consequence"])))
+                                    human: str(e["human"]).flatMap { $0.isEmpty ? nil : $0 }, consequence: str(e["consequence"]),
+                                    text: str(e["text"])))
                 if legacy, let r = StepIdentity.legacyResult(stepId: nil, status: str(e["status"])) { m.steps[m.steps.count - 1].status = r }
             case "step_result":
                 guard let i = index[id] else { continue }

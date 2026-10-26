@@ -63,7 +63,7 @@ enum ProcessTests {
         let m = RunDir.model(full)
         check(m.state == .ended && m.steps.count == 2 && m.judges.count == 2, "the whole run: \(m.state) \(m.steps.count) \(m.judges.count)")
         check(m.steps[0] == RunDir.Step(stepId: "st_1", planStep: 1, words: "在「正文」里填入「新的」", status: "ok", why: nil, shot: "shots/st_1.png",
-                                        act: RunDir.Act(status: "ok", epochReason: nil, changed: "{\"value\":true}"), human: "在「正文」里填入「新的」"),
+                                        act: RunDir.Act(status: "ok", epochReason: nil, changed: "{\"value\":true}"), human: "在「正文」里填入「新的」", text: "set_value"),
               "step 1: \(m.steps[0])")
         check(m.steps[1].shot == "shots/st_2.png" && m.steps[1].act?.epochReason == "the window's elements changed" && m.steps[1].why == "the screen moved", "step 2: its late picture, its epoch reason")
         check(m.judges[0].prompt?.hasPrefix("Does this action") == true && m.judges[0].options?.map(\.id) == ["matches", "mismatch"] && m.judges[0].kind == "intent",
