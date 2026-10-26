@@ -15,6 +15,8 @@ protocol IslandSurface: AnyObject {
     /// Shown for a new task: the last task's details link goes.
     func show(title: String, line: String, onStop: @escaping () -> Void)
     func update(step: Int, line: String)
+    /// The whole frame, each time it changes (the bar draws its kind and words from it).
+    func apply(_ frame: IslandFrame)
     func setAsking(_ on: Bool)
     func finish(passed: Bool, stopped: Bool, summary: String)
     func notify(title: String, body: String)
@@ -41,6 +43,7 @@ final class IslandApplier {
         if let n = IslandFeed.cardNotification(from: last, to: f, appActive: o.appActive, userTyping: o.userTyping, lang: lang) {
             o.notify(title: n.title, body: n.body)
         }
+        if f != last { o.apply(f) }
         switch f.phase {
         case .running:
             if f.step != last?.step || f.line != last?.line { o.update(step: f.step, line: f.line) }
@@ -55,3 +58,8 @@ final class IslandApplier {
     }
 }
 
+
+extension IslandSurface {
+    /// (a surface that draws no bar: nothing to do)
+    func apply(_ frame: IslandFrame) {}
+}

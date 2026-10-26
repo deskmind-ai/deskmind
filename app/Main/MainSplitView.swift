@@ -44,15 +44,19 @@ struct MainSplitView: View {
     @ObservedObject private var keys = KeyStatus.shared
 
     var body: some View {
-        MainColumns(shell: shell, openSettings: openSettings, unmet: setupAt == nil ? unmet : [], openSetup: { setupAt = $0 },
-                    cloud: cloud, mac: mac)
-        .frame(minWidth: MainColumns.minWidth, idealWidth: 1440, minHeight: 600, idealHeight: 900)
+        Group {
+            // the first run is the window's whole content while it runs (P1Setup); then the three columns
+            if let at = setupAt {
+                FirstRunView(shell: shell, flow: FirstRun(step: at), done: { setupAt = nil; settingsClosed() })
+                    .frame(minWidth: 1080, minHeight: 780)
+            } else {
+                MainColumns(shell: shell, openSettings: openSettings, unmet: unmet, openSetup: { setupAt = $0 }, cloud: cloud, mac: mac)
+                    .frame(minWidth: MainColumns.minWidth, minHeight: 600)
+            }
+        }
+        .frame(idealWidth: 1440, idealHeight: 900)
         .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
             CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
-        }
-        .sheet(isPresented: Binding(get: { setupAt != nil }, set: { if !$0 { setupAt = nil } }), onDismiss: settingsClosed) {
-            FirstRunView(shell: shell, flow: FirstRun(step: setupAt ?? .language), done: { setupAt = nil })
-                .environmentObject(model).environment(\.lang, lang)
         }
         .onAppear {
             ShellModel.shared = shell
@@ -621,7 +625,7 @@ struct EmptyChat: View {
     @Environment(\.lang) private var lang
     var body: some View {
         VStack(spacing: 10) {
-            XiaoFang(mood: .idle, size: 72)
+            XiaoFace(eyes: .look, size: 56)
             Text(opening ? L("Starting the conversation…", lang: lang) : L("What can I do for you?", lang: lang))
                 .font(.system(size: 15, weight: .semibold, design: .rounded)).foregroundStyle(Brand.ink)
             Text(L("Chat, or start a computer task with /cua followed by what to do.", lang: lang))
@@ -960,7 +964,7 @@ struct AgentPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
-                    XiaoFang(mood: Self.mood(c.status), size: 40).accessibilityHidden(true)
+                    XiaoFace(eyes: XiaoEyes.of(c.status), size: 28)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(headline(c.status))
                             .font(.system(size: 14, weight: .bold)).foregroundStyle(Self.waits(c.status) ? ShellColor.orangeText : Brand.ink)
@@ -1148,14 +1152,4 @@ struct AgentPanel: View {
         return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
     }
 
-    /// 小方's face for the state (LiveView.face): looking while it works, up when it waits for you, happy when done,
-    /// flat when it stopped or went wrong.
-    static func mood(_ s: SessionStatus) -> Brand.Mood {
-        switch s {
-        case .waitingForYou, .cardExpired: return .notice
-        case .done(_, let stopped): return stopped ? .rest : .done
-        case .error, .locked, .stopping: return .rest
-        case .acting, .thinking, .paused, .lookOnly, .idle: return .idle
-        }
-    }
 }

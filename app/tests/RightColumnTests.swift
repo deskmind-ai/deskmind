@@ -8,6 +8,7 @@ enum RightColumnTests {
     }
 
     static func run() {
+        xiaoEyesTests()
         DecisionTests.group("right-column.table"); tableTests()
     }
 
@@ -86,5 +87,17 @@ enum RightColumnTests {
         let s = SessionReducer.reduce(SessionState(), [SessionTests.se(1, #""kind":"session.task","msg_id":"m","run_id":"r1","raw":"x","by":"slash","t":0"#)].map { $0 } + [start])
         let started = s.task("r1")?.startedAt ?? 0
         check(RightColumn.model(s, otherRunning: nil, now: started + 38).progress?.seconds == 38, "0:38 from the task's start")
+    }
+
+    /// 小方's eyes by the session's state: one table, every place that draws it reads it.
+    static func xiaoEyesTests() {
+        let table: [(SessionStatus, XiaoEyes)] = [
+            (.acting(step: 2, of: 4), .look), (.thinking, .look), (.idle, .look), (.paused, .look), (.lookOnly, .look),
+            (.waitingForYou(cardKind: "action"), .up), (.cardExpired(cardKind: "plan"), .up),
+            (.done(at: nil, stopped: false), .happy), (.done(at: nil, stopped: true), .flat),
+            (.error("x"), .flat), (.locked, .flat), (.stopping, .flat),
+        ]
+        for (s, e) in table { check(XiaoEyes.of(s) == e, "eyes for \(s): \(XiaoEyes.of(s))") }
+        check(Set(table.map(\.1)) == Set(XiaoEyes.allCases), "every look is used")
     }
 }

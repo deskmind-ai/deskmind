@@ -1,4 +1,4 @@
-// DeskMind VI 1.0 in code: paper, ink, the orange dot, sage for secondary text, and 小方 for state. The colours are
+// DeskMind VI 1.0 in code: paper, ink, the orange dot, sage for secondary text, and 小方 (XiaoFace) for state. The colours are
 // Shared/ShellPalette.swift's tokens, each resolved by the appearance it is drawn in (light or dark): this file is the
 // one place a colour is made (`Color(_ tone:)`; L10nTests checks the 0.5 window and its sheets name none of their own).
 
@@ -21,8 +21,6 @@ enum Brand {
         return NSImage(size: NSSize(width: 1, height: 1))
     }
 
-    /// 小方, the logo come a little alive: idle while waiting, notice when something needs the user, done when set.
-    enum Mood: String { case idle, notice, done, rest }
 }
 
 extension Color {
@@ -38,23 +36,69 @@ extension Color {
     }
 }
 
-struct XiaoFang: View {
-    let mood: Brand.Mood
-    var size: CGFloat = 96
-    @State private var bob = false
-    @Environment(\.colorScheme) private var scheme
+/// 小方, drawn (the boards' face): a rounded square in ink -- in the paper colour on an ink surface -- two eyes in it,
+/// and the orange dot pressed on its lower right corner. `size` is the square's width (the boards: 28 in the right
+/// column, 20 in the float and the island). The eyes (XiaoEyes) move between their shapes in 150 ms; not with Reduce
+/// Motion.
+struct XiaoFace: View {
+    let eyes: XiaoEyes
+    var size: CGFloat = 28
+    var onInk = false
+    @Environment(\.accessibilityReduceMotion) private var reduce
 
     var body: some View {
-        Image(nsImage: Brand.image(mood.rawValue))
-            .resizable().interpolation(.high).scaledToFit()
-            .frame(width: size, height: size)
-            // (its images are dark ink: in Dark Mode they sit on a light badge, a little larger than they are)
-            .background(Circle().fill(Color(ShellPalette.badge)).padding(-size * 0.06).opacity(scheme == .dark ? 1 : 0))
-            .offset(y: bob ? -3 : 0)
-            .animation(mood == .done ? .spring(response: 0.35, dampingFraction: 0.5)
-                                     : .easeInOut(duration: 1.6).repeatForever(autoreverses: true), value: bob)
-            .onAppear { bob = true }
-            .id(mood)   // a new mood restarts the animation
+        let w = size, h = (size * 25 / 28).rounded()
+        let stroke: Color = onInk ? Color(ShellPalette.onInk) : Brand.ink
+        let dot = (size * 0.38).rounded()
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: size * 0.21, style: .continuous)
+                .strokeBorder(stroke, lineWidth: max(2, size * 0.107))
+                .frame(width: w, height: h)
+            Eye(eyes: eyes, left: true, w: w, h: h).fill(stroke)
+            Eye(eyes: eyes, left: false, w: w, h: h).fill(stroke)
+            Circle().fill(Brand.dot)
+                .overlay(Circle().stroke(Brand.dot.opacity(eyes == .up ? 0.3 : 0), lineWidth: dot * 0.3))
+                .frame(width: dot, height: dot)
+                .offset(x: w - dot * 0.6, y: h - dot * 0.6)
+        }
+        .frame(width: w + dot * 0.4, height: h + dot * 0.4, alignment: .topLeading)
+        .animation(reduce ? nil : .easeOut(duration: 0.15), value: eyes)
+        .accessibilityHidden(true)
+    }
+
+    /// One eye, as one shape whose numbers move between the four looks (a dot, a dot up, an arc, a line): its centre,
+    /// its width and height, and how much of an arc it is.
+    struct Eye: Shape {
+        var cx: CGFloat, cy: CGFloat, ew: CGFloat, eh: CGFloat, arc: CGFloat
+
+        init(eyes: XiaoEyes, left: Bool, w: CGFloat, h: CGFloat) {
+            let dot = w * 0.125
+            switch eyes {
+            case .look: cx = w * (left ? 0.455 : 0.67); cy = h * 0.47; ew = dot * 0.85; eh = dot * 0.85; arc = 0
+            case .up: cx = w * (left ? 0.36 : 0.64); cy = h * 0.31; ew = dot; eh = dot; arc = 0
+            case .happy: cx = w * (left ? 0.36 : 0.64); cy = h * 0.36; ew = w * 0.2; eh = h * 0.16; arc = 1
+            case .flat: cx = w * (left ? 0.36 : 0.64); cy = h * 0.4; ew = w * 0.2; eh = max(1.5, w * 0.07); arc = 0
+            }
+        }
+
+        var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<AnimatablePair<CGFloat, CGFloat>, CGFloat>> {
+            get { AnimatablePair(AnimatablePair(cx, cy), AnimatablePair(AnimatablePair(ew, eh), arc)) }
+            set { cx = newValue.first.first; cy = newValue.first.second; ew = newValue.second.first.first; eh = newValue.second.first.second; arc = newValue.second.second }
+        }
+
+        func path(in rect: CGRect) -> Path {
+            let r = CGRect(x: cx - ew / 2, y: cy - eh / 2, width: ew, height: eh)
+            guard arc > 0.01 else { return Path(roundedRect: r, cornerRadius: min(ew, eh) / 2) }
+            // ^ : an arc's band, as thick as a dot's quarter of the width
+            var p = Path()
+            let t = max(1.4, ew * 0.32) * arc
+            p.move(to: CGPoint(x: r.minX, y: r.maxY))
+            p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.maxY), control: CGPoint(x: r.midX, y: r.minY - eh * 0.6))
+            p.addLine(to: CGPoint(x: r.maxX - t * 0.5, y: r.maxY))
+            p.addQuadCurve(to: CGPoint(x: r.minX + t * 0.5, y: r.maxY), control: CGPoint(x: r.midX, y: r.minY - eh * 0.6 + t * 1.6))
+            p.closeSubpath()
+            return p
+        }
     }
 }
 

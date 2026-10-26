@@ -169,6 +169,13 @@ extension CardPlacementTests {
             check(F.shown(window: w, taskActive: task, cardWaiting: card, userCollapsed: collapsed) == want,
                   "float: \(w), task \(task), card \(card), collapsed \(collapsed): \(want)")
         }
+        // #130 review: a waiting card is never collapsed away -- the user's 收起 waits for it to close
+        check(F.collapsed(user: true, cardWaiting: false) && !F.collapsed(user: true, cardWaiting: true) && !F.collapsed(user: false, cardWaiting: false),
+              "collapsed: the user's say, never while a card waits")
+        let floatSource = ((try? String(contentsOf: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/FloatPanel.swift"), encoding: .utf8)) ?? "")
+        check(floatSource.contains("if FloatPolicy.collapsed(user: float.userCollapsed, cardWaiting: waits(n)) { capsule(n) }")
+              && !floatSource.contains("if float.userCollapsed {") && floatSource.contains("if !waits(n) {\n                Button(L(\"Collapse\""),
+              "the float draws a waiting card whole when collapsed, and offers no 收起 while one waits")
         // #125 Codex review at 2f29d42: whether the card fits the float is its measured height too
         check(!CardPlacement.fitsFloat(structure: true, height: nil) && !CardPlacement.fitsFloat(structure: true, height: 1000)
               && CardPlacement.fitsFloat(structure: true, height: 200) && !CardPlacement.fitsFloat(structure: false, height: 100),

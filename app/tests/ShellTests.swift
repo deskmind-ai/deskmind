@@ -975,8 +975,11 @@ enum ShellTests {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let raw = (try? String(contentsOf: dir.appendingPathComponent("Main/CloudModel.swift"), encoding: .utf8)) ?? ""
         let sheet = raw.split(separator: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n")
-        check(sheet.contains("if let engine = ModelChoice.engineToWrite(saved: savedCloud, shown: useCloud) { CloudModelSettings.engineIsCloud = engine }")
-              && !sheet.contains("CloudModelSettings.engineIsCloud = useCloud"), "the sheet's Save writes the engine through engineToWrite only")
+        // (#130: the sheet saves through ModelForm -- its plan's engine is engineToWrite's, CloudModelSettings.apply writes it)
+        check(sheet.contains("form.plan(engine: ModelChoice.engineToWrite(saved: savedCloud, shown: form.useCloud))")
+              && sheet.contains("if let e = plan.engine { engineIsCloud = e }")
+              && !sheet.contains("CloudModelSettings.engineIsCloud = form.useCloud") && !sheet.contains("engineIsCloud = useCloud"),
+              "the sheet's Save writes the engine through engineToWrite only")
         check(sheet.contains(".disabled(ModelChoice.switchLocked(inShell: inShell, saved: savedCloud))")
               && sheet.contains("useCloud = ModelChoice.startsCloud(inShell: inShell, saved: savedCloud)"), "the sheet's switch: stored state, locked as ModelChoice says")
         let note = sheet.components(separatedBy: "Text(inShell").dropFirst().first ?? ""
@@ -1165,11 +1168,11 @@ enum ShellTests {
     /// Final round (5): a pasted model name is saved and sent without its spaces.
     static func modelNameTests() {
         check(ModelChoice.modelName("  deepseek-chat \n") == "deepseek-chat" && ModelChoice.modelName("a b") == "a b", "trimmed at its ends only")
-        let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CloudModel.swift")
-        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let save = text.components(separatedBy: "private func save()").dropFirst().first?.components(separatedBy: "\n    }\n").first ?? ""
-        check(save.contains("ModelChoice.modelName(modelID)") && !save.contains("model: modelID") && !save.contains("= modelID"),
-              "the save sends the trimmed name")
+        // (#130: the save is ModelForm.plan's, the sheet's and the first run's)
+        var f = ModelForm(provider: CloudProvider.named("custom"), settings: ["CUSTOM_URL": "https://x/v1", "CUSTOM_MODEL": "  m-7 \n"])
+        f.key = "k"
+        let p = f.plan(engine: nil)
+        check(p.pairs["CUSTOM_MODEL"] == "m-7" && p.engineConfig == "openai:custom|m-7", "the save sends the trimmed name: \(p)")
     }
 
     /// Final round (6, E1): the stored lines a watch reconnect reads come off the stream's thread (the live lines go on

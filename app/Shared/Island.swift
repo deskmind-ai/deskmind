@@ -1,6 +1,6 @@
-// What needs no screen for the run's status at the top of the screen: where the notch is and the frames of the
-// "island" around it (collapsed: the notch with a wing either side; expanded: a panel dropping from it), the plain
-// capsule's frame on a screen with no notch, and the line that says which stage a starting run is in and for how long.
+// What needs no screen for the run's status at the top of the screen: where the notch is, the island's bar (the Island
+// board: one strip at the notch, as tall as it, 380 wide -- 460 while it needs you; on a screen with no notch the same
+// bar as a capsule under the menu bar), and the line that says which stage a starting run is in and for how long.
 // Foundation and CoreGraphics only, so tests/DecisionTests.swift checks it without a screen.
 
 import CoreGraphics
@@ -15,19 +15,33 @@ enum Island {
         return CGRect(x: left.maxX, y: screen.maxY - safeTop, width: right.minX - left.maxX, height: safeTop)
     }
 
-    /// Room either side of the notch for the status dot and the step, collapsed.
-    static let wing: CGFloat = 96
-    /// The expanded panel: wide enough for a step's line and the buttons, tall enough for three lines of text.
-    static let expanded = CGSize(width: 520, height: 132)
+    /// The bar's widths: as it works, and while it needs you (the Island board); its height with no notch.
+    static let barWidth: CGFloat = 380
+    static let barWideWidth: CGFloat = 460
+    static let barHeight: CGFloat = 34
 
-    static func collapsedFrame(notch: CGRect) -> CGRect {
-        CGRect(x: notch.minX - wing, y: notch.minY, width: notch.width + 2 * wing, height: notch.height)
+    /// How wide the bar is: at a notch always the wide one, whatever the state -- it never grows or shrinks around
+    /// the notch (fable, #130); with no notch 380, and 460 while it needs you.
+    static func width(notched: Bool, needsYou: Bool) -> CGFloat { notched || needsYou ? barWideWidth : barWidth }
+
+    /// The bar: centred on the notch and as tall as it, hanging from the top of the screen; with no notch, a capsule
+    /// 10 pt under the menu bar, centred on the visible area.
+    static func barFrame(notch: CGRect?, screen: CGRect, visible: CGRect, needsYou: Bool) -> CGRect {
+        let w = width(notched: notch != nil, needsYou: needsYou)
+        if let n = notch { return CGRect(x: n.midX - w / 2, y: screen.maxY - n.height, width: w, height: n.height) }
+        return CGRect(x: visible.midX - w / 2, y: visible.maxY - barHeight - 10, width: w, height: barHeight)
     }
 
-    /// Hanging from the top of the screen, centred on the notch; never narrower than the collapsed island.
-    static func expandedFrame(notch: CGRect, screen: CGRect) -> CGRect {
-        let w = max(expanded.width, notch.width + 2 * wing)
-        return CGRect(x: notch.midX - w / 2, y: screen.maxY - expanded.height, width: w, height: expanded.height)
+    /// The bar's inset from its ends, and the room it keeps clear on each side of the notch.
+    static let barInset: CGFloat = 16
+    static let notchGap: CGFloat = 8
+
+    /// How wide each side of the bar is at a notch `notchWidth` wide (the bar centred on it): what is left of the bar
+    /// outside the notch, its inset and a gap -- the words on each side are cut to it, never under the notch (#130
+    /// Codex review: an 84 pt spacer let a 200 pt notch hide the paused line). nil: no notch, the sides share the bar.
+    static func sideWidth(bar: CGFloat, notchWidth: CGFloat?) -> CGFloat? {
+        guard let n = notchWidth, n > 0 else { return nil }
+        return max(0, (bar - n) / 2 - barInset - notchGap)
     }
 
     /// How a run ended, in the collapsed island's word beside ✓ or !.
@@ -42,15 +56,10 @@ enum Island {
         }
     }
 
-    /// A finished run's island stays open this long with its result, then collapses to the notch...
+    /// A run that was done shows so this long, then the bar goes...
     static let resultOpenSeconds: Double = 6
-    /// ...and goes away after this long, unless dismissed first or a new run starts.
+    /// ...one that didn't finish or was stopped stays until clicked, or this long (its why is to be read).
     static let resultLingerSeconds: Double = 120
-
-    /// No notch: the capsule under the menu bar, centred, as before.
-    static func pillFrame(visible: CGRect, size: CGSize) -> CGRect {
-        CGRect(x: visible.midX - size.width / 2, y: visible.maxY - size.height - 10, width: size.width, height: size.height)
-    }
 }
 
 /// What a run is doing before its first step: each takes from a second to a minute, and a bare "starting…" for that
@@ -72,7 +81,7 @@ enum RunStage: String, CaseIterable {
         case .starting: "Connecting to the helper…"
         case .brain: "Loading the local model…"
         case .eyes: "Loading the vision model…"
-        case .hands: "Starting DeskMind Hands…"
+        case .hands: "Starting Hands…"
         case .looking: "Looking at the screen and choosing the first step…"
         }
     }

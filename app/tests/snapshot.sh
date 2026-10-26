@@ -4,7 +4,7 @@
 # line), DeskMindApp.swift without its @main; run as a small accessory app bundle (小方's images are its resources).
 # Draws in its own offscreen window only: no real app is driven, nothing comes to the front.
 #
-# usage: tests/snapshot.sh <out dir>   (from app/)
+# usage: tests/snapshot.sh <out dir> [window|float|island|firstrun]   (from app/; all when none is named)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT_PNG="${1:?usage: tests/snapshot.sh <out dir>}"
@@ -30,4 +30,4 @@ PLIST
 swiftc -j 2 -swift-version 5 -parse-as-library -target arm64-apple-macos15 -o "$APP/Contents/MacOS/MainWindowSnapshot" \
   "${SRC[@]}" tests/snapshot/MainWindowSnapshot.swift
 mkdir -p "$OUT_PNG"
-"$APP/Contents/MacOS/MainWindowSnapshot" "$(cd "$OUT_PNG" && pwd)"
+"$APP/Contents/MacOS/MainWindowSnapshot" "$(cd "$OUT_PNG" && pwd)" ${2:-}

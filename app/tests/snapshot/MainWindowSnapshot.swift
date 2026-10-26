@@ -1,5 +1,7 @@
-// The main window drawn offscreen, each state to a PNG in light and dark (tests/snapshot.sh builds and runs it): idle,
-// running, waiting with a card, answered, the 「过程」 tab. The states come from protocol lines fed to a ShellModel on a
+// The main window, the float and the island drawn offscreen, each state to a PNG in light and dark (tests/snapshot.sh
+// builds and runs it): the window idle, running, waiting with a card, answered, the 「过程」 tab; the float working, on a
+// confirm card, a choice card, a plan's summary, an answer held for its take-back, an expired card, collapsed; the
+// island's bar in each of its kinds, at a notch and as the capsule. The states come from protocol lines fed to a ShellModel on a
 // transport that answers nothing (as the decision tests do), the 过程 tab from a run folder in a temp dir; the live view
 // shows a drawn stand-in, never a real app's window. Nothing is brought forward: the window is ordered in off every
 // screen in an accessory process, never made key, and rendered from its layers.
@@ -64,13 +66,149 @@ enum MainWindowSnapshot {
             Scene(name: "process", lines: others + running() + waiting() + answered(), now: t0 + 66, process: true),
         ]
         writeRunFolder(support, run: running() + waiting() + answered())
-        for scene in scenes {
-            for dark in [false, true] {
-                let file = out.appendingPathComponent("\(scene.name)-\(dark ? "dark" : "light").png")
-                render(scene, dark: dark, to: file)
-                print(file.path)
+        let only = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil
+        for dark in [false, true] {
+            let tag = dark ? "dark" : "light"
+            if only == nil || only == "window" {
+                for scene in scenes { render(scene, dark: dark, to: out.appendingPathComponent("\(scene.name)-\(tag).png")) }
+            }
+            if only == nil || only == "float" {
+                for (name, lines, phase, fits, collapsed) in floatScenes() {
+                    renderFloat(lines, phase: phase, fits: fits, collapsed: collapsed, dark: dark, to: out.appendingPathComponent("float-\(name)-\(tag).png"))
+                }
+            }
+            if only == nil || only == "firstrun" {
+                for (name, step, key, granted) in firstRunScenes() {
+                    renderFirstRun(step, key: key, granted: granted, dark: dark, to: out.appendingPathComponent("firstrun-\(name)-\(tag).png"))
+                }
+            }
+            if only == nil || only == "island" {
+                for (name, lines, app) in islandScenes() {
+                    for notched in [true, false] {
+                        renderIsland(lines, app: app, notched: notched, dark: dark,
+                                     to: out.appendingPathComponent("island-\(name)-\(notched ? "notch" : "capsule")-\(tag).png"))
+                    }
+                }
             }
         }
+    }
+
+    // MARK: the first run, the float and the island
+
+    /// (name, step, the key's state, permissions granted)
+    static func firstRunScenes() -> [(String, FirstRun.Step, FirstRun.KeyState, Bool)] {
+        [
+            ("1-language", .language, .empty, false),
+            ("2-permissions", .permissions, .empty, false),
+            ("2-permissions-granted", .permissions, .empty, true),
+            ("3-key-empty", .key, .empty, true),
+            ("3-key-set", .key, .set(last4: "a1b2"), true),
+            ("3-key-checking", .key, .checking, true),
+            ("3-key-ok", .key, .ok(model: "deepseek-chat"), true),
+            ("3-key-bad", .key, .bad(why: "401 Unauthorized: the key was not accepted"), true),
+            ("3-key-unreadable", .key, .unreadable, true),
+            ("4-examples", .examples, .empty, true),
+        ]
+    }
+
+    @MainActor static func renderFirstRun(_ step: FirstRun.Step, key: FirstRun.KeyState, granted: Bool, dark: Bool, to file: URL) {
+        var flow = FirstRun(step: step)
+        flow.facts.accessibility = granted; flow.facts.screen = granted
+        if case .set = key { flow.facts.keySet = true }
+        // (the bad key saved, its check failed: the case 稍后 must still show -- #130 Codex review)
+        if case .bad = key { flow.facts.keySet = true; flow.facts.saveOK = true; flow.facts.checkOK = false }
+        let page = FirstRunPage(flow: flow, language: .constant(AppLanguage.zhHans.rawValue),
+                                form: .constant(ModelForm(provider: CloudProvider.all[0], settings: [:])), keyState: key,
+                                granted: { _ in granted }, grant: { _ in }, act: { _ in }, example: { _ in })
+        renderView(page.environment(\.lang, .zhHans), size: NSSize(width: 1080, height: 780), dark: dark, wait: 0.5, to: file)
+    }
+
+    /// (name, lines, the card's phase if not as the lines leave it, whether the card fits the float, collapsed)
+    static func floatScenes() -> [(String, [[String: Any]], CardPhase?, Bool, Bool)] {
+        let held = CardPhase.pending(.option(runId: rid, askId: "ask_send", option: 0), until: t0 + 58 + 2)
+        return [
+            ("working", running(), nil, true, false),
+            ("confirm", running() + waiting(), nil, true, false),
+            ("choice", running() + choice(), nil, true, false),
+            ("plan-summary", Array(running().prefix(6)), nil, false, false),
+            ("held", running() + waiting(), held, true, false),
+            ("expired", running() + waiting() + [line("ask_void", 13, 700, ["ask_id": "ask_send", "why": "timeout"])], nil, true, false),
+            ("capsule", running(), nil, true, true),
+        ]
+    }
+
+    /// A card with two readings and 「由你决定」.
+    static func choice() -> [[String: Any]] {
+        let card: [String: Any] = [
+            "kind": "ambiguity", "blocking": true, "headline": "许诺有两封没回的邮件，回哪一封？", "text": "许诺有两封没回的邮件，回哪一封？",
+            "options": [["kind": "reading", "text": "10 月 20 日 · 下周的方案评审", "detail": "最近一封"],
+                        ["kind": "reading", "text": "10 月 18 日 · 报价单 v2"], ["kind": "delegate", "text": "由你决定"]],
+        ]
+        return [line("ask", 9, 52, ["ask_id": "ask_which", "card": card]), line("waiting", 10, 52, ["ask_id": "ask_which"])]
+    }
+
+    /// (name, lines, the app its step acts in)
+    static func islandScenes() -> [(String, [[String: Any]], String?)] {
+        let start = Array(running().prefix(3))
+        func end(_ status: String) -> [[String: Any]] { running() + [line("task_done", 9, 57, ["status": status, "reason": "", "summary": "s"])] }
+        return [
+            ("preparing", start, nil),
+            ("working", running(), "Safari"),
+            ("needs-you", running() + waiting(), "Safari"),
+            ("paused", running() + [line("waiting", 9, 40, [:])], "Safari"),
+            ("done", end("succeeded"), nil),
+            ("failed", end("failed"), nil),
+            ("stopped", end("stopped"), nil),
+        ]
+    }
+
+    @MainActor static func state(_ lines: [[String: Any]], now: Double) -> (ShellModel, SessionState) {
+        let shell = ShellModel(client: SessionClient(transport: Wire()), defaults: MemoryDefaults(), config: { "openai:local|fake" },
+                               lang: { .zhHans }, now: { now }, work: { $0() }, deliver: { $0() })
+        for l in lines { shell.client.feed(l) }
+        shell.select(sid)
+        return (shell, shell.states[sid] ?? SessionState())
+    }
+
+    @MainActor static func renderFloat(_ lines: [[String: Any]], phase: CardPhase?, fits: Bool, collapsed: Bool, dark: Bool, to file: URL) {
+        let (shell, s) = state(lines, now: t0 + 58)
+        guard let task = s.tasks.last else { return }
+        let pinned = shell.pinned(s)
+        let card = pinned.map { CardModel(card: $0.card.card, runId: $0.runId, askId: $0.card.askId) }
+        let ph = phase ?? pinned?.phase
+        let placement = ph.map { CardPlacement.place($0, fitsFloat: fits, window: .behindVisible, frontNow: false, float: .visible) }
+        let f = FloatController.shared
+        f.userCollapsed = collapsed
+        f.preview(FloatController.Now(sessionId: sid, status: s.status, task: task, card: card, phase: ph, placement: placement))
+        let view = ZStack(alignment: .bottomTrailing) {
+            Color(red: 0.89, green: 0.91, blue: 0.92)
+            FloatView(shell: shell, float: f, still: still()).padding(18)
+        }
+        renderView(view.environment(\.lang, .zhHans), size: NSSize(width: 340, height: 640), dark: dark, wait: 0.6, to: file)
+        f.preview(nil)
+    }
+
+    @MainActor static func renderIsland(_ lines: [[String: Any]], app: String?, notched: Bool, dark: Bool, to file: URL) {
+        let (shell, s) = state(lines, now: t0 + 58)
+        guard let task = s.tasks.last else { return }
+        let model = OverlayModel()
+        let ended = task.ended
+        model.phase = ended ? (task.status == "succeeded" ? .passed : .failed) : .running
+        model.frame = IslandFeed.frame(task, pinned: shell.pinned(s).map { ($0.card, $0.phase) }, app: app, floatShows: true, lang: .zhHans)
+        let h: CGFloat = notched ? 37 : Island.barHeight
+        let view = ZStack(alignment: .top) {
+            Color(red: 0.36, green: 0.40, blue: 0.45)
+            VStack(spacing: 0) {
+                Color(red: 0.16, green: 0.17, blue: 0.19).frame(height: notched ? 37 : 24)     // (the menu bar)
+                if !notched { Color.clear.frame(height: 10) }
+            }
+            IslandView(model: model, height: h, notched: notched, notchWidth: notched ? 200 : nil, onStop: {}, onTap: { _ in }, now: { t0 + 58 })
+                .frame(width: Island.barWideWidth, height: h)
+                .padding(.top, notched ? 0 : 34)
+            // (the notch itself, 200 pt as on a 14" MacBook Pro, drawn over the bar as the hardware hides what is under it)
+            if notched { Color.black.frame(width: 200, height: h) }
+        }
+        renderView(view.environment(\.lang, .zhHans), size: NSSize(width: 560, height: notched ? 60 : 84), dark: dark, wait: 0.3, to: file)
     }
 
     // MARK: the states, as the harness would send them
@@ -100,6 +238,10 @@ enum MainWindowSnapshot {
         ]
         let planCard: [String: Any] = [
             "kind": "plan", "blocking": true, "headline": "回复许诺：4 步，1 步往外发，到时再确认",
+            "plan": ["steps": [["purpose": "找到许诺 10 月 20 日的邮件", "class": "read", "objects": [], "sites": []],
+                               ["purpose": "点「回复」，写入「我看一下再说」", "class": "modify_user", "objects": [], "sites": []],
+                               ["purpose": "点「发送」", "class": "external", "objects": [], "sites": [["host": "mail.example.com", "sends": "「我看一下再说」"]]],
+                               ["purpose": "确认已经发出", "class": "read", "objects": [], "sites": []]]],
             "text": "我打算这样做：\n1. 找到许诺 10 月 20 日的邮件\n2. 点「回复」，写入「我看一下再说」\n3. 点「发送」——往外发，到时再确认\n4. 确认已经发出",
             "options": [["kind": "approve", "text": "可以，就这样做"], ["kind": "cancel", "text": "先别做了"]],
         ]
@@ -186,8 +328,11 @@ enum MainWindowSnapshot {
         let root = MainColumns(shell: shell, openSettings: {}, cloud: SidebarCloud(on: true, ready: true, provider: "DeepSeek"),
                                mac: MacFacts(missing: []), still: scene.selected == nil ? nil : still())
             .environment(\.lang, .zhHans)
-            .frame(width: size.width, height: size.height)
-        let host = NSHostingView(rootView: root)
+        renderView(root, size: size, dark: dark, wait: scene.process ? 2.0 : 0.8, to: file)
+    }
+
+    @MainActor static func renderView(_ view: some View, size: NSSize, dark: Bool, wait: Double, to file: URL) {
+        let host = NSHostingView(rootView: view.frame(width: size.width, height: size.height))
         host.frame = NSRect(origin: .zero, size: size)
         let w = NSWindow(contentRect: host.frame, styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
         w.titlebarAppearsTransparent = true
@@ -197,7 +342,7 @@ enum MainWindowSnapshot {
         w.setFrameOrigin(NSPoint(x: -30_000, y: -30_000))     // (off every screen; never key, never front)
         w.orderFrontRegardless()
         // (the 过程 tab reads its folder off the main queue: let it land)
-        RunLoop.main.run(until: Date().addingTimeInterval(scene.process ? 2.0 : 0.8))
+        RunLoop.main.run(until: Date().addingTimeInterval(wait))
         host.layoutSubtreeIfNeeded()
         w.displayIfNeeded()
         let scale = 2
@@ -209,6 +354,7 @@ enum MainWindowSnapshot {
         let rep = NSBitmapImageRep(cgImage: ctx.makeImage()!)
         try? rep.representation(using: .png, properties: [:])?.write(to: file)
         w.orderOut(nil)
+        print(file.path)
     }
 
     /// The live view's stand-in: a drawn mail-compose window (no real app), window number 4242 as the steps say.

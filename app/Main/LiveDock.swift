@@ -108,9 +108,16 @@ struct LiveFrame: View {
     let boxRect: [Double]?
     @Binding var zoomed: Bool
     let popOut: () -> Void
+    /// The frame's own title bar and step line (the right column); false: the picture alone, 110 tall -- the float
+    /// draws its own title and line around it (U2).
+    var chrome = true
     @Environment(\.lang) private var lang
 
     var body: some View {
+        if chrome { framed } else { picture(height: 110).padding(.horizontal, 6) }
+    }
+
+    private var framed: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Circle().fill(Brand.dot).frame(width: 7, height: 7).accessibilityHidden(true)
@@ -121,8 +128,24 @@ struct LiveFrame: View {
                 barIcon("rectangle.on.rectangle", L("Pop out as a float", lang: lang), popOut)
             }
             .padding(.leading, 12).padding(.trailing, 6).frame(height: 34)
+            picture(height: zoomed ? 380 : 214)
+                .padding(.horizontal, 6)
+            Text(step ?? " ").font(.system(size: 13)).foregroundStyle(ShellColor.frameQuiet).lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12).frame(height: 34)
+                .accessibilityLabel(step.map { L("Current step: %@", $0, lang: lang) } ?? "")
+        }
+        .background(RoundedRectangle(cornerRadius: 14).fill(ShellColor.frame))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .shadow(color: Brand.ink.opacity(0.18), radius: 14, y: 10)
+        .accessibilityElement(children: .contain)
+    }
+
+    /// The picture, its cursor, the card's box and 「准备点」, or why there is none.
+    private func picture(height: CGFloat) -> some View {
             ZStack {
-                Rectangle().fill(Brand.card)
+                // (light on the float's ink in both appearances, as the board draws it)
+                Rectangle().fill(chrome ? Brand.card : Color(ShellPalette.shotWell))
                 if let p = picture {
                     GeometryReader { g in
                         let size = LiveDockView.fit(p.image.size, in: g.size)
@@ -144,30 +167,21 @@ struct LiveFrame: View {
                     .overlay(alignment: .topLeading) {
                         // (the card's own words for what it is about to act on: not placed on the step's box)
                         if let about {
-                            Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Brand.card)
+                            Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Color(ShellPalette.shotWell))
                                 .padding(.horizontal, 8).frame(height: 20)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(ShellColor.orangeText))
+                                .background(RoundedRectangle(cornerRadius: 4).fill(Color(ShellPalette.shotTag)))
                                 .padding(8)
                         }
                     }
                     .accessibilityLabel(L("Live view of the task's window", lang: lang))
                 } else {
-                    Text(LiveDockView.note(state, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                    Text(LiveDockView.note(state, lang: lang)).font(.system(size: chrome ? 12 : 11))
+                        .foregroundStyle(chrome ? ShellColor.secondary : Color(ShellPalette.inkSurface))
                         .multilineTextAlignment(.center).padding(14)
                 }
             }
-            .frame(height: zoomed ? 380 : 214)
+            .frame(height: height)
             .clipShape(RoundedRectangle(cornerRadius: 8))
-            .padding(.horizontal, 6)
-            Text(step ?? " ").font(.system(size: 13)).foregroundStyle(ShellColor.frameQuiet).lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 12).frame(height: 34)
-                .accessibilityLabel(step.map { L("Current step: %@", $0, lang: lang) } ?? "")
-        }
-        .background(RoundedRectangle(cornerRadius: 14).fill(ShellColor.frame))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .shadow(color: Brand.ink.opacity(0.18), radius: 14, y: 10)
-        .accessibilityElement(children: .contain)
     }
 
     /// 「<应用> · <窗口的状态>」: whose window, and whether it is live, waits for you or has no picture.

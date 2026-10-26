@@ -129,8 +129,7 @@ struct CardView: View {
         HStack(spacing: 8) {
             if card.blocking && !card.isResult {
                 if phase == .open {
-                    Circle().fill(Brand.dot).frame(width: 8, height: 8)
-                        .overlay(Circle().stroke(Brand.dot.opacity(0.3), lineWidth: 3)).accessibilityHidden(true)
+                    XiaoFace(eyes: .up, size: 22)      // (P1Waiting: 小方 looking up at you, the card's fourth place)
                     Text(L("Waiting for you · %@", ShellText.cardKind(card.kind.name, lang: lang), lang: lang))
                         .font(.system(size: 13, weight: .bold)).foregroundStyle(ShellColor.orangeText)
                 } else {
@@ -376,6 +375,8 @@ struct PlanSteps: View {
 /// on, the site, and every line of what goes out.
 struct ConsentFields: View {
     let consent: CardLayout.Consent
+    /// On an ink surface (the float): a darker block, its words in the ink surface's colours.
+    var onInk = false
     @Environment(\.lang) private var lang
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -384,24 +385,26 @@ struct ConsentFields: View {
             if let site = consent.site, !site.isEmpty { row(L("Site", lang: lang), site) }
             ForEach(Array(consent.selected.enumerated()), id: \.offset) { _, v in row(L("Selected", lang: lang), v) }
             if !consent.outgoing.isEmpty {
-                Text(L("What goes out", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary).padding(.top, 2)
+                Text(L("What goes out", lang: lang)).font(.system(size: onInk ? 11 : 12, weight: .semibold)).foregroundStyle(quiet).padding(.top, 2)
                 ForEach(Array(consent.outgoing.enumerated()), id: \.offset) { _, o in row(o.label, o.value, strong: true) }
             }
-            if let e = consent.effect { quiet(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
-            if !consent.uncertain.isEmpty || consent.uncertainMore > 0 { UncertainSteps(consent: consent) }
-            if let m = consent.modelSays { quiet(L("What the model says (not checked): %@", m, lang: lang)) }
+            if let e = consent.effect { note(e == .sends ? L("This sends something out", lang: lang) : L("This changes your things", lang: lang)) }
+            if !consent.uncertain.isEmpty || consent.uncertainMore > 0 { UncertainSteps(consent: consent, onInk: onInk) }
+            if let m = consent.modelSays { note(L("What the model says (not checked): %@", m, lang: lang)) }
         }
-        .padding(.horizontal, 14).padding(.vertical, 10)
+        .padding(.horizontal, onInk ? 12 : 14).padding(.vertical, onInk ? 8 : 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 12).fill(Brand.paper))
+        .background(RoundedRectangle(cornerRadius: onInk ? 10 : 12).fill(onInk ? Color(ShellPalette.inkButton) : Brand.paper))
     }
-    private func quiet(_ s: String) -> some View {
-        Text(s).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    private var quiet: Color { onInk ? Color(ShellPalette.onInkMuted) : ShellColor.secondary }
+    private func note(_ s: String) -> some View {
+        Text(s).font(.system(size: onInk ? 11 : 12)).foregroundStyle(quiet).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
     }
     private func row(_ label: String, _ value: String, strong: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label).font(.system(size: 13)).foregroundStyle(ShellColor.secondary)
-            Text(value).font(.system(size: strong ? 15 : 13, weight: strong ? .bold : .regular)).foregroundStyle(Brand.ink)
+            Text(label).font(.system(size: onInk ? 11 : 13)).foregroundStyle(quiet)
+            Text(value).font(.system(size: onInk ? (strong ? 13 : 11) : (strong ? 15 : 13), weight: strong ? .bold : .regular))
+                .foregroundStyle(onInk ? Color(ShellPalette.onInk) : Brand.ink)
                 .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
@@ -412,22 +415,26 @@ struct ConsentFields: View {
 /// to this send is given knowing which earlier one may already have gone out -- and how many more there are.
 struct UncertainSteps: View {
     let consent: CardLayout.Consent
+    var onInk = false
     @Environment(\.lang) private var lang
+    private var quiet: Color { onInk ? Color(ShellPalette.onInkMuted) : ShellColor.secondary }
+    private var strong: Color { onInk ? Color(ShellPalette.onInk) : Brand.ink }
+    private var size: CGFloat { onInk ? 11 : 12 }
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(L("Earlier steps that may already have gone out", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+            Text(L("Earlier steps that may already have gone out", lang: lang)).font(.system(size: size, weight: .semibold)).foregroundStyle(quiet)
             ForEach(Array(consent.uncertain.enumerated()), id: \.offset) { _, u in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(u.text).font(.system(size: 12)).foregroundStyle(Brand.ink).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    Text(u.text).font(.system(size: size)).foregroundStyle(strong).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     ForEach(Array(u.outgoing.enumerated()), id: \.offset) { _, o in
-                        Text(L("%@: %@", o.label, o.value, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                        Text(L("%@: %@", o.label, o.value, lang: lang)).font(.system(size: size)).foregroundStyle(quiet)
                             .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .accessibilityElement(children: .combine)
             }
             if consent.uncertainMore > 0 {
-                Text(L("%d more steps with an unknown result", consent.uncertainMore, lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                Text(L("%d more steps with an unknown result", consent.uncertainMore, lang: lang)).font(.system(size: size)).foregroundStyle(quiet)
             }
         }
         .padding(.top, 4)

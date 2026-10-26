@@ -16,7 +16,8 @@ final class RunOverlaySurface: IslandSurface {
             o.show(title: title, line: line)
         }
     }
-    func update(step: Int, line: String) { MainActor.assumeIsolated { RunOverlay.shared.update(app: "", step: step, line: line) } }
+    func update(step: Int, line: String) {}        // (the frame carries it: apply)
+    func apply(_ frame: IslandFrame) { MainActor.assumeIsolated { RunOverlay.shared.apply(frame) } }
     func setAsking(_ on: Bool) { MainActor.assumeIsolated { RunOverlay.shared.setAsking(on) } }
     func finish(passed: Bool, stopped: Bool, summary: String) {
         MainActor.assumeIsolated {

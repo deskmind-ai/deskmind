@@ -171,4 +171,9 @@ enum FloatPolicy {
         if cardWaiting { return .open }
         return userCollapsed ? .collapsed : .open
     }
+
+    /// The float drawn as its capsule: when the user collapsed it -- never while a card waits (#130 review: a card
+    /// collapsed away was placed in the float, so nothing else said it waited). The user's 收起 is kept and applies
+    /// again once the card closes.
+    static func collapsed(user: Bool, cardWaiting: Bool) -> Bool { user && !cardWaiting }
 }
