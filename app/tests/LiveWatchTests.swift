@@ -67,6 +67,12 @@ enum LiveWatchTests {
             ([0.5, 0.5, 0, 0.1], 9, [0, 0, 1, 1], nil, "no width: none"),
             ([0.0, 0.0, 0.5, 0.5], 9, [0.25, 0, 0.75, 1], (0, 0, 200.0 / 3, 50), "partly off its display: the shown part only"),
         ]
+        // which rect it marks: only the waiting card's own, for the button it asks about (none today); never a step's
+        let cardRect = [0.1, 0.1, 0.2, 0.1]
+        check(LiveFeed.boxRect(cardWaitsOnButton: false, card: nil) == nil, "no card waiting: no box (not the last step's)")
+        check(LiveFeed.boxRect(cardWaitsOnButton: true, card: nil) == nil, "a card waiting with no rect of its own: no box")
+        check(LiveFeed.boxRect(cardWaitsOnButton: true, card: cardRect) == cardRect, "a card waiting with its own rect: that one")
+        check(LiveFeed.boxRect(cardWaitsOnButton: false, card: cardRect) == nil, "a rect but no card waiting on a button: none")
         for b in boxes {
             let got = LiveFeed.box(pictureWindow: b.window, stepWindow: 9, rectNorm: b.rect, picture: pic, visible: b.visible)
             check(b.want.map { near(got, $0.0, $0.1, $0.2, $0.3) } ?? (got == nil), "box: \(b.why): \(String(describing: got))")

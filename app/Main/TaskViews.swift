@@ -41,8 +41,9 @@ struct TaskRow: View {
                 Text(line).font(.system(size: 13)).foregroundStyle(task.running ? Brand.ink : ShellColor.secondary)
                     .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                // the task's 「过程」 in the right column (M5): the one way to it from the chat
-                if stop == nil {
+                // the task's 「过程」 in the right column (M5): for a task that ended (the running one's is the column's
+                // own tab; the board's running line is the status alone)
+                if stop == nil && !task.running {
                     Button(L("Process", lang: lang)) { shell.showProcess(task.runId) }
                         .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
                         .accessibilityHint(L("Shows this task's process in the right column", lang: lang))
@@ -53,8 +54,9 @@ struct TaskRow: View {
                         .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
                         .accessibilityHint(L("Opens the task's recording", lang: lang))
                 }
-                if task.running {
-                    Button(L("Stop", lang: lang)) { if let stop { stop() } else { shell.stop() } }
+                // (Stop: the header's in the chat; a row given its own Stop shows it)
+                if task.running, let stop {
+                    Button(L("Stop", lang: lang)) { stop() }
                         .buttonStyle(InkButtonStyle(prominent: false, small: true))
                         .disabled(task.stopping)
                         .accessibilityLabel(L("Stop", lang: lang))

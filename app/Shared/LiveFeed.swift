@@ -111,6 +111,13 @@ struct LiveFeed: Equatable {
         return CGPoint(x: x * picture.width, y: y * picture.height)
     }
 
+    /// Which rect the dashed box marks (fable's U1 review): only a rect the waiting card itself carries for the button
+    /// it asks about -- never a step's, which may be another element than the one the card names (a card carries none
+    /// today: no box then). No card waiting on a button: no box.
+    static func boxRect(cardWaitsOnButton: Bool, card: [Double]?) -> [Double]? {
+        cardWaitsOnButton ? card : nil
+    }
+
     /// The step's target as a box on the picture (its own points, top-left origin), cut to the part the picture shows:
     /// on a picture of the step's window only, none when the target is outside it (the cursor's rule, for the dashed box
     /// around what it acts on).

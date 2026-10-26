@@ -104,6 +104,8 @@ struct LiveFrame: View {
     let step: String?
     let stepWindow: Int?
     let target: StepTarget?
+    /// The rect the dashed box marks (LiveFeed.boxRect): nil, no box.
+    let boxRect: [Double]?
     @Binding var zoomed: Bool
     let popOut: () -> Void
     @Environment(\.lang) private var lang
@@ -126,7 +128,7 @@ struct LiveFrame: View {
                         let size = LiveDockView.fit(p.image.size, in: g.size)
                         ZStack(alignment: .topLeading) {
                             Image(nsImage: p.image).resizable().frame(width: size.width, height: size.height)
-                            if let b = LiveFeed.box(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target?.rectNorm, picture: size, visible: p.visible) {
+                            if let b = LiveFeed.box(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: boxRect, picture: size, visible: p.visible) {
                                 RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.dot, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
                                     .frame(width: b.width + 8, height: b.height + 8).offset(x: b.minX - 4, y: b.minY - 4)
                                     .accessibilityHidden(true)

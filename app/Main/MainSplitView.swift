@@ -537,6 +537,10 @@ struct ChatColumn: View {
         VStack(alignment: .leading, spacing: 8) {
             if let p = shell.pinned(s) {
                 let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+                if shell.cardPinnedWhole(m) {
+                    Label(L("Pinned · waiting for your answer", lang: lang), systemImage: "pin")
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
+                }
                 PinnedCard(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s) { jumpTo = $0 }
             }
             if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, queueCap)) }
@@ -957,10 +961,16 @@ struct AgentPanel: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
                     XiaoFang(mood: Self.mood(c.status), size: 40).accessibilityHidden(true)
-                    Text(ShellText.status(c.status, lang: lang))
-                        .font(.system(size: 14, weight: .bold)).foregroundStyle(Self.waits(c.status) ? ShellColor.orangeText : Brand.ink)
-                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel(L("Status: %@", ShellText.status(c.status, lang: lang), lang: lang))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(headline(c.status))
+                            .font(.system(size: 14, weight: .bold)).foregroundStyle(Self.waits(c.status) ? ShellColor.orangeText : Brand.ink)
+                            .lineLimit(1)
+                        if let sub = subline(c.status) {
+                            Text(sub).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(L("Status: %@", ShellText.status(c.status, lang: lang), lang: lang))
                     Spacer(minLength: 4)
                     if let p = c.progress {
                         Text(L("Step %d · %d:%02d", p.step, p.seconds / 60, p.seconds % 60, lang: lang))
@@ -973,7 +983,10 @@ struct AgentPanel: View {
                     LiveFrame(picture: still ?? dock.picture, state: still == nil ? dock.state : .streaming,
                               app: Self.appName(last?.object), waiting: Self.waits(c.status), about: aboutToAct,
                               step: last.map(\.displayText), stepWindow: LiveFeed.windowNumber(last?.object),
-                              target: last?.target, zoomed: $zoomed, popOut: { shell.togglePopOut() })
+                              target: last?.target,
+                              // (only a card waiting on a button, by a rect of its own: cards carry none today, so no box)
+                              boxRect: LiveFeed.boxRect(cardWaitsOnButton: aboutToAct != nil, card: nil),
+                              zoomed: $zoomed, popOut: { shell.togglePopOut() })
                 } else if shell.current?.runningTask != nil {
                     placeholder(L("The live view is in the float", lang: lang))
                 } else {
@@ -1028,12 +1041,41 @@ struct AgentPanel: View {
         .frame(maxHeight: .infinity)
     }
 
-    /// 「准备点：<target>」: the element the open action card itself names (its consent.target), while it waits --
-    /// never worked out from the steps; none when the card names none.
+    /// 「准备点：<target>」: the button the open action card itself names (its consent: a click, on its target), while
+    /// it waits -- never worked out from the steps; none when the card names none.
     private var aboutToAct: String? {
+        guard let s = shell.current, let p = shell.pinned(s), p.phase == .open,
+              let c = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId).consent, c.action == "click",
+              let t = c.target, !t.isEmpty else { return nil }
+        return t
+    }
+
+    /// The open card's own target (any action), for 「任务停在<它>前」.
+    private var waitsBefore: String? {
         guard let s = shell.current, let p = shell.pinned(s), p.phase == .open,
               let t = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId).consent?.target, !t.isEmpty else { return nil }
         return t
+    }
+
+    /// The status in a word (P1Main): 「执行中」, 「等你」; the session's own words otherwise.
+    private func headline(_ s: SessionStatus) -> String {
+        switch s {
+        case .acting: return L("Working", lang: lang)
+        case .waitingForYou: return L("Waiting", lang: lang)
+        default: return ShellText.status(s, lang: lang)
+        }
+    }
+    /// Under it, what 小方 does: looks at the task's window while it works, up at you while a card waits.
+    private func subline(_ s: SessionStatus) -> String? {
+        switch s {
+        case .acting:
+            let app = Self.appName(shell.current?.runningTask?.steps.last?.object)
+            return app.map { L("Xiaofang is looking at the %@ window", $0, lang: lang) } ?? L("Xiaofang is looking at the task's window", lang: lang)
+        case .waitingForYou:
+            return waitsBefore.map { L("Xiaofang looks up at you: the task stopped before 「%@」", $0, lang: lang) }
+                ?? L("Xiaofang looks up at you: the task waits for your answer", lang: lang)
+        default: return nil
+        }
     }
 
     private func placeholder(_ text: String) -> some View {
@@ -1084,7 +1126,7 @@ struct AgentPanel: View {
     /// A step's mark (P1Main): done, a green check; now, the orange dot; still to do, a hollow ring.
     @ViewBuilder static func markShape(_ m: RightColumn.PlanRow.Mark) -> some View {
         switch m {
-        case .done: Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.ok)
+        case .done: Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.secondary)
         case .current: Circle().fill(Brand.dot).frame(width: 10, height: 10)
         case .todo: Circle().strokeBorder(ShellColor.secondary, lineWidth: 1.5).frame(width: 10, height: 10)
         }

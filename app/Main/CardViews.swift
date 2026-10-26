@@ -60,7 +60,9 @@ struct CardView: View {
             }
             if !layout.folds && !layout.plan.isEmpty { PlanSteps(rows: layout.plan, foreground: layout.foreground) }
             if let c = layout.consent { ConsentFields(consent: c) }
-            if layout.folds {
+            // (an action card is its headline and its fields: the board has no 「细节」 on it -- protocol.md: the
+            // consent is the text split, no more and no less)
+            if layout.folds && layout.consent == nil {
                 DisclosureGroup(isExpanded: detailsOpen) {
                     VStack(alignment: .leading, spacing: 8) {
                         if !layout.text.isEmpty {
@@ -85,6 +87,9 @@ struct CardView: View {
                     ForEach(layout.buttons, id: \.index) { c in control(c) }
                 }
                 .fixedSize(horizontal: false, vertical: true)
+            }
+            if phase.ending == nil, layout.consent != nil, let hint = Self.consentHint(card, lang: lang) {
+                Text(hint).font(.system(size: 12)).lineSpacing(2).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let held = phase.pending, case .pending(_, let until) = phase { takeBackRow(held, until: until) }
             if case .expired(_, let now) = phase { expiredRow(now) }
@@ -235,6 +240,22 @@ struct CardView: View {
                     .accessibilityHint(L("The task looks at the screen again and asks you anew", lang: lang))
             }
         }
+    }
+
+    /// The line under an action card's buttons (P1Waiting): what 「可以」 covers -- this once, the card's own target --
+    /// and what its 「这一步不要」 and 「先别做了」 do, each by the button's own words.
+    static func consentHint(_ card: CardModel, lang: ResolvedLang) -> String? {
+        var parts: [String] = []
+        if let t = card.consent?.target, !t.isEmpty { parts.append(L("Only for this one 「%@」.", t, lang: lang)) }
+        else { parts.append(L("Only for this once.", lang: lang)) }
+        for b in card.buttons {
+            switch b.role {
+            case .skipStep: parts.append(L("%@: this step is not done; the task goes on.", b.text, lang: lang))
+            case .cancel: parts.append(L("%@: the whole task stops here.", b.text, lang: lang))
+            default: break
+            }
+        }
+        return parts.count > 1 ? parts.joined(separator: lang == .zhHans ? "" : " ") : nil
     }
 
     /// What a held answer picked, in the card's own words.
