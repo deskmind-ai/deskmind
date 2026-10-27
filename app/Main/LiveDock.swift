@@ -12,6 +12,11 @@ final class LiveDock: ObservableObject {
     struct Picture { let image: NSImage; let window: Int; let epoch: Int; let visible: [Double] }
     @Published private(set) var picture: Picture?
     @Published private(set) var state: LiveFeed.State?
+    /// The run's last picture, kept when its window can no longer be taken (no_picture after one: hidden, minimised,
+    /// on another desktop) and after the watch ends: the float dims it (CardStates 「窗口不可见」) or shows it as the
+    /// task ended. Another run's watch drops it.
+    @Published private(set) var last: Picture?
+    private var lastRun: String?
     private(set) var run: String?
     private var stop: Flag?
 
@@ -36,6 +41,7 @@ final class LiveDock: ObservableObject {
         stop?.set(); stop = nil
         self.run = run; picture = nil; state = nil
         guard let run else { return }
+        if run != lastRun { last = nil; lastRun = run }
         let flag = Flag()
         stop = flag
         Thread.detachNewThread { [weak self] in
@@ -76,13 +82,14 @@ final class LiveDock: ObservableObject {
 
     private func takePicture(run: String, flag: Flag) {
         guard !flag.value, run == self.run, let p = flag.take(), state != .ended else { return }      // (given up since; or ended)
-        picture = p; state = .streaming
+        picture = p; state = .streaming; last = p
     }
 
     private func take(_ s: LiveFeed.State, run: String, flag: Flag) {
         guard !flag.value, run == self.run else { return }
         state = s
         if s == .ended || s == .noPermission || s == .noPicture { picture = nil }
+        if s == .noPermission { last = nil }
     }
 
     private func lost(run: String, flag: Flag) {

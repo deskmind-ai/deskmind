@@ -1,5 +1,5 @@
 // The task's bar at the notch (the Island board), on a Mac that has one: a black strip merged with the notch, as tall
-// as it, 380 wide (460 while it needs you); on a screen without a notch the same bar as a capsule under the menu bar.
+// as it, 380 wide (460 while it needs you); on a screen without a notch the same strip hanging from the menu bar.
 // Left, a dot -- or 小方 looking up, while a card waits -- and what is going on; right, the step and its time, what it
 // waits for, or how it ended (IslandFeed.frame: the words are the feed's, this only draws them). The whole bar is one
 // click: the user's way to the task (RunOverlay.tapped). Hovered while the task runs, its right side gives way to Stop.
@@ -39,16 +39,17 @@ struct IslandView: View {
                     if let side = Island.sideWidth(bar: Island.width(notched: notched, needsYou: wide), notchWidth: notchWidth) {
                         // (at a notch: each side cut to the room outside it, the notch's width clear between them)
                         HStack(spacing: 0) {
-                            HStack(spacing: 8) { lead; leftText }.frame(width: side, alignment: .leading).clipped()
+                            HStack(spacing: 7) { lead; leftText }.frame(width: side, alignment: .leading).clipped()
                             Spacer(minLength: 0)
                             right.opacity(hover && running ? 0 : 1).frame(width: side, alignment: .trailing).clipped()
                         }
                     } else {
-                        HStack(spacing: 8) {
-                            lead
-                            leftText
-                            Spacer(minLength: 84)
+                        // (the Island board: the left words, 84 clear, the right words after them -- read as one line)
+                        HStack(spacing: 0) {
+                            HStack(spacing: 7) { lead; leftText }.layoutPriority(1)
+                            Color.clear.frame(width: 84)
                             right.opacity(hover && running ? 0 : 1)
+                            Spacer(minLength: 0)
                         }
                     }
                 }
@@ -83,15 +84,21 @@ struct IslandView: View {
     }
 
     private var leftText: some View {
-        Text(model.frame?.left ?? "").font(.system(size: 13, weight: kind == .needsYou || !running ? .semibold : .regular))
+        Text(model.frame?.left ?? "").font(.system(size: 13, weight: Self.bold(kind) ? .semibold : .regular))
             .foregroundStyle(kind == .needsYou ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.islandText))
             .lineLimit(1).truncationMode(.tail)
     }
 
-    private var shape: AnyShape {
-        notched ? AnyShape(UnevenRoundedRectangle(bottomLeadingRadius: 18, bottomTrailingRadius: 18, style: .continuous))
-                : AnyShape(Capsule())
+    /// The left words' weight (the Island board): 600 needing you and once ended; 400 preparing, working, paused.
+    static func bold(_ k: IslandFrame.Kind) -> Bool {
+        switch k {
+        case .needsYou, .done, .failed, .stopped: true
+        case .preparing, .working, .paused: false
+        }
     }
+
+    /// At the notch and without one, the same strip: flat on top, its lower corners round (the Island board).
+    private var shape: some Shape { UnevenRoundedRectangle(bottomLeadingRadius: 18, bottomTrailingRadius: 18, style: .continuous) }
 
     /// The dot (orange, breathing, while it works; grey preparing, paused, didn't finish or stopped; the text's colour
     /// when done) -- or, while it needs you, 小方 looking up in its place.
@@ -103,7 +110,12 @@ struct IslandView: View {
         }
         let period: Double? = kind == .working ? 1.6 : kind == .needsYou ? 0.8 : nil
         if kind == .needsYou {
-            XiaoFace(eyes: .up, size: 20, onInk: true)
+            // (its dot's halo, 3 pt at .35 -- the Island board -- round the face's own dot)
+            // (17 × 15, as the boards draw 小方 on the bar)
+            XiaoFace(eyes: .up, size: 17, onInk: true)
+                .background(alignment: .topLeading) {
+                    Circle().fill(Brand.dot.opacity(0.35)).frame(width: 12, height: 12).offset(x: 10.4, y: 8.4).accessibilityHidden(true)
+                }
         } else {
         Circle().fill(color).frame(width: 8, height: 8)
             .overlay(Circle().stroke(Brand.dot.opacity(kind == .needsYou ? 0.35 : 0), lineWidth: 4))

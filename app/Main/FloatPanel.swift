@@ -116,11 +116,17 @@ final class FloatController: ObservableObject {
         var card: CardModel?
         var phase: CardPhase?
         var placement: CardPlacement?
+        /// When the card was asked (its 「等了 0:12」).
+        var askedAt: Double? = nil
     }
     @Published private(set) var now: Now?
     /// For the offscreen render only (tests/snapshot): this state, as `update` would set it.
     func preview(_ n: Now?) { now = n }
     @Published var userCollapsed = false
+    /// The picture at 720 wide (CardStates 「放大」), while no card is shown.
+    @Published var zoomed = false
+    /// The task this float followed that just ended, shown so for a moment (CardStates 完成 / 没做完): until then.
+    private var endedShown: (sessionId: String, runId: String, until: Double)?
     let dock = LiveDock()
     private let notices = CardNotices(SystemNotifier())
     private var islands: [String: IslandApplier] = [:]
@@ -152,6 +158,13 @@ final class FloatController: ObservableObject {
         CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)], room: cardRoom)
     }
     static let width: CGFloat = 304
+    /// The orange ring round a waiting card, outside it (P1Float: box-shadow 0 0 0 2px): the panel's room for it.
+    static let ring: CGFloat = 2
+    /// The float's width now: 304, or 720 zoomed with no card in it.
+    var panelWidth: CGFloat { zoomed && now?.card == nil && now?.task.ended == false ? 720 : Self.width }
+    /// How long an ended task's float stays: done, a moment (CardStates: 2.5 s, then it fades); stopped by the user,
+    /// the same; didn't finish, as long as the island's (its why is to be read).
+    static let doneSeconds: Double = 2.5
 
     /// The state of the window and the sessions changed (or a second went by): the float, the island, the notifications.
     func update(_ shell: ShellModel, window: MainWindowState, frontNow: Bool, lang: ResolvedLang) {
@@ -164,11 +177,13 @@ final class FloatController: ObservableObject {
             notices.cleanUp(waiting: waiting)
         }
         // tasks that ended: their island finishes; their end is said when nobody looked
-        for s in shell.states.values {
+        for (key, s) in shell.states {
             for task in s.tasks where task.ended && !ended.contains(task.runId) {
                 ended.insert(task.runId)
                 // (only a task this float followed: its island finishes, its end is said when nobody looked)
                 if let a = islands.removeValue(forKey: task.runId) {
+                    let failed = !(task.status == "succeeded" || task.status == "cancelled" || task.status == "stopped")
+                    endedShown = (key, task.runId, t + (failed ? Island.resultLingerSeconds : Self.doneSeconds))
                     a.apply(IslandFeed.frame(task, pinned: nil, lang: lang), title: task.raw, lang: lang, onStop: {})
                     notices.ended(task.runId, title: L("DeskMind", lang: lang), body: ShellText.task(task, lang: lang), seen: window == .front)
                 }
@@ -180,10 +195,19 @@ final class FloatController: ObservableObject {
         ended = ended.filter(known.contains)
         islands = islands.filter { known.contains($0.key) }
         guard let (sid, s) = running, let task = s.runningTask else {
-            now = nil; dock.watch(nil); show(.hidden)
+            dock.watch(nil)
             notices.card(nil, placement: nil, title: "", body: "", now: t)
+            // (the task it followed just ended: 完成 / 没做完 a moment, while the window is not in front)
+            if let e = endedShown, t < e.until, window != .front, let st = shell.states[e.sessionId], let done = st.tasks.first(where: { $0.runId == e.runId }) {
+                now = Now(sessionId: e.sessionId, status: st.status, task: done, card: nil, phase: nil, placement: nil)
+                show(.open)
+                return
+            }
+            endedShown = nil
+            now = nil; show(.hidden)
             return
         }
+        endedShown = nil
         let pinned = shell.pinned(s)
         let island = islands[task.runId] ?? {
             let a = IslandApplier(ChatIslandSurface(details: { [weak shell] in shell?.select(sid) }))
@@ -224,7 +248,7 @@ final class FloatController: ObservableObject {
                                       floatShows: floatShows, lang: lang), title: task.raw, lang: lang,
                      onStop: { shell.stop(sessionId: sid, runId: task.runId) })
         RunOverlay.shared.onTap = { [weak shell] g in islandTapped(g, sessionId: sid, shell: shell) }
-        now = Now(sessionId: sid, status: s.status, task: task, card: card, phase: pinned?.phase, placement: placement)
+        now = Now(sessionId: sid, status: s.status, task: task, card: card, phase: pinned?.phase, placement: placement, askedAt: pinned?.card.askedAt)
         // (only the card in view keeps its height)
         let keep = card.map(ShellModel.cardKey)
         if cardHeights.keys.contains(where: { $0 != keep }) { cardHeights = cardHeights.filter { $0.key == keep } }
@@ -247,8 +271,10 @@ final class FloatController: ObservableObject {
         let p = panel ?? makePanel()
         let screen = NSScreen.main ?? NSScreen.screens.first
         let visible = screen?.visibleFrame ?? .zero
-        let size = (p.contentView?.fittingSize).map { NSSize(width: Self.width, height: min($0.height, visible.height * 0.7)) } ?? NSSize(width: Self.width, height: 240)
-        let frame = NSRect(x: visible.maxX - size.width - 18, y: visible.minY + 18, width: size.width, height: size.height)
+        // (its ring's room round it: the card itself 18 in from the screen's corner)
+        let w = panelWidth + 2 * Self.ring
+        let size = (p.contentView?.fittingSize).map { NSSize(width: w, height: min($0.height, visible.height * 0.7)) } ?? NSSize(width: w, height: 240)
+        let frame = NSRect(x: visible.maxX - size.width - 18 + Self.ring, y: visible.minY + 18 - Self.ring, width: size.width, height: size.height)
         if p.frame != frame { p.setFrame(frame, display: true) }
         if !p.isVisible { Activation.showPanel(p); shownAt = Date() }
     }
@@ -278,18 +304,25 @@ final class FloatController: ObservableObject {
     }
 }
 
-/// What the float draws (P1Float, QuestionCard, CardStates), on the ink surface, 304 wide: its title bar (小方, the
-/// state, the app and the task, Stop), the task's window (U1's frame, without its own bar), the step in a line -- or,
-/// with a card, the card as placement says, and under an answerable one 「点按钮不抢键盘」 and 「去主窗口回答」. A card
-/// that waits rings it in orange. Collapsed by the user: a 260 × 36 capsule.
+/// What the float draws, on the ink surface, 304 wide (P1Float; QuestionCard and CardStates where P1Float draws no
+/// such state -- the owner's #133 rule: the P1 boards win where boards disagree). With no card (CardStates): a 30 tall
+/// bar -- 小方 looking at the cursor, 「<应用> · 第 n 步」, hovered its 放大 / 收起 / Stop -- the window's picture, and
+/// the step in a line; its window gone from the screen, the last picture dimmed with 「窗口不可见」; the task ended,
+/// 「完成 · n 步 · 时间」 (a moment) or 「没做完 · 原因」. With a card: the 36 tall bar -- 小方, 「等你」 (已回答,
+/// 已暂停), 「· 应用 · 任务」, how long it waited, Stop -- then the card as placement says (FloatCard). A card that waits
+/// is ringed in orange, outside the card. Collapsed by the user: a 260 × 36 capsule; a click on it opens it again.
 struct FloatView: View {
     @ObservedObject var shell: ShellModel
     @ObservedObject var float: FloatController
-    /// For the offscreen render only (tests/snapshot): this picture, nothing watched.
+    /// For the offscreen render only (tests/snapshot): this picture, nothing watched; and whether its window is off
+    /// the screen (the picture kept, dimmed).
     var still: LiveDock.Picture? = nil
+    var stillHidden = false
+    /// For the offscreen render only: drawn as hovered.
+    var stillHover = false
     @Environment(\.lang) private var lang
-    @State private var hover = false
-    @State private var zoomed = false
+    @State private var hovering = false
+    private var hover: Bool { hovering || stillHover }
 
     var body: some View {
         if let n = float.now {
@@ -298,80 +331,193 @@ struct FloatView: View {
     }
 
     private func waits(_ n: FloatController.Now) -> Bool {
-        guard let p = n.phase else { return false }
+        guard !n.task.ended, let p = n.phase else { return false }
         return p.ending == nil || p.isExpiredOffer
     }
 
-    private func panel(_ n: FloatController.Now) -> some View {
-        let last = n.task.steps.last
-        return VStack(alignment: .leading, spacing: 0) {
-            titleBar(n)
-            // (「准备点」 and the box by the right column's rule: the open click card's own target, the card's own rect)
-            LiveFrame(picture: still ?? float.dock.picture, state: still == nil ? float.dock.state : .streaming,
-                      app: nil, waiting: waits(n), about: Self.aboutToAct(n), step: nil, stepWindow: LiveFeed.windowNumber(last?.object),
-                      target: last?.target, boxRect: LiveFeed.boxRect(cardWaitsOnButton: Self.waitingClick(n) != nil, card: Self.waitingClick(n)?.targetBox?.rectNorm),
-                      boxWindow: LiveFeed.windowNumber(Self.waitingClick(n)?.object),
-                      zoomed: $zoomed, popOut: {}, chrome: false)
-            if let card = n.card, let phase = n.phase, let p = n.placement {
-                FloatCard(shell: shell, sessionId: n.sessionId, card: card, phase: phase, placement: p)
-            } else if let step = last {
-                Text(step.displayText).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(2)
-                    .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)
-            } else {
-                Color.clear.frame(height: 10)
-            }
+    /// What the float shows: the task (no card), its end, or its card -- open, held for its take-back, expired, or
+    /// as its summary (the whole card is the main window's).
+    enum Mode: Equatable { case working, ended, open, held, paused, summary }
+    static func mode(_ n: FloatController.Now) -> Mode {
+        if n.task.ended { return .ended }
+        guard n.card != nil, let p = n.phase, let pl = n.placement else { return .working }
+        switch pl.shown {
+        case .floatCard where p.isExpiredOffer: return .paused
+        case .floatCard where p.pending != nil: return .held
+        case .floatCard: return .open
+        default: return .summary
         }
-        .frame(width: FloatController.width, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 16).fill(Color(ShellPalette.inkSurface)))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(waits(n) ? Brand.dot : Color.clear, lineWidth: 2))
-        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hover = h } }
     }
 
-    /// 36 tall: 小方 (up while a card waits), the state, 「· 应用 · 任务」, then -- hovered -- 「收起」, and Stop.
-    private func titleBar(_ n: FloatController.Now) -> some View {
-        let word = stateWord(n)
+    private func panel(_ n: FloatController.Now) -> some View {
+        let m = Self.mode(n)
+        let ring = waits(n) && (m == .open || m == .summary)
+        return VStack(alignment: .leading, spacing: 0) {
+            if m == .working || m == .ended { liveBar(n, m) } else { cardBar(n, m) }
+            if m == .working || m == .ended || m == .open { picture(n, m) }
+            if m == .working || m == .ended {
+                Text(stepLine(n)).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkBright)).lineLimit(1)
+                    .padding(.horizontal, 10).frame(height: 30, alignment: .leading)
+            } else if let card = n.card, let phase = n.phase, let p = n.placement {
+                FloatCard(shell: shell, sessionId: n.sessionId, card: card, phase: phase, placement: p, mode: m)
+            }
+        }
+        .frame(width: float.panelWidth, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Color(ShellPalette.inkSurface)))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        // (P1Float: box-shadow 0 0 0 2px -- the ring outside the card, the card whole inside it)
+        .padding(FloatController.ring)
+        .overlay(RoundedRectangle(cornerRadius: 16 + FloatController.ring).strokeBorder(ring ? Color(ShellPalette.floatRing) : .clear, lineWidth: FloatController.ring))
+        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hovering = h } }
+    }
+
+    /// The window's picture (P1Float: 110 tall, 6 in, filled and kept on what it acts on); off the screen, the last one
+    /// dimmed with 「窗口不可见」; ended, the last one without the cursor.
+    private func picture(_ n: FloatController.Now, _ m: Mode) -> some View {
+        let last = n.task.steps.last
+        let hidden = Self.windowHidden(n, still: still, stillHidden: stillHidden, dock: float.dock)
+        let pic = still ?? (hidden || m == .ended ? float.dock.last : float.dock.picture)
+        return FloatPicture(picture: pic, state: still != nil || hidden || m == .ended ? .streaming : float.dock.state,
+                            about: Self.aboutToAct(n), stepWindow: LiveFeed.windowNumber(last?.object),
+                            target: m == .ended || hidden ? nil : last?.target?.rectNorm,
+                            boxRect: LiveFeed.boxRect(cardWaitsOnButton: Self.waitingClick(n) != nil, card: Self.waitingClick(n)?.targetBox?.rectNorm),
+                            boxWindow: LiveFeed.windowNumber(Self.waitingClick(n)?.object),
+                            height: float.zoomed && float.now?.card == nil ? 260 : 110,
+                            dimNote: hidden ? L("Window not visible", lang: lang) : nil)
+    }
+
+    /// The window can no longer be taken (no_picture after a picture of it: hidden, minimised, another desktop).
+    static func windowHidden(_ n: FloatController.Now, still: LiveDock.Picture?, stillHidden: Bool, dock: LiveDock) -> Bool {
+        guard !n.task.ended else { return false }
+        if still != nil { return stillHidden }
+        return dock.state == .noPicture && dock.last != nil
+    }
+
+    /// CardStates' bar: 30 tall, 小方 (looking at the cursor; ^ ^ done; – – ended otherwise or the window gone),
+    /// 「<应用> · 第 n 步」 or how it ended, and -- hovered, while it runs -- 放大, 收起 and Stop.
+    private func liveBar(_ n: FloatController.Now, _ m: Mode) -> some View {
+        let done = n.task.ended && n.task.status == "succeeded"
+        let hidden = Self.windowHidden(n, still: still, stillHidden: stillHidden, dock: float.dock)
+        let eyes: XiaoEyes = done ? .happy : (m == .ended || hidden) ? .flat : .look
+        let title = Self.liveTitle(n, lang: lang)
+        return HStack(spacing: 7) {
+            XiaoFace(eyes: eyes, size: 17, onInk: true, dot: m == .ended && !done ? .mist : .lit)
+            Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk)).lineLimit(1)
+            Spacer(minLength: 4)
+            if m == .working {
+                HStack(spacing: 8) {
+                    hoverIcon(float.zoomed ? L("Make the live view smaller", lang: lang) : L("Enlarge the live view", lang: lang)) {
+                        FloatGlyph.zoom.stroke(Color(ShellPalette.onInkIcon), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    } action: { float.zoomed.toggle() }
+                    hoverIcon(L("Collapse", lang: lang)) {
+                        FloatGlyph.down.stroke(Color(ShellPalette.onInkIcon), style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    } action: { float.userCollapsed = true }
+                    hoverIcon(L("Stop", lang: lang)) {
+                        RoundedRectangle(cornerRadius: 2).fill(Color(ShellPalette.onInkIcon)).frame(width: 9, height: 9)
+                    } action: { shell.stop(sessionId: n.sessionId, runId: n.task.runId) }
+                }
+                .opacity(hover ? 1 : 0)
+                .allowsHitTesting(hover)
+            }
+        }
+        .padding(.horizontal, 10).frame(height: 30)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(title)
+    }
+
+    private func hoverIcon(_ label: String, @ViewBuilder _ glyph: () -> some View, action: @escaping () -> Void) -> some View {
+        Button(action: action) { glyph().frame(width: 12, height: 12).frame(width: 18, height: 22).contentShape(Rectangle()) }
+            .buttonStyle(.plain).help(label).accessibilityLabel(label)
+    }
+
+    /// 「<应用> · 第 n 步」; ended, 「完成 · n 步 · 57 秒」, 「已停下 · n 步」 or 「没做完 · 为什么」.
+    static func liveTitle(_ n: FloatController.Now, lang: ResolvedLang) -> String {
+        let t = n.task, steps = t.steps.count
+        guard t.ended else {
+            let app = AgentPanel.appName(t.steps.last?.object) ?? shortName(t, lang: lang)
+            return L("%@ · Step %d", app, steps, lang: lang)
+        }
+        switch t.status {
+        case "succeeded":
+            let secs = max(0, Int((t.endedAt ?? 0) - (t.startedAt ?? t.endedAt ?? 0)))
+            let time = secs < 60 ? L("%d s", secs, lang: lang) : String(format: "%d:%02d", secs / 60, secs % 60)
+            return L("Done · %@", L("%d steps · %@", steps, time, lang: lang), lang: lang)
+        case "cancelled", "stopped":
+            return L("Stopped · %@", L("%d steps", steps, lang: lang), lang: lang)
+        default:
+            // (why: the task's own end in words, when it says more than 「没做完」)
+            let why = ShellText.task(t, lang: lang)
+            return why == L("Didn't finish", lang: lang) || why.isEmpty ? why : L("Didn't finish · %@", why, lang: lang)
+        }
+    }
+
+    /// The line under the picture: the step (its own words); ended, what it came to (the answer, else the summary).
+    private func stepLine(_ n: FloatController.Now) -> String {
+        if n.task.ended {
+            let d = n.task.done
+            return [d?.answer, d?.summary, d?.reason].compactMap { $0 }.first { !$0.isEmpty } ?? ""
+        }
+        return n.task.steps.last?.displayText ?? ""
+    }
+
+    /// P1Float's bar over a card: 36 tall, 小方 (up while it waits; ^ ^ held; – – expired), the state word, 「· 应用 ·
+    /// 任务」, how long the card has waited (QuestionCard), Stop.
+    private func cardBar(_ n: FloatController.Now, _ m: Mode) -> some View {
+        let word = m == .held ? L("Answered", lang: lang) : m == .paused ? L("Paused", lang: lang) : L("Waiting", lang: lang)
+        let eyes: XiaoEyes = m == .held ? .happy : m == .paused ? .flat : .up
         let detail = [AgentPanel.appName(n.task.steps.last?.object), Self.shortName(n.task, lang: lang)].compactMap { $0 }.joined(separator: " · ")
         return HStack(spacing: 8) {
-            XiaoFace(eyes: waits(n) ? .up : XiaoEyes.of(n.status), size: 20, onInk: true)
+            XiaoFace(eyes: eyes, size: 17, onInk: true, dot: m == .paused ? .mist : .lit)
             Text(word).font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(waits(n) ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.onInk))
+                .foregroundStyle(m == .open || m == .summary ? Color(ShellPalette.onInkOrange) : Color(ShellPalette.onInk))
             Text(verbatim: "· " + detail).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(1)
             Spacer(minLength: 4)
-            // (none while a card waits: the float stays whole until it is answered)
-            if !waits(n) {
-                Button(L("Collapse", lang: lang)) { float.userCollapsed = true }
-                    .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted))
-                    .opacity(hover ? 1 : 0)
+            // (QuestionCard: while it asks or waits expired, and on the typed-answer summary; not P1Float's plan summary)
+            if m == .open || m == .paused || (m == .summary && n.card?.allowsFreeText == true && n.card?.kind != .plan), let at = n.askedAt {
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    Text(Self.waited(shell.now() - at, lang: lang)).font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(Color(ShellPalette.onInkFaint)).lineLimit(1).fixedSize()
+                }
             }
-            stopButton(n, size: 26)
+            stopButton(n, size: 26, mark: 8)
         }
         .padding(.leading, 12).padding(.trailing, 6).frame(height: 36)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(word + " · " + detail)
     }
 
-    /// The capsule (CardStates 「胶囊」): the dot, 「<应用> · 第 n 步」, Stop; hovered, 「放大」.
+    /// 「等了 0:12」
+    static func waited(_ secs: Double, lang: ResolvedLang) -> String {
+        let s = max(0, Int(secs))
+        return L("Waited %@", String(format: "%d:%02d", s / 60, s % 60), lang: lang)
+    }
+
+    /// The capsule (CardStates 「胶囊」): the dot, 「<应用> · 第 n 步」, Stop; a click on it opens the float again.
     private func capsule(_ n: FloatController.Now) -> some View {
         let app = AgentPanel.appName(n.task.steps.last?.object) ?? Self.shortName(n.task, lang: lang)
         return HStack(spacing: 8) {
-            Circle().fill(Brand.dot).frame(width: 7, height: 7).accessibilityHidden(true)
-            Text(L("%@ · Step %d", app, n.task.steps.count, lang: lang)).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInk)).lineLimit(1)
-            Spacer(minLength: 4)
-            Button(L("Larger", lang: lang)) { float.userCollapsed = false }
-                .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted))
-                .opacity(hover ? 1 : 0)
-            stopButton(n, size: 22)
+            Button { float.userCollapsed = false } label: {
+                HStack(spacing: 8) {
+                    Circle().fill(Brand.dot).frame(width: 7, height: 7).accessibilityHidden(true)
+                    Text(L("%@ · Step %d", app, n.task.steps.count, lang: lang)).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInk)).lineLimit(1)
+                    Spacer(minLength: 4)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(L("Opens the float again", lang: lang))
+            stopButton(n, size: 22, mark: 7)
         }
-        .padding(.leading, 14).padding(.trailing, 7)
+        .padding(.leading, 14).padding(.trailing, 8)
         .frame(width: 260, height: 36)
         .background(Capsule().fill(Color(ShellPalette.inkSurface)))
-        .onHover { h in withAnimation(.easeOut(duration: 0.15)) { hover = h } }
-        .frame(width: FloatController.width, alignment: .trailing)
+        .padding(FloatController.ring)
+        .frame(width: FloatController.width + 2 * FloatController.ring, alignment: .trailing)
     }
 
-    private func stopButton(_ n: FloatController.Now, size: CGFloat) -> some View {
+    private func stopButton(_ n: FloatController.Now, size: CGFloat, mark: CGFloat) -> some View {
         Button { shell.stop(sessionId: n.sessionId, runId: n.task.runId) } label: {
-            RoundedRectangle(cornerRadius: 2).fill(Color(ShellPalette.onInk)).frame(width: size * 0.32, height: size * 0.32)
+            RoundedRectangle(cornerRadius: 2).fill(Color(ShellPalette.onInk)).frame(width: mark, height: mark)
                 .frame(width: size, height: size).background(Circle().fill(Color(ShellPalette.inkStop)))
         }
         .buttonStyle(.plain)
@@ -389,19 +535,136 @@ struct FloatView: View {
         return c
     }
 
-    private func stateWord(_ n: FloatController.Now) -> String {
-        if waits(n) { return L("Waiting", lang: lang) }
-        switch n.status {
-        case .paused: return L("Paused", lang: lang)
-        default: return L("Working", lang: lang)
-        }
-    }
-
-    /// The task in a few words (its goal, else what was asked): 10 characters in Chinese, 24 in English.
+    /// The task in a few words: its goal (else what was asked) up to its first colon -- 「回复许诺：我看一下再说」 is
+    /// 「回复许诺」 -- then at most 10 characters in Chinese, 24 in English.
     static func shortName(_ t: TaskState, lang: ResolvedLang) -> String {
-        let s = (t.goal?.isEmpty == false ? t.goal! : t.raw)
+        var s = (t.goal?.isEmpty == false ? t.goal! : t.raw)
+        if let r = s.range(of: "：") ?? s.range(of: ": "), r.lowerBound > s.startIndex { s = String(s[..<r.lowerBound]) }
         let cap = lang == .zhHans ? 10 : 24
         return s.count > cap ? String(s.prefix(cap - 1)) + "…" : s
+    }
+}
+
+/// The float's picture of the task's window (P1Float, CardStates): in a white well 6 in from the sides, radius 8,
+/// filling it (cut, never stretched) and kept on what the card waits on -- its dashed box 6 out, 「准备点」 small
+/// beside it -- else on the step's cursor; the window off the screen, the last picture dimmed with 「窗口不可见」.
+struct FloatPicture: View {
+    let picture: LiveDock.Picture?
+    let state: LiveFeed.State?
+    let about: String?
+    let stepWindow: Int?
+    let target: [Double]?
+    let boxRect: [Double]?
+    let boxWindow: Int?
+    var height: CGFloat = 110
+    var dimNote: String? = nil
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(Color(ShellPalette.shotWell))
+            if let p = picture {
+                GeometryReader { g in
+                    let (size, shift) = Self.fillLayout(p.image.size, in: g.size, focus: focus(p))
+                    ZStack(alignment: .topLeading) {
+                        Image(nsImage: p.image).resizable().frame(width: size.width, height: size.height)
+                        let box = LiveFeed.box(pictureWindow: p.window, stepWindow: boxWindow ?? stepWindow, rectNorm: boxRect, picture: size, visible: p.visible)
+                        if let b = box {
+                            RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.dot, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                                .frame(width: b.width + 12, height: b.height + 12).offset(x: b.minX - 6, y: b.minY - 6)
+                                .accessibilityHidden(true)
+                            if let about {
+                                let o = Self.sideTag(box: b, well: g.size, shift: shift)
+                                tag(about).offset(x: o.x, y: o.y)
+                            }
+                        } else if let c = LiveFeed.cursor(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target, picture: size, visible: p.visible) {
+                            Circle().fill(Brand.dot).frame(width: 11, height: 11)
+                                .overlay(Circle().strokeBorder(Color(ShellPalette.shotWell), lineWidth: 2))
+                                .offset(x: c.x - 5.5, y: c.y - 5.5).accessibilityHidden(true)
+                        }
+                    }
+                    .offset(x: shift.x, y: shift.y)
+                    .frame(width: g.size.width, height: g.size.height, alignment: .topLeading)
+                    .clipped()
+                }
+                .overlay(alignment: .topLeading) {
+                    // (no box of the card's own on this picture: the tag in the corner, never on a step's box)
+                    if let about, LiveFeed.box(pictureWindow: p.window, stepWindow: boxWindow ?? stepWindow, rectNorm: boxRect,
+                                               picture: CGSize(width: 1, height: 1), visible: p.visible) == nil {
+                        tag(about).padding(8)
+                    }
+                }
+                .accessibilityLabel(L("Live view of the task's window", lang: lang))
+            } else {
+                Text(LiveDockView.note(state, lang: lang)).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.inkSurface))
+                    .multilineTextAlignment(.center).padding(14)
+            }
+        }
+        .frame(height: height)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        // (CardStates: the whole well dimmed over the ink, the word on it)
+        .opacity(dimNote == nil ? 1 : 0.4)
+        .overlay {
+            if let dimNote { Text(dimNote).font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(ShellPalette.inkSurface)) }
+        }
+        .padding(.horizontal, 6)
+    }
+
+    /// 「准备点：…」: 9 / 700, 16 tall (P1Float).
+    private func tag(_ about: String) -> some View {
+        Text(L("About to click: %@", about, lang: lang)).font(.system(size: 9, weight: .bold)).foregroundStyle(Color(ShellPalette.shotWell))
+            .padding(.horizontal, 6).frame(height: Self.tagHeight)
+            .background(RoundedRectangle(cornerRadius: 3).fill(Color(ShellPalette.floatShotTag)))
+            .fixedSize()
+    }
+
+    /// What the picture is kept on: the card's box, else the step's cursor (0–1 of the picture), else its middle.
+    private func focus(_ p: LiveDock.Picture) -> CGPoint {
+        let unit = CGSize(width: 1, height: 1)
+        if let b = LiveFeed.box(pictureWindow: p.window, stepWindow: boxWindow ?? stepWindow, rectNorm: boxRect, picture: unit, visible: p.visible) {
+            return CGPoint(x: b.midX, y: b.midY)
+        }
+        return LiveFeed.cursor(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target, picture: unit, visible: p.visible) ?? CGPoint(x: 0.5, y: 0.5)
+    }
+
+    /// 「准备点」 4 right of the dashed frame, level with it; where the well has no room on its right, on its left
+    /// (about 90 pt for 「准备点：发送」 and a word or two).
+    static let tagHeight: CGFloat = 16
+    static func sideTag(box b: CGRect, well: CGSize, shift: CGPoint) -> CGPoint {
+        let right = b.maxX + 6 + 4
+        return CGPoint(x: right + shift.x + 90 <= well.width ? right : max(0, b.minX - 6 - 4 - 90), y: b.midY - tagHeight / 2)
+    }
+
+    /// The picture filling `well` (scaled to cover it, never stretched) and how far it moves so that `focus` (0–1 of
+    /// the picture) is in view, as near the middle as the picture's edges allow.
+    static func fillLayout(_ image: CGSize, in well: CGSize, focus: CGPoint) -> (CGSize, CGPoint) {
+        guard image.width > 0, image.height > 0, well.width > 0, well.height > 0 else { return (well, .zero) }
+        let k = max(well.width / image.width, well.height / image.height)
+        let size = CGSize(width: image.width * k, height: image.height * k)
+        func shift(_ f: CGFloat, _ s: CGFloat, _ w: CGFloat) -> CGFloat { min(0, max(w - s, w / 2 - f * s)) }
+        return (size, CGPoint(x: shift(focus.x, size.width, well.width), y: shift(focus.y, size.height, well.height)))
+    }
+}
+
+/// The float's line glyphs (CardStates' hover icons, P1Float's arrow), drawn in a 12 × 12 box.
+enum FloatGlyph: Shape {
+    case zoom, down, chevron
+    func path(in r: CGRect) -> Path {
+        let k = r.width / 12
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: r.minX + x * k, y: r.minY + y * k) }
+        var path = Path()
+        switch self {
+        case .zoom:          // M7 1h4v4 M5 11H1V7 M11 1L7 5 M1 11l4-4
+            path.move(to: p(7, 1)); path.addLine(to: p(11, 1)); path.addLine(to: p(11, 5))
+            path.move(to: p(5, 11)); path.addLine(to: p(1, 11)); path.addLine(to: p(1, 7))
+            path.move(to: p(11, 1)); path.addLine(to: p(7, 5))
+            path.move(to: p(1, 11)); path.addLine(to: p(5, 7))
+        case .down:          // M2 4l4 4 4-4
+            path.move(to: p(2, 4)); path.addLine(to: p(6, 8)); path.addLine(to: p(10, 4))
+        case .chevron:       // M4 2l4 4-4 4
+            path.move(to: p(4, 2)); path.addLine(to: p(8, 6)); path.addLine(to: p(4, 10))
+        }
+        return path
     }
 }
 
@@ -425,73 +688,115 @@ struct FloatButtonStyle: ButtonStyle {
     }
 }
 
-/// The card in the float, laid out from the same CardLayout the chat uses (#125 Codex review at 2f29d42): its title,
-/// its text when nothing folds it, what goes beyond the request, every field of what an approval does -- the action,
-/// what it acts on, the site, what goes out -- then its options, when placement says it is answerable here. Its whole
-/// height is measured (a copy laid out unseen) and reported: a card that does not fit the float's room is the main
-/// window's (CardPlacement.fitsFloat), and the float gives its title and 「去主窗口回答」. Held: its take-back row;
-/// expired: 「已过期 · 现在回答」. Under every answerable one: 「点按钮不抢键盘」 and 「去主窗口回答」 (handoff §3.3).
+/// The card in the float, from the same CardLayout the chat uses, as short as the boards draw it (owner, #133):
+///
+/// | mode    | board            | what                                                                              |
+/// |---------|------------------|-----------------------------------------------------------------------------------|
+/// | open    | P1Float a        | an action card: its question, what goes out in a line (CardBrief), the line on    |
+/// |         |                  |   earlier steps that may have gone out (never folded: #129), its buttons; a card   |
+/// |         |                  |   with picks: its question, the picks (QuestionCard), its buttons, 「停下这个任务」 |
+/// |         |                  |   -- then 「点按钮不抢键盘」 and 「去主窗口回答」                                      |
+/// | held    | QuestionCard     | 「已选：…」, 「n 秒后继续」, 「撤回」, the countdown's bar                            |
+/// | paused  | QuestionCard     | it expired: 「没有及时回答…」, 「现在回答」 and 「停止任务」                            |
+/// | summary | P1Float b / free | its title in two lines at most and 「去主窗口回答 ›」; a card that takes words:       |
+/// |         |   QuestionCard   |   「要打字回答」 · 「在 DeskMind 里回答 ›」                                           |
+///
+/// What the brief leaves out is the main window's 「细节」: the way there is under every card. Its height is measured
+/// (a copy laid out unseen) and reported: a card that does not fit the float's room is the main window's.
 struct FloatCard: View {
     @ObservedObject var shell: ShellModel
     let sessionId: String
     let card: CardModel
     let phase: CardPhase
     let placement: CardPlacement
+    let mode: FloatView.Mode
     @Environment(\.lang) private var lang
 
     var body: some View {
         let layout = CardLayout(card)
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 8) {
-                switch placement.shown {
-                case .floatCard where phase.isExpiredOffer:
-                    summaryTitle(layout)
-                    Text(L("Expired · Answer now", lang: lang)).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkOrange))
+            switch mode {
+            case .held:
+                held(layout)
+            case .paused:
+                Text(L("No answer in time, so the task is paused. It won't guess for you.", lang: lang))
+                    .font(.system(size: 16, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk)).lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 4)
+                HStack(spacing: 8) {
                     if placement.takesAnswer, let ask = card.askId {
                         Button(L("Answer now", lang: lang)) { if FloatController.shared.answersNow() { shell.answerNow(card.runId, askId: ask, session: sessionId) } }
                             .buttonStyle(FloatButtonStyle(prominent: true))
                     }
-                case .floatCard:
-                    whole(layout)
-                    if let held = phase.pending, case .pending(_, let until) = phase {
-                        HStack(spacing: 8) {
-                            // (the seconds left to take it back, from the same deadline the chat's card counts to)
-                            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                                Text(L("Picked: %@ · goes on in %d s", CardView.picked(held, card: card), max(0, Int((until - shell.now()).rounded(.up))), lang: lang))
-                                    .font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkOrange)).fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: 4)
-                            Button(L("Take back", lang: lang)) { if FloatController.shared.answersNow() { shell.takeBack(card) } }
-                                .buttonStyle(FloatButtonStyle(prominent: false)).frame(width: 72)
-                        }
-                    } else {
-                        options(layout)
-                    }
-                default:
-                    summaryTitle(layout)
-                    // (the card's own conversation selected first: the window shows it, not the one it showed -- #125 Codex)
-                    Button(action: Activation.onClick { g in shell.select(sessionId); MainWindow.comeBack(g) }) { Text(L("Answer in the main window ›", lang: lang)) }
-                        .buttonStyle(FloatButtonStyle(prominent: true))
-                        .accessibilityHint(L("Brings DeskMind's window forward on the card", lang: lang))
+                    Button(L("Stop task", lang: lang)) { shell.stop(sessionId: sessionId, runId: card.runId) }
+                        .buttonStyle(FloatButtonStyle(prominent: false))
                 }
+                .padding(.horizontal, 14).padding(.top, 12)
+                foot(L("Nothing is touched while paused; the island keeps reminding you.", lang: lang), rule: true)
+            case .open:
+                content(layout)
+                    // the whole card's height, laid out unseen at the float's width: whether it fits
+                    .background(alignment: .topLeading) {
+                        content(layout)
+                            .frame(width: FloatController.width, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .hidden()
+                            .background(GeometryReader { g in Color.clear.preference(key: CardHeight.self, value: g.size.height) })
+                            .onPreferenceChange(CardHeight.self) { h in FloatController.shared.cardLaidOut(card, height: h) }
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                footer
+            default:
+                summary(layout)
             }
-            .padding(.horizontal, 12).padding(.top, 10)
-            if placement.shown == .floatCard { footer } else { Color.clear.frame(height: 12) }
-        }
-        // the whole card's height, laid out unseen at the float's width: whether it fits
-        .background(alignment: .topLeading) {
-            VStack(alignment: .leading, spacing: 8) { whole(layout); options(layout) }
-                .frame(width: FloatController.width - 24, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-                .hidden()
-                .background(GeometryReader { g in Color.clear.preference(key: CardHeight.self, value: g.size.height) })
-                .onPreferenceChange(CardHeight.self) { h in FloatController.shared.cardLaidOut(card, height: h) }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
         }
     }
 
-    /// 「点按钮不抢键盘」 and 「去主窗口回答」, under every card the float answers.
+    /// The open card: its words (an action card's brief, else its title and what goes beyond the request), its picks,
+    /// its buttons.
+    @ViewBuilder private func content(_ layout: CardLayout) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            words(layout).padding(.horizontal, 14).padding(.top, 10)
+            options(layout).padding(.horizontal, 10).padding(.top, 10)
+            // (QuestionCard: under the picks, the way to stop the whole task)
+            if !layout.list.isEmpty {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button(L("Stop this task", lang: lang)) { shell.stop(sessionId: sessionId, runId: card.runId) }
+                        .buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Color(ShellPalette.onInkMuted))
+                }
+                .padding(.horizontal, 18).padding(.top, 12)
+            }
+        }
+    }
+
+    /// The question (P1Float: 14 / 600), what goes out in a line, the line that is never folded, what goes beyond.
+    @ViewBuilder private func words(_ layout: CardLayout) -> some View {
+        let brief = CardBrief(layout, lang: lang)
+        VStack(alignment: .leading, spacing: 4) {
+            Text(brief?.question ?? layout.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
+                .lineSpacing(2).fixedSize(horizontal: false, vertical: true)
+            if let l = brief?.leadLine {
+                Text(verbatim: l).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(1).truncationMode(.middle)
+                    .accessibilityLabel(L("What goes out", lang: lang) + " " + l)
+            }
+            if let w = brief?.warning {
+                Text(w).font(.system(size: 12, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInkOrange)).lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            // (what goes beyond the request: always shown, A2)
+            ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
+                Text(line).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkOrange)).fixedSize(horizontal: false, vertical: true)
+            }
+            // (a card with no consent fields and text its title does not say: the text, A2 -- #124)
+            if brief == nil, let t = layout.shownText {
+                Text(t).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkMuted)).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// 「点按钮不抢键盘」 and 「去主窗口回答」, under every card the float answers (P1Float).
     private var footer: some View {
         HStack(spacing: 8) {
             Text(L("Buttons here don't take your keyboard", lang: lang)).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkMuted))
@@ -500,15 +805,101 @@ struct FloatCard: View {
                 .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkLink))
                 .accessibilityHint(L("Brings DeskMind's window forward on the card", lang: lang))
         }
-        .padding(.horizontal, 14).padding(.top, 10).padding(.bottom, 12)
+        .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)
     }
 
-    /// The title where the card is not shown whole (its summary, an expired card): at most two lines, so that the
-    /// button under it is always in the float -- with no headline the title is the card's whole text (#125 Codex
-    /// re-review at d08465d). A plan card says its steps and how many go out.
-    @ViewBuilder private func summaryTitle(_ layout: CardLayout) -> some View {
-        Text(Self.summary(card, layout: layout, lang: lang)).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
-            .lineLimit(FloatCard.summaryLines).truncationMode(.tail)
+    /// QuestionCard's foot: a hairline, then a sentence.
+    private func foot(_ s: String, rule: Bool) -> some View {
+        VStack(spacing: 0) {
+            if rule { Rectangle().fill(Color(ShellPalette.inkRule)).frame(height: 1) }
+            Text(s).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkFaint)).lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 18).padding(.top, 11).padding(.bottom, 13)
+        }
+        .padding(.top, rule ? 12 : 0)
+    }
+
+    /// Held for its take-back (QuestionCard 「已回答」): what was picked, the seconds left, 「撤回」, the countdown.
+    @ViewBuilder private func held(_ layout: CardLayout) -> some View {
+        if let picked = phase.pending, case .pending(_, let until) = phase {
+            TimelineView(.periodic(from: .now, by: 0.1)) { _ in
+                let left = max(0, until - shell.now())
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: 12) {
+                        Circle().fill(Color(ShellPalette.onInk)).frame(width: 26, height: 26)
+                            .overlay(Image(systemName: "checkmark").font(.system(size: 11, weight: .heavy)).foregroundStyle(Color(ShellPalette.inkSurface)))
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(L("Picked: %@", CardView.picked(picked, card: card), lang: lang)).font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Color(ShellPalette.onInk)).fixedSize(horizontal: false, vertical: true)
+                            Text(L("Goes on in %d s", Int(left.rounded(.up)), lang: lang)).font(.system(size: 12).monospacedDigit())
+                                .foregroundStyle(Color(ShellPalette.onInkMuted))
+                        }
+                        Spacer(minLength: 4)
+                        Button(L("Take back", lang: lang)) { if FloatController.shared.answersNow() { shell.takeBack(card) } }
+                            .buttonStyle(.plain).font(.system(size: 13)).foregroundStyle(Color(ShellPalette.onInkLink))
+                    }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 13).fill(Color(ShellPalette.inkButton)))
+                    .padding(.horizontal, 14)
+                    // (the take-back's seconds as a bar, filling as they run out)
+                    GeometryReader { g in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color(ShellPalette.inkStop))
+                            Capsule().fill(Color(ShellPalette.floatRing)).frame(width: g.size.width * (1 - left / CardStore.takeBack))
+                        }
+                    }
+                    .frame(height: 3).padding(.horizontal, 14).padding(.top, 12)
+                    .accessibilityHidden(true)
+                }
+                .padding(.top, 4)
+            }
+            foot(L("Picked the wrong one? Take it back before the countdown ends.", lang: lang), rule: false)
+        }
+    }
+
+    /// Not answered here: its title (at most two lines, so the button under it is always in the float -- #125 Codex
+    /// re-review at d08465d) and the way to the main window (P1Float b); a card that takes words, QuestionCard's
+    /// 「要打字回答」 field that opens the window.
+    @ViewBuilder private func summary(_ layout: CardLayout) -> some View {
+        if card.allowsFreeText && card.kind != .plan {
+            Text(Self.summary(card, layout: layout, lang: lang)).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
+                .lineLimit(FloatCard.summaryLines).truncationMode(.tail)
+                .padding(.horizontal, 14).padding(.top, 10)
+            // (the card's conversation selected first: the window shows it, not the one it showed -- #125 Codex)
+            Button(action: Activation.onClick { g in shell.select(sessionId); MainWindow.comeBack(g) }) {
+                HStack(spacing: 10) {
+                    Text(L("Needs a typed answer", lang: lang)).font(.system(size: 14)).foregroundStyle(Color(ShellPalette.onInkMuted))
+                    Spacer(minLength: 4)
+                    Text(L("Answer in DeskMind", lang: lang)).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
+                    FloatGlyph.chevron.stroke(Color(ShellPalette.onInk), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                        .frame(width: 12, height: 12)
+                }
+                .padding(.horizontal, 14).frame(height: 44)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color(ShellPalette.inkButton)))
+                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(ShellPalette.inkButtonLine)))
+                .contentShape(RoundedRectangle(cornerRadius: 12))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(L("Brings DeskMind's window forward on the card", lang: lang))
+            .padding(.horizontal, 10).padding(.top, 12)
+            foot(L("Typing needs the DeskMind window; you open it, it never jumps in front of you.", lang: lang), rule: true)
+        } else {
+            Text(Self.summary(card, layout: layout, lang: lang)).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
+                .lineLimit(FloatCard.summaryLines).truncationMode(.tail)
+                .padding(.horizontal, 14).padding(.top, 4)
+            Button(action: Activation.onClick { g in shell.select(sessionId); MainWindow.comeBack(g) }) {
+                HStack(spacing: 8) {
+                    Text(L("Answer in the main window", lang: lang))
+                    FloatGlyph.chevron.stroke(Color(ShellPalette.inkSurface), style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                        .frame(width: 12, height: 12)
+                }
+            }
+            .buttonStyle(FloatButtonStyle(prominent: true))
+            .accessibilityHint(L("Brings DeskMind's window forward on the card", lang: lang))
+            .padding(.horizontal, 10).padding(.vertical, 12)
+        }
     }
     static let summaryLines = 2
 
@@ -522,59 +913,38 @@ struct FloatCard: View {
                        : L("Plan · %d steps", layout.plan.count, lang: lang)
     }
 
-    /// Everything an approval does, as the chat shows it (folded text and plan steps aside: with a headline, the
-    /// beyond lines and the consent fields say it).
-    @ViewBuilder private func whole(_ layout: CardLayout) -> some View {
-        Text(layout.title).font(.system(size: 14, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk)).fixedSize(horizontal: false, vertical: true)
-        if let t = layout.shownText { Text(t).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).fixedSize(horizontal: false, vertical: true) }
-        if !layout.folds && !layout.plan.isEmpty {
-            ForEach(layout.plan, id: \.n) { r in
-                Text("\(r.n). \(r.purpose)").font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
-            Text(line).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).fixedSize(horizontal: false, vertical: true)
-        }
-        if let c = layout.consent { ConsentFields(consent: c, onInk: true) }
-        // (an action card whose words do not say all of its text: the float has no 「细节」, so the whole text is here --
-        // #129 Codex review)
-        if layout.shownText == nil, let t = layout.wholeText, t != layout.title {
-            Text(t).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    /// The picks one under another (QuestionCard: its number, its words, its second line); the buttons side by side
-    /// (P1Float), three to a row, the primary a little narrower than the others (1 : 1.2).
+    /// The picks one under another (QuestionCard: 52 tall, its number in an orange disc, its words, its second line on
+    /// the right); the buttons side by side (P1Float: 可以 1 : 这一步不要 1.25 : 先别做了 1.15).
     @ViewBuilder private func options(_ layout: CardLayout) -> some View {
         let picks = layout.list, buttons = layout.buttons
         let rows = stride(from: 0, to: buttons.count, by: 3).map { Array(buttons[$0..<min($0 + 3, buttons.count)]) }
-        VStack(spacing: 6) {
+        VStack(spacing: 8) {
             ForEach(picks, id: \.index) { c in
                 let on = placement.takesAnswer && shell.canSend(c.button, session: sessionId)
                 Button { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId, place: .float) } } label: {
-                    HStack(spacing: 10) {
+                    HStack(spacing: 12) {
                         if let k = c.key {
-                            Text("\(k)").font(.system(size: 11, weight: .bold)).foregroundStyle(Color(ShellPalette.onInk))
-                                .frame(width: 20, height: 20).background(Circle().fill(Brand.dot)).accessibilityHidden(true)
+                            Text("\(k)").font(.system(size: 12, weight: .bold)).foregroundStyle(Color(ShellPalette.onInk))
+                                .frame(width: 22, height: 22).background(Circle().fill(Brand.dot)).accessibilityHidden(true)
                         }
-                        Text(c.button.text).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
+                        Text(c.button.text).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer(minLength: 4)
                         if let d = c.button.detail {
-                            Text(d).font(.system(size: 11)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(1)
+                            Text(d).font(.system(size: 13)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(1)
                         }
                     }
-                    .padding(.horizontal, 12).frame(minHeight: 44)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color(ShellPalette.inkButton)))
-                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color(ShellPalette.inkButtonLine)))
-                    .contentShape(RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 14).padding(.vertical, 8).frame(minHeight: 52)
+                    .background(RoundedRectangle(cornerRadius: 13).fill(Color(ShellPalette.inkButton)))
+                    .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(Color(ShellPalette.inkButtonLine)))
+                    .contentShape(RoundedRectangle(cornerRadius: 13))
                 }
                 .buttonStyle(.plain)
                 .disabled(!on).opacity(on ? 1 : 0.5)
                 .accessibilityLabel(c.button.detail.map { L("%@, %@", c.button.text, $0, lang: lang) } ?? c.button.text)
             }
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                WeightedRow(weights: row.map { $0.prominent ? 1 : 1.2 }, spacing: 6) {
+                WeightedRow(weights: row.map { Self.weight($0.button.role) }, spacing: 6) {
                     ForEach(row, id: \.index) { c in
                         // (the window's state now, at the click: in front, the chat answers and this does not)
                         Button(c.button.text) { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId, place: .float) } }
@@ -585,6 +955,15 @@ struct FloatCard: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// P1Float's widths by what the button does (its words are the harness's): the yes the narrowest.
+    static func weight(_ r: CardModel.Role) -> Double {
+        switch r {
+        case .approve: 1
+        case .skipStep: 1.25
+        default: 1.15
         }
     }
 }

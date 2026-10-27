@@ -100,6 +100,9 @@ enum MainWindowSnapshot {
                 for (name, lines, phase, fits, collapsed) in floatScenes() {
                     renderFloat(lines, phase: phase, fits: fits, collapsed: collapsed, dark: dark, to: out.appendingPathComponent("float-\(name)-\(tag).png"))
                 }
+                // (CardStates: hovered -- its 放大 / 收起 / Stop -- and its window off the screen)
+                renderFloat(running(), phase: nil, fits: true, collapsed: false, hover: true, dark: dark, to: out.appendingPathComponent("float-hover-\(tag).png"))
+                renderFloat(running(), phase: nil, fits: true, collapsed: false, hidden: true, dark: dark, to: out.appendingPathComponent("float-hidden-\(tag).png"))
             }
             if only == nil || only == "firstrun" {
                 for (name, step, key, granted) in firstRunScenes() {
@@ -159,7 +162,20 @@ enum MainWindowSnapshot {
             ("held", running() + waiting(), held, true, false),
             ("expired", running() + waiting() + [line("ask_void", 14, 700, ["ask_id": "ask_send", "why": "timeout"])], nil, true, false),
             ("capsule", running(), nil, true, true),
+            ("free", running() + typed(), nil, false, false),
+            ("done", running() + waiting() + answered() + [line("step_result", 18, 70, ["step_id": "st_4", "status": "ok"]),
+                      line("task_done", 19, 82, ["status": "succeeded", "reason": "", "summary": "回复了许诺：我看一下再说"])], nil, true, false),
+            ("failed", running() + [line("task_done", 9, 57, ["status": "failed", "reason": "", "summary": "同一步反复失败，没能写入回复"])], nil, true, false),
         ]
+    }
+
+    /// A card that takes the user's own words (free_text): the main window's -- the float says so.
+    static func typed() -> [[String: Any]] {
+        let card: [String: Any] = [
+            "kind": "missing", "blocking": true, "free_text": true, "headline": "回复里署什么名字？", "text": "回复里署什么名字？",
+            "options": [["kind": "cancel", "text": "先别做了"]],
+        ]
+        return [line("ask", 9, 52, ["ask_id": "ask_name", "card": card]), line("waiting", 10, 52, ["ask_id": "ask_name"])]
     }
 
     /// A card with two readings and 「由你决定」.
@@ -195,7 +211,8 @@ enum MainWindowSnapshot {
         return (shell, shell.states[sid] ?? SessionState())
     }
 
-    @MainActor static func renderFloat(_ lines: [[String: Any]], phase: CardPhase?, fits: Bool, collapsed: Bool, dark: Bool, to file: URL) {
+    @MainActor static func renderFloat(_ lines: [[String: Any]], phase: CardPhase?, fits: Bool, collapsed: Bool, hover: Bool = false, hidden: Bool = false,
+                                       dark: Bool, to file: URL) {
         let (shell, s) = state(lines, now: t0 + 58)
         guard let task = s.tasks.last else { return }
         let pinned = shell.pinned(s)
@@ -204,10 +221,11 @@ enum MainWindowSnapshot {
         let placement = ph.map { CardPlacement.place($0, fitsFloat: fits, window: .behindVisible, frontNow: false, float: .visible) }
         let f = FloatController.shared
         f.userCollapsed = collapsed
-        f.preview(FloatController.Now(sessionId: sid, status: s.status, task: task, card: card, phase: ph, placement: placement))
+        f.preview(FloatController.Now(sessionId: sid, status: s.status, task: task, card: card, phase: ph, placement: placement,
+                                      askedAt: pinned?.card.askedAt))
         let view = ZStack(alignment: .bottomTrailing) {
             Color(red: 0.89, green: 0.91, blue: 0.92)
-            FloatView(shell: shell, float: f, still: still()).padding(18)
+            FloatView(shell: shell, float: f, still: still(), stillHidden: hidden, stillHover: hover).padding(16)
         }
         renderView(view.environment(\.lang, .zhHans), size: NSSize(width: 340, height: 640), dark: dark, wait: 0.6, to: file)
         f.preview(nil)
@@ -225,11 +243,10 @@ enum MainWindowSnapshot {
             Color(red: 0.36, green: 0.40, blue: 0.45)
             VStack(spacing: 0) {
                 Color(red: 0.16, green: 0.17, blue: 0.19).frame(height: notched ? 37 : 24)     // (the menu bar)
-                if !notched { Color.clear.frame(height: 10) }
             }
             IslandView(model: model, height: h, notched: notched, notchWidth: notched ? 200 : nil, onStop: {}, onTap: { _ in }, now: { t0 + 58 })
                 .frame(width: Island.barWideWidth, height: h)
-                .padding(.top, notched ? 0 : 34)
+                .padding(.top, notched ? 0 : 24)
             // (the notch itself, 200 pt as on a 14" MacBook Pro, drawn over the bar as the hardware hides what is under it)
             if notched { Color.black.frame(width: 200, height: h) }
         }
