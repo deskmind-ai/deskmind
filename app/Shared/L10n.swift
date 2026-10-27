@@ -856,6 +856,7 @@ enum L10n {
         "The task stopped. Send it?": "任务已停，要发吗？",
         "Queued · sent to it when the task is done; you can still change it": "排队中 · 任务做完再发给它，发出前还能改",
         "Removed": "已撤掉",
+        "Error: %@": "出错：%@",
         "Return saves the change": "回车保存修改",
         "Put back": "放回去",
         "Send now": "立刻发送",

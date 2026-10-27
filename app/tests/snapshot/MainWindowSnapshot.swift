@@ -86,7 +86,10 @@ enum MainWindowSnapshot {
             Scene(name: "paused", lines: others + running() + [line("waiting", 9, 30, [:])], now: t0 + 38),
             Scene(name: "locked", lines: others + running() + [line("task_done", 9, 30, ["status": "environment", "reason": "", "summary": "", "cause": "screen_locked"])], now: t0 + 38),
             Scene(name: "queued", lines: others + running() + queue(), now: t0 + 38),
-            Scene(name: "withdrawn", lines: others + running() + queue(), now: t0 + 38, act: { $0.queueCancel("q_1") }),
+            Scene(name: "withdrawn", lines: others + running() + queue(), now: t0 + 38, act: { shell in
+                shell.queueCancel("q_1")
+                shell.client.feed(["kind": "session.queue", "session_id": sid, "items": [[String: Any]]()])
+            }),
             Scene(name: "sending", lines: others + running(), now: t0 + 38, act: { $0.draft = "发完以后，把明天上午的会议提醒也看一下"; $0.submit() }),
         ]
         writeRunFolder(support, run: running() + waiting() + answered())

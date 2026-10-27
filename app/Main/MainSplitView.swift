@@ -697,7 +697,10 @@ struct ChatColumn: View {
         ForEach(s.shownOutbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
         // (P1Main: what waits in the queue is at the chat's end, on the user's side; what was taken back stays a line)
         ForEach(s.queue, id: \.id) { q in QueuedBubble(shell: shell, item: q, cardOpen: !s.composerEnabled) }
-        ForEach(shell.withdrawn[shell.selected ?? ""] ?? [], id: \.id) { q in WithdrawnRow(shell: shell, item: q) }
+        // (once the session's queue no longer has it: the bubble until then)
+        ForEach((shell.withdrawn[shell.selected ?? ""] ?? []).filter { w in !s.queue.contains { $0.id == w.id } }, id: \.id) { q in
+            WithdrawnRow(shell: shell, item: q)
+        }
     }
 
     /// The 「● DeskMind」 label goes above DeskMind's turn: the first of its items after the user's words (a reply, a
@@ -1327,6 +1330,12 @@ struct AgentPanel: View {
                               zoomed: $zoomed, popOut: { shell.togglePopOut() })
                 } else if shell.current?.runningTask != nil {
                     placeholder(L("The live view is in the float", lang: lang))
+                } else if let t = shell.current?.tasks.last, let p = still ?? (dock.lastRun == t.runId ? dock.last : nil) {
+                    // (P1Flow frame 6: the task over, its last picture stays, dimmed, and how it ended under it)
+                    let last = t.steps.last
+                    LiveFrame(picture: p, state: .streaming, app: Self.appName(last?.object), waiting: false, about: nil,
+                              step: ShellText.status(c.status, lang: lang), stepWindow: nil, target: nil, boxRect: nil,
+                              zoomed: $zoomed, popOut: {}, ended: true)
                 } else {
                     placeholder(L("When it works the computer, the live view, the steps and the changes show here.", lang: lang))
                 }

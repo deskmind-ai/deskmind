@@ -305,6 +305,13 @@ enum ShellTests {
         line(&done, #"{"seq":1,"t":1792890000,"session_id":"done","kind":"session.message","msg_id":"u","role":"user","text":"整理下载"}"#)
         line(&done, #"{"seq":2,"t":1792890001,"session_id":"done","kind":"session.task","msg_id":"t","run_id":"r1","raw":"整理下载","goal":"g","by":"model"}"#)
         line(&done, #"{"seq":3,"t":1792890300,"session_id":"done","kind":"session.task_end","run_id":"r1","status":"succeeded","summary":"好了","reason":""}"#)
+        // (#133, P1Main: a failed task says its own reason under the title; a screen lock its own words, never a reason)
+        var failed = SessionState(sessionId: "failed")
+        line(&failed, #"{"seq":1,"t":1792890000,"session_id":"failed","kind":"session.task","msg_id":"t","run_id":"r1","raw":"导出发票","goal":"g","by":"model"}"#)
+        line(&failed, #"{"seq":2,"t":1792890300,"session_id":"failed","kind":"session.task_end","run_id":"r1","status":"failed","summary":"","reason":"网站要求重新登录"}"#)
+        let failedRow = ShellList.rows(summaries: [], states: ["failed": failed], names: [:], deleted: [], untitled: "新对话").first!
+        check(ShellText.rowLine(failedRow, now: now, lang: .zhHans) == "出错：网站要求重新登录" && failedRow.status.shape == .bang,
+              "a failed task: 「出错：<its reason>」, the 「!」 (\(ShellText.rowLine(failedRow, now: now, lang: .zhHans)))")
         let summaries = [SessionSummary(sessionId: "old", title: "汇总周报", updatedAt: now - 7200, lastMessage: ("assistant", "汇总好了")),
                          SessionSummary(sessionId: "chat", title: "在吗", updatedAt: now - 1000, lastMessage: nil),
                          SessionSummary(sessionId: "done", title: "整理下载", updatedAt: now - 9700, lastMessage: nil)]

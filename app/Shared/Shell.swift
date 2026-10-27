@@ -98,6 +98,7 @@ enum ShellText {
     static func rowLine(_ r: ShellRow, now: Double, lang: ResolvedLang) -> String {
         if r.fresh { return L("Just started", lang: lang) }
         if case .idle = r.status, let t = r.updatedAt { return when(t, now: now, lang: lang) }
+        if case .error = r.status, let w = r.why { return L("Error: %@", w, lang: lang) }
         return status(r.status, lang: lang, now: now)
     }
 
@@ -454,6 +455,8 @@ struct ShellRow: Equatable, Identifiable {
     var taskRunning: Bool
     /// The new conversation, not started yet (⌘N, 「新对话」): its own row, at the top, while it is shown (U4 §2.2).
     var fresh = false
+    /// A failed task's own reason (its end's words), for 「出错：<原因>」 under the title (P1Main).
+    var why: String? = nil
 
     /// The new conversation's row: 「新对话」, 「刚开始」, a mist dot.
     static func fresh(title: String) -> ShellRow {
@@ -483,6 +486,8 @@ enum ShellList {
             var r = out[id] ?? ShellRow(id: id, title: "", status: .idle, updatedAt: nil, taskRunning: false)
             r.status = st.status
             r.taskRunning = st.runningTask != nil
+            if case .error = st.status, let t = st.tasks.last, t.cause != .screenLocked,
+               let w = (t.done?.reason ?? t.end?.reason)?.trimmingCharacters(in: .whitespacesAndNewlines), !w.isEmpty { r.why = w } else { r.why = nil }
             if let t = st.lastEventAt { r.updatedAt = max(r.updatedAt ?? t, t) }
             if r.title.isEmpty, let first = st.messages.first(where: { $0.role == "user" }) { r.title = title(firstUserMessage: first.text) }
             if r.title.isEmpty, let task = st.tasks.first { r.title = title(firstUserMessage: task.raw) }

@@ -16,7 +16,8 @@ final class LiveDock: ObservableObject {
     /// on another desktop) and after the watch ends: the float dims it (CardStates 「窗口不可见」) or shows it as the
     /// task ended. Another run's watch drops it.
     @Published private(set) var last: Picture?
-    private var lastRun: String?
+    /// The run `last` is of.
+    private(set) var lastRun: String?
     private(set) var run: String?
     private var stop: Flag?
 
@@ -120,6 +121,8 @@ struct LiveFrame: View {
     /// The frame's own title bar and step line (the right column); false: the picture alone, 110 tall -- the float
     /// draws its own title and line around it (U2).
     var chrome = true
+    /// The task ended (P1Flow frame 6): its last picture dimmed to .55, the title 「<应用> · 已结束」, the end in the line.
+    var ended = false
     @Environment(\.lang) private var lang
 
     var body: some View {
@@ -132,11 +135,15 @@ struct LiveFrame: View {
                 Circle().fill(Brand.dot).frame(width: 7, height: 7).accessibilityHidden(true)
                 Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.frameText).lineLimit(1)
                 Spacer(minLength: 4)
-                barIcon(AnyShape(ZoomPath(inward: zoomed)), zoomed ? L("Make the live view smaller", lang: lang) : L("Enlarge the live view", lang: lang)) { zoomed.toggle() }
-                barIcon(AnyShape(PopOutPath()), L("Pop out as a float", lang: lang), popOut)
+                // (an ended task's picture: nothing to enlarge or pop out live)
+                if !ended {
+                    barIcon(AnyShape(ZoomPath(inward: zoomed)), zoomed ? L("Make the live view smaller", lang: lang) : L("Enlarge the live view", lang: lang)) { zoomed.toggle() }
+                    barIcon(AnyShape(PopOutPath()), L("Pop out as a float", lang: lang), popOut)
+                }
             }
             .padding(.leading, 12).padding(.trailing, 6).frame(height: 34)
             picture(height: zoomed ? 380 : 214)
+                .opacity(ended ? 0.55 : 1)
                 .padding(.horizontal, 6)
             Text(step ?? " ").font(.system(size: 13)).foregroundStyle(Color(ShellPalette.frameStep)).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -215,7 +222,8 @@ struct LiveFrame: View {
     /// the button the card names while it waits for you -- or has no picture.
     private var title: String {
         let what: String
-        if waiting { what = about.map { L("Background window · stopped before %@", $0, lang: lang) } ?? L("Background window · waiting for you", lang: lang) }
+        if ended { what = L("Ended", lang: lang) }
+        else if waiting { what = about.map { L("Background window · stopped before %@", $0, lang: lang) } ?? L("Background window · waiting for you", lang: lang) }
         else {
             switch state {
             case .streaming: what = L("Background window", lang: lang)
