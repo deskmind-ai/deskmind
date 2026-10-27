@@ -709,7 +709,7 @@ enum L10n {
         "Granted": "已授权",
         // the float on ink (U2)
         "%@ · Step %d": "%@ · 第 %d 步",
-        "Buttons here don't take your keyboard": "点按钮不抢键盘",
+        "Won't steal focus": "点按钮不抢键盘",
         "Answer in the main window ›": "去主窗口回答 ›",
         "Plan · %d steps, %d go out and are confirmed then": "计划 · %d 步，%d 步往外发，到时再确认",
         "Plan · %d steps": "计划 · %d 步",

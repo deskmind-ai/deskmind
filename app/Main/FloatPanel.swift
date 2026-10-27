@@ -674,9 +674,13 @@ struct FloatButtonStyle: ButtonStyle {
     var prominent: Bool
     func makeBody(configuration: Configuration) -> some View {
         let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        configuration.label
-            .font(.system(size: prominent ? 14 : 13, weight: prominent ? .bold : .regular))
-            .multilineTextAlignment(.center).lineLimit(2)
+        let size: CGFloat = prominent ? 14 : 13, weight: Font.Weight = prominent ? .bold : .regular
+        // (one line if it fits, then one line a size smaller -- 「Stop for now」 in three -- and only then two)
+        ViewThatFits(in: .horizontal) {
+            configuration.label.font(.system(size: size, weight: weight)).lineLimit(1)
+            configuration.label.font(.system(size: size - 1.5, weight: weight)).lineLimit(1)
+            configuration.label.font(.system(size: size, weight: weight)).multilineTextAlignment(.center).lineLimit(2)
+        }
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, minHeight: 44)
             .foregroundStyle(prominent ? Color(ShellPalette.inkSurface) : Color(ShellPalette.onInk))
@@ -799,10 +803,11 @@ struct FloatCard: View {
     /// 「点按钮不抢键盘」 and 「去主窗口回答」, under every card the float answers (P1Float).
     private var footer: some View {
         HStack(spacing: 8) {
-            Text(L("Buttons here don't take your keyboard", lang: lang)).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkMuted))
+            Text(L("Won't steal focus", lang: lang)).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkMuted))
+                .lineLimit(1).minimumScaleFactor(0.85)
             Spacer(minLength: 4)
-            Button(action: Activation.onClick { g in shell.select(sessionId); MainWindow.comeBack(g) }) { Text(L("Answer in the main window", lang: lang)) }
-                .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Color(ShellPalette.onInkLink))
+            Button(action: Activation.onClick { g in shell.select(sessionId); MainWindow.comeBack(g) }) { Text(L("Answer in the main window", lang: lang)).lineLimit(1).minimumScaleFactor(0.85) }
+                .buttonStyle(.plain).font(.system(size: 12)).layoutPriority(1).foregroundStyle(Color(ShellPalette.onInkLink))
                 .accessibilityHint(L("Brings DeskMind's window forward on the card", lang: lang))
         }
         .padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)

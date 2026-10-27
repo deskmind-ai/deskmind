@@ -106,6 +106,9 @@ enum MainWindowSnapshot {
                 // (CardStates: hovered -- its 放大 / 收起 / Stop -- and its window off the screen)
                 renderFloat(running(), phase: nil, fits: true, collapsed: false, hover: true, dark: dark, to: out.appendingPathComponent("float-hover-\(tag).png"))
                 renderFloat(running(), phase: nil, fits: true, collapsed: false, hidden: true, dark: dark, to: out.appendingPathComponent("float-hidden-\(tag).png"))
+                // (QuestionCard's English board: the confirm card with an English request -- the card's words are the harness's)
+                renderFloat(running() + waitingEnglish(), phase: nil, fits: true, collapsed: false, lang: .en, dark: dark,
+                            to: out.appendingPathComponent("float-confirm-en-\(tag).png"))
             }
             if only == nil || only == "firstrun" {
                 for (name, step, key, granted) in firstRunScenes() {
@@ -206,17 +209,17 @@ enum MainWindowSnapshot {
         ]
     }
 
-    @MainActor static func state(_ lines: [[String: Any]], now: Double) -> (ShellModel, SessionState) {
+    @MainActor static func state(_ lines: [[String: Any]], now: Double, lang: ResolvedLang = .zhHans) -> (ShellModel, SessionState) {
         let shell = ShellModel(client: SessionClient(transport: Wire()), defaults: MemoryDefaults(), config: { "openai:local|fake" },
-                               lang: { .zhHans }, now: { now }, work: { $0() }, deliver: { $0() })
+                               lang: { lang }, now: { now }, work: { $0() }, deliver: { $0() })
         for l in lines { shell.client.feed(l) }
         shell.select(sid)
         return (shell, shell.states[sid] ?? SessionState())
     }
 
     @MainActor static func renderFloat(_ lines: [[String: Any]], phase: CardPhase?, fits: Bool, collapsed: Bool, hover: Bool = false, hidden: Bool = false,
-                                       dark: Bool, to file: URL) {
-        let (shell, s) = state(lines, now: t0 + 58)
+                                       lang: ResolvedLang = .zhHans, dark: Bool, to file: URL) {
+        let (shell, s) = state(lines, now: t0 + 58, lang: lang)
         guard let task = s.tasks.last else { return }
         let pinned = shell.pinned(s)
         let card = pinned.map { CardModel(card: $0.card.card, runId: $0.runId, askId: $0.card.askId) }
@@ -230,7 +233,7 @@ enum MainWindowSnapshot {
             Color(red: 0.89, green: 0.91, blue: 0.92)
             FloatView(shell: shell, float: f, still: still(), stillHidden: hidden, stillHover: hover).padding(16)
         }
-        renderView(view.environment(\.lang, .zhHans), size: NSSize(width: 340, height: 640), dark: dark, wait: 0.6, to: file)
+        renderView(view.environment(\.lang, lang), size: NSSize(width: 340, height: 640), dark: dark, wait: 0.6, to: file)
         f.preview(nil)
     }
 
@@ -379,6 +382,23 @@ enum MainWindowSnapshot {
             line("ask", 12, 52, ["ask_id": "ask_send", "card": card]),
             line("waiting", 13, 52, ["ask_id": "ask_send"]),
         ]
+    }
+
+    /// The same card from an English request: its words in English, as the harness writes them for one.
+    static func waitingEnglish() -> [[String: Any]] {
+        waiting().map { l in
+            guard l["kind"] as? String == "ask", var card = l["card"] as? [String: Any], var c = card["consent"] as? [String: Any] else { return l }
+            card["headline"] = "Click “Send” in the web mail?"
+            card["text"] = "Click “Send” in the web mail? This sends the reply to Xu Nuo."
+            card["options"] = [["kind": "approve", "text": "OK"], ["kind": "skip_step", "text": "Not this step"], ["kind": "cancel", "text": "Stop for now"]]
+            c["action_text"] = "Click “Send”"; c["target"] = "Send"; c["object_label"] = "Safari window “Re: Next week's review”"
+            c["outgoing"] = [["kind": "field", "label": "To", "value": "Xu Nuo <xu.nuo@example.com>"],
+                             ["kind": "field", "label": "Subject", "value": "Re: Next week's review"],
+                             ["kind": "typed", "label": "", "value": "Let me take a look first"]]
+            card["consent"] = c
+            var out = l; out["card"] = card
+            return out
+        }
     }
 
     /// Answered 「可以」: sent, step 4 under way.
