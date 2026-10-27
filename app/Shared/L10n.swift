@@ -715,6 +715,9 @@ enum L10n {
         "Plan · %d steps, %d go out and are confirmed then": "计划 · %d 步，%d 步往外发，到时再确认",
         "Plan · %d steps": "计划 · %d 步",
         "Plan · %@": "计划 · %@",
+        // the float / island after the boards (#133), and the short action card (CardBrief)
+        "%d earlier steps may already have gone out": "之前有 %d 步可能已经发出",
+        "%d earlier steps may already have gone out: %@": "之前有 %d 步可能已经发出：%@",
         // card contents (U3)
         "Which one": "哪一个",
         "Missing info": "缺的信息",
