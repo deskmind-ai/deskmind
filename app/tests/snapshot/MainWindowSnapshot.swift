@@ -78,7 +78,7 @@ enum MainWindowSnapshot {
             Scene(name: "answered-oldlog", lines: others + strip(running() + waiting() + answered()), now: t0 + 66),
             Scene(name: "undone", lines: others + running() + waiting() + answered() + undone(), now: t0 + 90),
             Scene(name: "process", lines: others + running() + waiting() + answered(), now: t0 + 66, process: true),
-        ]
+        ] + cardScenes(others)
         writeRunFolder(support, run: running() + waiting() + answered())
         let only = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil
         for dark in [false, true] {
@@ -344,6 +344,138 @@ enum MainWindowSnapshot {
              "undo": "open", "reason": "", "changes": ["created": ["/Users/demo/Desktop/回复草稿.txt"], "modified": [], "deleted": [], "external": []]],
             line("result_response", 20, 80, ["picked": "undo", "effect": "undone 1/1", "undone": 1, "total": 1, "refused": NSNull()]),
             ["kind": "session.task_undo", "session_id": sid, "seq": 4, "t": t0 + 81, "run_id": rid, "undone": 1, "total": 1, "refused": NSNull()],
+        ]
+    }
+
+    // MARK: cards (#133): each card and result state the boards draw (P3States 「卡片 × 状态」, 「结果卡」; P1Main)
+
+    static func cardScenes(_ others: [[String: Any]]) -> [Scene] {
+        var out: [Scene] = []
+        func scene(_ name: String, _ run: [[String: Any]], session: [[String: Any]] = [], now: Double = 90) {
+            out.append(Scene(name: "card-" + name, lines: others + taskStart() + run + session, now: t0 + now))
+        }
+        let kinds: [(String, [String: Any], [String: Any])] = [
+            ("plan", planCard(), planCard(changed: true)), ("action", actionCard(), actionCard(changed: true)),
+            ("choice", choiceCard(2), choiceCard(2, changed: true)), ("missing", missingCard(), missingCard(changed: true)),
+        ]
+        // 未回答
+        for (k, c, _) in kinds { scene(k + "-open", asked("a_\(k)", c, seq: 3, t: 4)) }
+        scene("choice6-open", asked("a_six", choiceCard(6), seq: 3, t: 4))
+        // 已回答: whole while no card waits (P1Main), a line each while one does (P1Waiting)
+        let answered = asked("a_plan", planCard(), seq: 3, t: 4) + [line("resumed", 5, 9, ["ask_id": "a_plan", "answer": ["option": 0]])]
+            + asked("a_choice", choiceCard(2), seq: 6, t: 10) + [line("resumed", 8, 14, ["ask_id": "a_choice", "answer": ["option": 0]])]
+            + asked("a_missing", missingCard(), seq: 9, t: 16) + [line("resumed", 11, 20, ["ask_id": "a_missing", "answer": ["text": "reimburse.example.com"]])]
+            + asked("a_action", actionCard(), seq: 12, t: 22) + [line("resumed", 14, 26, ["ask_id": "a_action", "answer": ["option": 0]])]
+            + [line("step", 15, 30, ["step_id": "st_9", "plan_step": 4, "text": "{\"kind\":\"read\"}", "human": "确认已经发出",
+                                     "object": "window:com.apple.Safari#4242", "consequence": "read"])]
+        scene("answered", answered)
+        scene("answered-rows", answered + asked("a_next", actionCard(), seq: 16, t: 40))
+        // 改主意后作废重问: the user's change, the old card voided by it, the new one
+        for (k, c, changed) in kinds {
+            scene(k + "-reasked", asked("a_\(k)", c, seq: 3, t: 4) + [
+                line("steered", 5, 8, ["text": "改成回复：明天给你答复"]),
+                line("ask_void", 6, 8, ["ask_id": "a_\(k)", "why": "steer"]),
+            ] + asked("a_\(k)2", changed, seq: 7, t: 10), session: [
+                ["kind": "session.steer", "session_id": sid, "seq": 3, "t": t0 + 7, "run_id": rid, "text": "改成回复：明天给你答复"],
+            ])
+        }
+        // 过期或已停止: the action card expired (the task waits on it), the others stopped with the task
+        scene("action-expired", asked("a_action", actionCard(), seq: 3, t: 4) + [line("ask_void", 5, 604, ["ask_id": "a_action", "why": "timeout"])], now: 610)
+        for (k, c, _) in kinds where k != "action" {
+            scene(k + "-stopped", asked("a_\(k)", c, seq: 3, t: 4) + [
+                line("ask_void", 5, 30, ["ask_id": "a_\(k)", "why": "stop"]),
+                line("task_done", 6, 31, ["status": "stopped", "reason": "stopped by the app", "cause": "user_stopped", "summary": "", "result_card": NSNull(),
+                                          "answer": NSNull(), "changes": ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": []]]),
+            ], session: [["kind": "session.task_end", "session_id": sid, "seq": 3, "t": t0 + 32, "run_id": rid, "status": "stopped", "summary": "",
+                          "undo": "none", "reason": "stopped by the app", "cause": "user_stopped"]])
+        }
+        // 结果卡
+        func done(_ status: String, text: String, summary: String, changes: [String: Any], undo: Bool) -> [[String: Any]] {
+            var options: [[String: Any]] = [["kind": "approve", "text": "好的"]]
+            if undo { options.append(["kind": "undo", "text": "撤回"]) }
+            var f: [String: Any] = ["status": status, "reason": "", "summary": summary, "answer": NSNull(), "changes": changes,
+                                    "result_card": ["kind": "result", "text": text, "options": options, "free_text": false, "blocking": false]]
+            if undo { f["undo_until"] = t0 + 3600 }
+            return [line("task_done", 3, 72, f)]
+        }
+        func end(_ status: String, undo: Bool) -> [[String: Any]] {
+            [["kind": "session.task_end", "session_id": sid, "seq": 3, "t": t0 + 73, "run_id": rid, "status": status, "summary": "",
+              "undo": undo ? "open" : "none", "reason": "", "undo_until": t0 + 3600]]
+        }
+        let none: [String: Any] = ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": []]
+        scene("result-sent", done("succeeded", text: "做了：回复许诺「我看一下再说」", summary: "回复了许诺",
+                                  changes: ["created": [], "modified": [], "deleted": [], "external": ["1 封 → 许诺"], "unconfirmed": []], undo: false),
+              session: end("succeeded", undo: false))
+        scene("result-partial", done("succeeded", text: "做了：把 9 月的发票放回「下载」", summary: "整理了发票",
+                                     changes: ["created": [], "modified": [], "deleted": ["安装包 (1).dmg"], "external": [], "unconfirmed": []], undo: true),
+              session: end("succeeded", undo: true) + [
+                ["kind": "session.task_undo", "session_id": sid, "seq": 4, "t": t0 + 81, "run_id": rid, "undone": 1, "total": 2,
+                 "refused": "安装包 (1).dmg：废纸篓已经清空"]])
+        scene("result-nothing", done("succeeded", text: "做了：查了许诺上周发来的报价单", summary: "查了报价单", changes: none, undo: false),
+              session: end("succeeded", undo: false))
+        scene("result-unconfirmed", done("unconfirmed", text: "做了：点了「发送」，邮箱提示「已发送」", summary: "点了发送",
+                                         changes: ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": ["已发送列表没刷新，没看到这封"]], undo: false),
+              session: end("unconfirmed", undo: false))
+        return out
+    }
+
+    /// The task as it starts (the user's words, the session's task, its plan).
+    static func taskStart() -> [[String: Any]] {
+        let r = running()
+        return Array(r.prefix(4))
+    }
+
+    /// A card asked (`ask`, then `waiting`) at run seq `seq`.
+    static func asked(_ id: String, _ card: [String: Any], seq: Int, t: Double) -> [[String: Any]] {
+        [line("ask", seq, t, ["ask_id": id, "card": card]), line("waiting", seq + 1, t, ["ask_id": id])]
+    }
+
+    static func planCard(changed: Bool = false) -> [String: Any] {
+        let reply = changed ? "「明天给你答复」" : "「我看一下再说」"
+        return [
+            "kind": "plan", "blocking": true, "headline": "计划 · 4 步",
+            "plan": ["steps": [["purpose": "在后台打开网页邮箱，找到许诺 10 月 20 日的邮件", "class": "read", "objects": [], "sites": []],
+                               ["purpose": "点「回复」，写入" + reply, "class": "modify_user", "objects": ["网页邮箱里的回复草稿"], "sites": []],
+                               ["purpose": "点「发送」", "class": "external", "objects": ["发给许诺的一封邮件"], "sites": [["host": "mail.example.com", "sends": reply + " → 许诺"]]],
+                               ["purpose": "确认已经发出", "class": "read", "objects": [], "sites": []]],
+                     "foreground": ["apps": []]],
+            "text": "我打算这样做：回复许诺" + reply,
+            "options": [["kind": "approve", "text": "可以，就这样做"], ["kind": "cancel", "text": "先别做了"]], "free_text": false,
+        ]
+    }
+
+    static func actionCard(changed: Bool = false) -> [String: Any] {
+        var out: [[String: Any]] = [["kind": "field", "label": "收件人", "value": "许诺 <xu.nuo@example.com>"],
+                                    ["kind": "field", "label": "主题", "value": "Re: 下周的方案评审"],
+                                    ["kind": "typed", "label": "", "value": "我看一下再说"]]
+        if changed { out.insert(["kind": "field", "label": "抄送", "value": "王磊"], at: 1) }
+        return [
+            "kind": "action", "blocking": true, "headline": "要在网页邮箱里点「发送」吗？", "text": "要在网页邮箱里点「发送」吗？这会把回复发给许诺。",
+            "consent": ["action": "click", "action_text": "点「发送」", "target": "发送", "object": "window:com.apple.Safari#4242",
+                        "object_label": "Safari 窗口「Re: 下周的方案评审」", "consequence": "external", "site": "mail.example.com", "outgoing": out],
+            "options": [["kind": "approve", "text": "可以"], ["kind": "skip_step", "text": "这一步不要"], ["kind": "cancel", "text": "先别做了"]],
+        ]
+    }
+
+    static func choiceCard(_ n: Int, changed: Bool = false) -> [String: Any] {
+        let two: [[String: Any]] = changed
+            ? [["kind": "reading", "text": "都写「我看一下再说」"], ["kind": "reading", "text": "分开写"]]
+            : [["kind": "reading", "text": "10 月 20 日 ·「下周的方案评审」", "detail": "最近一封"], ["kind": "reading", "text": "10 月 18 日 ·「报价单 v2」"]]
+        let six: [[String: Any]] = ["新建「2026-09 发票」放进去", "放进已有的「发票」文件夹", "放进「报销」文件夹", "按月份分到各自的文件夹", "只改名，不移动", "放到桌面"]
+            .map { ["kind": "proposal", "text": $0] }
+        return [
+            "kind": "ambiguity", "blocking": true,
+            "headline": n > 2 ? "9 月的发票放到哪？" : (changed ? "两封都回，用同一句话吗？" : "许诺有两封没回的邮件，回哪一封？"),
+            "text": n > 2 ? "「下载」里有 [N] 个 9 月的发票 PDF。" : "许诺有两封没回的邮件。",
+            "options": (n > 2 ? six : two) + [["kind": "delegate", "text": "由你决定"], ["kind": "cancel", "text": "先别做了"]], "free_text": true,
+        ]
+    }
+
+    static func missingCard(changed: Bool = false) -> [String: Any] {
+        [
+            "kind": "missing", "blocking": true, "headline": changed ? "新的报销系统网址是？" : "要传到哪个报销网站？",
+            "text": changed ? "你说传到新的报销系统，但不知道它的网址。" : "计划第 6 步要上传发票，但不知道网址。它不会去猜。",
+            "options": [["kind": "cancel", "text": "先别做了"]], "free_text": true,
         ]
     }
 

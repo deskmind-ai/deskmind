@@ -80,6 +80,16 @@ enum ShellPalette {
     static let setupOK = Tone(light: 0x2F5531, dark: 0x8FC293)
     static let setupBad = Tone(light: 0xB84A2E, dark: 0xE5735A)         // graphics only: its words are orangeText
 
+    // cards (#133): a card's quieter body text (P1Main #3A413B), a check's words and the agreed pill's tint (#2F5531 on
+    // #E7ECE3), a card that ended (#EFECE4), the strip over a card asked again (#EAE6DC), a rule inside a card and an
+    // unpicked option's edge (#E6E3DA)
+    static let cardBody = Tone(light: 0x3A413B, dark: 0xC9CEC8)
+    static let okText = Tone(light: 0x2F5531, dark: 0x9BCB9E)
+    static let okTint = Tone(light: 0xE7ECE3, dark: 0x26342A)
+    static let endedCard = Tone(light: 0xEFECE4, dark: 0x222624)
+    static let voidStrip = Tone(light: 0xEAE6DC, dark: 0x2B302C)
+    static let cardRule = Tone(light: 0xE6E3DA, dark: 0x323834)
+
     /// The island (one bar at the notch, the same in both appearances, as the hardware is): its fill, its left text,
     /// its right text, and its grey dot (preparing, paused, didn't finish). Working and needing you are the orange dot,
     /// done is the text's colour (Island board: no colour outside the palette).
@@ -107,6 +117,8 @@ enum ShellPalette {
         (shotWell, shotTag),                // 「准备点：…」 on the picture
         (onInkBody, inkSurface), (onInkPromiseText, inkSurface),     // the first run's ink column
         (setupBody, card), (setupBody, paper), (setupOK, card),      // its step's lists and status
+        (cardBody, card), (cardBody, paper), (cardBody, endedCard), (secondary, endedCard), (okText, okTint), (okText, card),
+        (cardBody, voidStrip), (secondary, voidStrip), (orangeText, voidStrip),          // cards (#133)
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }

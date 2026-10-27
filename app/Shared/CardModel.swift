@@ -91,6 +91,9 @@ struct CardModel: Equatable {
     var beyond: [String]
 
     var isResult: Bool { askId == nil }
+    /// The action sends something out of this Mac: its consent's class is external (the harness's consequence) --
+    /// never read from its words or its app. Only then is it 「发送前确认」; any other action card is 「动手前确认」.
+    var sends: Bool { kind == .action && consent?.consequence == "external" }
 
     init(ask: AskEvent, runId: String) {
         self.init(card: ask.card, runId: runId, askId: ask.askId)
@@ -195,4 +198,24 @@ struct CardModel: Equatable {
     }
 
     var freeTextInFloat: Bool { false }
+}
+
+extension CardModel {
+    /// The card's kind in a word (P3States): 同意计划, 选一个, 缺一条信息…; an action card 「发送前确认」 only when its
+    /// action sends something out (`sends`: the harness's class), 「动手前确认」 otherwise.
+    func kindWord(lang: ResolvedLang) -> String {
+        sends ? L("confirm before sending", lang: lang) : ShellText.cardKind(kind.name, lang: lang)
+    }
+
+    /// A line of a result card's text (P3States 「结果卡」): 「做了：…」 as its short head (before the first colon, up to
+    /// eight characters) and the rest; a line with none, whole under no head.
+    static func resultRow(_ line: String) -> (label: String, value: String) {
+        if let r = line.range(of: "：") ?? line.range(of: ": "), r.lowerBound > line.startIndex,
+           line.distance(from: line.startIndex, to: r.lowerBound) <= 8 {
+            let label = String(line[..<r.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+            if !value.isEmpty { return (label, value) }
+        }
+        return ("", line)
+    }
 }
