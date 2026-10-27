@@ -43,38 +43,42 @@ struct MainSplitView: View {
     @State private var setupAt: FirstRun.Step? = UserDefaults.standard.bool(forKey: FirstRun.doneKey) ? nil : .language
     @ObservedObject private var keys = KeyStatus.shared
 
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
     var body: some View {
-        Group {
-            // the first run is the window's whole content while it runs (P1Setup); then the three columns
-            if let at = setupAt {
-                FirstRunView(shell: shell, flow: FirstRun(step: at), done: { setupAt = nil; settingsClosed() })
-                    .frame(minWidth: 1080, minHeight: 780)
-            } else {
-                MainColumns(shell: shell, openSettings: openSettings, unmet: unmet, openSetup: { setupAt = $0 }, cloud: cloud, mac: mac)
-                    .frame(minWidth: MainColumns.minWidth, minHeight: 600)
-                    // (up to the window's top edge, under the hidden title bar, as P1Main and the offscreen render draw
-                    // it: the sidebar's 40 on top clears the window's buttons; the real window had the columns 28 lower
-                    // -- U4 §3)
-                    .ignoresSafeArea(.container, edges: .top)
+        let least: CGSize = setupAt == nil ? CGSize(width: MainColumns.minWidth, height: 600) : CGSize(width: 1080, height: 780)
+        return content
+            .frame(idealWidth: 1440, idealHeight: 900)
+            // (the frame SwiftUI restored, fitted once to the least size of what is shown: U4 §2.1)
+            .background(WindowFitter(min: least))
+            .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
+                CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
             }
+            .onAppear {
+                ShellModel.shared = shell
+                shell.refreshSettings()
+                // what was saved while this window was not shown (the window as it was, before this launch): told now,
+                // before the watch (ShellModel.syncSettings; #107 review at 5999bd9)
+                shell.syncSettings()
+                shell.start()
+            }
+            .onChange(of: lang) { _, _ in shell.syncSettings() }     // (the language is a session setting like the model's)
+            // the float, the island and the notifications: the app's one, started once, whatever the window does
+            .onAppear { FloatController.shared.start(shell) }
+    }
+
+    /// The first run is the window's whole content while it runs (P1Setup); then the three columns.
+    @ViewBuilder private var content: some View {
+        if let at = setupAt {
+            FirstRunView(shell: shell, flow: FirstRun(step: at), done: { setupAt = nil; settingsClosed() })
+                .frame(minWidth: 1080, minHeight: 780)
+        } else {
+            MainColumns(shell: shell, openSettings: openSettings, unmet: unmet, openSetup: { setupAt = $0 }, cloud: cloud, mac: mac)
+                .frame(minWidth: MainColumns.minWidth, minHeight: 600)
+                // (up to the window's top edge, under the hidden title bar, as P1Main and the offscreen render draw
+                // it: the sidebar's 40 on top clears the window's buttons; the real window had the columns 28 lower
+                // -- U4 §3)
+                .ignoresSafeArea(.container, edges: .top)
         }
-        .frame(idealWidth: 1440, idealHeight: 900)
-        // (the frame SwiftUI restored, fitted once to the least size of what is shown: U4 §2.1)
-        .background(WindowFitter(min: setupAt == nil ? CGSize(width: MainColumns.minWidth, height: 600) : CGSize(width: 1080, height: 780)))
-        .sheet(isPresented: $settingsOpen, onDismiss: settingsClosed) {
-            CloudModelSheet(inShell: true).environmentObject(model).environment(\.lang, lang)
-        }
-        .onAppear {
-            ShellModel.shared = shell
-            shell.refreshSettings()
-            // what was saved while this window was not shown (the window as it was, before this launch): told now,
-            // before the watch (ShellModel.syncSettings; #107 review at 5999bd9)
-            shell.syncSettings()
-            shell.start()
-        }
-        .onChange(of: lang) { _, _ in shell.syncSettings() }     // (the language is a session setting like the model's)
-        // the float, the island and the notifications: the app's one, started once, whatever the window does
-        .onAppear { FloatController.shared.start(shell) }
     }
 
     /// The key file (keys, a custom service's URL and model): a session process reads it when it starts, so only a
@@ -304,73 +308,33 @@ struct SessionList: View {
 
     /// Top to bottom (P1Main): 「新对话 ⌘N」, the 「对话」 caption, the rows (each a button: a click selects it; with the
     /// list focused -- a click in it, or Tab -- ↑ ↓ move, as ⌘↑ ⌘↓ do anywhere), and the foot -- the cloud model and the settings. Below the window's buttons, on the sidebar's colour.
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Button {
-                shell.newConversation()
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "plus").font(.system(size: 13, weight: .semibold)).accessibilityHidden(true)
-                    Text(L("New conversation", lang: lang))
-                    Spacer(minLength: 4)
-                    Text(L("⌘N", lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
-                }
-                .font(.system(size: 14, weight: .semibold)).foregroundStyle(Brand.ink)
-                .padding(.horizontal, 12).frame(height: 40)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
-                // (never the ink edge: the new conversation shown is its row in the list -- U4 §2.2, P1Flow)
-                .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Brand.line, lineWidth: 1))
-                .contentShape(RoundedRectangle(cornerRadius: 12))
-            }
-            .buttonStyle(.plain)
-            .help(L("New conversation (⌘N)", lang: lang))
-            .accessibilityHint(L("Starts a new conversation", lang: lang))
-            .accessibilityIdentifier("sidebar.new")
+            newButton
             Text(L("Conversations", lang: lang)).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.secondary)
                 .padding(.horizontal, 6).padding(.top, 6)
                 .accessibilityAddTraits(.isHeader)
-            ScrollView {
-                // (the time words move on: 「刚才」 becomes 「1 分钟前」 with no event)
-                TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    let now = shell.now()
-                    LazyVStack(spacing: 4) {
-                        ForEach(shell.listRows) { row in
-                            let on = row.fresh || shell.selected == row.id
-                            Button { if row.fresh { shell.newConversation() } else { shell.select(row.id) } } label: {
-                                SessionRowView(row: row, selected: on, now: now)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityAddTraits(on ? .isSelected : [])
-                            .contextMenu {
-                                if !row.fresh {
-                                    Button(L("Rename…", lang: lang)) { newName = shell.name(row.id) ?? row.title; renaming = row.id }
-                                    Button(L("Delete…", lang: lang), role: .destructive) { deleting = row.id }
-                                        .disabled(!shell.canDelete(row.id))
-                                }
-                            }
-                        }
+            rows
+                .frame(maxHeight: .infinity)
+                // (the user's own click or Tab focuses it; nothing here moves the focus)
+                .focusable()
+                // (no ring round the whole list -- no board draws one; the selected row shows where the arrows go)
+                .focusEffectDisabled()
+                .onMoveCommand { d in
+                    switch d {
+                    case .up: shell.move(-1)
+                    case .down: shell.move(1)
+                    default: break
                     }
                 }
-            }
-            .frame(maxHeight: .infinity)
-            // (the user's own click or Tab focuses it; nothing here moves the focus)
-            .focusable()
-            // (no ring round the whole list -- no board draws one; the selected row shows where the arrows go)
-            .focusEffectDisabled()
-            .onMoveCommand { d in
-                switch d {
-                case .up: shell.move(-1)
-                case .down: shell.move(1)
-                default: break
-                }
-            }
             footer
         }
         // (P1Main: 16 above the window's buttons, their 12 + 4, then the 14 gap -- the button at 46; 16 below the foot)
         .padding(.horizontal, 12).padding(.top, 46).padding(.bottom, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(ShellColor.sidebar)
-        .alert(L("Rename conversation", lang: lang), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+        .alert(L("Rename conversation", lang: lang), isPresented: renamingShown) {
             TextField(L("Name", lang: lang), text: $newName)
             Button(L("Cancel", lang: lang), role: .cancel) { renaming = nil }
             Button(L("Rename", lang: lang)) { if let id = renaming { shell.rename(id, to: newName) }; renaming = nil }
@@ -378,13 +342,72 @@ struct SessionList: View {
             Text(L("An empty name goes back to the first message.", lang: lang))
         }
         .confirmationDialog(L("Delete this conversation?", lang: lang),
-                            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+                            isPresented: deletingShown) {
             Button(L("Delete", lang: lang), role: .destructive) { if let id = deleting { shell.delete(id) }; deleting = nil }
             Button(L("Cancel", lang: lang), role: .cancel) { deleting = nil }
         } message: {
-            Text(L("Its messages and its tasks' records are removed from this Mac. This can't be undone.", lang: lang)
-                 + (deleting.map(shell.undoOpen) == true ? " " + L("Its last task's changes can still be undone; deleting the conversation gives that up.", lang: lang) : ""))
+            Text(deleteMessage)
         }
+    }
+
+    private var newButton: some View {
+        Button {
+            shell.newConversation()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "plus").font(.system(size: 13, weight: .semibold)).accessibilityHidden(true)
+                Text(L("New conversation", lang: lang))
+                Spacer(minLength: 4)
+                Text(L("⌘N", lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
+            }
+            .font(.system(size: 14, weight: .semibold)).foregroundStyle(Brand.ink)
+            .padding(.horizontal, 12).frame(height: 40)
+            .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
+            // (never the ink edge: the new conversation shown is its row in the list -- U4 §2.2, P1Flow)
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Brand.line, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+        }
+        .buttonStyle(.plain)
+        .help(L("New conversation (⌘N)", lang: lang))
+        .accessibilityHint(L("Starts a new conversation", lang: lang))
+        .accessibilityIdentifier("sidebar.new")
+    }
+
+    private var rows: some View {
+        ScrollView {
+            // (the time words move on: 「刚才」 becomes 「1 分钟前」 with no event)
+            TimelineView(.periodic(from: .now, by: 30)) { _ in
+                let now: Double = shell.now()
+                LazyVStack(spacing: 4) {
+                    ForEach(shell.listRows) { row in rowButton(row, now: now) }
+                }
+            }
+        }
+    }
+
+    private func rowButton(_ row: ShellRow, now: Double) -> some View {
+        let on: Bool = row.fresh || shell.selected == row.id
+        return Button { if row.fresh { shell.newConversation() } else { shell.select(row.id) } } label: {
+            SessionRowView(row: row, selected: on, now: now)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? .isSelected : [])
+        .contextMenu {
+            if !row.fresh {
+                Button(L("Rename…", lang: lang)) { newName = shell.name(row.id) ?? row.title; renaming = row.id }
+                Button(L("Delete…", lang: lang), role: .destructive) { deleting = row.id }
+                    .disabled(!shell.canDelete(row.id))
+            }
+        }
+    }
+
+    private var renamingShown: Binding<Bool> { Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } }) }
+    private var deletingShown: Binding<Bool> { Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }) }
+
+    private var deleteMessage: String {
+        let gone: String = L("Its messages and its tasks' records are removed from this Mac. This can't be undone.", lang: lang)
+        guard deleting.map(shell.undoOpen) == true else { return gone }
+        return gone + " " + L("Its last task's changes can still be undone; deleting the conversation gives that up.", lang: lang)
     }
 
     /// 「● 云端模型 · <服务商>」 and the settings gear (the window's one standing way to the model settings).
@@ -574,55 +597,66 @@ struct ChatColumn: View {
     /// Top to bottom: the header, the chat (which gives up height first), the pinned card and queue (bounded: their
     /// bodies scroll), the notice and the composer — the header, the card's question and buttons, and the composer with
     /// its Stop always on screen, down to the window's least height (#107 review).
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
     private func column(height: Double) -> some View {
         let s = shell.current
         return VStack(spacing: 0) {
             header(s)
                 .fixedSize(horizontal: false, vertical: true)
-            if !shell.reachable {
-                Banner(text: L("DeskMind's helper isn't answering. Conversations come back when it does.", lang: lang))
-            }
-            if shell.waitingForHelper {
-                Banner(text: L("Waiting for DeskMind's helper…", lang: lang))
-            }
-            if shell.showsCloudOff(s) {
-                CloudOffRow(openSettings: openSettings)
-            }
-            if let code = s?.settingsRefused {
-                Banner(text: ShellText.settingsRefused(code, lang: lang))
-            }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        if let s { timeline(s) } else { EmptyChat(opening: shell.opening, unmet: unmet, openSetup: openSetup, pick: { shell.fillExample($0) }) }
-                        Color.clear.frame(height: 1).id("bottom")
-                    }
-                    .padding(.horizontal, 40).padding(.top, 18).padding(.bottom, 12)
-                }
-                // (not while a card too tall to pin waits in place in the chat: the chat would pull away from it)
-                .onChange(of: s?.lastSeq) { _, _ in if !inlineCard(s) { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } } }
-                .onChange(of: s?.streamingMessage?.text.count) { _, _ in proxy.scrollTo("bottom") }
-                .onChange(of: shell.selected) { _, _ in proxy.scrollTo("bottom") }
-                .onChange(of: jumpTo) { _, id in
-                    if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }; jumpTo = nil }
-                }
-                // (an option of a card in place here took the keyboard focus: into view)
-                .onChange(of: shell.scrollRequest?.n) { _, _ in if let id = shell.scrollRequest?.id { proxy.scrollTo(id) } }
-            }
-            .frame(minHeight: 0, maxHeight: .infinity)
-            .layoutPriority(0)
+            banners(s)
+            chat(s)
             if let s { pinned(s).layoutPriority(1) }
-            if let n = shell.notice {
-                Text(n).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 40).padding(.bottom, 4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .layoutPriority(2)
-            }
+            if let n = shell.notice { noticeLine(n) }
             Composer(shell: shell)
                 .fixedSize(horizontal: false, vertical: true)
                 .layoutPriority(2)
         }
         .frame(height: height)
+    }
+
+    @ViewBuilder private func banners(_ s: SessionState?) -> some View {
+        if !shell.reachable {
+            Banner(text: L("DeskMind's helper isn't answering. Conversations come back when it does.", lang: lang))
+        }
+        if shell.waitingForHelper {
+            Banner(text: L("Waiting for DeskMind's helper…", lang: lang))
+        }
+        if shell.showsCloudOff(s) {
+            CloudOffRow(openSettings: openSettings)
+        }
+        if let code = s?.settingsRefused {
+            Banner(text: ShellText.settingsRefused(code, lang: lang))
+        }
+    }
+
+    private func chat(_ s: SessionState?) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if let s { timeline(s) } else { EmptyChat(opening: shell.opening, unmet: unmet, openSetup: openSetup, pick: { shell.fillExample($0) }) }
+                    Color.clear.frame(height: 1).id("bottom")
+                }
+                .padding(.horizontal, 40).padding(.top, 18).padding(.bottom, 12)
+            }
+            // (not while a card too tall to pin waits in place in the chat: the chat would pull away from it)
+            .onChange(of: s?.lastSeq) { _, _ in if !inlineCard(s) { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom") } } }
+            .onChange(of: s?.streamingMessage?.text.count) { _, _ in proxy.scrollTo("bottom") }
+            .onChange(of: shell.selected) { _, _ in proxy.scrollTo("bottom") }
+            .onChange(of: jumpTo) { _, id in
+                if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .top) }; jumpTo = nil }
+            }
+            // (an option of a card in place here took the keyboard focus: into view)
+            .onChange(of: shell.scrollRequest?.n) { _, _ in if let id = shell.scrollRequest?.id { proxy.scrollTo(id) } }
+        }
+        .frame(minHeight: 0, maxHeight: .infinity)
+        .layoutPriority(0)
+    }
+
+    private func noticeLine(_ n: String) -> some View {
+        Text(n).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 40).padding(.bottom, 4)
+            .fixedSize(horizontal: false, vertical: true)
+            .layoutPriority(2)
     }
 
     /// 60 pt (P1Main): the conversation's title, and under it its state in a line (orange while it waits for you);
@@ -636,8 +670,10 @@ struct ChatColumn: View {
                     let waits: Bool = { switch s.status { case .waitingForYou, .cardExpired: true; default: false } }()
                     // (P1Main: paused or locked, in ink and 600 -- the task is held, not working)
                     let held: Bool = { switch s.status { case .paused, .locked: true; default: false } }()
-                    Text(Self.headSub(s, lang: lang)).font(.system(size: 12, weight: waits || held ? .semibold : .regular))
-                        .foregroundStyle(waits ? ShellColor.orangeText : held ? Brand.ink : ShellColor.secondary).lineLimit(1)
+                    let weight: Font.Weight = waits || held ? .semibold : .regular
+                    let colour: Color = waits ? ShellColor.orangeText : held ? Brand.ink : ShellColor.secondary
+                    Text(Self.headSub(s, lang: lang)).font(.system(size: 12, weight: weight))
+                        .foregroundStyle(colour).lineLimit(1)
                 }
             }
             Spacer()
@@ -891,32 +927,45 @@ struct ReplyText: View {
     let text: String
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(ChatMarkdown.blocks(text).enumerated()), id: \.offset) { _, b in
-                switch b {
-                case .paragraph(let s): Self.body(s)
-                case .heading(let s): Self.body(s).fontWeight(.semibold)
-                case .list(let items):
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(items.enumerated()), id: \.offset) { _, i in
-                            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                Text(verbatim: i.marker).font(.system(size: 15).monospacedDigit()).foregroundStyle(ShellColor.secondary)
-                                    .frame(minWidth: 14, alignment: .trailing)
-                                Self.body(i.text)
-                            }
-                            .padding(.leading, CGFloat(i.level) * 18)
-                        }
-                    }
-                case .code(let s):
-                    Text(verbatim: s).font(.system(size: 13, design: .monospaced)).lineSpacing(3).foregroundStyle(Brand.ink)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 12).padding(.vertical, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(ShellColor.bubble))
-                case .rule: Hairline()
-                }
-            }
+        let blocks: [ChatMarkdown.Block] = ChatMarkdown.blocks(text)
+        return VStack(alignment: .leading, spacing: 10) {
+            ForEach(blocks.indices, id: \.self) { i in Self.block(blocks[i]) }
         }
+    }
+
+    @ViewBuilder static func block(_ b: ChatMarkdown.Block) -> some View {
+        switch b {
+        case .paragraph(let s): body(s)
+        case .heading(let s): body(s).fontWeight(.semibold)
+        case .list(let items): list(items)
+        case .code(let s): code(s)
+        case .rule: Hairline()
+        }
+    }
+
+    static func list(_ items: [ChatMarkdown.Item]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(items.indices, id: \.self) { n in item(items[n]) }
+        }
+    }
+
+    static func item(_ i: ChatMarkdown.Item) -> some View {
+        let indent: CGFloat = CGFloat(i.level) * 18
+        return HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(verbatim: i.marker).font(.system(size: 15).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+                .frame(minWidth: 14, alignment: .trailing)
+            body(i.text)
+        }
+        .padding(.leading, indent)
+    }
+
+    static func code(_ s: String) -> some View {
+        let well = RoundedRectangle(cornerRadius: 8, style: .continuous)
+        return Text(verbatim: s).font(.system(size: 13, design: .monospaced)).lineSpacing(3).foregroundStyle(Brand.ink)
+            .textSelection(.enabled)
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(well.fill(ShellColor.bubble))
     }
 
     static func body(_ s: String) -> some View {
@@ -935,34 +984,54 @@ struct MessageRow: View {
     var labelled = false
     @Environment(\.lang) private var lang
 
+    // (in typed pieces: one expression of all of it was more than CI's older compiler would type-check, rc.21)
+    private var user: Bool { message.role == "user" }
+
     var body: some View {
-        let user = message.role == "user"
-        HStack {
+        let alignment: HorizontalAlignment = user ? .trailing : .leading
+        let width: CGFloat = user ? 460 : 640
+        let frameAlignment: Alignment = user ? .trailing : .leading
+        return HStack {
             if user { Spacer(minLength: 60) }
-            VStack(alignment: user ? .trailing : .leading, spacing: 6) {
+            VStack(alignment: alignment, spacing: 6) {
                 if !user && labelled { SpeakerLabel() }
-                // (the boards' 15 px on a 1.55 line: 23.25, the font's own about 18)
-                if user || message.text.isEmpty {
-                    Text(message.text.isEmpty && message.streaming ? "…" : message.text)
-                        .font(.system(size: 15)).lineSpacing(5).padding(.vertical, 2.5).foregroundStyle(Brand.ink)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, user ? 14 : 0).padding(.vertical, user ? 10 : 0)
-                        .background(user ? UserBubble().fill(ShellColor.bubble) : nil)
-                        .opacity(message.retracted ? 0.5 : 1)
-                } else {
-                    // (the reply's Markdown: what the user types stays as typed)
-                    ReplyText(text: message.text).opacity(message.retracted ? 0.5 : 1)
-                }
+                words
                 if let note = note {
                     Text(note).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 }
             }
-            .frame(maxWidth: user ? 460 : 640, alignment: user ? .trailing : .leading)
+            .frame(maxWidth: width, alignment: frameAlignment)
             if !user { Spacer(minLength: 24) }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel((user ? L("You", lang: lang) : L("DeskMind", lang: lang)) + ": " + (user ? message.text : ChatMarkdown.plain(message.text))
-                            + (note.map { ". " + $0 } ?? ""))
+        .accessibilityLabel(spoken)
+    }
+
+    /// The words: the user's as typed, in their bubble; a reply's Markdown (ReplyText). The boards' 15 px on a 1.55
+    /// line: 23.25, the font's own about 18.
+    @ViewBuilder private var words: some View {
+        let fade: Double = message.retracted ? 0.5 : 1
+        if user {
+            Self.plain(message.text).padding(.horizontal, 14).padding(.vertical, 10)
+                .background(UserBubble().fill(ShellColor.bubble))
+                .opacity(fade)
+        } else if message.text.isEmpty {
+            Self.plain(message.streaming ? "…" : "").opacity(fade)
+        } else {
+            ReplyText(text: message.text).opacity(fade)
+        }
+    }
+
+    private static func plain(_ s: String) -> some View {
+        Text(s).font(.system(size: 15)).lineSpacing(5).padding(.vertical, 2.5).foregroundStyle(Brand.ink)
+            .textSelection(.enabled)
+    }
+
+    private var spoken: String {
+        let who: String = user ? L("You", lang: lang) : L("DeskMind", lang: lang)
+        let what: String = user ? message.text : ChatMarkdown.plain(message.text)
+        let tail: String = note.map { ". " + $0 } ?? ""
+        return who + ": " + what + tail
     }
 
     private var note: String? {
@@ -1347,98 +1416,130 @@ struct AgentPanel: View {
 
     /// P1Main's right column: 小方 and the state in a line (the step and the time on the right), the live view in its
     /// ink frame, then white cards -- this Mac (always its three rows), the steps, the changes.
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
     private func content(_ c: RightColumn) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    XiaoFace(eyes: XiaoEyes.of(c.status), size: 28)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(headline(c.status))
-                            .font(.system(size: 14, weight: .bold)).foregroundStyle(Self.waits(c.status) ? ShellColor.orangeText : Brand.ink)
-                            .lineLimit(1)
-                        if let sub = subline(c.status) {
-                            Text(sub).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(L("Status: %@", ShellText.status(c.status, lang: lang), lang: lang))
-                    Spacer(minLength: 4)
-                    if let p = c.progress {
-                        Text(L("Step %d · %d:%02d", p.step, p.seconds / 60, p.seconds % 60, lang: lang))
-                            .font(.system(size: 12).monospacedDigit()).foregroundStyle(ShellColor.secondary)
-                    }
-                }
-                .frame(height: 40)
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("panel.state")
-                // the live view of the task's window (A4), while one runs here
-                if let t = shell.current?.runningTask, watched != nil || still != nil {
-                    let last = t.steps.last
-                    LiveFrame(picture: still ?? dock.picture, state: still == nil ? dock.state : .streaming,
-                              app: Self.appName(last?.object), waiting: Self.waits(c.status), about: aboutToAct,
-                              step: last.map(\.displayText), stepWindow: LiveFeed.windowNumber(last?.object),
-                              target: last?.target,
-                              // (only a card waiting on a button, by a rect of its own: cards carry none today, so no box)
-                              boxRect: LiveFeed.boxRect(cardWaitsOnButton: waitingClick != nil, card: waitingClick?.targetBox?.rectNorm),
-                              boxWindow: LiveFeed.windowNumber(waitingClick?.object),
-                              zoomed: $zoomed, popOut: { shell.togglePopOut() })
-                } else if shell.current?.runningTask != nil {
-                    placeholder(L("The live view is in the float", lang: lang))
-                } else if let t = shell.current?.tasks.last, let p = still ?? (dock.lastRun == t.runId ? dock.last : nil) {
-                    // (P1Flow frame 6: the task over, its last picture stays, dimmed, and how it ended under it)
-                    let last = t.steps.last
-                    LiveFrame(picture: p, state: .streaming, app: Self.appName(last?.object), waiting: false, about: nil,
-                              step: ShellText.status(c.status, lang: lang), stepWindow: nil, target: nil, boxRect: nil,
-                              zoomed: $zoomed, popOut: {}, ended: true)
-                } else {
-                    placeholder(L("When it works the computer, the live view, the steps and the changes show here.", lang: lang))
-                }
-                if let who = c.computerUsedBy {
-                    Button(L("The computer is being used by 「%@」", who, lang: lang)) { if let id = c.computerUsedById { shell.select(id) } }
-                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
-                        .accessibilityHint(L("Shows that conversation", lang: lang))
-                }
+                stateLine(c)
+                live(c)
+                if let who = c.computerUsedBy { usedBy(who, id: c.computerUsedById) }
                 macSection(c)
-                if !c.plan.isEmpty {
-                    section(L("Current steps", lang: lang), spacing: 7, link: shell.current?.tasks.last.map { t in (L("All records ›", lang: lang), { shell.showProcess(t.runId) }) }) {
-                        ForEach(c.plan, id: \.n) { r in
-                            let waitsHere = r.mark == .current && Self.waits(c.status)
-                            HStack(spacing: 9) {
-                                Self.markShape(r.mark, halo: waitsHere).frame(width: 16, height: 16).accessibilityHidden(true)
-                                Text(r.purpose).font(.system(size: 13, weight: r.mark == .current ? .semibold : .regular))
-                                    .foregroundStyle(r.mark == .done ? ShellColor.secondary : r.mark == .todo ? Color(ShellPalette.macLine) : Brand.ink)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                Spacer(minLength: 4)
-                                // (P1Waiting: the step that waits says 「等你」; P1Main: one still to come that asks first, 「发前问你」)
-                                if waitsHere {
-                                    Text(L("Waiting", lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.orangeText)
-                                } else if r.asksFirst {
-                                    Text(L("asks before sending", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
-                                }
-                            }
-                            .frame(minHeight: 18.5)
-                            .accessibilityElement(children: .combine)
-                            .accessibilityLabel(L("Step %d: %@, %@", r.n, r.purpose, Self.markWord(r.mark, lang: lang), lang: lang))
-                        }
-                    }
-                }
-                if !c.changeRows.isEmpty || c.sentLine != nil {
-                    section(L("Changes and outputs", lang: lang), link: shell.current?.tasks.last.map { t in (L("Details ›", lang: lang), { shell.showChanges(t.runId) }) }) {
-                        ForEach(Array(c.changeRows.enumerated()), id: \.offset) { _, r in ChangeRowView(row: r) }
-                        if let s = c.sentLine {
-                            HStack(spacing: 10) {
-                                Image(systemName: "paperplane").font(.system(size: 13)).foregroundStyle(ShellColor.secondary).frame(width: 16).accessibilityHidden(true)
-                                Text(s == .noneYetWaiting ? L("Sent: none yet, waiting for you", lang: lang) : { if case .count(let n) = s { return L("Sent: %d", n, lang: lang) }; return "" }())
-                                    .font(.system(size: 13)).foregroundStyle(ShellColor.secondary)
-                            }
-                        }
-                        if c.changes.undone { line(L("All undone", lang: lang)) }
-                    }
-                }
+                steps(c)
+                changes(c)
             }
             .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 16)
         }
         .frame(maxHeight: .infinity)
+    }
+
+    private func stateLine(_ c: RightColumn) -> some View {
+        let colour: Color = Self.waits(c.status) ? ShellColor.orangeText : Brand.ink
+        let spoken: String = L("Status: %@", ShellText.status(c.status, lang: lang), lang: lang)
+        return HStack(spacing: 12) {
+            XiaoFace(eyes: XiaoEyes.of(c.status), size: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(headline(c.status))
+                    .font(.system(size: 14, weight: .bold)).foregroundStyle(colour)
+                    .lineLimit(1)
+                if let sub = subline(c.status) {
+                    Text(sub).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(spoken)
+            Spacer(minLength: 4)
+            if let p = c.progress {
+                Text(L("Step %d · %d:%02d", p.step, p.seconds / 60, p.seconds % 60, lang: lang))
+                    .font(.system(size: 12).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+            }
+        }
+        .frame(height: 40)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("panel.state")
+    }
+
+    @ViewBuilder private func live(_ c: RightColumn) -> some View {
+        // the live view of the task's window (A4), while one runs here
+        if let t = shell.current?.runningTask, watched != nil || still != nil {
+            let last = t.steps.last
+            LiveFrame(picture: still ?? dock.picture, state: still == nil ? dock.state : .streaming,
+                      app: Self.appName(last?.object), waiting: Self.waits(c.status), about: aboutToAct,
+                      step: last.map(\.displayText), stepWindow: LiveFeed.windowNumber(last?.object),
+                      target: last?.target,
+                      // (only a card waiting on a button, by a rect of its own: cards carry none today, so no box)
+                      boxRect: LiveFeed.boxRect(cardWaitsOnButton: waitingClick != nil, card: waitingClick?.targetBox?.rectNorm),
+                      boxWindow: LiveFeed.windowNumber(waitingClick?.object),
+                      zoomed: $zoomed, popOut: { shell.togglePopOut() })
+        } else if shell.current?.runningTask != nil {
+            placeholder(L("The live view is in the float", lang: lang))
+        } else if let t = shell.current?.tasks.last, let p = still ?? (dock.lastRun == t.runId ? dock.last : nil) {
+            // (P1Flow frame 6: the task over, its last picture stays, dimmed, and how it ended under it)
+            let last = t.steps.last
+            LiveFrame(picture: p, state: .streaming, app: Self.appName(last?.object), waiting: false, about: nil,
+                      step: ShellText.status(c.status, lang: lang), stepWindow: nil, target: nil, boxRect: nil,
+                      zoomed: $zoomed, popOut: {}, ended: true)
+        } else {
+            placeholder(L("When it works the computer, the live view, the steps and the changes show here.", lang: lang))
+        }
+    }
+
+    private func usedBy(_ who: String, id: String?) -> some View {
+        Button(L("The computer is being used by 「%@」", who, lang: lang)) { if let id { shell.select(id) } }
+            .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
+            .accessibilityHint(L("Shows that conversation", lang: lang))
+    }
+
+    @ViewBuilder private func steps(_ c: RightColumn) -> some View {
+        if !c.plan.isEmpty {
+            section(L("Current steps", lang: lang), spacing: 7, link: shell.current?.tasks.last.map { t in (L("All records ›", lang: lang), { shell.showProcess(t.runId) }) }) {
+                ForEach(c.plan, id: \.n) { r in stepRow(r, waits: Self.waits(c.status)) }
+            }
+        }
+    }
+
+    private func stepRow(_ r: RightColumn.PlanRow, waits: Bool) -> some View {
+        let waitsHere: Bool = r.mark == .current && waits
+        let weight: Font.Weight = r.mark == .current ? .semibold : .regular
+        let colour: Color = r.mark == .done ? ShellColor.secondary : r.mark == .todo ? Color(ShellPalette.macLine) : Brand.ink
+        return HStack(spacing: 9) {
+            Self.markShape(r.mark, halo: waitsHere).frame(width: 16, height: 16).accessibilityHidden(true)
+            Text(r.purpose).font(.system(size: 13, weight: weight))
+                .foregroundStyle(colour)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            // (P1Waiting: the step that waits says 「等你」; P1Main: one still to come that asks first, 「发前问你」)
+            if waitsHere {
+                Text(L("Waiting", lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.orangeText)
+            } else if r.asksFirst {
+                Text(L("asks before sending", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+            }
+        }
+        .frame(minHeight: 18.5)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(L("Step %d: %@, %@", r.n, r.purpose, Self.markWord(r.mark, lang: lang), lang: lang))
+    }
+
+    @ViewBuilder private func changes(_ c: RightColumn) -> some View {
+        if !c.changeRows.isEmpty || c.sentLine != nil {
+            section(L("Changes and outputs", lang: lang), link: shell.current?.tasks.last.map { t in (L("Details ›", lang: lang), { shell.showChanges(t.runId) }) }) {
+                ForEach(Array(c.changeRows.enumerated()), id: \.offset) { _, r in ChangeRowView(row: r) }
+                if let s = c.sentLine {
+                    HStack(spacing: 10) {
+                        Image(systemName: "paperplane").font(.system(size: 13)).foregroundStyle(ShellColor.secondary).frame(width: 16).accessibilityHidden(true)
+                        Text(sentWords(s))
+                            .font(.system(size: 13)).foregroundStyle(ShellColor.secondary)
+                    }
+                }
+                if c.changes.undone { line(L("All undone", lang: lang)) }
+            }
+        }
+    }
+
+    private func sentWords(_ s: RightColumn.SentLine) -> String {
+        switch s {
+        case .noneYetWaiting: return L("Sent: none yet, waiting for you", lang: lang)
+        case .count(let n): return L("Sent: %d", n, lang: lang)
+        }
     }
 
     /// No computer task in this conversation yet (P3States 「还没有任务」, U4 §2.4): 小方 with its dot in mist and

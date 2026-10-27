@@ -90,8 +90,10 @@ enum CardNoticesTests {
               "the chat island finishes without the island's own notification")
         // 3. the float answers by the window's state at the click
         let buttons = float.components(separatedBy: "struct FloatCard").last ?? ""
-        // (U2: 「现在回答」, 「撤回」, a pick, a button)
-        check(buttons.components(separatedBy: "if FloatController.shared.answersNow() {").count - 1 == 4 && float.contains("frontNow: FrontmostMonitor.observe() == .front, float: visibility())"),
+        // (U2: 「现在回答」, 「撤回」, and answer(_:) -- what a pick and a button both run)
+        check(buttons.components(separatedBy: "if FloatController.shared.answersNow() {").count - 1 == 3
+              && buttons.contains("return Button { answer(c) } label:") && buttons.contains("Button(c.button.text) { answer(c) }")
+              && float.contains("frontNow: FrontmostMonitor.observe() == .front, float: visibility())"),
               "every float answer button checks the window's state now")
         // #125 Codex review at 2f29d42, then the owner's #133 decision: the float's card is as short as P1Float draws
         // it, from the chat's CardLayout -- an action card's brief (CardBrief: its question and what goes out), the line

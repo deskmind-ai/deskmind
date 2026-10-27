@@ -721,10 +721,12 @@ enum CardLayoutTests {
         // the view's labels and hints read keyWorks (never keysActive alone)
         let url = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Main/CardViews.swift")
         let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        check(text.components(separatedBy: "KeyCap(n: k)").count - 1 == 2 && text.components(separatedBy: "if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) }").count - 1 == 2
-              && text.contains("CardLayout.hint(c, keys: shell.keyWorks(card, c)") && !text.contains("keysActive"), "labels and hints: keyWorks")
+        // (the control reads keyWorks once and hands it to both of its kinds and to the hint)
+        check(text.contains("let keys: Bool = shell.keyWorks(card, c)") && text.components(separatedBy: "KeyCap(n: k)").count - 1 == 2
+              && text.components(separatedBy: "if keys, let k = c.key { KeyCap(n: k) }").count - 1 == 2
+              && text.contains("CardLayout.hint(c, keys: keys") && !text.contains("keysActive"), "labels and hints: keyWorks")
         // a click by VoiceOver presses the same action as the mouse: the control's Button runs shell.click
-        check(text.contains("let action = { _ = shell.click(b) }") && text.components(separatedBy: "Button(action: action)").count - 1 == 2,
+        check(text.contains("private func press(_ b: CardModel.Button) { _ = shell.click(b) }") && text.components(separatedBy: "Button { press(b) }").count - 1 == 2,
               "VoiceOver's press and the mouse click are the same action")
         // a click on an option (the mouse, or VoiceOver's press: that action) is a move into the card
         let r = CardStoreTests.Rig()

@@ -26,32 +26,51 @@ struct TaskRow: View {
     /// its cards no longer pinned -- whole while no card waits (P1Main), a line each while one does (P1Waiting) -- then
     /// where it is, in a line with the orange dot (two while a card waits: the step done, the one that waits); the card
     /// too tall to pin, in place; once it ended, its result card.
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
     var body: some View {
-        let pinned = shell.pinned(session)
-        VStack(alignment: .leading, spacing: 12) {
+        let pinned: Pinned? = shell.pinned(session)
+        let mine: Pinned? = Self.mine(pinned, runId: task.runId)
+        let answered: [CardState] = shown(pinned: pinned?.card.askId)
+        let compact: Bool = pinned != nil
+        return VStack(alignment: .leading, spacing: 12) {
             if labelled { SpeakerLabel() }
             // (a card voided by the user's change and asked again is the new card's 「已作废」 strip, not a card of its own)
-            ForEach(shown(pinned: pinned?.card.askId), id: \.askId) { c in
-                AnsweredRow(card: c, runId: task.runId, phase: shell.phase(task.runId, c, in: session), compact: pinned != nil)
-            }
-            if task.running { statusLines(pinned: pinned?.runId == task.runId ? pinned : nil) }
+            ForEach(answered, id: \.askId) { c in answeredRow(c, compact: compact) }
+            if task.running { statusLines(pinned: mine) }
             // (the pinned card is above the composer -- or here, whole, when it is too tall to pin: A2)
-            if let p = pinned, p.runId == task.runId {
-                let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
-                if !shell.cardPinnedWhole(m) {
-                    CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: session).id(Self.cardAnchor(m))
-                }
-            }
-            if !task.running {
-                if ShellText.fullyUndone(task) == nil, let a = task.answer, !a.isEmpty, a != ShellText.summary(task, lang: lang) {
-                    Text(a).font(.system(size: 15)).lineSpacing(15 * 0.55 - 3).foregroundStyle(Brand.ink).textSelection(.enabled)
-                }
-                ResultSection(shell: shell, task: task, session: session)
-            }
+            if let p = mine { tooTall(p) }
+            if !task.running { ended }
         }
         .frame(maxWidth: 640, alignment: .leading)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L("Computer task: %@", task.raw, lang: lang))
+    }
+
+    typealias Pinned = (runId: String, card: CardState, phase: CardPhase)
+
+    static func mine(_ p: Pinned?, runId: String) -> Pinned? {
+        guard let p, p.runId == runId else { return nil }
+        return p
+    }
+
+    private func answeredRow(_ c: CardState, compact: Bool) -> some View {
+        let phase: CardPhase = shell.phase(task.runId, c, in: session)
+        return AnsweredRow(card: c, runId: task.runId, phase: phase, compact: compact)
+    }
+
+    @ViewBuilder private func tooTall(_ p: Pinned) -> some View {
+        let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
+        if !shell.cardPinnedWhole(m) {
+            CardView(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: session).id(Self.cardAnchor(m))
+        }
+    }
+
+    /// Once it ended: its answer (when it says more than the summary, and nothing was undone) and its result card.
+    @ViewBuilder private var ended: some View {
+        if ShellText.fullyUndone(task) == nil, let a = task.answer, !a.isEmpty, a != ShellText.summary(task, lang: lang) {
+            Text(a).font(.system(size: 15)).lineSpacing(15 * 0.55 - 3).foregroundStyle(Brand.ink).textSelection(.enabled)
+        }
+        ResultSection(shell: shell, task: task, session: session)
     }
 
     /// Its cards as the chat shows them: not the pinned one, and not one voided by a change the next card was asked for.
@@ -160,52 +179,15 @@ struct ResultSection: View {
         }
     }
 
-    @ViewBuilder private var card: some View {
-        let undoButtons = task.resultCard.map { CardModel(resultCard: $0, runId: task.runId) }.map { m in m.buttons.filter { $0.role == .undo }.map { (m, $0) } } ?? []
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
+    private var card: some View {
         VStack(alignment: .leading, spacing: 6) {
             VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 6) {
-                    if headOK {
-                        CheckMark().stroke(ShellColor.ok, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                            .frame(width: 13, height: 13).accessibilityHidden(true)
-                    }
-                    Text(head).font(.system(size: 15, weight: .bold)).foregroundStyle(partlyUndone ? ShellColor.orangeText : Brand.ink)
-                }
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, r in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(r.label).font(.system(size: 12, weight: r.bad ? .bold : .regular))
-                            .foregroundStyle(r.bad ? ShellColor.orangeText : ShellColor.secondary).frame(width: 58, alignment: .leading)
-                        Text(r.value).font(.system(size: 12)).lineSpacing(2).foregroundStyle(CardColor.body)
-                            .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    }
-                    .accessibilityElement(children: .combine)
-                }
+                headRow
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, r in rowView(r) }
                 Spacer(minLength: 0)
                 if let foot { Text(foot).font(.system(size: 11)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true) }
-                HStack(spacing: 6) {
-                    // (its undo: the card's own option, through shell.click -- open only while the harness offers it)
-                    ForEach(undoButtons, id: \.1.index) { m, b in
-                        if task.resultCardState.undoEnabled {
-                            Button(b.text) { _ = shell.click(b) }
-                                .buttonStyle(CardButtonStyle(prominent: false, height: 32, radius: 16, size: 12, fill: false))
-                                .disabled(!shell.buttonEnabled(b, card: m, in: session))
-                                .accessibilityLabel(b.text)
-                                .accessibilityHint(L("Undoes what the task changed", lang: lang))
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    Button(L("Review ›", lang: lang)) { shell.showProcess(task.runId) }
-                        .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
-                        .accessibilityLabel(L("Review", lang: lang))
-                        .accessibilityHint(L("Shows this task's process in the right column", lang: lang))
-                    // 「已录制」: the task's movie (Movies › DeskMind), when one was made
-                    if let path = shell.movies[task.runId] {
-                        Button(L("Recorded", lang: lang)) { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
-                            .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
-                            .accessibilityLabel(L("Recorded", lang: lang))
-                            .accessibilityHint(L("Opens the task's recording", lang: lang))
-                    }
-                }
+                actions
             }
             .padding(.horizontal, 14).padding(.vertical, 12)
             .frame(width: 300, alignment: .leading)
@@ -221,6 +203,63 @@ struct ResultSection: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel(l)
                 }
+            }
+        }
+    }
+
+    private var headRow: some View {
+        let colour: Color = partlyUndone ? ShellColor.orangeText : Brand.ink
+        return HStack(spacing: 6) {
+            if headOK {
+                CheckMark().stroke(ShellColor.ok, style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+                    .frame(width: 13, height: 13).accessibilityHidden(true)
+            }
+            Text(head).font(.system(size: 15, weight: .bold)).foregroundStyle(colour)
+        }
+    }
+
+    private func rowView(_ r: Row) -> some View {
+        let weight: Font.Weight = r.bad ? .bold : .regular
+        let colour: Color = r.bad ? ShellColor.orangeText : ShellColor.secondary
+        return HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(r.label).font(.system(size: 12, weight: weight))
+                .foregroundStyle(colour).frame(width: 58, alignment: .leading)
+            Text(r.value).font(.system(size: 12)).lineSpacing(2).foregroundStyle(CardColor.body)
+                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Its undo -- the card's own option, open only while the harness offers it -- then 复盘 and 「已录制」.
+    private var undoButtons: [(CardModel, CardModel.Button)] {
+        guard let r = task.resultCard else { return [] }
+        let m = CardModel(resultCard: r, runId: task.runId)
+        return m.buttons.filter { $0.role == .undo }.map { (m, $0) }
+    }
+
+    private var actions: some View {
+        HStack(spacing: 6) {
+            // (its undo: the card's own option, through shell.click -- open only while the harness offers it)
+            ForEach(undoButtons, id: \.1.index) { m, b in
+                if task.resultCardState.undoEnabled {
+                    Button(b.text) { _ = shell.click(b) }
+                        .buttonStyle(CardButtonStyle(prominent: false, height: 32, radius: 16, size: 12, fill: false))
+                        .disabled(!shell.buttonEnabled(b, card: m, in: session))
+                        .accessibilityLabel(b.text)
+                        .accessibilityHint(L("Undoes what the task changed", lang: lang))
+                }
+            }
+            Spacer(minLength: 0)
+            Button(L("Review ›", lang: lang)) { shell.showProcess(task.runId) }
+                .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                .accessibilityLabel(L("Review", lang: lang))
+                .accessibilityHint(L("Shows this task's process in the right column", lang: lang))
+            // 「已录制」: the task's movie (Movies › DeskMind), when one was made
+            if let path = shell.movies[task.runId] {
+                Button(L("Recorded", lang: lang)) { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                    .accessibilityLabel(L("Recorded", lang: lang))
+                    .accessibilityHint(L("Opens the task's recording", lang: lang))
             }
         }
     }

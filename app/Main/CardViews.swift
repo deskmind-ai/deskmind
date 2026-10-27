@@ -106,74 +106,99 @@ struct CardView: View {
         .onDisappear { shell.cardHidden(card) }
     }
 
-    @ViewBuilder private var box: some View {
+    // (in typed pieces: CI's older compiler gave up on it as one expression, rc.21)
+    private var box: some View {
         let layout = self.layout
         let brief = CardBrief(layout, lang: lang)
         let shape = RoundedRectangle(cornerRadius: 16)
-        VStack(alignment: .leading, spacing: 10) {
+        let fill: Color = ended ? CardColor.ended : Brand.card
+        let edge: Color = waits ? Color.clear : Brand.line
+        let ring: Color = waits ? Brand.dot : Color.clear
+        let shadow: Color = waits ? Brand.ink.opacity(0.12) : Color.clear
+        return VStack(alignment: .leading, spacing: 10) {
             header
-            Text(layout.title).font(.system(size: waits ? 17 : 15, weight: .bold)).lineSpacing(3)
-                .foregroundStyle(ended ? CardColor.body : Brand.ink)
-                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            titleText(layout)
             if ended {
                 endedRow
             } else {
-                if let t = layout.shownText {
-                    Text(t).font(.system(size: 13)).lineSpacing(3).foregroundStyle(CardColor.body).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if let t = textInline {
-                    Text(t).font(.system(size: 13)).lineSpacing(3).foregroundStyle(CardColor.body).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.system(size: 13)).foregroundStyle(CardColor.body).fixedSize(horizontal: false, vertical: true)
-                }
-                if !layout.plan.isEmpty { PlanBody(layout: layout) }
-                if let brief { BriefBlock(brief: brief) }
-                // (what the two lines leave out -- the other fields, the window's text, where it acts, the card's whole
-                // text -- under 「细节」: owner, #133; an earlier step that may have gone out stays above, in its line)
-                if (brief?.folded ?? false) || (layout.hasDetails && textInline == nil) {
-                    DisclosureGroup(isExpanded: detailsOpen) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            if !layout.text.isEmpty && layout.text != layout.title {
-                                Text(layout.text).font(.system(size: 13)).foregroundStyle(CardColor.body).textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            if let c = layout.consent { ConsentFields(consent: c, showsAction: card.headline == nil) }
-                        }
-                        .padding(.top, 4)
-                    } label: {
-                        Text(L("Card details", lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
-                    }
-                }
-                if !layout.list.isEmpty && phase.ending == nil {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(layout.list, id: \.index) { c in control(c) }
-                    }
-                }
-                if phase.ending == nil && (!layout.buttons.isEmpty || answersWithField) {
-                    buttonRow(layout)
-                }
-                if layout.field && phase.ending == nil && !answersWithField { ownWords }
-                if phase.ending == nil, let d = layout.buttons.first(where: { $0.button.role == .delegate }), layout.kind == .ambiguity || !layout.list.isEmpty {
-                    Text(L("%@: it picks one itself and goes on.", d.button.text, lang: lang))
-                        .font(.system(size: 12)).lineSpacing(2).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                if phase.ending == nil, layout.consent != nil, let hint = CardLayout.consentHint(card, lang: lang) {
-                    Text(hint).font(.system(size: 12)).lineSpacing(2).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                if let held = phase.pending, case .pending(_, let until) = phase { takeBackRow(held, until: until) }
+                words(layout, brief: brief)
+                details(layout, brief: brief)
+                answers(layout)
             }
         }
         .padding(.horizontal, 16).padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(shape.fill(ended ? CardColor.ended : Brand.card))
+        .background(shape.fill(fill))
         // (waiting: the 2 pt orange ring outside its edge and its shadow, no grey edge -- P1Waiting; else the hairline)
-        .overlay(shape.strokeBorder(waits ? Color.clear : Brand.line, lineWidth: 1))
-        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(waits ? Brand.dot : Color.clear, lineWidth: 2).padding(-2))
-        .shadow(color: waits ? Brand.ink.opacity(0.12) : Color.clear, radius: 15, y: 12)
+        .overlay(shape.strokeBorder(edge, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(ring, lineWidth: 2).padding(-2))
+        .shadow(color: shadow, radius: 15, y: 12)
+    }
+
+    private func titleText(_ layout: CardLayout) -> some View {
+        let size: CGFloat = waits ? 17 : 15
+        let colour: Color = ended ? CardColor.body : Brand.ink
+        return Text(layout.title).font(.system(size: size, weight: .bold)).lineSpacing(3)
+            .foregroundStyle(colour)
+            .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The card's words under its question: its text, what goes beyond the request, a plan's steps, the two lines.
+    @ViewBuilder private func words(_ layout: CardLayout, brief: CardBrief?) -> some View {
+        if let t = layout.shownText {
+            Text(t).font(.system(size: 13)).lineSpacing(3).foregroundStyle(CardColor.body).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        if let t = textInline {
+            Text(t).font(.system(size: 13)).lineSpacing(3).foregroundStyle(CardColor.body).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        ForEach(Array(layout.beyond.enumerated()), id: \.offset) { _, line in
+            Text(line).font(.system(size: 13)).foregroundStyle(CardColor.body).fixedSize(horizontal: false, vertical: true)
+        }
+        if !layout.plan.isEmpty { PlanBody(layout: layout) }
+        if let brief { BriefBlock(brief: brief) }
+    }
+
+    @ViewBuilder private func details(_ layout: CardLayout, brief: CardBrief?) -> some View {
+        // (what the two lines leave out -- the other fields, the window's text, where it acts, the card's whole
+        // text -- under 「细节」: owner, #133; an earlier step that may have gone out stays above, in its line)
+        if (brief?.folded ?? false) || (layout.hasDetails && textInline == nil) {
+            DisclosureGroup(isExpanded: detailsOpen) {
+                VStack(alignment: .leading, spacing: 8) {
+                    if !layout.text.isEmpty && layout.text != layout.title {
+                        Text(layout.text).font(.system(size: 13)).foregroundStyle(CardColor.body).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let c = layout.consent { ConsentFields(consent: c, showsAction: card.headline == nil) }
+                }
+                .padding(.top, 4)
+            } label: {
+                Text(L("Card details", lang: lang)).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+            }
+        }
+    }
+
+    /// How it is answered: the list, the buttons, its own words, and the lines under them.
+    @ViewBuilder private func answers(_ layout: CardLayout) -> some View {
+        if !layout.list.isEmpty && phase.ending == nil {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(layout.list, id: \.index) { c in control(c) }
+            }
+        }
+        if phase.ending == nil && (!layout.buttons.isEmpty || answersWithField) {
+            buttonRow(layout)
+        }
+        if layout.field && phase.ending == nil && !answersWithField { ownWords }
+        if phase.ending == nil, let d = layout.buttons.first(where: { $0.button.role == .delegate }), layout.kind == .ambiguity || !layout.list.isEmpty {
+            Text(L("%@: it picks one itself and goes on.", d.button.text, lang: lang))
+                .font(.system(size: 12)).lineSpacing(2).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        if phase.ending == nil, layout.consent != nil, let hint = CardLayout.consentHint(card, lang: lang) {
+            Text(hint).font(.system(size: 12)).lineSpacing(2).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        if let held = phase.pending, case .pending(_, let until) = phase { takeBackRow(held, until: until) }
     }
 
     /// A choice or missing-information card's text under its question, not folded (P3States: 「「下载」里有 [N] 个 9 月的
@@ -267,51 +292,65 @@ struct CardView: View {
 
     /// One option's control: a row of the list (a pick: its number on an ink disc, 14 px semibold, its second line), or a
     /// button; with its key (1–9) shown while the key works.
-    @ViewBuilder private func control(_ c: CardLayout.Control) -> some View {
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
+    private func control(_ c: CardLayout.Control) -> some View {
         let b = c.button
-        let enabled = shell.buttonEnabled(b, card: card, in: session)
-        let action = { _ = shell.click(b) }      // (the same action for a mouse click and VoiceOver's press)
-        let choiceCard = !layout.list.isEmpty
-        Group {
+        let enabled: Bool = shell.buttonEnabled(b, card: card, in: session)
+        let keys: Bool = shell.keyWorks(card, c)
+        let spoken: String = b.detail.map { L("%@, %@", b.text, $0, lang: lang) } ?? b.text
+        return Group {
             switch c.slot {
-            case .list:
-                Button(action: action) {
-                    HStack(alignment: .center, spacing: 10) {
-                        if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) } else {
-                            Circle().strokeBorder(ShellColor.buttonLine, lineWidth: 1.5).frame(width: 22, height: 22).accessibilityHidden(true)
-                        }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(b.text).font(.system(size: 14, weight: .semibold)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
-                            if let d = b.detail {
-                                Text(d).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .frame(minHeight: 44)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
-                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(ShellColor.buttonLine, lineWidth: 1))
-                    .contentShape(RoundedRectangle(cornerRadius: 12))
-                }
-                .buttonStyle(.plain)
-            case .button:
-                Button(action: action) {
-                    HStack(spacing: 6) {
-                        if shell.keyWorks(card, c), let k = c.key { KeyCap(n: k) }
-                        Text(b.text)
-                    }
-                }
-                .buttonStyle(choiceCard ? CardButtonStyle(prominent: false, height: 40, radius: 12, size: 14)
-                                        : CardButtonStyle(prominent: c.prominent && !answersWithField))
+            case .list: listPick(c, keys: keys)
+            case .button: cardButton(c, keys: keys)
             }
         }
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)    // (the style does not dim: the card's own)
         .focused($focusedOption, equals: c.index)
         .id(ShellModel.optionAnchor(card, c.index))
-        .accessibilityLabel(b.detail.map { L("%@, %@", b.text, $0, lang: lang) } ?? b.text)
-        .accessibilityHint(CardLayout.hint(c, keys: shell.keyWorks(card, c), lang: lang))
+        .accessibilityLabel(spoken)
+        .accessibilityHint(CardLayout.hint(c, keys: keys, lang: lang))
+    }
+
+    /// (the same action for a mouse click and VoiceOver's press)
+    private func press(_ b: CardModel.Button) { _ = shell.click(b) }
+
+    private func listPick(_ c: CardLayout.Control, keys: Bool) -> some View {
+        let b = c.button
+        let shape = RoundedRectangle(cornerRadius: 12)
+        return Button { press(b) } label: {
+            HStack(alignment: .center, spacing: 10) {
+                if keys, let k = c.key { KeyCap(n: k) } else {
+                    Circle().strokeBorder(ShellColor.buttonLine, lineWidth: 1.5).frame(width: 22, height: 22).accessibilityHidden(true)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(b.text).font(.system(size: 14, weight: .semibold)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true)
+                    if let d = b.detail {
+                        Text(d).font(.system(size: 12)).foregroundStyle(ShellColor.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .frame(minHeight: 44)
+            .background(shape.fill(Brand.card))
+            .overlay(shape.strokeBorder(ShellColor.buttonLine, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func cardButton(_ c: CardLayout.Control, keys: Bool) -> some View {
+        let b = c.button
+        let style: CardButtonStyle = layout.list.isEmpty ? CardButtonStyle(prominent: c.prominent && !answersWithField)
+                                                         : CardButtonStyle(prominent: false, height: 40, radius: 12, size: 14)
+        return Button { press(b) } label: {
+            HStack(spacing: 6) {
+                if keys, let k = c.key { KeyCap(n: k) }
+                Text(b.text)
+            }
+        }
+        .buttonStyle(style)
     }
 
     /// An ended card's line (P3States): why it no longer counts, in one line; an expired one's small 「现在回答」 while the

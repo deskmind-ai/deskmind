@@ -920,47 +920,63 @@ struct FloatCard: View {
 
     /// The picks one under another (QuestionCard: 52 tall, its number in an orange disc, its words, its second line on
     /// the right); the buttons side by side (P1Float: 可以 1 : 这一步不要 1.25 : 先别做了 1.15).
-    @ViewBuilder private func options(_ layout: CardLayout) -> some View {
-        let picks = layout.list, buttons = layout.buttons
-        let rows = stride(from: 0, to: buttons.count, by: 3).map { Array(buttons[$0..<min($0 + 3, buttons.count)]) }
-        VStack(spacing: 8) {
-            ForEach(picks, id: \.index) { c in
-                let on = placement.takesAnswer && shell.canSend(c.button, session: sessionId)
-                Button { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId, place: .float) } } label: {
-                    HStack(spacing: 12) {
-                        if let k = c.key {
-                            Text("\(k)").font(.system(size: 12, weight: .bold)).foregroundStyle(Color(ShellPalette.onInk))
-                                .frame(width: 22, height: 22).background(Circle().fill(Brand.dot)).accessibilityHidden(true)
-                        }
-                        Text(c.button.text).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 4)
-                        if let d = c.button.detail {
-                            Text(d).font(.system(size: 13)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(1)
-                        }
-                    }
-                    .padding(.horizontal, 14).padding(.vertical, 8).frame(minHeight: 52)
-                    .background(RoundedRectangle(cornerRadius: 13).fill(Color(ShellPalette.inkButton)))
-                    .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(Color(ShellPalette.inkButtonLine)))
-                    .contentShape(RoundedRectangle(cornerRadius: 13))
+    // (in typed pieces: CI's older compiler gives up on long view expressions, rc.21)
+    private func options(_ layout: CardLayout) -> some View {
+        let picks: [CardLayout.Control] = layout.list, buttons: [CardLayout.Control] = layout.buttons
+        let rows: [[CardLayout.Control]] = stride(from: 0, to: buttons.count, by: 3).map { Array(buttons[$0..<min($0 + 3, buttons.count)]) }
+        return VStack(spacing: 8) {
+            ForEach(picks, id: \.index) { c in pick(c) }
+            ForEach(rows.indices, id: \.self) { i in buttonRow(rows[i]) }
+        }
+    }
+
+    private func sendable(_ c: CardLayout.Control) -> Bool {
+        placement.takesAnswer && shell.canSend(c.button, session: sessionId)
+    }
+
+    private func answer(_ c: CardLayout.Control) {
+        // (the window's state now, at the click: in front, the chat answers and this does not)
+        if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId, place: .float) }
+    }
+
+    private func pick(_ c: CardLayout.Control) -> some View {
+        let on: Bool = sendable(c)
+        let shape = RoundedRectangle(cornerRadius: 13)
+        let spoken: String = c.button.detail.map { L("%@, %@", c.button.text, $0, lang: lang) } ?? c.button.text
+        return Button { answer(c) } label: {
+            HStack(spacing: 12) {
+                if let k = c.key {
+                    Text("\(k)").font(.system(size: 12, weight: .bold)).foregroundStyle(Color(ShellPalette.onInk))
+                        .frame(width: 22, height: 22).background(Circle().fill(Brand.dot)).accessibilityHidden(true)
                 }
-                .buttonStyle(.plain)
-                .disabled(!on).opacity(on ? 1 : 0.5)
-                .accessibilityLabel(c.button.detail.map { L("%@, %@", c.button.text, $0, lang: lang) } ?? c.button.text)
+                Text(c.button.text).font(.system(size: 15, weight: .semibold)).foregroundStyle(Color(ShellPalette.onInk))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                if let d = c.button.detail {
+                    Text(d).font(.system(size: 13)).foregroundStyle(Color(ShellPalette.onInkMuted)).lineLimit(1)
+                }
             }
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                WeightedRow(weights: row.map { Self.weight($0.button.role) }, spacing: 6) {
-                    ForEach(row, id: \.index) { c in
-                        // (the window's state now, at the click: in front, the chat answers and this does not)
-                        Button(c.button.text) { if FloatController.shared.answersNow() { _ = shell.click(c.button, session: sessionId, place: .float) } }
-                            .buttonStyle(FloatButtonStyle(prominent: c.prominent))
-                            .disabled(!placement.takesAnswer || !shell.canSend(c.button, session: sessionId))
-                            .opacity(placement.takesAnswer && shell.canSend(c.button, session: sessionId) ? 1 : 0.5)
-                    }
-                }
-                .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 14).padding(.vertical, 8).frame(minHeight: 52)
+            .background(shape.fill(Color(ShellPalette.inkButton)))
+            .overlay(shape.strokeBorder(Color(ShellPalette.inkButtonLine)))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .disabled(!on).opacity(on ? 1 : 0.5)
+        .accessibilityLabel(spoken)
+    }
+
+    private func buttonRow(_ row: [CardLayout.Control]) -> some View {
+        let weights: [Double] = row.map { Self.weight($0.button.role) }
+        return WeightedRow(weights: weights, spacing: 6) {
+            ForEach(row, id: \.index) { c in
+                let on: Bool = sendable(c)
+                Button(c.button.text) { answer(c) }
+                    .buttonStyle(FloatButtonStyle(prominent: c.prominent))
+                    .disabled(!on).opacity(on ? 1 : 0.5)
             }
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// P1Float's widths by what the button does (its words are the harness's): the yes the narrowest.
