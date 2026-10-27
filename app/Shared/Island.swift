@@ -1,6 +1,6 @@
 // What needs no screen for the run's status at the top of the screen: where the notch is, the island's bar (the Island
 // board: one strip at the notch, as tall as it, 380 wide -- 460 while it needs you; on a screen with no notch the same
-// bar as a capsule under the menu bar), and the line that says which stage a starting run is in and for how long.
+// strip hanging from the menu bar), and the line that says which stage a starting run is in and for how long.
 // Foundation and CoreGraphics only, so tests/DecisionTests.swift checks it without a screen.
 
 import CoreGraphics
@@ -24,12 +24,13 @@ enum Island {
     /// the notch (fable, #130); with no notch 380, and 460 while it needs you.
     static func width(notched: Bool, needsYou: Bool) -> CGFloat { notched || needsYou ? barWideWidth : barWidth }
 
-    /// The bar: centred on the notch and as tall as it, hanging from the top of the screen; with no notch, a capsule
-    /// 10 pt under the menu bar, centred on the visible area.
+    /// The bar: centred on the notch and as tall as it, hanging from the top of the screen; with no notch the same
+    /// strip (the Island board: flat on top, its lower corners round), hanging from the menu bar's lower edge --
+    /// never over the menu bar's own items -- centred on the visible area.
     static func barFrame(notch: CGRect?, screen: CGRect, visible: CGRect, needsYou: Bool) -> CGRect {
         let w = width(notched: notch != nil, needsYou: needsYou)
         if let n = notch { return CGRect(x: n.midX - w / 2, y: screen.maxY - n.height, width: w, height: n.height) }
-        return CGRect(x: visible.midX - w / 2, y: visible.maxY - barHeight - 10, width: w, height: barHeight)
+        return CGRect(x: visible.midX - w / 2, y: visible.maxY - barHeight, width: w, height: barHeight)
     }
 
     /// The bar's inset from its ends, and the room it keeps clear on each side of the notch.

@@ -132,6 +132,8 @@ struct CardLayout: Equatable {
     var text: String
     var plan: [PlanRow]
     var foreground: [String]
+    /// The plan says what comes to the front (its foreground field came, empty or not): only then is 「前台」 said.
+    var foregroundKnown = false
     var consent: Consent?
     /// The card's title: H2's headline, else its text (which is then the whole card's words).
     var title: String
@@ -207,6 +209,7 @@ struct CardLayout: Equatable {
                     changesYours: s.class == "modify_user", sendsOut: s.class == "external" || s.sites.contains { ($0.sends ?? "").isEmpty == false })
         }
         foreground = card.plan?.foreground?.apps ?? []
+        foregroundKnown = card.plan?.foreground != nil
         // (an action card with no consent fields: its text is the only account of what it does -- never folded; #124 review)
         folds = card.headline != nil && (!card.text.isEmpty || !plan.isEmpty) && !(card.kind == .action && card.consent == nil)
         consent = card.consent.map { Self.consent($0, title: card.headline ?? card.text) }

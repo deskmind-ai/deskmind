@@ -35,6 +35,8 @@ enum ShellPalette {
     static let softLine = Tone(light: 0xE2DFD6, dark: 0x323834)     // a section card's edge (the right column), a fold's rule
     static let buttonLine = Tone(light: 0xC9C6BB, dark: 0x4A524B)   // a secondary button's edge
     static let ok = Tone(light: 0x3F6B41, dark: 0x7FB283)           // all is well (a dot, a check): graphics only
+    /// 「这台 Mac」's one line while all is well (P3States #3A413B; the ink in dark).
+    static let macLine = Tone(light: 0x3A413B, dark: 0xE7E9E4)
     /// The sidebar: a step darker than the paper (P1Main #EAE6DC).
     static let sidebar = Tone(light: 0xEAE6DC, dark: 0x151816)
     /// The user's bubble (#E6E3DA).
@@ -45,6 +47,24 @@ enum ShellPalette {
     static let frame = Tone(light: 0x262B28, dark: 0x0F1110)
     static let frameText = Tone(light: 0xF4F1EA, dark: 0xF4F1EA)
     static let frameQuiet = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
+    // main window (#133): the boards' values the window had no token for
+    /// The step line under the live view (P1Main #E9ECE8 on the frame).
+    static let frameStep = Tone(light: 0xE9ECE8, dark: 0xE9ECE8)
+    /// A step not done yet: its ring (#8C958C); graphics only.
+    static let todoRing = Tone(light: 0x8C958C, dark: 0x7C857C)
+    /// The sidebar's 「等你」 pill (#B84A2E) and its white words; a problem's hollow 「!」 (graphics).
+    static let waitTag = Tone(light: 0xB84A2E, dark: 0xB84A2E)
+    static let waitTagText = Tone(light: 0xFFFFFF, dark: 0xFFFFFF)
+    /// An idle conversation's dot in the sidebar: mist, a step lighter in dark (the mist there is lost on the sidebar).
+    static let idleDot = Tone(light: 0xB2BBAF, dark: 0x6F786F)
+    /// The agreed plan's pill (#E7ECE3, its words #2F5531) and a queued message's dashed edge (#8C958C).
+    static let agreedFill = Tone(light: 0xE7ECE3, dark: 0x26332A)
+    static let agreedText = Tone(light: 0x2F5531, dark: 0x9FD0A3)
+    static let queueEdge = Tone(light: 0x8C958C, dark: 0x6F786F)
+    /// The composer's outline: ink in light; in dark a quieter edge (ink there is near white and glares).
+    static let composerEdge = Tone(light: 0x262B28, dark: 0x5A635B)
+    /// 「正在发送」 in the bubble (#4A524B).
+    static let sendingText = Tone(light: 0x4A524B, dark: 0xC9CFC8)
 
     /// The sidebar and the agent's column: the card at 60 % over the paper.
     static let panel = tint(card, 0.6, over: paper)
@@ -70,6 +90,24 @@ enum ShellPalette {
     /// 「准备点：…」 over a window's picture: the same in both appearances (the picture is the app's, not ours).
     static let shotTag = Tone(light: 0xA3402A, dark: 0xA3402A)
 
+    // the first run (P1Setup): its ink column's paragraph and promises; the step's list text, a key that works,
+    // a key that doesn't (its dot and its field's edge)
+    static let onInkBody = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
+    static let onInkPromiseText = Tone(light: 0xC2C9C1, dark: 0xC2C9C1)
+    static let setupBody = Tone(light: 0x3A413B, dark: 0xE7E9E4)
+    static let setupOK = Tone(light: 0x2F5531, dark: 0x8FC293)
+    static let setupBad = Tone(light: 0xB84A2E, dark: 0xE5735A)         // graphics only: its words are orangeText
+
+    // cards (#133): a card's quieter body text (P1Main #3A413B), a check's words and the agreed pill's tint (#2F5531 on
+    // #E7ECE3), a card that ended (#EFECE4), the strip over a card asked again (#EAE6DC), a rule inside a card and an
+    // unpicked option's edge (#E6E3DA)
+    static let cardBody = Tone(light: 0x3A413B, dark: 0xC9CEC8)
+    static let okText = Tone(light: 0x2F5531, dark: 0x9BCB9E)
+    static let okTint = Tone(light: 0xE7ECE3, dark: 0x26342A)
+    static let endedCard = Tone(light: 0xEFECE4, dark: 0x222624)
+    static let voidStrip = Tone(light: 0xEAE6DC, dark: 0x2B302C)
+    static let cardRule = Tone(light: 0xE6E3DA, dark: 0x323834)
+
     /// The island (one bar at the notch, the same in both appearances, as the hardware is): its fill, its left text,
     /// its right text, and its grey dot (preparing, paused, didn't finish). Working and needing you are the orange dot,
     /// done is the text's colour (Island board: no colour outside the palette).
@@ -77,6 +115,18 @@ enum ShellPalette {
     static let islandText = Tone(light: 0xF4F1EA, dark: 0xF4F1EA)
     static let islandMuted = Tone(light: 0xB2BBAF, dark: 0xB2BBAF)
     static let islandGrey = Tone(light: 0x8C958C, dark: 0x8C958C)
+
+    // float / island (#133, the boards): the same in both appearances, as the ink surface is.
+    /// The ring round a waiting card in the float (P1Float's accent, not the dark appearance's brighter dot).
+    static let floatRing = Tone(light: 0xC95536, dark: 0xC95536)
+    /// 「准备点：…」 in the float's picture (P1Float).
+    static let floatShotTag = Tone(light: 0xB84A2E, dark: 0xB84A2E)
+    /// On the ink: the step line (CardStates), the hover icons, the faint words (how long a card waited, QuestionCard's
+    /// foot), and the foot's hairline.
+    static let onInkBright = Tone(light: 0xE9ECE8, dark: 0xE9ECE8)
+    static let onInkIcon = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
+    static let onInkFaint = Tone(light: 0x8C958C, dark: 0x8C958C)
+    static let inkRule = Tone(light: 0x353A36, dark: 0x353A36)
 
     /// Text colours and the backgrounds each is drawn on (both appearances: `textOn(_:)`).
     static let textPairs: [(text: Tone, background: Tone)] = [
@@ -87,6 +137,8 @@ enum ShellPalette {
         (card, orangeText),                 // the sidebar's 「等你」 pill
         (frameText, frame), (frameQuiet, frame),
         (error, card), (error, paper),
+        (macLine, card),                    // 「这台 Mac」's one line (U4)
+        (frameStep, frame), (waitTagText, waitTag), (agreedText, agreedFill), (macLine, paper), (sendingText, bubble),   // main window (#133)
         (paper, ink),                       // the prominent button: paper text on an ink capsule
         (islandText, islandFill), (islandMuted, islandFill), (onInkOrange, islandFill),
         (onInk, inkSurface), (onInkMuted, inkSurface), (onInkOrange, inkSurface), (onInkLink, inkSurface), (onInkPromise, inkSurface),
@@ -94,6 +146,11 @@ enum ShellPalette {
         (onInk, inkButton), (onInkMuted, inkButton),
         (inkSurface, shotWell),             // the float's 「还没有画面」 in its well
         (shotWell, shotTag),                // 「准备点：…」 on the picture
+        (onInkBody, inkSurface), (onInkPromiseText, inkSurface),     // the first run's ink column
+        (setupBody, card), (setupBody, paper), (setupOK, card),      // its step's lists and status
+        (onInkBright, inkSurface), (onInkFaint, inkSurface), (shotWell, floatShotTag),   // the float after the boards (#133)
+        (cardBody, card), (cardBody, paper), (cardBody, endedCard), (secondary, endedCard), (okText, okTint), (okText, card),
+        (cardBody, voidStrip), (secondary, voidStrip), (orangeText, voidStrip),          // cards (#133)
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }

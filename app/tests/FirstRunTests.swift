@@ -154,7 +154,8 @@ enum FirstRunTests {
         let dir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let src = (try? String(contentsOf: dir.appendingPathComponent("Main/FirstRunView.swift"), encoding: .utf8)) ?? ""
         let fields = src.components(separatedBy: "private var keyFields").dropFirst().first?.components(separatedBy: "            status\n").first ?? ""
-        check(fields.components(separatedBy: ".disabled(keyState == .checking)").count - 1 == 2 && fields.contains("Picker(") && fields.contains("SecureField("),
+        check(fields.components(separatedBy: ".disabled(keyState == .checking)").count - 1 == 2 && fields.contains("{ providerMenu }") && fields.contains("SecureField(")
+              && (src.components(separatedBy: "private var providerMenu").dropFirst().first ?? "").contains("Menu {"),
               "the service picker, the key and a custom service's fields are off while checking")
         check(src.contains("form.saved(version: version") && src.contains("form.checked(version: version") && src.contains("form.edit(new"),
               "the view takes results only through the version")
@@ -206,5 +207,13 @@ enum FirstRunTests {
         check(view.contains("grant: { model.grant($0) }") && view.contains("CloudModelSettings.save(plan, replace: replace)"), "the permissions and the key through their own paths")
         check(view.contains("granted: { model.granted($0) }") && view.contains("if granted(g)"), "「已授权」 only from the helper's status")
         check(view.contains("shell.draft = L(e, lang: lang)") && !view.contains("submit"), "an example fills the composer, never sends")
+        // (#133: the board's shorter 「截图在本机识别，不上传」 is not copied -- the words read off the screen do go to the
+        // cloud model; the promise keeps saying so, in both languages)
+        let shot = "Screenshots are read on this Mac and the images are not uploaded; the words read from them go to the cloud model to decide the next step"
+        let promise = L10n.zh[shot] ?? ""
+        check(view.contains("static let shotPromise = \"\(shot)\"") && promise.contains("图片不上传") && promise.contains("云端"),
+              "the screenshot promise says the images stay and the words go: \(promise)")
+        // (no 「用默认的服务」: there is no service the app reaches without the user's own key)
+        check(!view.contains("Use the default service"), "no default service offered: none exists")
     }
 }

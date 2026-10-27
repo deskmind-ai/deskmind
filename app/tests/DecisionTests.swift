@@ -118,13 +118,13 @@ enum DecisionTests {
         check(Island.notch(screen: screen, safeTop: 32, left: CGRect(x: 0, y: 0, width: 900, height: 32),
                            right: CGRect(x: 800, y: 0, width: 900, height: 32)) == nil, "overlapping areas: no notch")
         // the bar (U2): at the notch, as tall as it, 460 wide in every state (it never grows or shrinks around the
-        // notch: fable, #130); no notch: a 34 pt capsule 10 under the menu bar, 380 / 460 while it needs you
+        // notch: fable, #130); no notch: a 34 pt strip hanging from the menu bar, 380 / 460 while it needs you
         let visible = CGRect(x: 0, y: 0, width: 1920, height: 1050), plain = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let bars: [(CGRect?, CGRect, Bool, CGRect, String)] = [
             (notch, screen, false, CGRect(x: 634, y: 1085, width: 460, height: 32), "notch, working: 460 too"),
             (notch, screen, true, CGRect(x: 634, y: 1085, width: 460, height: 32), "notch, needs you: the same frame"),
-            (nil, plain, false, CGRect(x: 770, y: 1006, width: 380, height: 34), "no notch, working"),
-            (nil, plain, true, CGRect(x: 730, y: 1006, width: 460, height: 34), "no notch, needs you"),
+            (nil, plain, false, CGRect(x: 770, y: 1016, width: 380, height: 34), "no notch, working"),
+            (nil, plain, true, CGRect(x: 730, y: 1016, width: 460, height: 34), "no notch, needs you"),
         ]
         for (n, sc, wide, want, name) in bars {
             let got = Island.barFrame(notch: n, screen: sc, visible: visible, needsYou: wide)
@@ -214,6 +214,7 @@ enum DecisionTests {
         check(!DownloadSource.stalled(elapsed: 30, bytes: 4_000, fileSize: 4_000), "a small file done is not")
         check(!DownloadSource.stalled(elapsed: 10, bytes: 0, fileSize: 5_000_000_000), "too early to tell")
 
+        group("windowFitTests"); windowFitTests()
         group("liveViewTests"); liveViewTests()
         group("issueReportTests"); issueReportTests()
         group("runErrorTests"); runErrorTests()
@@ -242,6 +243,8 @@ enum DecisionTests {
         FirstRunTests.run()
         RecordingTests.run()
         CardContentTests.run()
+        CardBriefTests.run()
+        ChatMarkdownTests.run()
         ProcessTests.run()
         UIEventsTests.run()
         TaskResultTests.run()
@@ -269,6 +272,39 @@ enum DecisionTests {
     }
 
     /// The live view (Shared/LiveView.swift): which window, the card's size and corner, the cursor, the capture.
+    /// U4 §2.1: the main window's frame as restored at launch, fitted to its least size (1098 × 600) on its screen.
+    static func windowFitTests() {
+        let least = CGSize(width: 1098, height: 600)
+        let screen = CGRect(x: 0, y: 0, width: 1728, height: 1084)     // (the owner's: 1728 × 1084 pt, menu bar off)
+        // big enough: as it is, wherever it is
+        for f in [CGRect(x: 144, y: 92, width: 1440, height: 900), CGRect(x: 0, y: 0, width: 1098, height: 600),
+                  CGRect(x: 600, y: 400, width: 1400, height: 700)] {
+            check(WindowFit.fit(restored: f, min: least, screen: screen) == f, "big enough, unchanged: \(f)")
+        }
+        // too small: grown to the least size, its top edge kept, on the screen
+        let rows: [(String, CGRect, CGRect)] = [
+            ("1000 × 580 (the owner's)", CGRect(x: 200, y: 300, width: 1000, height: 580), CGRect(x: 200, y: 280, width: 1098, height: 600)),
+            ("900 × 500", CGRect(x: 100, y: 300, width: 900, height: 500), CGRect(x: 100, y: 200, width: 1098, height: 600)),
+            ("narrow only", CGRect(x: 100, y: 100, width: 800, height: 800), CGRect(x: 100, y: 100, width: 1098, height: 800)),
+            ("short only", CGRect(x: 100, y: 400, width: 1200, height: 400), CGRect(x: 100, y: 200, width: 1200, height: 600)),
+            ("at the right edge: moved in", CGRect(x: 1200, y: 300, width: 900, height: 500), CGRect(x: 1728 - 1098, y: 200, width: 1098, height: 600)),
+            ("at the bottom: moved up", CGRect(x: 100, y: 0, width: 900, height: 300), CGRect(x: 100, y: 0, width: 1098, height: 600)),
+            ("off the screen to the left", CGRect(x: -500, y: 300, width: 900, height: 500), CGRect(x: 0, y: 200, width: 1098, height: 600)),
+        ]
+        for (what, f, want) in rows {
+            let got = WindowFit.fit(restored: f, min: least, screen: screen)
+            check(got == want && screen.contains(got), "\(what): \(got) (want \(want))")
+        }
+        // a screen smaller than the least size: as big as the screen, on it
+        let small = CGRect(x: 0, y: 0, width: 1024, height: 640)
+        let got = WindowFit.fit(restored: CGRect(x: 10, y: 10, width: 900, height: 500), min: least, screen: small)
+        check(got.size == CGSize(width: 1024, height: 600) && small.contains(got), "a small screen: the window no wider than it, on it: \(got)")
+        // a screen with its origin elsewhere (a second display to the left, the menu bar's strip off the top)
+        let second = CGRect(x: -1920, y: 0, width: 1920, height: 1055)
+        let g2 = WindowFit.fit(restored: CGRect(x: -1000, y: 700, width: 1000, height: 580), min: least, screen: second)
+        check(second.contains(g2) && g2.size == least && g2.maxY == 1055, "on a second screen: kept on it: \(g2)")
+    }
+
     static func liveViewTests() {
         typealias LV = LiveView
         // The window hands observes.

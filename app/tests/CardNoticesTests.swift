@@ -90,15 +90,20 @@ enum CardNoticesTests {
               "the chat island finishes without the island's own notification")
         // 3. the float answers by the window's state at the click
         let buttons = float.components(separatedBy: "struct FloatCard").last ?? ""
-        // (U2: 「现在回答」, 「撤回」, a pick, a button)
-        check(buttons.components(separatedBy: "if FloatController.shared.answersNow() {").count - 1 == 4 && float.contains("frontNow: FrontmostMonitor.observe() == .front, float: visibility())"),
+        // (U2: 「现在回答」, 「撤回」, and answer(_:) -- what a pick and a button both run)
+        check(buttons.components(separatedBy: "if FloatController.shared.answersNow() {").count - 1 == 3
+              && buttons.contains("return Button { answer(c) } label:") && buttons.contains("Button(c.button.text) { answer(c) }")
+              && float.contains("frontNow: FrontmostMonitor.observe() == .front, float: visibility())"),
               "every float answer button checks the window's state now")
-        // #125 Codex review at 2f29d42: the float's card says all an approval does, from the chat's CardLayout; the way
-        // to the main window selects the card's own conversation first
+        // #125 Codex review at 2f29d42, then the owner's #133 decision: the float's card is as short as P1Float draws
+        // it, from the chat's CardLayout -- an action card's brief (CardBrief: its question and what goes out), the line
+        // on earlier steps that may have gone out never folded (#129), the beyond lines always; the way to the main
+        // window selects the card's own conversation first
         let floatCard = float.components(separatedBy: "struct FloatCard").last ?? ""
-        check(floatCard.contains("if let c = layout.consent { ConsentFields(consent: c, onInk: true) }") && floatCard.contains("ForEach(Array(layout.beyond.enumerated())")
-              && floatCard.contains("if let t = layout.shownText") && floatCard.contains("let t = layout.wholeText") && floatCard.contains("FloatController.shared.cardLaidOut(card, height: h)"),
-              "the float card: shown text, beyond lines, every consent field, its height measured")
+        check(floatCard.contains("let brief = CardBrief(layout, lang: lang)") && floatCard.contains("if let w = brief?.warning {")
+              && floatCard.contains("ForEach(Array(layout.beyond.enumerated())") && floatCard.contains("if brief == nil, let t = layout.shownText")
+              && floatCard.contains("FloatController.shared.cardLaidOut(card, height: h)"),
+              "the float card: its brief, the uncertain line, beyond lines, shown text, its height measured")
         check(floatCard.contains("shell.select(sessionId); MainWindow.comeBack(g)"), "去主窗口回答: the card's conversation selected, then the window")
         check(float.contains("CardPlacement.fitsFloat(structure: card.answerableInFloat, height: cardHeights[ShellModel.cardKey(card)], room: cardRoom)")
               && float.contains("visibleFrame.height") && !float.contains("fitsFloat: card.answerableInFloat"),
@@ -107,8 +112,8 @@ enum CardNoticesTests {
         // #125 Codex re-review at d08465d: the summary's title is bounded, its button always under it
         check(float.contains("static let summaryLines = 2") && float.contains(".lineLimit(FloatCard.summaryLines).truncationMode(.tail)"), "the summary title: two lines at most")
         let shown = float.components(separatedBy: "struct FloatCard").last ?? ""
-        check(shown.components(separatedBy: "summaryTitle(layout)").count - 1 == 2 && !shown.contains("            default:\n                title(layout)"),
-              "the summary and the expired card use the bounded title")
+        check(shown.components(separatedBy: ".lineLimit(FloatCard.summaryLines).truncationMode(.tail)").count - 1 == 2,
+              "both summaries (P1Float's and the typed answer's) use the bounded title")
         // the float's places in the UI log (A2 with #123): shown whole / as its summary once it can be seen, its picks
         check(float.contains("switch fact == .visible ? pl.shown : .ended {") && float.contains("shell.cardPlaced(card, place: .float, in: s)")
               && float.contains("shell.cardPlaced(card, place: .floatSummary, in: s)") && float.contains("shell.click(c.button, session: sessionId, place: .float)"),

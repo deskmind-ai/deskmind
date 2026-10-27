@@ -1109,12 +1109,17 @@ enum SessionStatus: Equatable {
     case done(at: Double?, stopped: Bool)
     case idle
 
-    enum Shape: Equatable { case haloDot, bang, solidDot, hollowRing, check, mistDot }
+    /// P3States 「对话的状态点」: paused, the screen locked and looking only each have their own mark (two bars, a lock,
+    /// a magnifier), never the working dot or the problem's 「!」.
+    enum Shape: Equatable { case haloDot, bang, solidDot, hollowRing, check, mistDot, pause, lock, look }
     var shape: Shape {
         switch self {
         case .waitingForYou, .cardExpired: return .haloDot
-        case .error, .locked: return .bang
-        case .stopping, .paused, .lookOnly, .acting: return .solidDot
+        case .error: return .bang
+        case .locked: return .lock
+        case .paused: return .pause
+        case .lookOnly: return .look
+        case .stopping, .acting: return .solidDot
         case .thinking: return .hollowRing
         case .done: return .check
         case .idle: return .mistDot
@@ -1128,9 +1133,9 @@ enum SessionStatus: Equatable {
     /// what the user needs to see. (Owner confirmed this order, 10-22.)
     static func derive(_ s: SessionState) -> SessionStatus {
         // 1. waiting for you: a card is open
-        if let open = s.openCard { return .waitingForYou(cardKind: open.card.card.kind) }
+        if let open = s.openCard { return .waitingForYou(cardKind: CardModel.statusKind(open.card.card)) }
         // (the task waits on a card nobody answered in time: the user is still the one it waits for)
-        if let t = s.runningTask, let c = t.expiredCard { return .cardExpired(cardKind: c.card.kind) }
+        if let t = s.runningTask, let c = t.expiredCard { return .cardExpired(cardKind: CardModel.statusKind(c.card)) }
         // 2. a running task
         if let t = s.runningTask {
             if t.stopping { return .stopping }
@@ -1145,7 +1150,9 @@ enum SessionStatus: Equatable {
         if let p = problem(s) { return p }
         // 4. thinking: a reply is streaming
         if s.streamingMessage != nil { return .thinking }
-        // 5. done: the newest thing in the chat is a task that ended or an assistant message
+        // 5. done: the newest task, whatever was said after it -- the model's closing words come right after every
+        // task's end, and a chat after it does not undo it; messages are chat, never a done themselves (the list's
+        // check is a finished task's only: U4 §2.2, P1Main). No task: idle.
         for item in s.timeline.reversed() {
             switch item {
             case .task(let id):
@@ -1155,10 +1162,8 @@ enum SessionStatus: Equatable {
                 if st == "succeeded" { return .done(at: t.doneAt ?? s.lastEventAt, stopped: false) }
                 if st == "cancelled" || st == "stopped" { return .done(at: t.doneAt ?? s.lastEventAt, stopped: true) }
                 return .idle
-            case .message(let id):
-                guard let m = s.message(id) else { continue }
-                // done only with the final message: a reply cut off by the process's end is not a finished one
-                return m.role == "assistant" && !m.interrupted ? .done(at: m.t, stopped: m.stopped) : .idle
+            case .message:
+                continue
             case .error:
                 return .idle
             }

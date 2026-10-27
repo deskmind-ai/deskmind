@@ -14,6 +14,13 @@ enum Brand {
     static let mist = Color(ShellPalette.mist)
     static let line = Color(ShellPalette.line)
 
+    /// A picture for the appearance it is drawn in: `<name>-dark` in dark when there is one (Resources/brand/dark.swift
+    /// makes it from the light one), else `<name>`.
+    static func image(_ name: String, scheme: ColorScheme) -> NSImage {
+        if scheme == .dark, Bundle.main.url(forResource: name + "-dark", withExtension: "png") != nil { return image(name + "-dark") }
+        return image(name)
+    }
+
     static func image(_ name: String) -> NSImage {
         if let url = Bundle.main.url(forResource: name, withExtension: "png"), let img = NSImage(contentsOf: url) {
             return img
@@ -36,6 +43,9 @@ extension Color {
     }
 }
 
+/// 小方's dot: lit (the orange one), or mist (idle, no task).
+enum XiaoDot: Equatable { case lit, mist }
+
 /// 小方, drawn (the boards' face): a rounded square in ink -- in the paper colour on an ink surface -- two eyes in it,
 /// and the orange dot pressed on its lower right corner. `size` is the square's width (the boards: 28 in the right
 /// column, 20 in the float and the island). The eyes (XiaoEyes) move between their shapes in 150 ms; not with Reduce
@@ -44,6 +54,9 @@ struct XiaoFace: View {
     let eyes: XiaoEyes
     var size: CGFloat = 28
     var onInk = false
+    /// Its dot: lit, the orange, while a task is about (the island's and the float's always), mist while the column is idle with
+    /// no task (P3States 「还没有任务」), with no halo.
+    var dot: XiaoDot = .lit
     @Environment(\.accessibilityReduceMotion) private var reduce
 
     var body: some View {
@@ -56,8 +69,8 @@ struct XiaoFace: View {
                 .frame(width: w, height: h)
             Eye(eyes: eyes, left: true, w: w, h: h).fill(stroke)
             Eye(eyes: eyes, left: false, w: w, h: h).fill(stroke)
-            Circle().fill(Brand.dot)
-                .overlay(Circle().stroke(Brand.dot.opacity(eyes == .up ? 0.3 : 0), lineWidth: dot * 0.3))
+            Circle().fill(self.dot == .mist ? Brand.mist : Brand.dot)
+                .overlay(Circle().stroke(Brand.dot.opacity(eyes == .up && self.dot == .lit ? 0.3 : 0), lineWidth: dot * 0.3))
                 .frame(width: dot, height: dot)
                 .offset(x: w - dot * 0.6, y: h - dot * 0.6)
         }

@@ -16,9 +16,12 @@ enum MainWindowSnapshot {
     static let sid = "ses_mail", rid = "run_mail"
     static let t0 = 1_792_900_000.0
 
-    /// A transport with no helper behind it: every write taken, no stream.
+    /// A transport with no helper behind it: every write taken, no stream; `sessions.list` answers `sessions`.
     final class Wire: SessionTransport {
-        func request(_ body: [String: Any]) -> [String: Any]? { ["ok": true] }
+        var sessions: [[String: Any]] = []
+        func request(_ body: [String: Any]) -> [String: Any]? {
+            body["op"] as? String == SessionClient.Op.list ? ["ok": true, "sessions": sessions] : ["ok": true]
+        }
         func stream(_ body: [String: Any], onLine: @escaping ([String: Any]) -> Bool, onIdle: @escaping () -> Bool) -> Bool { false }
     }
 
@@ -44,6 +47,11 @@ enum MainWindowSnapshot {
         let now: Double
         var selected: String? = sid
         var process = false
+        /// The helper's list (`sessions list`), the rows' only source when no lines are fed (the window as it opens).
+        var summaries: [[String: Any]] = []
+        var size = NSSize(width: 1440, height: 900)
+        /// What the user did after the lines (a message typed and sent, a queued one taken back).
+        var act: (@MainActor (ShellModel) -> Void)? = nil
     }
 
     static func main() {
@@ -58,7 +66,15 @@ enum MainWindowSnapshot {
 
         let others = otherSessions()
         let scenes = [
-            Scene(name: "idle", lines: others + running(), now: t0 + 38, selected: nil),
+            // (U4 §2.6: the window as it opens -- no conversation at all; the list from the helper's summaries alone, as the
+            // real window has it before one is opened; the same at the least size)
+            Scene(name: "idle-fresh", lines: [], now: t0 + 38, selected: nil),
+            Scene(name: "idle", lines: [], now: t0 + 38, selected: nil, summaries: summaries()),
+            Scene(name: "idle-min", lines: [], now: t0 + 38, selected: nil, summaries: summaries(), size: NSSize(width: 1098, height: 600)),
+            // (owner, rc.20: a long reply in Markdown -- at the least window, the right column giving way; and at full size)
+            Scene(name: "reply-min", lines: otherSessions() + markdownReply(), now: t0 + 38, size: NSSize(width: 1098, height: 638)),
+            Scene(name: "reply", lines: otherSessions() + markdownReply(), now: t0 + 38),
+            Scene(name: "waiting-min", lines: others + running() + waiting(), now: t0 + 58, size: NSSize(width: 1098, height: 638)),
             Scene(name: "running", lines: others + running(), now: t0 + 38),
             Scene(name: "waiting", lines: others + running() + waiting(), now: t0 + 58),
             Scene(name: "waiting-uncertain", lines: others + running() + waiting(uncertain: true), now: t0 + 58),
@@ -68,7 +84,18 @@ enum MainWindowSnapshot {
             Scene(name: "answered-oldlog", lines: others + strip(running() + waiting() + answered()), now: t0 + 66),
             Scene(name: "undone", lines: others + running() + waiting() + answered() + undone(), now: t0 + 90),
             Scene(name: "process", lines: others + running() + waiting() + answered(), now: t0 + 66, process: true),
-        ]
+            // (#133: what the boards draw that had no picture -- the list's every mark, the task paused or the screen locked,
+            // a queued message, one taken back, one on its way)
+            Scene(name: "sidebar-states", lines: stateSessions() + running(), now: t0 + 38),
+            Scene(name: "paused", lines: others + running() + [line("waiting", 9, 30, [:])], now: t0 + 38),
+            Scene(name: "locked", lines: others + running() + [line("task_done", 9, 30, ["status": "environment", "reason": "", "summary": "", "cause": "screen_locked"])], now: t0 + 38),
+            Scene(name: "queued", lines: others + running() + queue(), now: t0 + 38),
+            Scene(name: "withdrawn", lines: others + running() + queue(), now: t0 + 38, act: { shell in
+                shell.queueCancel("q_1")
+                shell.client.feed(["kind": "session.queue", "session_id": sid, "items": [[String: Any]]()])
+            }),
+            Scene(name: "sending", lines: others + running(), now: t0 + 38, act: { $0.draft = "发完以后，把明天上午的会议提醒也看一下"; $0.submit() }),
+        ] + cardScenes(others)
         writeRunFolder(support, run: running() + waiting() + answered())
         let only = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil
         for dark in [false, true] {
@@ -80,6 +107,12 @@ enum MainWindowSnapshot {
                 for (name, lines, phase, fits, collapsed) in floatScenes() {
                     renderFloat(lines, phase: phase, fits: fits, collapsed: collapsed, dark: dark, to: out.appendingPathComponent("float-\(name)-\(tag).png"))
                 }
+                // (CardStates: hovered -- its 放大 / 收起 / Stop -- and its window off the screen)
+                renderFloat(running(), phase: nil, fits: true, collapsed: false, hover: true, dark: dark, to: out.appendingPathComponent("float-hover-\(tag).png"))
+                renderFloat(running(), phase: nil, fits: true, collapsed: false, hidden: true, dark: dark, to: out.appendingPathComponent("float-hidden-\(tag).png"))
+                // (QuestionCard's English board: the confirm card with an English request -- the card's words are the harness's)
+                renderFloat(running() + waitingEnglish(), phase: nil, fits: true, collapsed: false, lang: .en, dark: dark,
+                            to: out.appendingPathComponent("float-confirm-en-\(tag).png"))
             }
             if only == nil || only == "firstrun" {
                 for (name, step, key, granted) in firstRunScenes() {
@@ -118,7 +151,8 @@ enum MainWindowSnapshot {
     @MainActor static func renderFirstRun(_ step: FirstRun.Step, key: FirstRun.KeyState, granted: Bool, dark: Bool, to file: URL) {
         var flow = FirstRun(step: step)
         flow.facts.accessibility = granted; flow.facts.screen = granted
-        if case .set = key { flow.facts.keySet = true }
+        // (a key set, being tried or that works: the key is there, so 继续 is drawn on -- as it is in the app)
+        switch key { case .set, .checking, .ok: flow.facts.keySet = true; default: break }
         // (the bad key saved, its check failed: the case 稍后 must still show -- #130 Codex review)
         if case .bad = key { flow.facts.keySet = true; flow.facts.saveOK = true; flow.facts.checkOK = false }
         let page = FirstRunPage(flow: flow, language: .constant(AppLanguage.zhHans.rawValue),
@@ -138,7 +172,20 @@ enum MainWindowSnapshot {
             ("held", running() + waiting(), held, true, false),
             ("expired", running() + waiting() + [line("ask_void", 14, 700, ["ask_id": "ask_send", "why": "timeout"])], nil, true, false),
             ("capsule", running(), nil, true, true),
+            ("free", running() + typed(), nil, false, false),
+            ("done", running() + waiting() + answered() + [line("step_result", 18, 70, ["step_id": "st_4", "status": "ok"]),
+                      line("task_done", 19, 82, ["status": "succeeded", "reason": "", "summary": "回复了许诺：我看一下再说"])], nil, true, false),
+            ("failed", running() + [line("task_done", 9, 57, ["status": "failed", "reason": "", "summary": "同一步反复失败，没能写入回复"])], nil, true, false),
         ]
+    }
+
+    /// A card that takes the user's own words (free_text): the main window's -- the float says so.
+    static func typed() -> [[String: Any]] {
+        let card: [String: Any] = [
+            "kind": "missing", "blocking": true, "free_text": true, "headline": "回复里署什么名字？", "text": "回复里署什么名字？",
+            "options": [["kind": "cancel", "text": "先别做了"]],
+        ]
+        return [line("ask", 9, 52, ["ask_id": "ask_name", "card": card]), line("waiting", 10, 52, ["ask_id": "ask_name"])]
     }
 
     /// A card with two readings and 「由你决定」.
@@ -166,16 +213,17 @@ enum MainWindowSnapshot {
         ]
     }
 
-    @MainActor static func state(_ lines: [[String: Any]], now: Double) -> (ShellModel, SessionState) {
+    @MainActor static func state(_ lines: [[String: Any]], now: Double, lang: ResolvedLang = .zhHans) -> (ShellModel, SessionState) {
         let shell = ShellModel(client: SessionClient(transport: Wire()), defaults: MemoryDefaults(), config: { "openai:local|fake" },
-                               lang: { .zhHans }, now: { now }, work: { $0() }, deliver: { $0() })
+                               lang: { lang }, now: { now }, work: { $0() }, deliver: { $0() })
         for l in lines { shell.client.feed(l) }
         shell.select(sid)
         return (shell, shell.states[sid] ?? SessionState())
     }
 
-    @MainActor static func renderFloat(_ lines: [[String: Any]], phase: CardPhase?, fits: Bool, collapsed: Bool, dark: Bool, to file: URL) {
-        let (shell, s) = state(lines, now: t0 + 58)
+    @MainActor static func renderFloat(_ lines: [[String: Any]], phase: CardPhase?, fits: Bool, collapsed: Bool, hover: Bool = false, hidden: Bool = false,
+                                       lang: ResolvedLang = .zhHans, dark: Bool, to file: URL) {
+        let (shell, s) = state(lines, now: t0 + 58, lang: lang)
         guard let task = s.tasks.last else { return }
         let pinned = shell.pinned(s)
         let card = pinned.map { CardModel(card: $0.card.card, runId: $0.runId, askId: $0.card.askId) }
@@ -183,12 +231,13 @@ enum MainWindowSnapshot {
         let placement = ph.map { CardPlacement.place($0, fitsFloat: fits, window: .behindVisible, frontNow: false, float: .visible) }
         let f = FloatController.shared
         f.userCollapsed = collapsed
-        f.preview(FloatController.Now(sessionId: sid, status: s.status, task: task, card: card, phase: ph, placement: placement))
+        f.preview(FloatController.Now(sessionId: sid, status: s.status, task: task, card: card, phase: ph, placement: placement,
+                                      askedAt: pinned?.card.askedAt))
         let view = ZStack(alignment: .bottomTrailing) {
             Color(red: 0.89, green: 0.91, blue: 0.92)
-            FloatView(shell: shell, float: f, still: still()).padding(18)
+            FloatView(shell: shell, float: f, still: still(), stillHidden: hidden, stillHover: hover).padding(16)
         }
-        renderView(view.environment(\.lang, .zhHans), size: NSSize(width: 340, height: 640), dark: dark, wait: 0.6, to: file)
+        renderView(view.environment(\.lang, lang), size: NSSize(width: 340, height: 640), dark: dark, wait: 0.6, to: file)
         f.preview(nil)
     }
 
@@ -204,11 +253,10 @@ enum MainWindowSnapshot {
             Color(red: 0.36, green: 0.40, blue: 0.45)
             VStack(spacing: 0) {
                 Color(red: 0.16, green: 0.17, blue: 0.19).frame(height: notched ? 37 : 24)     // (the menu bar)
-                if !notched { Color.clear.frame(height: 10) }
             }
             IslandView(model: model, height: h, notched: notched, notchWidth: notched ? 200 : nil, onStop: {}, onTap: { _ in }, now: { t0 + 58 })
                 .frame(width: Island.barWideWidth, height: h)
-                .padding(.top, notched ? 0 : 34)
+                .padding(.top, notched ? 0 : 24)
             // (the notch itself, 200 pt as on a 14" MacBook Pro, drawn over the bar as the hardware hides what is under it)
             if notched { Color.black.frame(width: 200, height: h) }
         }
@@ -223,6 +271,15 @@ enum MainWindowSnapshot {
         return l
     }
 
+    /// The helper's list as `sessions list` gives it (no messages fed): a task this morning, chats from yesterday and
+    /// last week.
+    static func summaries() -> [[String: Any]] {
+        [["session_id": sid, "title": "回复许诺说我看一下再说", "updated_at": t0 + 30 - 600],
+         ["session_id": "ses_folder", "title": "整理下载文件夹", "updated_at": t0 - 3600 * 5],
+         ["session_id": "ses_week", "title": "汇总这周的周报数据", "updated_at": t0 - 3600 * 30],
+         ["session_id": "ses_trip", "title": "查一下下周去杭州的高铁", "updated_at": t0 - 3600 * 24 * 9]]
+    }
+
     static func otherSessions() -> [[String: Any]] {
         [
             ["kind": "session.message", "session_id": "ses_folder", "seq": 1, "t": t0 - 3600, "msg_id": "m_f1", "role": "user", "text": "整理下载文件夹"],
@@ -230,6 +287,62 @@ enum MainWindowSnapshot {
             ["kind": "session.message", "session_id": "ses_week", "seq": 1, "t": t0 - 7200, "msg_id": "m_w1", "role": "user", "text": "汇总这周的周报数据"],
             ["kind": "session.message", "session_id": "ses_week", "seq": 2, "t": t0 - 7100, "msg_id": "m_w2", "role": "assistant", "text": "这周一共 12 条记录，已经按项目汇总。"],
         ]
+    }
+
+    /// A chat-only session: a question and a long reply in Markdown (bold heads, lists, `code`, a numbered list).
+    static func markdownReply() -> [[String: Any]] {
+        let text = """
+        我能在后台帮你操作这台 Mac 上的应用，大致分三类：
+
+        **信息处理**
+        - 读一份/一批文件，提炼要点或做对照表
+        - 把散在各处的信息汇总成一份东西
+
+        **对外动作（会先弹卡片让你确认）**
+        - 发消息、发邮件、提交表单、改动或删除你的文件——凡涉及「往外发」和「动你东西」的，都会先请你点头
+        - 比如在 `~/Downloads` 里按月份归档发票
+
+        **你只要说清楚「要什么结果」**，我负责在电脑上走完步骤：
+        1. 先列计划给你看
+        2. 一步一步做，每步都核对
+        3. 做完告诉你成没成、改了哪些、能不能撤回
+
+        不擅长的：需要你本人身份验证的登录、以及你机器上没装也没权限的东西。
+        """
+        return [
+            ["kind": "session.message", "session_id": sid, "seq": 1, "t": t0 - 60, "msg_id": "m_q", "role": "user", "text": "你能在我的 Mac 上做什么？"],
+            ["kind": "session.message", "session_id": sid, "seq": 2, "t": t0 - 50, "msg_id": "m_a", "role": "assistant", "text": text],
+        ]
+    }
+
+    /// A message typed while the task works, waiting in the queue (session.queue).
+    static func queue() -> [[String: Any]] {
+        [["kind": "session.queue", "session_id": sid, "items": [["id": "q_1", "text": "发完以后，把明天上午的会议提醒也看一下"]]]]
+    }
+
+    /// One conversation in each of the list's states (P1Main, P3States 「对话的状态点」): waiting for you, thinking, done
+    /// yesterday, failed, paused, the screen locked, looking only.
+    static func stateSessions() -> [[String: Any]] {
+        func task(_ s: String, _ title: String, _ t: Double, _ run: [[String: Any]]) -> [[String: Any]] {
+            let r = "run_" + s
+            var out: [[String: Any]] = [
+                ["kind": "session.message", "session_id": s, "seq": 1, "t": t, "msg_id": s + "_m1", "role": "user", "text": title],
+                ["kind": "session.task", "session_id": s, "seq": 2, "t": t + 1, "msg_id": s + "_m2", "run_id": r, "raw": title, "goal": title, "by": "model", "reply_to": s + "_m1"],
+                ["kind": "start", "session_id": s, "run_id": r, "seq": 1, "t": t + 1, "raw": title, "lang": "zh"],
+            ]
+            for (i, l) in run.enumerated() { var l = l; l["session_id"] = s; l["run_id"] = r; l["seq"] = i + 2; l["t"] = t + 2 + Double(i); out.append(l) }
+            return out
+        }
+        let step: [String: Any] = ["kind": "step", "step_id": "st_1", "text": "{\"kind\":\"read\"}", "human": "看一眼", "object": "window:com.example.Files#7", "consequence": "read"]
+        let choose: [String: Any] = ["kind": "ambiguity", "blocking": true, "headline": "放进哪个文件夹？", "text": "放进哪个文件夹？",
+                                     "options": [["kind": "choice", "text": "文稿"], ["kind": "choice", "text": "下载"]]]
+        return task("ses_folder", "整理下载文件夹", t0 - 600, [step, ["kind": "ask", "ask_id": "a1", "card": choose], ["kind": "waiting", "ask_id": "a1"]])
+            + task("ses_week", "汇总这周的周报数据", t0 - 300, [["kind": "preparing"]])
+            + task("ses_trip", "比较下周去上海的机票", t0 - 3600 * 30, [step, ["kind": "task_done", "status": "succeeded", "reason": "", "summary": "比较好了"]])
+            + task("ses_invoice", "导出 9 月的发票", t0 - 3600 * 2, [step, ["kind": "task_done", "status": "failed", "reason": "网站要求重新登录", "summary": ""]])
+            + task("ses_pause", "整理桌面截图", t0 - 900, [step, ["kind": "waiting"]])
+            + task("ses_lock", "备份照片", t0 - 1200, [step, ["kind": "task_done", "status": "environment", "reason": "", "summary": "", "cause": "screen_locked"]])
+            + task("ses_look", "核对报销单", t0 - 1500, [step, ["kind": "verify", "verdict": "unknown", "reason": "r", "missing_kind": "evidence"]])
     }
 
     /// Asked in chat, a task by DeskMind: its plan agreed, step 1 done, step 2 under way in a (drawn) mail window.
@@ -301,6 +414,23 @@ enum MainWindowSnapshot {
         ]
     }
 
+    /// The same card from an English request: its words in English, as the harness writes them for one.
+    static func waitingEnglish() -> [[String: Any]] {
+        waiting().map { l in
+            guard l["kind"] as? String == "ask", var card = l["card"] as? [String: Any], var c = card["consent"] as? [String: Any] else { return l }
+            card["headline"] = "Click “Send” in the web mail?"
+            card["text"] = "Click “Send” in the web mail? This sends the reply to Xu Nuo."
+            card["options"] = [["kind": "approve", "text": "OK"], ["kind": "skip_step", "text": "Not this step"], ["kind": "cancel", "text": "Stop for now"]]
+            c["action_text"] = "Click “Send”"; c["target"] = "Send"; c["object_label"] = "Safari window “Re: Next week's review”"
+            c["outgoing"] = [["kind": "field", "label": "To", "value": "Xu Nuo <xu.nuo@example.com>"],
+                             ["kind": "field", "label": "Subject", "value": "Re: Next week's review"],
+                             ["kind": "typed", "label": "", "value": "Let me take a look first"]]
+            card["consent"] = c
+            var out = l; out["card"] = card
+            return out
+        }
+    }
+
     /// Answered 「可以」: sent, step 4 under way.
     static func answered() -> [[String: Any]] {
         [
@@ -324,6 +454,138 @@ enum MainWindowSnapshot {
              "undo": "open", "reason": "", "changes": ["created": ["/Users/demo/Desktop/回复草稿.txt"], "modified": [], "deleted": [], "external": []]],
             line("result_response", 20, 80, ["picked": "undo", "effect": "undone 1/1", "undone": 1, "total": 1, "refused": NSNull()]),
             ["kind": "session.task_undo", "session_id": sid, "seq": 4, "t": t0 + 81, "run_id": rid, "undone": 1, "total": 1, "refused": NSNull()],
+        ]
+    }
+
+    // MARK: cards (#133): each card and result state the boards draw (P3States 「卡片 × 状态」, 「结果卡」; P1Main)
+
+    static func cardScenes(_ others: [[String: Any]]) -> [Scene] {
+        var out: [Scene] = []
+        func scene(_ name: String, _ run: [[String: Any]], session: [[String: Any]] = [], now: Double = 90) {
+            out.append(Scene(name: "card-" + name, lines: others + taskStart() + run + session, now: t0 + now))
+        }
+        let kinds: [(String, [String: Any], [String: Any])] = [
+            ("plan", planCard(), planCard(changed: true)), ("action", actionCard(), actionCard(changed: true)),
+            ("choice", choiceCard(2), choiceCard(2, changed: true)), ("missing", missingCard(), missingCard(changed: true)),
+        ]
+        // 未回答
+        for (k, c, _) in kinds { scene(k + "-open", asked("a_\(k)", c, seq: 3, t: 4)) }
+        scene("choice6-open", asked("a_six", choiceCard(6), seq: 3, t: 4))
+        // 已回答: whole while no card waits (P1Main), a line each while one does (P1Waiting)
+        let answered = asked("a_plan", planCard(), seq: 3, t: 4) + [line("resumed", 5, 9, ["ask_id": "a_plan", "answer": ["option": 0]])]
+            + asked("a_choice", choiceCard(2), seq: 6, t: 10) + [line("resumed", 8, 14, ["ask_id": "a_choice", "answer": ["option": 0]])]
+            + asked("a_missing", missingCard(), seq: 9, t: 16) + [line("resumed", 11, 20, ["ask_id": "a_missing", "answer": ["text": "reimburse.example.com"]])]
+            + asked("a_action", actionCard(), seq: 12, t: 22) + [line("resumed", 14, 26, ["ask_id": "a_action", "answer": ["option": 0]])]
+            + [line("step", 15, 30, ["step_id": "st_9", "plan_step": 4, "text": "{\"kind\":\"read\"}", "human": "确认已经发出",
+                                     "object": "window:com.apple.Safari#4242", "consequence": "read"])]
+        scene("answered", answered)
+        scene("answered-rows", answered + asked("a_next", actionCard(), seq: 16, t: 40))
+        // 改主意后作废重问: the user's change, the old card voided by it, the new one
+        for (k, c, changed) in kinds {
+            scene(k + "-reasked", asked("a_\(k)", c, seq: 3, t: 4) + [
+                line("steered", 5, 8, ["text": "改成回复：明天给你答复"]),
+                line("ask_void", 6, 8, ["ask_id": "a_\(k)", "why": "steer"]),
+            ] + asked("a_\(k)2", changed, seq: 7, t: 10), session: [
+                ["kind": "session.steer", "session_id": sid, "seq": 3, "t": t0 + 7, "run_id": rid, "text": "改成回复：明天给你答复"],
+            ])
+        }
+        // 过期或已停止: the action card expired (the task waits on it), the others stopped with the task
+        scene("action-expired", asked("a_action", actionCard(), seq: 3, t: 4) + [line("ask_void", 5, 604, ["ask_id": "a_action", "why": "timeout"])], now: 610)
+        for (k, c, _) in kinds where k != "action" {
+            scene(k + "-stopped", asked("a_\(k)", c, seq: 3, t: 4) + [
+                line("ask_void", 5, 30, ["ask_id": "a_\(k)", "why": "stop"]),
+                line("task_done", 6, 31, ["status": "stopped", "reason": "stopped by the app", "cause": "user_stopped", "summary": "", "result_card": NSNull(),
+                                          "answer": NSNull(), "changes": ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": []]]),
+            ], session: [["kind": "session.task_end", "session_id": sid, "seq": 3, "t": t0 + 32, "run_id": rid, "status": "stopped", "summary": "",
+                          "undo": "none", "reason": "stopped by the app", "cause": "user_stopped"]])
+        }
+        // 结果卡
+        func done(_ status: String, text: String, summary: String, changes: [String: Any], undo: Bool) -> [[String: Any]] {
+            var options: [[String: Any]] = [["kind": "approve", "text": "好的"]]
+            if undo { options.append(["kind": "undo", "text": "撤回"]) }
+            var f: [String: Any] = ["status": status, "reason": "", "summary": summary, "answer": NSNull(), "changes": changes,
+                                    "result_card": ["kind": "result", "text": text, "options": options, "free_text": false, "blocking": false]]
+            if undo { f["undo_until"] = t0 + 3600 }
+            return [line("task_done", 3, 72, f)]
+        }
+        func end(_ status: String, undo: Bool) -> [[String: Any]] {
+            [["kind": "session.task_end", "session_id": sid, "seq": 3, "t": t0 + 73, "run_id": rid, "status": status, "summary": "",
+              "undo": undo ? "open" : "none", "reason": "", "undo_until": t0 + 3600]]
+        }
+        let none: [String: Any] = ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": []]
+        scene("result-sent", done("succeeded", text: "做了：回复许诺「我看一下再说」", summary: "回复了许诺",
+                                  changes: ["created": [], "modified": [], "deleted": [], "external": ["1 封 → 许诺"], "unconfirmed": []], undo: false),
+              session: end("succeeded", undo: false))
+        scene("result-partial", done("succeeded", text: "做了：把 9 月的发票放回「下载」", summary: "整理了发票",
+                                     changes: ["created": [], "modified": [], "deleted": ["安装包 (1).dmg"], "external": [], "unconfirmed": []], undo: true),
+              session: end("succeeded", undo: true) + [
+                ["kind": "session.task_undo", "session_id": sid, "seq": 4, "t": t0 + 81, "run_id": rid, "undone": 1, "total": 2,
+                 "refused": "安装包 (1).dmg：废纸篓已经清空"]])
+        scene("result-nothing", done("succeeded", text: "做了：查了许诺上周发来的报价单", summary: "查了报价单", changes: none, undo: false),
+              session: end("succeeded", undo: false))
+        scene("result-unconfirmed", done("unconfirmed", text: "做了：点了「发送」，邮箱提示「已发送」", summary: "点了发送",
+                                         changes: ["created": [], "modified": [], "deleted": [], "external": [], "unconfirmed": ["已发送列表没刷新，没看到这封"]], undo: false),
+              session: end("unconfirmed", undo: false))
+        return out
+    }
+
+    /// The task as it starts (the user's words, the session's task, its plan).
+    static func taskStart() -> [[String: Any]] {
+        let r = running()
+        return Array(r.prefix(4))
+    }
+
+    /// A card asked (`ask`, then `waiting`) at run seq `seq`.
+    static func asked(_ id: String, _ card: [String: Any], seq: Int, t: Double) -> [[String: Any]] {
+        [line("ask", seq, t, ["ask_id": id, "card": card]), line("waiting", seq + 1, t, ["ask_id": id])]
+    }
+
+    static func planCard(changed: Bool = false) -> [String: Any] {
+        let reply = changed ? "「明天给你答复」" : "「我看一下再说」"
+        return [
+            "kind": "plan", "blocking": true, "headline": "计划 · 4 步",
+            "plan": ["steps": [["purpose": "在后台打开网页邮箱，找到许诺 10 月 20 日的邮件", "class": "read", "objects": [], "sites": []],
+                               ["purpose": "点「回复」，写入" + reply, "class": "modify_user", "objects": ["网页邮箱里的回复草稿"], "sites": []],
+                               ["purpose": "点「发送」", "class": "external", "objects": ["发给许诺的一封邮件"], "sites": [["host": "mail.example.com", "sends": reply + " → 许诺"]]],
+                               ["purpose": "确认已经发出", "class": "read", "objects": [], "sites": []]],
+                     "foreground": ["apps": []]],
+            "text": "我打算这样做：回复许诺" + reply,
+            "options": [["kind": "approve", "text": "可以，就这样做"], ["kind": "cancel", "text": "先别做了"]], "free_text": false,
+        ]
+    }
+
+    static func actionCard(changed: Bool = false) -> [String: Any] {
+        var out: [[String: Any]] = [["kind": "field", "label": "收件人", "value": "许诺 <xu.nuo@example.com>"],
+                                    ["kind": "field", "label": "主题", "value": "Re: 下周的方案评审"],
+                                    ["kind": "typed", "label": "", "value": "我看一下再说"]]
+        if changed { out.insert(["kind": "field", "label": "抄送", "value": "王磊"], at: 1) }
+        return [
+            "kind": "action", "blocking": true, "headline": "要在网页邮箱里点「发送」吗？", "text": "要在网页邮箱里点「发送」吗？这会把回复发给许诺。",
+            "consent": ["action": "click", "action_text": "点「发送」", "target": "发送", "object": "window:com.apple.Safari#4242",
+                        "object_label": "Safari 窗口「Re: 下周的方案评审」", "consequence": "external", "site": "mail.example.com", "outgoing": out],
+            "options": [["kind": "approve", "text": "可以"], ["kind": "skip_step", "text": "这一步不要"], ["kind": "cancel", "text": "先别做了"]],
+        ]
+    }
+
+    static func choiceCard(_ n: Int, changed: Bool = false) -> [String: Any] {
+        let two: [[String: Any]] = changed
+            ? [["kind": "reading", "text": "都写「我看一下再说」"], ["kind": "reading", "text": "分开写"]]
+            : [["kind": "reading", "text": "10 月 20 日 ·「下周的方案评审」", "detail": "最近一封"], ["kind": "reading", "text": "10 月 18 日 ·「报价单 v2」"]]
+        let six: [[String: Any]] = ["新建「2026-09 发票」放进去", "放进已有的「发票」文件夹", "放进「报销」文件夹", "按月份分到各自的文件夹", "只改名，不移动", "放到桌面"]
+            .map { ["kind": "proposal", "text": $0] }
+        return [
+            "kind": "ambiguity", "blocking": true,
+            "headline": n > 2 ? "9 月的发票放到哪？" : (changed ? "两封都回，用同一句话吗？" : "许诺有两封没回的邮件，回哪一封？"),
+            "text": n > 2 ? "「下载」里有 [N] 个 9 月的发票 PDF。" : "许诺有两封没回的邮件。",
+            "options": (n > 2 ? six : two) + [["kind": "delegate", "text": "由你决定"], ["kind": "cancel", "text": "先别做了"]], "free_text": true,
+        ]
+    }
+
+    static func missingCard(changed: Bool = false) -> [String: Any] {
+        [
+            "kind": "missing", "blocking": true, "headline": changed ? "新的报销系统网址是？" : "要传到哪个报销网站？",
+            "text": changed ? "你说传到新的报销系统，但不知道它的网址。" : "计划第 6 步要上传发票，但不知道网址。它不会去猜。",
+            "options": [["kind": "cancel", "text": "先别做了"]], "free_text": true,
         ]
     }
 
@@ -352,12 +614,16 @@ enum MainWindowSnapshot {
 
     @MainActor static func render(_ scene: Scene, dark: Bool, to file: URL) {
         let defaults = MemoryDefaults()
-        let shell = ShellModel(client: SessionClient(transport: Wire()), defaults: defaults, config: { "openai:local|fake" },
+        let wire = Wire()
+        wire.sessions = scene.summaries
+        let shell = ShellModel(client: SessionClient(transport: wire), defaults: defaults, config: { "openai:local|fake" },
                                lang: { .zhHans }, now: { scene.now }, work: { $0() }, deliver: { $0() })
+        if !scene.summaries.isEmpty { shell.refreshList() }
         for l in scene.lines { shell.client.feed(l) }
         if let s = scene.selected { shell.select(s) }
         if scene.process { shell.pickTab(.process) }
-        let size = NSSize(width: 1440, height: 900)
+        scene.act?(shell)
+        let size = scene.size
         let root = MainColumns(shell: shell, openSettings: {}, cloud: SidebarCloud(on: true, ready: true, provider: "DeepSeek"),
                                mac: MacFacts(missing: []), still: scene.selected == nil ? nil : still())
             .environment(\.lang, .zhHans)

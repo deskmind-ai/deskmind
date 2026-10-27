@@ -12,6 +12,12 @@ final class LiveDock: ObservableObject {
     struct Picture { let image: NSImage; let window: Int; let epoch: Int; let visible: [Double] }
     @Published private(set) var picture: Picture?
     @Published private(set) var state: LiveFeed.State?
+    /// The run's last picture, kept when its window can no longer be taken (no_picture after one: hidden, minimised,
+    /// on another desktop) and after the watch ends: the float dims it (CardStates 「窗口不可见」) or shows it as the
+    /// task ended. Another run's watch drops it.
+    @Published private(set) var last: Picture?
+    /// The run `last` is of.
+    private(set) var lastRun: String?
     private(set) var run: String?
     private var stop: Flag?
 
@@ -36,6 +42,7 @@ final class LiveDock: ObservableObject {
         stop?.set(); stop = nil
         self.run = run; picture = nil; state = nil
         guard let run else { return }
+        if run != lastRun { last = nil; lastRun = run }
         let flag = Flag()
         stop = flag
         Thread.detachNewThread { [weak self] in
@@ -76,13 +83,14 @@ final class LiveDock: ObservableObject {
 
     private func takePicture(run: String, flag: Flag) {
         guard !flag.value, run == self.run, let p = flag.take(), state != .ended else { return }      // (given up since; or ended)
-        picture = p; state = .streaming
+        picture = p; state = .streaming; last = p
     }
 
     private func take(_ s: LiveFeed.State, run: String, flag: Flag) {
         guard !flag.value, run == self.run else { return }
         state = s
         if s == .ended || s == .noPermission || s == .noPicture { picture = nil }
+        if s == .noPermission { last = nil }
     }
 
     private func lost(run: String, flag: Flag) {
@@ -113,6 +121,8 @@ struct LiveFrame: View {
     /// The frame's own title bar and step line (the right column); false: the picture alone, 110 tall -- the float
     /// draws its own title and line around it (U2).
     var chrome = true
+    /// The task ended (P1Flow frame 6): its last picture dimmed to .55, the title 「<应用> · 已结束」, the end in the line.
+    var ended = false
     @Environment(\.lang) private var lang
 
     var body: some View {
@@ -125,14 +135,17 @@ struct LiveFrame: View {
                 Circle().fill(Brand.dot).frame(width: 7, height: 7).accessibilityHidden(true)
                 Text(title).font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.frameText).lineLimit(1)
                 Spacer(minLength: 4)
-                barIcon(zoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
-                            zoomed ? L("Make the live view smaller", lang: lang) : L("Enlarge the live view", lang: lang)) { zoomed.toggle() }
-                barIcon("rectangle.on.rectangle", L("Pop out as a float", lang: lang), popOut)
+                // (an ended task's picture: nothing to enlarge or pop out live)
+                if !ended {
+                    barIcon(AnyShape(ZoomPath(inward: zoomed)), zoomed ? L("Make the live view smaller", lang: lang) : L("Enlarge the live view", lang: lang)) { zoomed.toggle() }
+                    barIcon(AnyShape(PopOutPath()), L("Pop out as a float", lang: lang), popOut)
+                }
             }
             .padding(.leading, 12).padding(.trailing, 6).frame(height: 34)
             picture(height: zoomed ? 380 : 214)
+                .opacity(ended ? 0.55 : 1)
                 .padding(.horizontal, 6)
-            Text(step ?? " ").font(.system(size: 13)).foregroundStyle(ShellColor.frameQuiet).lineLimit(1)
+            Text(step ?? " ").font(.system(size: 13)).foregroundStyle(Color(ShellPalette.frameStep)).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 12).frame(height: 34)
                 .accessibilityLabel(step.map { L("Current step: %@", $0, lang: lang) } ?? "")
@@ -146,22 +159,29 @@ struct LiveFrame: View {
     /// The picture, its cursor, the card's box and 「准备点」, or why there is none.
     private func picture(height: CGFloat) -> some View {
             ZStack {
-                // (light on the float's ink in both appearances, as the board draws it)
-                Rectangle().fill(chrome ? Brand.card : Color(ShellPalette.shotWell))
+                // (the well white in both appearances, as the boards draw it: a dark card colour round a light
+                // window's picture read as the picture not filling it)
+                Rectangle().fill(Color(ShellPalette.shotWell))
                 if let p = picture {
                     GeometryReader { g in
-                        let size = LiveDockView.fit(p.image.size, in: g.size)
+                        // (in the right column the picture fills its 214 (P1Main), cut to keep the cursor -- else the
+                        // box -- in view; the float's small well shows it whole)
+                        let size = chrome ? Self.fill(p.image.size, in: g.size) : LiveDockView.fit(p.image.size, in: g.size)
+                        let focus = LiveFeed.cursor(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target?.rectNorm, picture: size, visible: p.visible)
+                            ?? LiveFeed.box(pictureWindow: p.window, stepWindow: boxWindow ?? stepWindow, rectNorm: boxRect, picture: size, visible: p.visible).map { CGPoint(x: $0.midX, y: $0.midY) }
+                        let shift = chrome ? Self.shift(size, in: g.size, keeping: focus) : .zero
                         ZStack(alignment: .topLeading) {
                             Image(nsImage: p.image).resizable().frame(width: size.width, height: size.height)
                             let box = LiveFeed.box(pictureWindow: p.window, stepWindow: boxWindow ?? stepWindow, rectNorm: boxRect, picture: size, visible: p.visible)
                             if let b = box {
-                                RoundedRectangle(cornerRadius: 5).strokeBorder(Brand.dot, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
+                                RoundedRectangle(cornerRadius: 6).strokeBorder(Brand.dot, style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
                                     .frame(width: b.width + 8, height: b.height + 8).offset(x: b.minX - 4, y: b.minY - 4)
                                     .accessibilityHidden(true)
                                 // 「准备点」 anchored on its box (U3 §2.4)
+                                // (on the box's edge, as P1Waiting draws it: no gap between them)
                                 if let about {
-                                    let o = LiveFeed.tagOrigin(box: b, tagHeight: 20)
-                                    tag(about).offset(x: o.x, y: o.y)
+                                    let o = LiveFeed.tagOrigin(box: b, tagHeight: 18)
+                                    tag(about).offset(x: o.x, y: o.y + (o.y < b.minY ? 4 : -4))
                                 }
                             }
                             if let c = LiveFeed.cursor(pictureWindow: p.window, stepWindow: stepWindow, rectNorm: target?.rectNorm, picture: size, visible: p.visible) {
@@ -170,7 +190,8 @@ struct LiveFrame: View {
                                     .offset(x: c.x - 6, y: c.y - 6).accessibilityHidden(true)
                             }
                         }
-                        .frame(width: g.size.width, height: g.size.height)
+                        .offset(x: shift.x, y: shift.y)
+                        .frame(width: g.size.width, height: g.size.height, alignment: .topLeading)
                     }
                     .overlay(alignment: .topLeading) {
                         // (no box of the card's own: the tag in the corner, never on a step's box)
@@ -191,19 +212,21 @@ struct LiveFrame: View {
     }
 
     private func tag(_ about: String) -> some View {
-        Text(L("About to click: %@", about, lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(Color(ShellPalette.shotWell))
-            .padding(.horizontal, 8).frame(height: 20)
-            .background(RoundedRectangle(cornerRadius: 4).fill(Color(ShellPalette.shotTag)))
+        Text(L("About to click: %@", about, lang: lang)).font(.system(size: 10, weight: .bold)).foregroundStyle(Color(ShellPalette.waitTagText))
+            .padding(.horizontal, 6).frame(height: 18)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Color(ShellPalette.waitTag)))
             .fixedSize()
     }
 
-    /// 「<应用> · <窗口的状态>」: whose window, and whether it is live, waits for you or has no picture.
+    /// 「<应用> · <窗口的状态>」 (P1Main, P1Waiting): whose window, and that it works in the background -- stopped before
+    /// the button the card names while it waits for you -- or has no picture.
     private var title: String {
         let what: String
-        if waiting { what = L("Waiting for you", lang: lang) }
+        if ended { what = L("Ended", lang: lang) }
+        else if waiting { what = about.map { L("Background window · stopped before %@", $0, lang: lang) } ?? L("Background window · waiting for you", lang: lang) }
         else {
             switch state {
-            case .streaming: what = L("Live", lang: lang)
+            case .streaming: what = L("Background window", lang: lang)
             case .noPermission, .noPicture: what = L("No picture", lang: lang)
             case .ended: what = L("Ended", lang: lang)
             case nil: what = L("Connecting…", lang: lang)
@@ -212,14 +235,60 @@ struct LiveFrame: View {
         return app.map { L("%@ · %@", $0, what, lang: lang) } ?? what
     }
 
-    private func barIcon(_ icon: String, _ label: String, _ action: @escaping () -> Void) -> some View {
+    /// The picture as large as it must be to fill `box`, its ratio kept.
+    static func fill(_ image: CGSize, in box: CGSize) -> CGSize {
+        guard image.width > 0, image.height > 0 else { return box }
+        let k = max(box.width / image.width, box.height / image.height)
+        return CGSize(width: image.width * k, height: image.height * k)
+    }
+
+    /// Where a picture of `size`, bigger than `box`, goes so that `focus` (in its own points) is in view: centred on
+    /// it, never past the picture's edges; centred when there is none.
+    static func shift(_ size: CGSize, in box: CGSize, keeping focus: CGPoint?) -> CGPoint {
+        func one(_ len: CGFloat, _ room: CGFloat, _ f: CGFloat?) -> CGFloat {
+            guard len > room else { return (room - len) / 2 }
+            let want = f.map { room / 2 - $0 } ?? (room - len) / 2
+            return min(0, max(room - len, want))
+        }
+        return CGPoint(x: one(size.width, box.width, focus?.x), y: one(size.height, box.height, focus?.y))
+    }
+
+    private func barIcon(_ icon: AnyShape, _ label: String, _ action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.frameQuiet)
+            icon.stroke(ShellColor.frameQuiet, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round)).frame(width: 12, height: 12)
                 .frame(width: 28, height: 28).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(label)
         .accessibilityLabel(label)
+    }
+}
+
+/// 「放大」's mark (P1Main: a 12 box, arrows out to ↗ and ↙; `inward`, back in).
+struct ZoomPath: Shape {
+    var inward = false
+    func path(in r: CGRect) -> Path {
+        let k = min(r.width, r.height) / 12
+        func pt(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: r.minX + x * k, y: r.minY + y * k) }
+        var p = Path()
+        if inward {
+            p.move(to: pt(11, 5)); p.addLine(to: pt(7, 5)); p.addLine(to: pt(7, 1)); p.move(to: pt(7, 5)); p.addLine(to: pt(11, 1))
+            p.move(to: pt(1, 7)); p.addLine(to: pt(5, 7)); p.addLine(to: pt(5, 11)); p.move(to: pt(5, 7)); p.addLine(to: pt(1, 11))
+        } else {
+            p.move(to: pt(7, 1)); p.addLine(to: pt(11, 1)); p.addLine(to: pt(11, 5)); p.move(to: pt(11, 1)); p.addLine(to: pt(7, 5))
+            p.move(to: pt(5, 11)); p.addLine(to: pt(1, 11)); p.addLine(to: pt(1, 7)); p.move(to: pt(1, 11)); p.addLine(to: pt(5, 7))
+        }
+        return p
+    }
+}
+
+/// 「弹出成浮窗」's mark (P1Main: a 12 box, a square with a small one in its lower right).
+struct PopOutPath: Shape {
+    func path(in r: CGRect) -> Path {
+        let k = min(r.width, r.height) / 12
+        var p = Path(CGRect(x: r.minX + 1.5 * k, y: r.minY + 1.5 * k, width: 9 * k, height: 9 * k))
+        p.addRect(CGRect(x: r.minX + 6 * k, y: r.minY + 6 * k, width: 4.5 * k, height: 4.5 * k))
+        return p
     }
 }
 

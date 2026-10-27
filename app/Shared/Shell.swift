@@ -72,7 +72,7 @@ struct ComposerMode: Equatable {
 
 enum ShellText {
     /// The session's state for the list's subtitle, the right column and VoiceOver (handoff §1.5).
-    static func status(_ st: SessionStatus, lang: ResolvedLang) -> String {
+    static func status(_ st: SessionStatus, lang: ResolvedLang, now: Double = Date().timeIntervalSince1970) -> String {
         switch st {
         case .waitingForYou(let kind): return L("Waiting for you: %@", cardKind(kind, lang: lang), lang: lang)
         case .cardExpired(let kind): return L("Expired, waiting for you: %@", cardKind(kind, lang: lang), lang: lang)
@@ -88,17 +88,59 @@ enum ShellText {
         case .done(let at, let stopped):
             if stopped { return L("Stopped", lang: lang) }
             guard let at else { return L("Done", lang: lang) }
-            return L("Done · %@", time(at), lang: lang)
+            return L("Done · %@", when(at, now: now, lang: lang), lang: lang)
         case .idle: return L("Idle", lang: lang)
         }
     }
 
+    /// A conversation's line under its title in the list (U4 §2.2): a new one not started yet, 「刚开始」; one that is
+    /// only chat (idle), when it was last written to; a finished task, 「完成 · <when>」; else its state.
+    static func rowLine(_ r: ShellRow, now: Double, lang: ResolvedLang) -> String {
+        if r.fresh { return L("Just started", lang: lang) }
+        if case .idle = r.status, let t = r.updatedAt { return when(t, now: now, lang: lang) }
+        if case .error = r.status, let w = r.why { return L("Error: %@", w, lang: lang) }
+        return status(r.status, lang: lang, now: now)
+    }
+
+    /// A clock time (a card's tail: when it closed, in the chat beside it).
     static func time(_ t: Double) -> String {
         DateFormatter.localizedString(from: Date(timeIntervalSince1970: t), dateStyle: .none, timeStyle: .short)
     }
 
+    /// When, in a word (U4 §2.2; the Home board's 「最近」): under a minute 「刚才」; under an hour 「n 分钟前」; the
+    /// same day its time; the day before 「昨天」; this year its month and day; else with its year -- by `calendar`
+    /// (the user's; a test's own).
+    static func when(_ t: Double, now: Double, lang: ResolvedLang, calendar: Calendar = .current, hourLocale: Locale = .current) -> String {
+        let d = now - t
+        let date = Date(timeIntervalSince1970: t), today = Date(timeIntervalSince1970: now)
+        let f = DateFormatter()
+        f.calendar = calendar; f.timeZone = calendar.timeZone
+        f.locale = Locale(identifier: lang == .zhHans ? "zh_CN" : "en_US")
+        // (the clock as the user set it, 12 or 24 hours; the language's own words round it)
+        let clock = { () -> String in
+            f.dateFormat = DateFormatter.dateFormat(fromTemplate: "jmm", options: 0, locale: hourLocale) ?? "HH:mm"
+            return f.string(from: date)
+        }
+        // (a time after now -- another Mac's clock, a skew: its time, never 「刚才」 for ever)
+        if d < 0 { return clock() }
+        if d < 60 { return L("Just now", lang: lang) }
+        if d < 3600 { return L("%d min ago", Int(d / 60), lang: lang) }
+        if calendar.isDate(date, inSameDayAs: today) { return clock() }
+        if let y = calendar.date(byAdding: .day, value: -1, to: today), calendar.isDate(date, inSameDayAs: y) { return L("Yesterday", lang: lang) }
+        let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: today)
+        // (zh as the boards write it, spaced: 「3 月 5 日」, 「2025 年 12 月 31 日」; en by its locale: "Mar 5", "Dec 31, 2025")
+        if lang == .zhHans {
+            let c = calendar.dateComponents([.year, .month, .day], from: date)
+            let md = L("%d month %d day", c.month ?? 0, c.day ?? 0, lang: lang)
+            return sameYear ? md : L("%d year %@", c.year ?? 0, md, lang: lang)
+        }
+        f.setLocalizedDateFormatFromTemplate(sameYear ? "MMMd" : "yMMMd")
+        return f.string(from: date)
+    }
+
     /// A card's kind in words (the card's own text is the harness's, already in the request's language).
     static func cardKind(_ kind: String, lang: ResolvedLang) -> String {
+        if kind == CardModel.sendingKind { return L("confirm before sending", lang: lang) }
         switch CardModel.Kind(kind) {
         case .plan: return L("approve the plan", lang: lang)
         case .action: return L("confirm before acting", lang: lang)
@@ -412,6 +454,16 @@ struct ShellRow: Equatable, Identifiable {
     var updatedAt: Double?
     /// A task of it runs (delete waits for it to end).
     var taskRunning: Bool
+    /// The new conversation, not started yet (⌘N, 「新对话」): its own row, at the top, while it is shown (U4 §2.2).
+    var fresh = false
+    /// A failed task's own reason (its end's words), for 「出错：<原因>」 under the title (P1Main).
+    var why: String? = nil
+
+    /// The new conversation's row: 「新对话」, 「刚开始」, a mist dot.
+    static func fresh(title: String) -> ShellRow {
+        ShellRow(id: freshId, title: title, status: .idle, updatedAt: nil, taskRunning: false, fresh: true)
+    }
+    static let freshId = ""
 }
 
 enum ShellList {
@@ -435,6 +487,8 @@ enum ShellList {
             var r = out[id] ?? ShellRow(id: id, title: "", status: .idle, updatedAt: nil, taskRunning: false)
             r.status = st.status
             r.taskRunning = st.runningTask != nil
+            if case .error = st.status, let t = st.tasks.last, t.cause != .screenLocked,
+               let w = (t.done?.reason ?? t.end?.reason)?.trimmingCharacters(in: .whitespacesAndNewlines), !w.isEmpty { r.why = w } else { r.why = nil }
             if let t = st.lastEventAt { r.updatedAt = max(r.updatedAt ?? t, t) }
             if r.title.isEmpty, let first = st.messages.first(where: { $0.role == "user" }) { r.title = title(firstUserMessage: first.text) }
             if r.title.isEmpty, let task = st.tasks.first { r.title = title(firstUserMessage: task.raw) }
@@ -790,6 +844,21 @@ final class ShellModel: ObservableObject {
     func newConversation() {
         selected = nil
         notice = nil
+        askComposerFocus()          // (the user's own ⌘N or click: the new conversation's typing is in the composer -- P3States)
+    }
+
+    /// The rows the list draws: while the new conversation is the one shown -- at launch, after ⌘N or the button, the
+    /// same state (fable, U4) -- its own row first, selected; it goes once another is selected or its first message
+    /// opened a session (U4 §2.2). Then the sessions.
+    var listRows: [ShellRow] {
+        selected == nil ? [ShellRow.fresh(title: L("New conversation", lang: lang()))] + rows : rows
+    }
+
+    /// An example of the empty chat (P3States): its words into the composer, the typing there -- never sent.
+    func fillExample(_ words: String) {
+        // (a draft being written is the user's: never replaced; the click only moves the typing there -- U4 review)
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { draft = words }
+        askComposerFocus()
     }
 
     /// The user opened a session: its error dot clears. Reading it needs no process (#107 review): what is stored after
@@ -1228,6 +1297,11 @@ final class ShellModel: ObservableObject {
         guard let id = selected else { return }
         if poppedOut.contains(id) { poppedOut.remove(id) } else { poppedOut.insert(id) }
     }
+    /// The one way to ask for the composer's focus, in the key window only: from the user's own acts -- Esc out of a
+    /// card, ⌘N or 「新对话」, an example picked (U4: P3States, 「焦点在输入框」).
+    private func askComposerFocus() {
+        if windowKey { focusRequest += 1 }
+    }
     private var focusTaken = 0
     func takeFocus(_ n: Int) -> Bool {
         guard n > focusTaken, windowKey else { return false }
@@ -1367,7 +1441,7 @@ final class ShellModel: ObservableObject {
         case .leaveCard:
             if keyCard != nil {
                 keyCard = nil
-                if windowKey { focusRequest += 1 }     // (the focus funnel: back to the composer)
+                askComposerFocus()     // (the focus funnel: back to the composer)
             }
             return false
         case .takeBack:
@@ -1603,7 +1677,23 @@ final class ShellModel: ObservableObject {
     // MARK: the queue, unsent words, retry
 
     func queueEdit(_ id: String, text: String) { control(.queueEdit(id: id, text: text)) }
-    func queueCancel(_ id: String) { control(.queueCancel(id: id)) }
+    /// 撤掉 (P3States 「已撤掉」): the session drops it; the window keeps a line of it -- struck through, with 「放回去」 --
+    /// until it is put back or the app quits (this window's memory only: the session has nothing of it any more).
+    func queueCancel(_ id: String) {
+        if let sid = selected, let q = client.state(sid).queue.first(where: { $0.id == id }),
+           withdrawn[sid]?.contains(where: { $0.id == id }) != true { withdrawn[sid, default: []].append(q) }
+        control(.queueCancel(id: id))
+    }
+    /// The queued words taken back here, by session (queueCancel).
+    @Published private(set) var withdrawn: [String: [QueueItem]] = [:]
+    /// 「放回去」: the words back in the message field (after what is there), the line gone. Never sent by this: the
+    /// user sends them again, or not.
+    func putBack(_ id: String) {
+        guard let sid = selected, let q = withdrawn[sid]?.first(where: { $0.id == id }) else { return }
+        withdrawn[sid]?.removeAll { $0.id == id }
+        draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? q.text : draft + "\n" + q.text
+        askComposerFocus()
+    }
     func queueSendNow(_ id: String) { guard cloudAllows() else { return }; control(.queueSendNow(id: id)) }
     func retry() { guard cloudAllows() else { return }; control(.retry) }
 
