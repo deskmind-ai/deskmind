@@ -80,6 +80,18 @@ enum ShellPalette {
     static let islandMuted = Tone(light: 0xB2BBAF, dark: 0xB2BBAF)
     static let islandGrey = Tone(light: 0x8C958C, dark: 0x8C958C)
 
+    // float / island (#133, the boards): the same in both appearances, as the ink surface is.
+    /// The ring round a waiting card in the float (P1Float's accent, not the dark appearance's brighter dot).
+    static let floatRing = Tone(light: 0xC95536, dark: 0xC95536)
+    /// 「准备点：…」 in the float's picture (P1Float).
+    static let floatShotTag = Tone(light: 0xB84A2E, dark: 0xB84A2E)
+    /// On the ink: the step line (CardStates), the hover icons, the faint words (how long a card waited, QuestionCard's
+    /// foot), and the foot's hairline.
+    static let onInkBright = Tone(light: 0xE9ECE8, dark: 0xE9ECE8)
+    static let onInkIcon = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
+    static let onInkFaint = Tone(light: 0x8C958C, dark: 0x8C958C)
+    static let inkRule = Tone(light: 0x353A36, dark: 0x353A36)
+
     /// Text colours and the backgrounds each is drawn on (both appearances: `textOn(_:)`).
     static let textPairs: [(text: Tone, background: Tone)] = [
         (ink, paper), (ink, card), (ink, panel), (ink, panelSelected), (ink, banner), (ink, sidebar), (ink, bubble), (ink, waitRow),
@@ -97,6 +109,7 @@ enum ShellPalette {
         (onInk, inkButton), (onInkMuted, inkButton),
         (inkSurface, shotWell),             // the float's 「还没有画面」 in its well
         (shotWell, shotTag),                // 「准备点：…」 on the picture
+        (onInkBright, inkSurface), (onInkFaint, inkSurface), (shotWell, floatShotTag),   // the float after the boards (#133)
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }

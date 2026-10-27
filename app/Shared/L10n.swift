@@ -715,6 +715,17 @@ enum L10n {
         // the float / island after the boards (#133), and the short action card (CardBrief)
         "%d earlier steps may already have gone out": "之前有 %d 步可能已经发出",
         "%d earlier steps may already have gone out: %@": "之前有 %d 步可能已经发出：%@",
+        "Stopped · %@": "已停下 · %@",
+        "Didn't finish · %@": "没做完 · %@",
+        "Waited %@": "等了 %@",
+        "Opens the float again": "重新展开浮窗",
+        "No answer in time, so the task is paused. It won't guess for you.": "没有及时回答，任务先暂停了。它不会替你猜。",
+        "Nothing is touched while paused; the island keeps reminding you.": "暂停期间不会动任何东西；灵动岛会一直提示。",
+        "Stop this task": "停下这个任务",
+        "Picked the wrong one? Take it back before the countdown ends.": "选错了可以撤回，倒计时结束才真正交给它。",
+        "Needs a typed answer": "要打字回答",
+        "Answer in DeskMind": "在 DeskMind 里回答",
+        "Typing needs the DeskMind window; you open it, it never jumps in front of you.": "要输入文字时才需要回到 DeskMind 窗口，由你点开，不会自己跳出来。",
         // card contents (U3)
         "Which one": "哪一个",
         "Missing info": "缺的信息",
