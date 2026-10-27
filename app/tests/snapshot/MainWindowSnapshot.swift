@@ -128,7 +128,8 @@ enum MainWindowSnapshot {
     @MainActor static func renderFirstRun(_ step: FirstRun.Step, key: FirstRun.KeyState, granted: Bool, dark: Bool, to file: URL) {
         var flow = FirstRun(step: step)
         flow.facts.accessibility = granted; flow.facts.screen = granted
-        if case .set = key { flow.facts.keySet = true }
+        // (a key set, being tried or that works: the key is there, so 继续 is drawn on -- as it is in the app)
+        switch key { case .set, .checking, .ok: flow.facts.keySet = true; default: break }
         // (the bad key saved, its check failed: the case 稍后 must still show -- #130 Codex review)
         if case .bad = key { flow.facts.keySet = true; flow.facts.saveOK = true; flow.facts.checkOK = false }
         let page = FirstRunPage(flow: flow, language: .constant(AppLanguage.zhHans.rawValue),

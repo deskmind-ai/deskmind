@@ -702,8 +702,11 @@ enum L10n {
         "Trying this key…": "正在试这个密钥…",
         "Works · reached %@": "能用 · 已连上 %@",
         "This key doesn't work: %@": "这个密钥用不了：%@",
-        "The key stays in this Mac's keychain; only DeskMind's helper can read it": "密钥只存在这台 Mac 的钥匙串里，只有 DeskMind 的助手能读",
-        "You can change this later in the cloud model settings": "以后可以在「云端模型」设置里改",
+        "You can change this later in settings": "以后可以在设置里改",
+        "Use my own key": "用我自己的密钥",
+        "Billed to your own account": "按你自己的账号计费",
+        "Paste your key": "粘贴你的密钥",
+        "The key stays only in this Mac's keychain": "密钥只存在这台 Mac 的钥匙串里",
         "Granted": "已授权",
         // the float on ink (U2)
         "%@ · Step %d": "%@ · 第 %d 步",

@@ -72,6 +72,14 @@ enum ShellPalette {
     /// 「准备点：…」 over a window's picture: the same in both appearances (the picture is the app's, not ours).
     static let shotTag = Tone(light: 0xA3402A, dark: 0xA3402A)
 
+    // the first run (P1Setup): its ink column's paragraph and promises; the step's list text, a key that works,
+    // a key that doesn't (its dot and its field's edge)
+    static let onInkBody = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
+    static let onInkPromiseText = Tone(light: 0xC2C9C1, dark: 0xC2C9C1)
+    static let setupBody = Tone(light: 0x3A413B, dark: 0xE7E9E4)
+    static let setupOK = Tone(light: 0x2F5531, dark: 0x8FC293)
+    static let setupBad = Tone(light: 0xB84A2E, dark: 0xE5735A)         // graphics only: its words are orangeText
+
     /// The island (one bar at the notch, the same in both appearances, as the hardware is): its fill, its left text,
     /// its right text, and its grey dot (preparing, paused, didn't finish). Working and needing you are the orange dot,
     /// done is the text's colour (Island board: no colour outside the palette).
@@ -97,6 +105,8 @@ enum ShellPalette {
         (onInk, inkButton), (onInkMuted, inkButton),
         (inkSurface, shotWell),             // the float's 「还没有画面」 in its well
         (shotWell, shotTag),                // 「准备点：…」 on the picture
+        (onInkBody, inkSurface), (onInkPromiseText, inkSurface),     // the first run's ink column
+        (setupBody, card), (setupBody, paper), (setupOK, card),      // its step's lists and status
     ]
     static func textOn(_ a: Appearance) -> [(text: UInt32, background: UInt32)] {
         textPairs.map { ($0.text.value(a), $0.background.value(a)) }
