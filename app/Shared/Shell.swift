@@ -1671,7 +1671,23 @@ final class ShellModel: ObservableObject {
     // MARK: the queue, unsent words, retry
 
     func queueEdit(_ id: String, text: String) { control(.queueEdit(id: id, text: text)) }
-    func queueCancel(_ id: String) { control(.queueCancel(id: id)) }
+    /// 撤掉 (P3States 「已撤掉」): the session drops it; the window keeps a line of it -- struck through, with 「放回去」 --
+    /// until it is put back or the app quits (this window's memory only: the session has nothing of it any more).
+    func queueCancel(_ id: String) {
+        if let sid = selected, let q = client.state(sid).queue.first(where: { $0.id == id }),
+           withdrawn[sid]?.contains(where: { $0.id == id }) != true { withdrawn[sid, default: []].append(q) }
+        control(.queueCancel(id: id))
+    }
+    /// The queued words taken back here, by session (queueCancel).
+    @Published private(set) var withdrawn: [String: [QueueItem]] = [:]
+    /// 「放回去」: the words back in the message field (after what is there), the line gone. Never sent by this: the
+    /// user sends them again, or not.
+    func putBack(_ id: String) {
+        guard let sid = selected, let q = withdrawn[sid]?.first(where: { $0.id == id }) else { return }
+        withdrawn[sid]?.removeAll { $0.id == id }
+        draft = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? q.text : draft + "\n" + q.text
+        askComposerFocus()
+    }
     func queueSendNow(_ id: String) { guard cloudAllows() else { return }; control(.queueSendNow(id: id)) }
     func retry() { guard cloudAllows() else { return }; control(.retry) }
 

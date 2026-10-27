@@ -363,7 +363,8 @@ struct SessionList: View {
             }
             footer
         }
-        .padding(.horizontal, 12).padding(.top, 40).padding(.bottom, 10)
+        // (P1Main: 16 above the window's buttons, their 12 + 4, then the 14 gap -- the button at 46; 16 below the foot)
+        .padding(.horizontal, 12).padding(.top, 46).padding(.bottom, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(ShellColor.sidebar)
         .alert(L("Rename conversation", lang: lang), isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -393,7 +394,7 @@ struct SessionList: View {
                 .font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(1)
             Spacer(minLength: 4)
             Button(action: openSettings) {
-                Image(systemName: "gearshape").font(.system(size: 15)).foregroundStyle(Brand.ink)
+                GearPath().stroke(Brand.ink, style: StrokeStyle(lineWidth: 1.4, lineCap: .round)).frame(width: 16, height: 16)
                     .frame(width: 32, height: 32).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -417,35 +418,47 @@ struct SessionRowView: View {
     private var waits: Bool {
         switch row.status { case .waitingForYou, .cardExpired: true; default: false }
     }
+    /// The line under the title (P1Main): waiting, orange and 600; a problem, orange; paused or locked, ink and 600.
+    private var metaColor: Color {
+        if waits { return ShellColor.orangeText }
+        switch row.status.shape { case .bang: return ShellColor.orangeText; case .pause, .lock: return Brand.ink; default: return ShellColor.secondary }
+    }
+    private var metaBold: Bool { waits || row.status.shape == .pause || row.status.shape == .lock }
 
     var body: some View {
         let status = ShellText.rowLine(row, now: now, lang: lang)
         HStack(spacing: 10) {
             StatusDot(status: row.status, label: status).frame(width: 16)
+            // (the boards' CSS lines: 14 px on 20, 12 px on 17, 2 apart)
             VStack(alignment: .leading, spacing: 2) {
                 Text(row.title).font(.system(size: 14, weight: selected || waits ? .semibold : .regular)).foregroundStyle(Brand.ink).lineLimit(1)
-                Text(status).font(.system(size: 12, weight: waits ? .semibold : .regular))
-                    .foregroundStyle(waits ? ShellColor.orangeText : ShellColor.secondary).lineLimit(1)
+                    .frame(height: 20)
+                Text(status).font(.system(size: 12, weight: metaBold ? .semibold : .regular))
+                    .foregroundStyle(metaColor).lineLimit(1)
+                    .frame(height: 17)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if waits {
-                Text(L("Waiting", lang: lang)).font(.system(size: 12, weight: .bold)).foregroundStyle(Brand.card)
+                Text(L("Waiting", lang: lang)).font(.system(size: 12, weight: .bold)).foregroundStyle(Color(ShellPalette.waitTagText))
                     .padding(.horizontal, 8).frame(height: 22)
-                    .background(Capsule().fill(ShellColor.orangeText))
+                    .background(Capsule().fill(Color(ShellPalette.waitTag)))
                     .accessibilityHidden(true)
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 9)
+        .padding(.horizontal, 11.5).padding(.vertical, 10.5)
         .background(RoundedRectangle(cornerRadius: 12).fill(waits ? ShellColor.waitRow : selected ? Brand.card : Color.clear))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(waits ? Brand.dot : selected ? Brand.line : Color.clear, lineWidth: 1.5))
+        // (P1Waiting: the selected one waiting for you lifts a little)
+        .shadow(color: Brand.dot.opacity(waits && selected ? 0.18 : 0), radius: 7, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 12))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(L("%@, %@", row.title, status, lang: lang))
     }
 }
 
-/// The session's state as a shape (never by colour alone, handoff §1.5): a ring (thinking), a dot (working), a dot with
-/// a halo (waiting for you), a check (done), "!" (a problem), a mist dot (idle).
+/// The session's state as a shape (never by colour alone, handoff §1.5), P1Main's and P3States' marks: a ring
+/// (thinking), a dot (working), a dot with a halo (waiting for you), a green check (done), a hollow 「!」 (a problem),
+/// two bars (paused), a lock (the screen locked), a magnifier (looking only), a mist dot (idle).
 struct StatusDot: View {
     let status: SessionStatus
     let label: String
@@ -454,25 +467,83 @@ struct StatusDot: View {
         ZStack {
             switch status.shape {
             case .haloDot:
-                Circle().stroke(Brand.dot.opacity(0.35), lineWidth: 3).frame(width: 13, height: 13)
-                Circle().fill(Brand.dot).frame(width: 8, height: 8)
+                // (the 4 pt halo a ring round the dot: no translucent fill -- L10nTests)
+                Circle().stroke(Brand.dot.opacity(0.28), lineWidth: 4).frame(width: 14, height: 14)
+                Circle().fill(Brand.dot).frame(width: 10, height: 10)
             case .bang:
-                Circle().fill(ShellColor.orangeText).frame(width: 13, height: 13)
-                Text("!").font(.system(size: 10, weight: .heavy)).foregroundStyle(Brand.paper)
+                Circle().strokeBorder(Color(ShellPalette.waitTag), lineWidth: 1.5).frame(width: 14, height: 14)
+                Text(verbatim: "!").font(.system(size: 10, weight: .heavy)).foregroundStyle(Color(ShellPalette.waitTag))
             case .solidDot:
-                Circle().fill(Brand.dot).frame(width: 8, height: 8)
+                Circle().fill(Brand.dot).frame(width: 9, height: 9)
             case .hollowRing:
-                Circle().stroke(ShellColor.secondary, lineWidth: 2).frame(width: 9, height: 9)
+                Circle().strokeBorder(ShellColor.secondary, lineWidth: 2).frame(width: 9, height: 9)
             case .check:
-                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.ok)
+                CheckPath().stroke(ShellColor.ok, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)).frame(width: 14, height: 14)
+            case .pause:
+                PausePath().stroke(Color(ShellPalette.macLine), style: StrokeStyle(lineWidth: 2.2, lineCap: .round)).frame(width: 12, height: 12)
+            case .lock:
+                LockPath().stroke(Color(ShellPalette.macLine), lineWidth: 1.4).frame(width: 12, height: 13)
+            case .look:
+                Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color(ShellPalette.macLine))
             case .mistDot:
-                Circle().fill(Brand.mist).frame(width: 7, height: 7)
+                Circle().fill(Color(ShellPalette.idleDot)).frame(width: 7, height: 7)
             }
         }
-        .frame(width: 14, height: 14)
+        .frame(width: 16, height: 18)
         .animation(.easeInOut(duration: 0.15), value: status.shape)
         .accessibilityElement()
         .accessibilityLabel(label)
+    }
+}
+
+/// The sidebar's settings mark (P1Main: a 16 box, a 2.4 circle and eight short rays).
+struct GearPath: Shape {
+    func path(in r: CGRect) -> Path {
+        let k = min(r.width, r.height) / 16
+        func pt(_ x: Double, _ y: Double) -> CGPoint { CGPoint(x: r.minX + x * k, y: r.minY + y * k) }
+        var p = Path(ellipseIn: CGRect(x: r.minX + 5.6 * k, y: r.minY + 5.6 * k, width: 4.8 * k, height: 4.8 * k))
+        for (a, b) in [((8, 1.5), (8, 3.5)), ((8, 12.5), (8, 14.5)), ((1.5, 8), (3.5, 8)), ((12.5, 8), (14.5, 8)),
+                       ((3.4, 3.4), (4.8, 4.8)), ((11.2, 11.2), (12.6, 12.6)), ((3.4, 12.6), (4.8, 11.2)), ((11.2, 4.8), (12.6, 3.4))] as [((Double, Double), (Double, Double))] {
+            p.move(to: pt(a.0, a.1)); p.addLine(to: pt(b.0, b.1))
+        }
+        return p
+    }
+}
+
+/// The boards' check (a 14 box: M3 7.5 l2.6 2.6 L11 4.5), drawn in whatever frame it is given.
+struct CheckPath: Shape {
+    func path(in r: CGRect) -> Path {
+        let k = min(r.width, r.height) / 14
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX + 3 * k, y: r.minY + 7.5 * k))
+        p.addLine(to: CGPoint(x: r.minX + 5.6 * k, y: r.minY + 10.1 * k))
+        p.addLine(to: CGPoint(x: r.minX + 11 * k, y: r.minY + 4.5 * k))
+        return p
+    }
+}
+
+/// Two bars (P3States 已暂停: a 12 box, M4 2.5v7 M8 2.5v7).
+struct PausePath: Shape {
+    func path(in r: CGRect) -> Path {
+        let k = min(r.width, r.height) / 12
+        var p = Path()
+        for x in [4.0, 8.0] {
+            p.move(to: CGPoint(x: r.minX + x * k, y: r.minY + 2.5 * k)); p.addLine(to: CGPoint(x: r.minX + x * k, y: r.minY + 9.5 * k))
+        }
+        return p
+    }
+}
+
+/// A lock (P3States 屏幕已锁定: an 11 × 12 box, its body and its shackle).
+struct LockPath: Shape {
+    func path(in r: CGRect) -> Path {
+        let kx = r.width / 11, ky = r.height / 12
+        var p = Path(roundedRect: CGRect(x: r.minX + 1.5 * kx, y: r.minY + 5.5 * ky, width: 8 * kx, height: 5.5 * ky), cornerRadius: 1.2 * kx)
+        p.move(to: CGPoint(x: r.minX + 3.5 * kx, y: r.minY + 5.5 * ky))
+        p.addLine(to: CGPoint(x: r.minX + 3.5 * kx, y: r.minY + 4 * ky))
+        p.addArc(center: CGPoint(x: r.minX + 5.5 * kx, y: r.minY + 4 * ky), radius: 2 * kx, startAngle: .degrees(180), endAngle: .degrees(0), clockwise: false)
+        p.addLine(to: CGPoint(x: r.minX + 7.5 * kx, y: r.minY + 5.5 * ky))
+        return p
     }
 }
 
@@ -537,7 +608,7 @@ struct ChatColumn: View {
             }
             .frame(minHeight: 0, maxHeight: .infinity)
             .layoutPriority(0)
-            if let s { pinned(s, queueCap: CardBody.cap(columnHeight: height)).layoutPriority(1) }
+            if let s { pinned(s).layoutPriority(1) }
             if let n = shell.notice {
                 Text(n).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 40).padding(.bottom, 4)
@@ -560,20 +631,29 @@ struct ChatColumn: View {
                     .font(.system(size: 16, weight: .bold)).foregroundStyle(Brand.ink).lineLimit(1)
                 if let s, s.status != .idle {
                     let waits: Bool = { switch s.status { case .waitingForYou, .cardExpired: true; default: false } }()
-                    Text(ShellText.status(s.status, lang: lang)).font(.system(size: 12, weight: waits ? .semibold : .regular))
-                        .foregroundStyle(waits ? ShellColor.orangeText : ShellColor.secondary).lineLimit(1)
+                    // (P1Main: paused or locked, in ink and 600 -- the task is held, not working)
+                    let held: Bool = { switch s.status { case .paused, .locked: true; default: false } }()
+                    Text(Self.headSub(s, lang: lang)).font(.system(size: 12, weight: waits || held ? .semibold : .regular))
+                        .foregroundStyle(waits ? ShellColor.orangeText : held ? Brand.ink : ShellColor.secondary).lineLimit(1)
                 }
             }
             Spacer()
             if let t = s?.runningTask {
                 Button { shell.stop() } label: {
+                    // (P1Main: 36 high, a capsule, 1 pt hairline, 13 px)
                     HStack(spacing: 8) {
                         RoundedRectangle(cornerRadius: 2).fill(Brand.ink).frame(width: 9, height: 9).accessibilityHidden(true)
                         Text(L("Stop task", lang: lang))
                         Text(verbatim: "⌘.").foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
                     }
+                    .font(.system(size: 13)).foregroundStyle(Brand.ink)
+                    .padding(.horizontal, 14).frame(height: 36)
+                    .background(Capsule().fill(Brand.card))
+                    .overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
+                    .contentShape(Capsule())
                 }
-                .buttonStyle(InkButtonStyle(prominent: false, small: true))
+                .buttonStyle(.plain)
+                .pointerStyle(.link)
                 .disabled(t.stopping)
                 .help(L("Stop the task (⌘.)", lang: lang))
                 .accessibilityLabel(L("Stop task", lang: lang))
@@ -582,6 +662,20 @@ struct ChatColumn: View {
         }
         .padding(.horizontal, 28).frame(height: 60)
         .overlay(alignment: .bottom) { Hairline() }
+    }
+
+    /// The line under the title (P1Main): a task working, 「1 个电脑任务在后台执行」 (its step is in the chat and the
+    /// right column); paused, until you stop; the screen locked, the step it stopped at (it ended: nothing goes on by
+    /// itself after the unlock); else the state in words, as in the list.
+    static func headSub(_ s: SessionState, lang: ResolvedLang) -> String {
+        switch s.status {
+        case .acting: return L("A computer task is running in the background", lang: lang)
+        case .paused: return L("You're using the Mac: the task is paused until you stop", lang: lang)
+        case .locked:
+            let n = s.tasks.last?.steps.count ?? 0
+            return n > 0 ? L("The screen is locked: the task stopped at step %d", n, lang: lang) : ShellText.status(s.status, lang: lang)
+        default: return ShellText.status(s.status, lang: lang)
+        }
     }
 
     @ViewBuilder private func timeline(_ s: SessionState) -> some View {
@@ -601,6 +695,9 @@ struct ChatColumn: View {
             }
         }
         ForEach(s.shownOutbox, id: \.id) { o in OutgoingRow(shell: shell, item: o) }
+        // (P1Main: what waits in the queue is at the chat's end, on the user's side; what was taken back stays a line)
+        ForEach(s.queue, id: \.id) { q in QueuedBubble(shell: shell, item: q, cardOpen: !s.composerEnabled) }
+        ForEach(shell.withdrawn[shell.selected ?? ""] ?? [], id: \.id) { q in WithdrawnRow(shell: shell, item: q) }
     }
 
     /// The 「● DeskMind」 label goes above DeskMind's turn: the first of its items after the user's words (a reply, a
@@ -618,10 +715,10 @@ struct ChatColumn: View {
     }
 
     /// Above the composer: the open card (handoff §3.3, pinned while it waits) -- whole when it fits the pinned place
-    /// (ShellModel.cardPinnedWhole), else one line, its title and 「跳到卡片」, the card itself in place in the chat (A2) --
-    /// and the queue (scrolls past a few).
-    @ViewBuilder private func pinned(_ s: SessionState, queueCap: Double) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    /// (ShellModel.cardPinnedWhole), else one line, its title and 「跳到卡片」, the card itself in place in the chat (A2).
+    /// (The queue is in the chat, P1Main.)
+    @ViewBuilder private func pinned(_ s: SessionState) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
             if let p = shell.pinned(s) {
                 let m = CardModel(card: p.card.card, runId: p.runId, askId: p.card.askId)
                 if shell.cardPinnedWhole(m) {
@@ -630,9 +727,8 @@ struct ChatColumn: View {
                 }
                 PinnedCard(shell: shell, card: m, phase: p.phase, askedAt: p.card.askedAt, session: s) { jumpTo = $0 }
             }
-            if !s.queue.isEmpty { QueueList(shell: shell, session: s, cap: min(150, queueCap)) }
         }
-        .padding(.horizontal, 40)
+        .padding(.horizontal, 40).padding(.bottom, shell.pinned(s) == nil ? 0 : 6)
         .animation(.easeOut(duration: 0.2), value: shell.pinned(s)?.card.askId)
     }
 
@@ -654,24 +750,6 @@ struct ChatColumn: View {
     }
 }
 
-/// The queue above the composer: as tall as its bubbles, scrolling past `cap`.
-struct QueueList: View {
-    @ObservedObject var shell: ShellModel
-    let session: SessionState
-    let cap: Double
-    @State private var content: Double = 0
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(session.queue, id: \.id) { q in QueuedBubble(shell: shell, item: q, cardOpen: !session.composerEnabled) }
-            }
-            .background(GeometryReader { g in Color.clear.preference(key: CardBodyVisible.self, value: g.size.height) })
-        }
-        .frame(height: min(cap, max(content, 1)))
-        .onPreferenceChange(CardBodyVisible.self) { content = $0 }
-    }
-}
-
 /// Cloud models are off: a conversation needs one (0.5 has no local-only conversation), so nothing is sent; the
 /// settings are one click away.
 struct CloudOffRow: View {
@@ -679,7 +757,8 @@ struct CloudOffRow: View {
     @Environment(\.lang) private var lang
     var body: some View {
         HStack(spacing: 10) {
-            Label(L("Cloud models are off. Conversations need one: nothing is sent until it is on.", lang: lang), systemImage: "cloud.slash")
+            // (the words alone, as the banner above them: their left edges in line)
+            Text(L("Cloud models are off. Conversations need one: nothing is sent until it is on.", lang: lang))
                 .font(.system(size: 12)).foregroundStyle(Brand.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Button(L("Open model settings", lang: lang), action: openSettings).buttonStyle(InkButtonStyle(prominent: true, small: true))
@@ -717,8 +796,9 @@ struct EmptyChat: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .center, spacing: 16) {
+                // (P3States: a 66 × 71 box, the body in it about 51 × 52 -- the picture is trimmed to the body)
                 Image(nsImage: Brand.image("idle", scheme: scheme)).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
-                    .frame(height: 71).accessibilityHidden(true)
+                    .frame(height: 52).frame(width: 66, height: 71).accessibilityHidden(true)
                 Text(opening ? L("Starting the conversation…", lang: lang) : L("What should it do?", lang: lang))
                     .font(.system(size: 24, weight: .bold)).foregroundStyle(Brand.ink)
             }
@@ -728,7 +808,7 @@ struct EmptyChat: View {
                         let words = L(key, lang: lang)
                         Button { pick(words) } label: {
                             Text(words).font(.system(size: 13)).foregroundStyle(Brand.ink).lineLimit(1).fixedSize()
-                                .padding(.horizontal, 14).frame(height: 34)
+                                .padding(.horizontal, 12).frame(height: 34)
                                 .background(RoundedRectangle(cornerRadius: 17).fill(Brand.card))
                                 .overlay(RoundedRectangle(cornerRadius: 17).strokeBorder(Brand.line, lineWidth: 1))
                                 .contentShape(RoundedRectangle(cornerRadius: 17))
@@ -810,8 +890,9 @@ struct MessageRow: View {
             if user { Spacer(minLength: 60) }
             VStack(alignment: user ? .trailing : .leading, spacing: 6) {
                 if !user && labelled { SpeakerLabel() }
+                // (the boards' 15 px on a 1.55 line: 23.25, the font's own about 18)
                 Text(message.text.isEmpty && message.streaming ? "…" : message.text)
-                    .font(.system(size: 15)).lineSpacing(3).foregroundStyle(Brand.ink)
+                    .font(.system(size: 15)).lineSpacing(5).padding(.vertical, 2.5).foregroundStyle(Brand.ink)
                     .textSelection(.enabled)
                     .padding(.horizontal, user ? 14 : 0).padding(.vertical, user ? 10 : 0)
                     .background(user ? UserBubble().fill(ShellColor.bubble) : nil)
@@ -871,7 +952,8 @@ struct ErrorRow: View {
     }
 }
 
-/// The user's words the app holds: on their way (sending), or not sent (with why, 「重新发送」 and remove).
+/// The user's words the app holds: on their way (P3States 「正在发送」: the bubble as sent, a line in it with the orange
+/// dot), or not sent (with why, 「重新发送」 and remove).
 struct OutgoingRow: View {
     @ObservedObject var shell: ShellModel
     let item: Outgoing
@@ -881,13 +963,19 @@ struct OutgoingRow: View {
         HStack {
             Spacer(minLength: 60)
             VStack(alignment: .trailing, spacing: 4) {
-                Text(item.text).font(.system(size: 15)).lineSpacing(3).foregroundStyle(Brand.ink)
-                    .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(UserBubble().fill(ShellColor.bubble))
-                    .opacity(item.sending ? 0.6 : 1)
-                if item.sending {
-                    Text(L("Sending…", lang: lang)).font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-                } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.text).font(.system(size: 15)).lineSpacing(5).padding(.vertical, 2.5).foregroundStyle(Brand.ink)
+                    if item.sending {
+                        HStack(spacing: 6) {
+                            Circle().fill(Brand.dot).frame(width: 6, height: 6).accessibilityHidden(true)
+                            Text(L("Sending…", lang: lang))
+                        }
+                        .font(.system(size: 12)).foregroundStyle(Color(ShellPalette.sendingText))
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 10)
+                .background(UserBubble().fill(ShellColor.bubble))
+                if !item.sending {
                     HStack(spacing: 8) {
                         Text(shell.unsentText(item.refused)).font(.system(size: 11)).foregroundStyle(ShellColor.orangeText)
                         Button(L("Send again", lang: lang)) { shell.resend(item.id) }.buttonStyle(.link)
@@ -897,50 +985,63 @@ struct OutgoingRow: View {
                     .font(.system(size: 11))
                 }
             }
+            .frame(maxWidth: 460, alignment: .trailing)
         }
         .accessibilityElement(children: .contain)
     }
 }
 
-/// A message typed while the task runs (handoff §3.4): it waits in the session's queue until the task is done; it can
-/// be edited, removed, or sent to the task now. A task that was stopped holds it: sent only if the user says so.
+/// A message typed while the task runs (handoff §3.4; P1Main): in the chat on the user's side, 420 wide, a dashed
+/// bubble -- what it waits for above it, its words editable in place, 「撤掉」 and 「立刻发送」 under them. It waits in
+/// the session's queue until the task is done; a task that was stopped holds it: sent only if the user says so.
 struct QueuedBubble: View {
     @ObservedObject var shell: ShellModel
     let item: QueueItem
     let cardOpen: Bool
     @Environment(\.lang) private var lang
-    @State private var editing = false
     @State private var text = ""
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "clock").foregroundStyle(ShellColor.secondary).accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 4) {
-                if editing {
-                    TextField(L("Queued message", lang: lang), text: $text, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit(save)
-                } else {
-                    Text(item.text).font(.system(size: 13)).foregroundStyle(Brand.ink)
-                }
-                Text(item.note ?? (item.held == true ? L("The task stopped. Send it?", lang: lang) : L("Queued: sent when the task is done", lang: lang)))
-                    .font(.system(size: 11)).foregroundStyle(ShellColor.secondary)
-            }
-            Spacer()
-            if editing {
-                Button(L("Save", lang: lang), action: save).buttonStyle(.link)
-                Button(L("Cancel", lang: lang)) { editing = false }.buttonStyle(.link)
-            } else {
-                Button(L("Edit", lang: lang)) { text = item.text; editing = true }.buttonStyle(.link)
-                Button(L("Send now", lang: lang)) { shell.queueSendNow(item.id) }.buttonStyle(.link)
+        HStack {
+            Spacer(minLength: 60)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(item.note ?? (item.held == true ? L("The task stopped. Send it?", lang: lang) : L("Queued · sent to it when the task is done; you can still change it", lang: lang)))
+                    .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                // (edited in place: the change goes to the session on Return, on 立刻发送, or when the bubble goes)
+                TextField("", text: $text, axis: .vertical)
+                    .textFieldStyle(.plain).font(.system(size: 15)).lineSpacing(5).foregroundStyle(Brand.ink)
+                    .lineLimit(1...6)
+                    .focusEffectDisabled()
+                    .onSubmit(save)
+                    .accessibilityLabel(L("Queued message", lang: lang))
+                    .accessibilityHint(L("Return saves the change", lang: lang))
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button { shell.queueCancel(item.id) } label: {
+                        Text(L("Remove", lang: lang)).font(.system(size: 13)).foregroundStyle(Brand.ink)
+                            .padding(.horizontal, 12).frame(height: 32)
+                            .background(Capsule().fill(Brand.card)).overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    Button { save(); shell.queueSendNow(item.id) } label: {
+                        Text(L("Send now", lang: lang)).font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.paper)
+                            .padding(.horizontal, 12).frame(height: 32)
+                            .background(Capsule().fill(Brand.ink)).contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
                     .disabled(cardOpen)
                     .accessibilityHint(L("Sends it to the running task now", lang: lang))
-                Button(L("Remove", lang: lang)) { shell.queueCancel(item.id) }.buttonStyle(.link)
+                }
             }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .frame(width: 420, alignment: .leading)
+            .background(UserBubble().fill(Brand.paper))
+            .overlay(UserBubble().stroke(Color(ShellPalette.queueEdge), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4])))
         }
-        .font(.system(size: 12))
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 10).strokeBorder(Brand.line, style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+        .onAppear { text = item.text }
+        .onDisappear(perform: save)
+        .onChange(of: item.text) { _, t in text = t }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L("Queued message: %@", item.text, lang: lang))
     }
@@ -948,7 +1049,37 @@ struct QueuedBubble: View {
     private func save() {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !t.isEmpty && t != item.text { shell.queueEdit(item.id, text: t) }
-        editing = false
+    }
+}
+
+/// A queued message taken back (P3States 「已撤掉」): a line -- the word, the words struck through, 「放回去」 (into the
+/// message field).
+struct WithdrawnRow: View {
+    @ObservedObject var shell: ShellModel
+    let item: QueueItem
+    @Environment(\.lang) private var lang
+
+    var body: some View {
+        HStack {
+            Spacer(minLength: 60)
+            HStack(spacing: 10) {
+                Text(L("Removed", lang: lang)).font(.system(size: 13, weight: .semibold)).foregroundStyle(Brand.ink)
+                Text(item.text).font(.system(size: 13)).foregroundStyle(ShellColor.secondary).strikethrough().lineLimit(1)
+                Spacer(minLength: 4)
+                Button { shell.putBack(item.id) } label: {
+                    Text(L("Put back", lang: lang)).font(.system(size: 12)).foregroundStyle(Brand.ink)
+                        .padding(.horizontal, 12).frame(height: 30)
+                        .background(Capsule().fill(Brand.card)).overlay(Capsule().strokeBorder(Brand.line, lineWidth: 1))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint(L("Puts it in the message field", lang: lang))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 8)
+            .frame(width: 420)
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Brand.line, lineWidth: 1))
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -974,61 +1105,67 @@ struct Composer: View {
     /// The focus funnel's one consumer (ShellModel.focusRequest: the user's Esc out of a card).
     @FocusState private var focused: Bool
 
-    /// P1Main: the field (15 px) on the card colour in a 1.5 pt ink outline, radius 18. At rest one row, 54 high, the
-    /// record and send buttons at its right end (P3States); two rows -- the field, then under it the state, Stop, record
-    /// and send -- while a task runs or a reply comes (they have Stop), or the draft has more than one line. The field
-    /// stays the same view in both (the typing keeps its place).
+    /// The field on the card colour in a 1.5 pt ink outline (a quieter edge in dark). At rest one row, 54 high, radius
+    /// 16, the field 14 px, record and send (34) at its right end (P3States). Two rows while a task runs or a reply comes,
+    /// or the draft has more than one line (P1Main, radius 18, 15 px): the field -- two lines tall while a task runs and
+    /// nothing waits for you, one while a card does (P1Waiting) -- then under it the state, record and send (36); Stop
+    /// only for a reply (a task's is the header's 「停止任务」). The field stays the same view in both.
     var body: some View {
         let mode = shell.composer
         let twoRows = mode.taskRunning || mode.replying || shell.draft.contains("\n")
-        VStack(alignment: .leading, spacing: 4) {
+        let radius: CGFloat = twoRows ? 18 : 16
+        VStack(alignment: .leading, spacing: 0) {
             // (bottom: when the field wraps, the buttons stay on its last line)
             HStack(alignment: .bottom, spacing: 8) {
-                field(mode)
+                field(mode, twoRows: twoRows)
                 if !twoRows {
                     recordButton
-                    sendButton(mode)
+                    sendButton(mode, size: 34)
                 }
             }
             .padding(.leading, twoRows ? 16 : 14).padding(.trailing, twoRows ? 16 : 10)
-            .padding(.top, twoRows ? 12 : 9).padding(.bottom, twoRows ? 0 : 9)
+            .padding(.top, twoRows ? 12 : 10).padding(.bottom, twoRows ? (cardWaits ? 2 : 4) : 10)
             if twoRows {
                 HStack(spacing: 12) {
                     if mode.taskRunning {
                         HStack(spacing: 6) {
                             Circle().fill(Brand.dot).frame(width: 6, height: 6).accessibilityHidden(true)
-                            Text(L("Task running", lang: lang))
+                            Text(L("Task running: Return sends it to the task now", lang: lang))
                         }
-                        .font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
+                        .font(.system(size: 12)).foregroundStyle(ShellColor.secondary).lineLimit(1)
                     }
                     Spacer()
-                    if mode.canStop {
+                    if mode.replying {
                         Button(L("Stop", lang: lang)) { shell.stop() }
                             .buttonStyle(InkButtonStyle(prominent: false, small: true))
-                            .accessibilityHint(mode.taskRunning ? L("Stops the computer task", lang: lang) : L("Stops the reply", lang: lang))
+                            .accessibilityHint(L("Stops the reply", lang: lang))
                     }
                     recordButton
-                    if !mode.replying { sendButton(mode) }
+                    if !mode.replying { sendButton(mode, size: 36) }
                 }
-                .padding(.leading, 16).padding(.trailing, 10).padding(.bottom, 8)
+                .padding(.leading, 16).padding(.trailing, 10).padding(.top, cardWaits ? 4 : 6).padding(.bottom, 8)
             }
         }
-        .background(RoundedRectangle(cornerRadius: 18).fill(Brand.card))
-        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(Brand.ink, lineWidth: 1.5))
+        .background(RoundedRectangle(cornerRadius: radius).fill(Brand.card))
+        .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(Color(ShellPalette.composerEdge), lineWidth: 1.5))
         .shadow(color: Brand.ink.opacity(0.08), radius: 10, y: 6)
-        .padding(.horizontal, 40).padding(.bottom, 20).padding(.top, 6)
+        .padding(.horizontal, 40).padding(.bottom, 20)
         .opacity(mode.enabled ? 1 : 0.7)
     }
 
-    private func field(_ mode: ComposerMode) -> some View {
+    /// A card waits above (P1Waiting): the field one line, the rows a little closer.
+    private var cardWaits: Bool { shell.current.flatMap { shell.pinned($0) } != nil }
+
+    private func field(_ mode: ComposerMode, twoRows: Bool) -> some View {
+        let size: CGFloat = twoRows ? 15 : 14
         // (the placeholder drawn here on one line, cut short at the least width: the field's own would wrap, and the one
         // row would be two -- U4 §2.3)
-        TextField("", text: Binding(get: { shell.draft }, set: { shell.draft = $0 }), axis: .vertical)
+        return TextField("", text: Binding(get: { shell.draft }, set: { shell.draft = $0 }), axis: .vertical)
             .textFieldStyle(.plain)
-            .font(.system(size: 15))
-            .background(alignment: .leading) {
+            .font(.system(size: size)).lineSpacing(twoRows ? 5 : 0)
+            .background(alignment: .topLeading) {
                 if shell.draft.isEmpty {
-                    Text(placeholder(mode)).font(.system(size: 15)).foregroundStyle(ShellColor.secondary).lineLimit(1)
+                    Text(placeholder(mode)).font(.system(size: size)).foregroundStyle(ShellColor.secondary).lineLimit(1)
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
             }
@@ -1049,14 +1186,15 @@ struct Composer: View {
             .accessibilityLabel(L("Message", lang: lang))
             .accessibilityHint(mode.taskRunning ? L("Return sends it to the task now", lang: lang)
                                                 : L("Return sends; start with /cua to run a computer task", lang: lang))
-            .frame(minHeight: 36)
+            // (P1Main: two 24 lines while a task works, P1Waiting one while a card waits; at rest the send button's 34)
+            .frame(minHeight: twoRows ? (mode.taskRunning && !cardWaits ? 48 : 24) : 34, alignment: twoRows ? .topLeading : .leading)
     }
 
     /// 「录制这个任务」: this conversation's next computer task recorded (TaskRecording), off unless turned on.
     private var recordButton: some View {
         Toggle(isOn: Binding(get: { shell.recordsNext }, set: { shell.setRecording($0) })) {
             Image(systemName: shell.recordsNext ? "record.circle.fill" : "record.circle").font(.system(size: 17))
-                .frame(width: 34, height: 34).contentShape(Rectangle())
+                .frame(width: 34, height: 34).contentShape(Circle())
         }
         .toggleStyle(.button).buttonStyle(.plain)
         .foregroundStyle(shell.recordsNext ? ShellColor.orangeText : ShellColor.secondary)
@@ -1066,10 +1204,10 @@ struct Composer: View {
 
     /// The round send button: ink always (P3States) -- with nothing to send, a press does nothing (ShellModel.submit);
     /// off only while the conversation opens.
-    private func sendButton(_ mode: ComposerMode) -> some View {
+    private func sendButton(_ mode: ComposerMode, size: CGFloat) -> some View {
         Button { shell.submit() } label: {
             Image(systemName: "arrow.up").font(.system(size: 14, weight: .bold)).foregroundStyle(Brand.paper)
-                .frame(width: 36, height: 36).background(Circle().fill(Brand.ink)).contentShape(Circle())
+                .frame(width: size, height: size).background(Circle().fill(Brand.ink)).contentShape(Circle())
         }
         .buttonStyle(.plain)
         .disabled(shell.opening)
@@ -1079,7 +1217,8 @@ struct Composer: View {
 
     private func placeholder(_ m: ComposerMode) -> String {
         if !m.enabled { return L("Answer the card above to go on", lang: lang) }
-        if m.taskRunning { return L("Add something: Return sends it to the task now", lang: lang) }
+        // (P1Main's words, less 「/cua」: while a task runs, Return gives the words to it -- a /cua then would not start one)
+        if m.taskRunning { return L("Keep talking: it reads it right away", lang: lang) }
         if m.replying { return L("Wait for the reply, or stop it", lang: lang) }
         return L("Say what to do, or /cua and it works the computer", lang: lang)
     }
@@ -1106,17 +1245,24 @@ struct AgentPanel: View {
         return t.runId
     }
 
-    /// The column's two tabs, 「现在」 and 「过程」 (ProcessTabs: switching sends nothing): 现在's blocks (RightColumn.model:
-    /// only what the events said), each second while a task runs; 过程, the run as its folder recorded it.
+    /// The column (P1Main: no tabs): its blocks now (RightColumn.model: only what the events said), each second while a
+    /// task runs. 当前步骤's 「全部记录 ›」 and 改动和产出's 「明细 ›」 open 过程 in its place -- the run as its folder
+    /// recorded it (ProcessTabs: switching sends nothing) -- with 「‹ 现在」 back.
     var body: some View {
-        VStack(spacing: 12) {
-            Picker("", selection: Binding(get: { shell.currentTabs.tab }, set: { shell.pickTab($0) })) {
-                Text(L("Now", lang: lang)).tag(ProcessTabs.Tab.now)
-                Text(L("Process", lang: lang)).tag(ProcessTabs.Tab.process)
+        VStack(alignment: .leading, spacing: 12) {
+            if shell.currentTabs.tab == .process {
+                Button { shell.pickTab(.now) } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold)).accessibilityHidden(true)
+                        Text(L("Now", lang: lang))
+                    }
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                    .frame(height: 40).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(L("Back to now", lang: lang))
+                .padding(.horizontal, 18).padding(.top, 16)
             }
-            .pickerStyle(.segmented).labelsHidden()
-            .accessibilityIdentifier("panel.tabs")
-            .padding(.horizontal, 18).padding(.top, 16)
             if shell.currentTabs.tab == .process, let sid = shell.selected,
                let run = shell.currentTabs.run ?? shell.current?.tasks.last?.runId {
                 ProcessPane(sessionId: sid, runId: run, focus: shell.currentTabs.focus, focusAsks: shell.currentTabs.focusAsks,
@@ -1131,6 +1277,7 @@ struct AgentPanel: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Brand.paper)
         .onChange(of: watched, initial: true) { _, run in dock.watch(run) }
         .onDisappear { dock.watch(nil) }
@@ -1164,6 +1311,9 @@ struct AgentPanel: View {
                             .font(.system(size: 12).monospacedDigit()).foregroundStyle(ShellColor.secondary)
                     }
                 }
+                .frame(height: 40)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("panel.state")
                 // the live view of the task's window (A4), while one runs here
                 if let t = shell.current?.runningTask, watched != nil || still != nil {
                     let last = t.steps.last
@@ -1187,15 +1337,23 @@ struct AgentPanel: View {
                 }
                 macSection(c)
                 if !c.plan.isEmpty {
-                    section(L("Current steps", lang: lang), link: shell.current?.tasks.last.map { t in (L("All records ›", lang: lang), { shell.showProcess(t.runId) }) }) {
+                    section(L("Current steps", lang: lang), spacing: 7, link: shell.current?.tasks.last.map { t in (L("All records ›", lang: lang), { shell.showProcess(t.runId) }) }) {
                         ForEach(c.plan, id: \.n) { r in
+                            let waitsHere = r.mark == .current && Self.waits(c.status)
                             HStack(spacing: 9) {
-                                Self.markShape(r.mark).frame(width: 16, height: 16).accessibilityHidden(true)
+                                Self.markShape(r.mark, halo: waitsHere).frame(width: 16, height: 16).accessibilityHidden(true)
                                 Text(r.purpose).font(.system(size: 13, weight: r.mark == .current ? .semibold : .regular))
-                                    .foregroundStyle(r.mark == .done ? ShellColor.secondary : Brand.ink).fixedSize(horizontal: false, vertical: true)
+                                    .foregroundStyle(r.mark == .done ? ShellColor.secondary : r.mark == .todo ? Color(ShellPalette.macLine) : Brand.ink)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 Spacer(minLength: 4)
-                                if r.asksFirst { Text(L("asks before sending", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText) }
+                                // (P1Waiting: the step that waits says 「等你」; P1Main: one still to come that asks first, 「发前问你」)
+                                if waitsHere {
+                                    Text(L("Waiting", lang: lang)).font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.orangeText)
+                                } else if r.asksFirst {
+                                    Text(L("asks before sending", lang: lang)).font(.system(size: 11, weight: .semibold)).foregroundStyle(ShellColor.orangeText)
+                                }
                             }
+                            .frame(minHeight: 18.5)
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel(L("Step %d: %@, %@", r.n, r.purpose, Self.markWord(r.mark, lang: lang), lang: lang))
                         }
@@ -1215,7 +1373,7 @@ struct AgentPanel: View {
                     }
                 }
             }
-            .padding(.horizontal, 18).padding(.bottom, 16)
+            .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 16)
         }
         .frame(maxHeight: .infinity)
     }
@@ -1231,6 +1389,9 @@ struct AgentPanel: View {
                     .accessibilityLabel(L("Status: %@", L("Idle", lang: lang), lang: lang))
                 Spacer(minLength: 4)
             }
+            .frame(height: 40)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("panel.state")
             RoundedRectangle(cornerRadius: 12)
                 .strokeBorder(Brand.mist, style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
                 .overlay(
@@ -1248,11 +1409,15 @@ struct AgentPanel: View {
                     .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(ShellColor.orangeText)
                     .accessibilityHint(L("Shows that conversation", lang: lang))
             }
-            if mac.missing?.isEmpty == true && !c.screenLocked && !c.youAreUsingIt {
+            // (in one line while all is well -- and while the permissions are still being looked at: P3States draws no
+            // other form; anything wrong is its three rows)
+            if mac.missing?.isEmpty != false && !c.screenLocked && !c.youAreUsingIt {
+                let known = mac.missing != nil
+                let words = known ? L("Permissions OK · screen not locked", lang: lang) : L("Checking…", lang: lang)
                 HStack(spacing: 8) {
-                    Circle().fill(ShellColor.ok).frame(width: 7, height: 7).accessibilityHidden(true)
+                    Circle().fill(known ? ShellColor.ok : Brand.mist).frame(width: 7, height: 7).accessibilityHidden(true)
                     Text(L("This Mac", lang: lang)).fontWeight(.bold).foregroundStyle(Brand.ink)
-                    Text(L("Permissions OK · screen not locked", lang: lang)).foregroundStyle(Color(ShellPalette.macLine)).lineLimit(1)
+                    Text(words).foregroundStyle(Color(ShellPalette.macLine)).lineLimit(1)
                     Spacer(minLength: 0)
                 }
                 .font(.system(size: 13))
@@ -1261,13 +1426,13 @@ struct AgentPanel: View {
                 .background(RoundedRectangle(cornerRadius: 12).fill(Brand.card))
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(ShellColor.softLine))
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel(L("%@: %@", L("This Mac", lang: lang), L("Permissions OK · screen not locked", lang: lang), lang: lang))
+                .accessibilityLabel(L("%@: %@", L("This Mac", lang: lang), words, lang: lang))
                 .accessibilityIdentifier("panel.mac")
             } else {
                 macSection(c)
             }
         }
-        .padding(.horizontal, 18).padding(.bottom, 16)
+        .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 16)
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
@@ -1281,7 +1446,7 @@ struct AgentPanel: View {
             macRow(L("Screen", lang: lang),
                    c.screenLocked ? L("The screen was locked, so the task stopped", lang: lang) : L("Not locked", lang: lang), ok: !c.screenLocked)
             macRow(L("In use", lang: lang),
-                   c.youAreUsingIt ? L("You're using it: the task waits for you to stop", lang: lang) : L("No conflict", lang: lang), ok: !c.youAreUsingIt)
+                   c.youAreUsingIt ? L("You're using it: the task waits for you to stop", lang: lang) : L("No conflict: it works in a background window", lang: lang), ok: !c.youAreUsingIt)
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("panel.mac")
@@ -1338,8 +1503,8 @@ struct AgentPanel: View {
     }
 
     /// A white card: its title (13 px bold), a link on the right when it has one, its rows.
-    @ViewBuilder private func section(_ title: String, link: (String, () -> Void)? = nil, @ViewBuilder _ body: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    @ViewBuilder private func section(_ title: String, spacing: CGFloat = 8, link: (String, () -> Void)? = nil, @ViewBuilder _ body: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: spacing) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.system(size: 13, weight: .bold)).foregroundStyle(Brand.ink).accessibilityAddTraits(.isHeader)
                 Spacer()
@@ -1354,16 +1519,17 @@ struct AgentPanel: View {
         .background(RoundedRectangle(cornerRadius: 14).fill(Brand.card))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(ShellColor.softLine))
     }
-    /// A row of 「这台 Mac」: a dot (green: fine; orange: not; mist: not known), the label, the value.
+    /// A row of 「这台 Mac」 (P1Main): a dot (green: fine; orange: not; mist: not known) centred on the line, the label
+    /// in its 72, the value; the CSS line's 18.5.
     private func macRow(_ label: String, _ value: String, ok: Bool?) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(alignment: .center, spacing: 8) {
             Circle().fill(ok == true ? ShellColor.ok : ok == false ? Brand.dot : Brand.mist).frame(width: 7, height: 7)
-                .alignmentGuide(.firstTextBaseline) { d in d[.bottom] - 1 }
                 .accessibilityHidden(true)
-            Text(label).foregroundStyle(ShellColor.secondary).frame(width: 64, alignment: .leading)
+            Text(label).foregroundStyle(ShellColor.secondary).frame(width: 72, alignment: .leading)
             Text(value).foregroundStyle(ok == false ? ShellColor.orangeText : Brand.ink).fontWeight(ok == false ? .semibold : .regular)
                 .fixedSize(horizontal: false, vertical: true)
         }
+        .frame(minHeight: 18.5)
         .font(.system(size: 13))
         .accessibilityElement(children: .combine)
     }
@@ -1371,12 +1537,17 @@ struct AgentPanel: View {
         Text(text).font(.system(size: 13)).foregroundStyle(Brand.ink).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
     }
 
-    /// A step's mark (P1Main): done, a green check; now, the orange dot; still to do, a hollow ring.
-    @ViewBuilder static func markShape(_ m: RightColumn.PlanRow.Mark) -> some View {
+    /// A step's mark (P1Main): done, a green check (13, stroke 2); now, the orange dot -- with a 3 pt halo while it
+    /// waits for you (P1Waiting); still to do, a hollow ring (#8C958C).
+    @ViewBuilder static func markShape(_ m: RightColumn.PlanRow.Mark, halo: Bool = false) -> some View {
         switch m {
-        case .done: Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(ShellColor.secondary)
-        case .current: Circle().fill(Brand.dot).frame(width: 10, height: 10)
-        case .todo: Circle().strokeBorder(ShellColor.secondary, lineWidth: 1.5).frame(width: 10, height: 10)
+        case .done: CheckPath().stroke(ShellColor.ok, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round)).frame(width: 13, height: 13)
+        case .current:
+            ZStack {
+                if halo { Circle().stroke(Brand.dot.opacity(0.28), lineWidth: 3).frame(width: 13, height: 13) }
+                Circle().fill(Brand.dot).frame(width: 10, height: 10)
+            }
+        case .todo: Circle().strokeBorder(Color(ShellPalette.todoRing), lineWidth: 1.5).frame(width: 10, height: 10)
         }
     }
     static func markWord(_ m: RightColumn.PlanRow.Mark, lang: ResolvedLang) -> String {

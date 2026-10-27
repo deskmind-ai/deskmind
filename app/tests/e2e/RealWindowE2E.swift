@@ -2,7 +2,7 @@
 // this). Two launches of that build, each in the background (open -g): fresh -- its defaults empty but the first run
 // done -- then from a saved frame of 900 × 500 written into every window frame key the first launch saved. Each time:
 // the window's frame (CGWindowList) is at least the three columns' 1098 × 600 and on its screen; the columns' places by
-// their accessibility ids -- 「新对话」 in the 256 sidebar, 「现在 / 过程」 and 这台 Mac in the 400 right column, inside
+// their accessibility ids -- 「新对话」 in the 256 sidebar, 小方's state line and 这台 Mac in the 400 right column, inside
 // the window; and its picture (screencapture -l: real pixels, the window as it is, not brought forward). Nothing is
 // activated and no other app is touched; the app is quit at the end.
 //
@@ -99,14 +99,14 @@ func launch(_ name: String) {
     }
     check(!proc.isActive, "\(name): it did not take the front")
     if AXIsProcessTrusted() {
-        let new = element(pid, "sidebar.new"), tabs = element(pid, "panel.tabs"), mac = element(pid, "panel.mac")
-        print("\(name): 新对话 \(String(describing: new)), 现在/过程 \(String(describing: tabs)), 这台 Mac \(String(describing: mac))")
+        let new = element(pid, "sidebar.new"), state = element(pid, "panel.state"), mac = element(pid, "panel.mac")
+        print("\(name): 新对话 \(String(describing: new)), 小方 \(String(describing: state)), 这台 Mac \(String(describing: mac))")
         if let n = new {
             check(near(n.minX, f.minX + 12) && near(n.maxX, f.minX + 256 - 12), "\(name): 「新对话」 in the 256 sidebar (12 in from each side): \(n)")
         } else { check(false, "\(name): 「新对话」 found by its id") }
         // (the right column: the window's last 400; its blocks 18 in from each side)
         let column = CGRect(x: f.maxX - 400, y: f.minY, width: 400, height: f.height)
-        for (what, r) in [("现在 / 过程", tabs), ("这台 Mac", mac)] {
+        for (what, r) in [("小方's state line", state), ("这台 Mac", mac)] {
             if let r {
                 check(column.insetBy(dx: -1, dy: -1).contains(r) && f.contains(r), "\(name): \(what) inside the right column, inside the window: \(r)")
             } else { check(false, "\(name): \(what) found by its id") }

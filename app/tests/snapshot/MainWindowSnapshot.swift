@@ -50,6 +50,8 @@ enum MainWindowSnapshot {
         /// The helper's list (`sessions list`), the rows' only source when no lines are fed (the window as it opens).
         var summaries: [[String: Any]] = []
         var size = NSSize(width: 1440, height: 900)
+        /// What the user did after the lines (a message typed and sent, a queued one taken back).
+        var act: (@MainActor (ShellModel) -> Void)? = nil
     }
 
     static func main() {
@@ -78,6 +80,14 @@ enum MainWindowSnapshot {
             Scene(name: "answered-oldlog", lines: others + strip(running() + waiting() + answered()), now: t0 + 66),
             Scene(name: "undone", lines: others + running() + waiting() + answered() + undone(), now: t0 + 90),
             Scene(name: "process", lines: others + running() + waiting() + answered(), now: t0 + 66, process: true),
+            // (#133: what the boards draw that had no picture -- the list's every mark, the task paused or the screen locked,
+            // a queued message, one taken back, one on its way)
+            Scene(name: "sidebar-states", lines: stateSessions() + running(), now: t0 + 38),
+            Scene(name: "paused", lines: others + running() + [line("waiting", 9, 30, [:])], now: t0 + 38),
+            Scene(name: "locked", lines: others + running() + [line("task_done", 9, 30, ["status": "environment", "reason": "", "summary": "", "cause": "screen_locked"])], now: t0 + 38),
+            Scene(name: "queued", lines: others + running() + queue(), now: t0 + 38),
+            Scene(name: "withdrawn", lines: others + running() + queue(), now: t0 + 38, act: { $0.queueCancel("q_1") }),
+            Scene(name: "sending", lines: others + running(), now: t0 + 38, act: { $0.draft = "发完以后，把明天上午的会议提醒也看一下"; $0.submit() }),
         ]
         writeRunFolder(support, run: running() + waiting() + answered())
         let only = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil
@@ -252,6 +262,36 @@ enum MainWindowSnapshot {
         ]
     }
 
+    /// A message typed while the task works, waiting in the queue (session.queue).
+    static func queue() -> [[String: Any]] {
+        [["kind": "session.queue", "session_id": sid, "items": [["id": "q_1", "text": "发完以后，把明天上午的会议提醒也看一下"]]]]
+    }
+
+    /// One conversation in each of the list's states (P1Main, P3States 「对话的状态点」): waiting for you, thinking, done
+    /// yesterday, failed, paused, the screen locked, looking only.
+    static func stateSessions() -> [[String: Any]] {
+        func task(_ s: String, _ title: String, _ t: Double, _ run: [[String: Any]]) -> [[String: Any]] {
+            let r = "run_" + s
+            var out: [[String: Any]] = [
+                ["kind": "session.message", "session_id": s, "seq": 1, "t": t, "msg_id": s + "_m1", "role": "user", "text": title],
+                ["kind": "session.task", "session_id": s, "seq": 2, "t": t + 1, "msg_id": s + "_m2", "run_id": r, "raw": title, "goal": title, "by": "model", "reply_to": s + "_m1"],
+                ["kind": "start", "session_id": s, "run_id": r, "seq": 1, "t": t + 1, "raw": title, "lang": "zh"],
+            ]
+            for (i, l) in run.enumerated() { var l = l; l["session_id"] = s; l["run_id"] = r; l["seq"] = i + 2; l["t"] = t + 2 + Double(i); out.append(l) }
+            return out
+        }
+        let step: [String: Any] = ["kind": "step", "step_id": "st_1", "text": "{\"kind\":\"read\"}", "human": "看一眼", "object": "window:com.example.Files#7", "consequence": "read"]
+        let choose: [String: Any] = ["kind": "ambiguity", "blocking": true, "headline": "放进哪个文件夹？", "text": "放进哪个文件夹？",
+                                     "options": [["kind": "choice", "text": "文稿"], ["kind": "choice", "text": "下载"]]]
+        return task("ses_folder", "整理下载文件夹", t0 - 600, [step, ["kind": "ask", "ask_id": "a1", "card": choose], ["kind": "waiting", "ask_id": "a1"]])
+            + task("ses_week", "汇总这周的周报数据", t0 - 300, [["kind": "preparing"]])
+            + task("ses_trip", "比较下周去上海的机票", t0 - 3600 * 30, [step, ["kind": "task_done", "status": "succeeded", "reason": "", "summary": "比较好了"]])
+            + task("ses_invoice", "导出 9 月的发票", t0 - 3600 * 2, [step, ["kind": "task_done", "status": "failed", "reason": "网站要求重新登录", "summary": ""]])
+            + task("ses_pause", "整理桌面截图", t0 - 900, [step, ["kind": "waiting"]])
+            + task("ses_lock", "备份照片", t0 - 1200, [step, ["kind": "task_done", "status": "environment", "reason": "", "summary": "", "cause": "screen_locked"]])
+            + task("ses_look", "核对报销单", t0 - 1500, [step, ["kind": "verify", "verdict": "unknown", "reason": "r", "missing_kind": "evidence"]])
+    }
+
     /// Asked in chat, a task by DeskMind: its plan agreed, step 1 done, step 2 under way in a (drawn) mail window.
     static func running() -> [[String: Any]] {
         let plan: [[String: Any]] = [
@@ -380,6 +420,7 @@ enum MainWindowSnapshot {
         for l in scene.lines { shell.client.feed(l) }
         if let s = scene.selected { shell.select(s) }
         if scene.process { shell.pickTab(.process) }
+        scene.act?(shell)
         let size = scene.size
         let root = MainColumns(shell: shell, openSettings: {}, cloud: SidebarCloud(on: true, ready: true, provider: "DeepSeek"),
                                mac: MacFacts(missing: []), still: scene.selected == nil ? nil : still())

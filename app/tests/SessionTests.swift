@@ -301,8 +301,8 @@ enum SessionTests {
         var seen = s
         seen.markSeen()
         check(seen.status != .locked, "seen: no longer locked")
-        check(SessionStatus.locked.shape == .bang && SessionStatus.thinking.shape == .hollowRing && SessionStatus.waitingForYou(cardKind: "plan").shape == .haloDot
-              && SessionStatus.done(at: nil, stopped: false).shape == .check && SessionStatus.idle.shape == .mistDot && SessionStatus.paused.shape == .solidDot, "a shape for each")
+        check(SessionStatus.locked.shape == .lock && SessionStatus.lookOnly.shape == .look && SessionStatus.thinking.shape == .hollowRing && SessionStatus.waitingForYou(cardKind: "plan").shape == .haloDot
+              && SessionStatus.done(at: nil, stopped: false).shape == .check && SessionStatus.idle.shape == .mistDot && SessionStatus.paused.shape == .pause && SessionStatus.error("failed").shape == .bang, "a shape for each")
     }
 
     // MARK: replay

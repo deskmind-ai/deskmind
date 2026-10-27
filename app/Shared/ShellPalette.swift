@@ -47,6 +47,24 @@ enum ShellPalette {
     static let frame = Tone(light: 0x262B28, dark: 0x0F1110)
     static let frameText = Tone(light: 0xF4F1EA, dark: 0xF4F1EA)
     static let frameQuiet = Tone(light: 0xD3D8D2, dark: 0xD3D8D2)
+    // main window (#133): the boards' values the window had no token for
+    /// The step line under the live view (P1Main #E9ECE8 on the frame).
+    static let frameStep = Tone(light: 0xE9ECE8, dark: 0xE9ECE8)
+    /// A step not done yet: its ring (#8C958C); graphics only.
+    static let todoRing = Tone(light: 0x8C958C, dark: 0x7C857C)
+    /// The sidebar's 「等你」 pill (#B84A2E) and its white words; a problem's hollow 「!」 (graphics).
+    static let waitTag = Tone(light: 0xB84A2E, dark: 0xB84A2E)
+    static let waitTagText = Tone(light: 0xFFFFFF, dark: 0xFFFFFF)
+    /// An idle conversation's dot in the sidebar: mist, a step lighter in dark (the mist there is lost on the sidebar).
+    static let idleDot = Tone(light: 0xB2BBAF, dark: 0x6F786F)
+    /// The agreed plan's pill (#E7ECE3, its words #2F5531) and a queued message's dashed edge (#8C958C).
+    static let agreedFill = Tone(light: 0xE7ECE3, dark: 0x26332A)
+    static let agreedText = Tone(light: 0x2F5531, dark: 0x9FD0A3)
+    static let queueEdge = Tone(light: 0x8C958C, dark: 0x6F786F)
+    /// The composer's outline: ink in light; in dark a quieter edge (ink there is near white and glares).
+    static let composerEdge = Tone(light: 0x262B28, dark: 0x5A635B)
+    /// 「正在发送」 in the bubble (#4A524B).
+    static let sendingText = Tone(light: 0x4A524B, dark: 0xC9CFC8)
 
     /// The sidebar and the agent's column: the card at 60 % over the paper.
     static let panel = tint(card, 0.6, over: paper)
@@ -98,6 +116,7 @@ enum ShellPalette {
         (frameText, frame), (frameQuiet, frame),
         (error, card), (error, paper),
         (macLine, card),                    // 「这台 Mac」's one line (U4)
+        (frameStep, frame), (waitTagText, waitTag), (agreedText, agreedFill), (macLine, paper), (sendingText, bubble),   // main window (#133)
         (paper, ink),                       // the prominent button: paper text on an ink capsule
         (islandText, islandFill), (islandMuted, islandFill), (onInkOrange, islandFill),
         (onInk, inkSurface), (onInkMuted, inkSurface), (onInkOrange, inkSurface), (onInkLink, inkSurface), (onInkPromise, inkSurface),

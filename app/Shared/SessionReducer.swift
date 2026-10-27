@@ -1109,12 +1109,17 @@ enum SessionStatus: Equatable {
     case done(at: Double?, stopped: Bool)
     case idle
 
-    enum Shape: Equatable { case haloDot, bang, solidDot, hollowRing, check, mistDot }
+    /// P3States 「对话的状态点」: paused, the screen locked and looking only each have their own mark (two bars, a lock,
+    /// a magnifier), never the working dot or the problem's 「!」.
+    enum Shape: Equatable { case haloDot, bang, solidDot, hollowRing, check, mistDot, pause, lock, look }
     var shape: Shape {
         switch self {
         case .waitingForYou, .cardExpired: return .haloDot
-        case .error, .locked: return .bang
-        case .stopping, .paused, .lookOnly, .acting: return .solidDot
+        case .error: return .bang
+        case .locked: return .lock
+        case .paused: return .pause
+        case .lookOnly: return .look
+        case .stopping, .acting: return .solidDot
         case .thinking: return .hollowRing
         case .done: return .check
         case .idle: return .mistDot

@@ -350,7 +350,7 @@ enum ShellTests {
         let now = 1_900_000_000.0
         let table: [(String, SessionStatus.Shape, String?)] = [
             ("task-card", .check, "完成 · "), ("task-question", .check, "完成 · "), ("task-steer", .check, "完成 · "),
-            ("task-stop", .check, L("Stopped", lang: .zhHans)), ("task-locked", .bang, nil), ("task-paused-unconfirmed", .bang, nil),
+            ("task-stop", .check, L("Stopped", lang: .zhHans)), ("task-locked", .lock, nil), ("task-paused-unconfirmed", .bang, nil),
         ]
         for (name, shape, line) in table {
             let s = SessionTests.final(name)
