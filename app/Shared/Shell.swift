@@ -140,6 +140,7 @@ enum ShellText {
 
     /// A card's kind in words (the card's own text is the harness's, already in the request's language).
     static func cardKind(_ kind: String, lang: ResolvedLang) -> String {
+        if kind == CardModel.sendingKind { return L("confirm before sending", lang: lang) }
         switch CardModel.Kind(kind) {
         case .plan: return L("approve the plan", lang: lang)
         case .action: return L("confirm before acting", lang: lang)

@@ -1133,9 +1133,9 @@ enum SessionStatus: Equatable {
     /// what the user needs to see. (Owner confirmed this order, 10-22.)
     static func derive(_ s: SessionState) -> SessionStatus {
         // 1. waiting for you: a card is open
-        if let open = s.openCard { return .waitingForYou(cardKind: open.card.card.kind) }
+        if let open = s.openCard { return .waitingForYou(cardKind: CardModel.statusKind(open.card.card)) }
         // (the task waits on a card nobody answered in time: the user is still the one it waits for)
-        if let t = s.runningTask, let c = t.expiredCard { return .cardExpired(cardKind: c.card.kind) }
+        if let t = s.runningTask, let c = t.expiredCard { return .cardExpired(cardKind: CardModel.statusKind(c.card)) }
         // 2. a running task
         if let t = s.runningTask {
             if t.stopping { return .stopping }

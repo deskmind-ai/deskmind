@@ -83,7 +83,7 @@ enum IslandFeed {
         if let p = pinned, p.phase.ending == nil || p.phase.isExpiredOffer {
             // (「等你」, the P1 boards' word -- P1Float, P1Waiting -- over the Island board's 「需要你」: owner, #133)
             f.kind = .needsYou; f.left = L("Waiting", lang: lang)
-            f.right = floatShows ? ShellText.cardKind(p.card.card.kind, lang: lang) : CardLayout(CardModel(card: p.card.card, runId: t.runId, askId: p.card.askId)).title
+            f.right = floatShows ? ShellText.cardKind(CardModel.statusKind(p.card.card), lang: lang) : CardLayout(CardModel(card: p.card.card, runId: t.runId, askId: p.card.askId)).title
         } else if t.userActive {
             f.kind = .paused; f.left = L("You're on the Mac", lang: lang); f.right = L("Resumes when you stop", lang: lang)
         } else if t.preparing && n == 0 {

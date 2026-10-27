@@ -323,6 +323,28 @@ enum TaskResultTests {
     }
 
     static func viewTests() {
+        // (#133) the result card's rows: the harness's own lines under their short heads; a line with none, whole
+        let did = CardModel.resultRow("做了：回复许诺「我看一下再说」"), note = CardModel.resultRow("（界面上的操作撤不回）")
+        check(did.label == "做了" && did.value == "回复许诺「我看一下再说」" && note.label.isEmpty && note.value == "（界面上的操作撤不回）",
+              "result rows: \(did), \(note)")
+        check(CardModel.resultRow("这是一句很长很长很长的话：后面").label.isEmpty, "a long head before a colon is no label")
+        // (#133) 「发送前确认」 only for an action that sends out, by the harness's class -- never its words
+        func action(_ consequence: String) -> CardModel {
+            CardLayoutTests.model(["kind": "action", "blocking": true, "text": "要点「发送」吗？", "free_text": false,
+                                   "consent": ["action": "click", "object": "window:x#1", "consequence": consequence, "outgoing": []],
+                                   "options": [["kind": "approve", "text": "可以"]]])
+        }
+        check(action("external").sends && !action("modify_user").sends && !action("").sends, "sends: the consent's class external only")
+        check(action("external").kindWord(lang: .zhHans) == "发送前确认" && action("modify_user").kindWord(lang: .zhHans) == "动手前确认",
+              "the kind word follows sends")
+        // (and the list's, the header's and the island's 「等你：…」 from the same fact)
+        func event(_ consequence: String) -> CardEvent {
+            let d = try! JSONSerialization.data(withJSONObject: ["kind": "action", "text": "x", "consent": ["action": "click", "object": "window:x#1", "consequence": consequence, "outgoing": []]])
+            return try! JSONDecoder().decode(CardEvent.self, from: d)
+        }
+        let sending = ShellText.status(.waitingForYou(cardKind: CardModel.statusKind(event("external"))), lang: .zhHans)
+        let acting = ShellText.status(.waitingForYou(cardKind: CardModel.statusKind(event("modify_user"))), lang: .zhHans)
+        check(sending.hasSuffix("发送前确认") && acting.hasSuffix("动手前确认"), "the status's kind word: \(sending) / \(acting)")
         let files = ShellTests.windowViewFiles()
         check(files.contains { $0.name == "Main/TaskViews.swift" }, "the task views are in the focus check's files: \(files.map(\.name))")
         let task = files.first { $0.name == "Main/TaskViews.swift" }?.code ?? ""
