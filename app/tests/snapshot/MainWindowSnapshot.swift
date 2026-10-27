@@ -71,6 +71,10 @@ enum MainWindowSnapshot {
             Scene(name: "idle-fresh", lines: [], now: t0 + 38, selected: nil),
             Scene(name: "idle", lines: [], now: t0 + 38, selected: nil, summaries: summaries()),
             Scene(name: "idle-min", lines: [], now: t0 + 38, selected: nil, summaries: summaries(), size: NSSize(width: 1098, height: 600)),
+            // (owner, rc.20: a long reply in Markdown -- at the least window, the right column giving way; and at full size)
+            Scene(name: "reply-min", lines: otherSessions() + markdownReply(), now: t0 + 38, size: NSSize(width: 1098, height: 638)),
+            Scene(name: "reply", lines: otherSessions() + markdownReply(), now: t0 + 38),
+            Scene(name: "waiting-min", lines: others + running() + waiting(), now: t0 + 58, size: NSSize(width: 1098, height: 638)),
             Scene(name: "running", lines: others + running(), now: t0 + 38),
             Scene(name: "waiting", lines: others + running() + waiting(), now: t0 + 58),
             Scene(name: "waiting-uncertain", lines: others + running() + waiting(uncertain: true), now: t0 + 58),
@@ -282,6 +286,32 @@ enum MainWindowSnapshot {
             ["kind": "session.message", "session_id": "ses_folder", "seq": 2, "t": t0 - 3500, "msg_id": "m_f2", "role": "assistant", "text": "整理好了：按类型分进了 5 个文件夹。"],
             ["kind": "session.message", "session_id": "ses_week", "seq": 1, "t": t0 - 7200, "msg_id": "m_w1", "role": "user", "text": "汇总这周的周报数据"],
             ["kind": "session.message", "session_id": "ses_week", "seq": 2, "t": t0 - 7100, "msg_id": "m_w2", "role": "assistant", "text": "这周一共 12 条记录，已经按项目汇总。"],
+        ]
+    }
+
+    /// A chat-only session: a question and a long reply in Markdown (bold heads, lists, `code`, a numbered list).
+    static func markdownReply() -> [[String: Any]] {
+        let text = """
+        我能在后台帮你操作这台 Mac 上的应用，大致分三类：
+
+        **信息处理**
+        - 读一份/一批文件，提炼要点或做对照表
+        - 把散在各处的信息汇总成一份东西
+
+        **对外动作（会先弹卡片让你确认）**
+        - 发消息、发邮件、提交表单、改动或删除你的文件——凡涉及「往外发」和「动你东西」的，都会先请你点头
+        - 比如在 `~/Downloads` 里按月份归档发票
+
+        **你只要说清楚「要什么结果」**，我负责在电脑上走完步骤：
+        1. 先列计划给你看
+        2. 一步一步做，每步都核对
+        3. 做完告诉你成没成、改了哪些、能不能撤回
+
+        不擅长的：需要你本人身份验证的登录、以及你机器上没装也没权限的东西。
+        """
+        return [
+            ["kind": "session.message", "session_id": sid, "seq": 1, "t": t0 - 60, "msg_id": "m_q", "role": "user", "text": "你能在我的 Mac 上做什么？"],
+            ["kind": "session.message", "session_id": sid, "seq": 2, "t": t0 - 50, "msg_id": "m_a", "role": "assistant", "text": text],
         ]
     }
 

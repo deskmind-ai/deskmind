@@ -183,21 +183,22 @@ struct MainColumns: View {
     /// For the offscreen render only: a fixed picture in the live view, nothing watched.
     var still: LiveDock.Picture? = nil
 
-    static let sidebarWidth: CGFloat = 256
-    static let rightWidth: CGFloat = 400
-    static let chatMinWidth: CGFloat = 440
-    static var minWidth: CGFloat { sidebarWidth + chatMinWidth + rightWidth + 2 }
+    static var sidebarWidth: CGFloat { ColumnWidths.sidebar }
+    static var minWidth: CGFloat { ColumnWidths.windowMin }
 
     var body: some View {
-        HStack(spacing: 0) {
-            SessionList(shell: shell, cloud: cloud, openSettings: openSettings)
-                .frame(width: Self.sidebarWidth)
-            Hairline(vertical: true)
-            ChatColumn(shell: shell, openSettings: openSettings, unmet: unmet, openSetup: openSetup)
-                .frame(minWidth: Self.chatMinWidth, maxWidth: .infinity)
-            Hairline(vertical: true)
-            AgentPanel(shell: shell, mac: mac, still: still)
-                .frame(width: Self.rightWidth)
+        GeometryReader { g in
+            HStack(spacing: 0) {
+                SessionList(shell: shell, cloud: cloud, openSettings: openSettings)
+                    .frame(width: Self.sidebarWidth)
+                Hairline(vertical: true)
+                ChatColumn(shell: shell, openSettings: openSettings, unmet: unmet, openSetup: openSetup)
+                    .frame(minWidth: ColumnWidths.chatMin, maxWidth: .infinity)
+                Hairline(vertical: true)
+                // (the right column gives way first, 400 down to 300, so the chat keeps its 540)
+                AgentPanel(shell: shell, mac: mac, still: still)
+                    .frame(width: ColumnWidths.right(in: g.size.width))
+            }
         }
         .background(Brand.paper)
     }
@@ -354,6 +355,8 @@ struct SessionList: View {
             .frame(maxHeight: .infinity)
             // (the user's own click or Tab focuses it; nothing here moves the focus)
             .focusable()
+            // (no ring round the whole list -- no board draws one; the selected row shows where the arrows go)
+            .focusEffectDisabled()
             .onMoveCommand { d in
                 switch d {
                 case .up: shell.move(-1)
@@ -882,6 +885,51 @@ struct SpeakerLabel: View {
     }
 }
 
+/// A reply's Markdown (ChatMarkdown) in the chat's body style: 15 on 23.25, paragraphs 10 apart; headings in the same
+/// size, bold; list markers in the secondary colour, nested 18 a level; `code` in mono on the bubble's colour.
+struct ReplyText: View {
+    let text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(ChatMarkdown.blocks(text).enumerated()), id: \.offset) { _, b in
+                switch b {
+                case .paragraph(let s): Self.body(s)
+                case .heading(let s): Self.body(s).fontWeight(.semibold)
+                case .list(let items):
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(Array(items.enumerated()), id: \.offset) { _, i in
+                            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                Text(verbatim: i.marker).font(.system(size: 15).monospacedDigit()).foregroundStyle(ShellColor.secondary)
+                                    .frame(minWidth: 14, alignment: .trailing)
+                                Self.body(i.text)
+                            }
+                            .padding(.leading, CGFloat(i.level) * 18)
+                        }
+                    }
+                case .code(let s):
+                    Text(verbatim: s).font(.system(size: 13, design: .monospaced)).lineSpacing(3).foregroundStyle(Brand.ink)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(ShellColor.bubble))
+                case .rule: Hairline()
+                }
+            }
+        }
+    }
+
+    static func body(_ s: String) -> some View {
+        var a = ChatMarkdown.inline(s)
+        for run in a.runs where run.inlinePresentationIntent?.contains(.code) == true {
+            a[run.range].font = .system(size: 13.5, design: .monospaced)
+            a[run.range].backgroundColor = ShellColor.bubble
+        }
+        return Text(a).font(.system(size: 15)).lineSpacing(5).padding(.vertical, 2.5).foregroundStyle(Brand.ink)
+            .tint(ShellColor.orangeText).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 struct MessageRow: View {
     let message: ChatMessage
     var labelled = false
@@ -894,21 +942,27 @@ struct MessageRow: View {
             VStack(alignment: user ? .trailing : .leading, spacing: 6) {
                 if !user && labelled { SpeakerLabel() }
                 // (the boards' 15 px on a 1.55 line: 23.25, the font's own about 18)
-                Text(message.text.isEmpty && message.streaming ? "…" : message.text)
-                    .font(.system(size: 15)).lineSpacing(5).padding(.vertical, 2.5).foregroundStyle(Brand.ink)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, user ? 14 : 0).padding(.vertical, user ? 10 : 0)
-                    .background(user ? UserBubble().fill(ShellColor.bubble) : nil)
-                    .opacity(message.retracted ? 0.5 : 1)
+                if user || message.text.isEmpty {
+                    Text(message.text.isEmpty && message.streaming ? "…" : message.text)
+                        .font(.system(size: 15)).lineSpacing(5).padding(.vertical, 2.5).foregroundStyle(Brand.ink)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, user ? 14 : 0).padding(.vertical, user ? 10 : 0)
+                        .background(user ? UserBubble().fill(ShellColor.bubble) : nil)
+                        .opacity(message.retracted ? 0.5 : 1)
+                } else {
+                    // (the reply's Markdown: what the user types stays as typed)
+                    ReplyText(text: message.text).opacity(message.retracted ? 0.5 : 1)
+                }
                 if let note = note {
                     Text(note).font(.system(size: 12)).foregroundStyle(ShellColor.secondary)
                 }
             }
             .frame(maxWidth: user ? 460 : 640, alignment: user ? .trailing : .leading)
-            if !user { Spacer(minLength: 60) }
+            if !user { Spacer(minLength: 24) }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel((user ? L("You", lang: lang) : L("DeskMind", lang: lang)) + ": " + message.text + (note.map { ". " + $0 } ?? ""))
+        .accessibilityLabel((user ? L("You", lang: lang) : L("DeskMind", lang: lang)) + ": " + (user ? message.text : ChatMarkdown.plain(message.text))
+                            + (note.map { ". " + $0 } ?? ""))
     }
 
     private var note: String? {

@@ -2,9 +2,9 @@
 // this). Two launches of that build, each in the background (open -g): fresh -- its defaults empty but the first run
 // done -- then from a saved frame of 900 × 500 written into every window frame key the first launch saved. Each time:
 // the window's frame (CGWindowList) is at least the three columns' 1098 × 600 and on its screen; the columns' places by
-// their accessibility ids -- 「新对话」 in the 256 sidebar, 小方's state line and 这台 Mac in the 400 right column, inside
-// the window; and its picture (screencapture -l: real pixels, the window as it is, not brought forward). Nothing is
-// activated and no other app is touched; the app is quit at the end.
+// their accessibility ids -- 「新对话」 in the 256 sidebar, 小方's state line and 这台 Mac in the right column (400, or
+// down to 300 at the least width), inside the window; and its picture (screencapture -l: real pixels, the window as it
+// is, not brought forward). Nothing is activated and no other app is touched; the app is quit at the end.
 //
 //   RealWindowE2E <app> <bundle id> <out dir> <support dir>
 
@@ -104,14 +104,16 @@ func launch(_ name: String) {
         if let n = new {
             check(near(n.minX, f.minX + 12) && near(n.maxX, f.minX + 256 - 12), "\(name): 「新对话」 in the 256 sidebar (12 in from each side): \(n)")
         } else { check(false, "\(name): 「新对话」 found by its id") }
-        // (the right column: the window's last 400; its blocks 18 in from each side)
-        let column = CGRect(x: f.maxX - 400, y: f.minY, width: 400, height: f.height)
+        // (the right column: the window's last 400, giving way down to 300 so the chat keeps 540 -- ColumnWidths; its
+        // blocks 18 in from each side)
+        let width = min(400, max(300, f.width - 256 - 2 - 540))
+        let column = CGRect(x: f.maxX - width, y: f.minY, width: width, height: f.height)
         for (what, r) in [("小方's state line", state), ("这台 Mac", mac)] {
             if let r {
                 check(column.insetBy(dx: -1, dy: -1).contains(r) && f.contains(r), "\(name): \(what) inside the right column, inside the window: \(r)")
             } else { check(false, "\(name): \(what) found by its id") }
         }
-        if let m = mac { check(near(m.minX, column.minX + 18) && near(m.maxX, f.maxX - 18), "\(name): 这台 Mac spans the 400 column (18 in): \(m)") }
+        if let m = mac { check(near(m.minX, column.minX + 18) && near(m.maxX, f.maxX - 18), "\(name): 这台 Mac spans the \(Int(width)) column (18 in): \(m)") }
     } else {
         check(false, "\(name): the columns' places need this process to have Accessibility permission")
     }

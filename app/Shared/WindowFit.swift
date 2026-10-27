@@ -20,3 +20,19 @@ enum WindowFit {
         return CGRect(x: x, y: y, width: w, height: h)
     }
 }
+
+/// The three columns' widths (owner, rc.20): the sidebar 256 always; the right column 400 when there is room, giving way
+/// first down to 300 so the chat keeps 540 -- at the least window, 1098, the chat 540 and the right column 300. Past
+/// 1198 the chat takes the rest. Two 1 pt hairlines between them.
+enum ColumnWidths {
+    static let sidebar: CGFloat = 256
+    static let right: CGFloat = 400
+    static let rightMin: CGFloat = 300
+    static let chatMin: CGFloat = 540
+    static var windowMin: CGFloat { sidebar + chatMin + rightMin + 2 }
+
+    /// The right column's width in a window `total` wide.
+    static func right(in total: CGFloat) -> CGFloat {
+        Swift.min(right, Swift.max(rightMin, total - sidebar - 2 - chatMin))
+    }
+}
